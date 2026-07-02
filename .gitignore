@@ -1,0 +1,50 @@
+# Build outputs
+bin/
+obj/
+TestResults/
+
+# Keep bundled FFmpeg binaries used by local recording scripts.
+!tools/ffmpeg/
+!tools/ffmpeg/bin/
+!tools/ffmpeg/bin/**
+
+# IDE and user settings
+*.user
+*.suo
+.vs/
+.idea/
+.agents/
+.codex/
+
+# Local data directory (contains API keys, recordings, logs)
+.local-data/
+
+# Agent workflow/process artifacts
+doc/
+docs/contest/
+prompt/
+report/
+archive/
+agent-recorder/
+.uploads/
+_debug/
+_tmp*/
+
+# API Key files
+**/config/api-key.txt
+
+# Package files
+*.nupkg
+*.snupkg
+
+# Test output
+test-output/
+*.received.*
+*.verified.*
+
+# Local throwaway scripts and binaries
+.tmp-*
+temp-*
+check-*.ps1
+*.obj
+_rt*_server_err.txt

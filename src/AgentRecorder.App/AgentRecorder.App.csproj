@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <OutputType>WinExe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentRecorder.Api\AgentRecorder.Api.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

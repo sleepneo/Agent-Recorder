@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentRecorder.Logging\AgentRecorder.Logging.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentRecorder.App" />
+    <InternalsVisibleTo Include="AgentRecorder.Tests" />
+  </ItemGroup>
+
+</Project>

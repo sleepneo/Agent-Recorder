@@ -1,0 +1,48 @@
+{
+    "schema_version":  "2.0",
+    "capture_kind":  "continuous",
+    "timestamp":  "2026-06-22T10:00:38Z",
+    "mode":  "real",
+    "window_hwnd":  "1839573",
+    "window_id":  "window_1839573",
+    "recording_id":  "rec_v2_bad_007",
+    "confirmation_id":  "conf_v2_bad_007",
+    "final_status":  "failed",
+    "output":  {
+                   "path":  "",
+                   "container":  "",
+                   "codec":  "",
+                   "bytes_written":  0,
+                   "width":  0,
+                   "height":  0,
+                   "duration_ms":  0,
+                   "fps":  0,
+                   "frames_captured":  0,
+                   "frames_dropped":  0,
+                   "capture_method":  ""
+               },
+    "actual_file_exists":  false,
+    "actual_file_size":  0,
+    "is_playable_media":  false,
+    "partial_output_exists":  false,
+    "duration_ms":  0,
+    "requested_duration_ms":  1000,
+    "fps":  30,
+    "frames_captured":  0,
+    "frames_dropped":  0,
+    "stop_reason":  "error",
+    "warnings":  [
+
+                 ],
+    "error":  "",
+    "audit_events":  [
+                         {
+                             "event":  "confirmation.created",
+                             "confirmation_id":  "conf_v2_bad_007"
+                         },
+                         {
+                             "event":  "recording.failed",
+                             "recording_id":  "rec_v2_bad_007"
+                         }
+                     ]
+}
