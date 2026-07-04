@@ -12,6 +12,8 @@ using AgentRecorder.Headless;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using Xunit;
+using EventWaitHandle = System.Threading.EventWaitHandle;
+using EventResetMode = System.Threading.EventResetMode;
 
 namespace AgentRecorder.Tests;
 
@@ -157,7 +159,7 @@ public class HeadlessHostIntegrationTests
         }
     }
 
-    private static Process StartHeadless(string dataDir, string? windowBackend = null)
+    private static Process StartHeadless(string dataDir, string? windowBackend = null, string? shutdownEventName = null)
     {
         Assert.True(File.Exists(HeadlessExePath), $"Headless executable not found at {HeadlessExePath}");
 
@@ -165,6 +167,10 @@ public class HeadlessHostIntegrationTests
         if (!string.IsNullOrWhiteSpace(windowBackend))
         {
             args += $" --window-backend {windowBackend}";
+        }
+        if (!string.IsNullOrWhiteSpace(shutdownEventName))
+        {
+            args += $" --shutdown-event-name \"{shutdownEventName}\"";
         }
 
         var psi = new ProcessStartInfo
@@ -176,6 +182,21 @@ public class HeadlessHostIntegrationTests
             CreateNoWindow = true
         };
         return Process.Start(psi)!;
+    }
+
+    private static void StopHeadlessGraceful(string shutdownEventName, Process proc, int timeoutSeconds = 15)
+    {
+        try
+        {
+            using var evt = new EventWaitHandle(false, EventResetMode.AutoReset, shutdownEventName);
+            evt.Set();
+        }
+        catch { }
+
+        if (!proc.WaitForExit(timeoutSeconds * 1000))
+        {
+            try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+        }
     }
 
     private static bool WaitForHealthy(int timeoutSeconds = 30)
@@ -327,6 +348,128 @@ public class HeadlessHostIntegrationTests
 
             var backend = starting.GetProperty("window_backend").GetString();
             Assert.Equal("wgc", backend);
+        }
+        finally
+        {
+            try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+        }
+    }
+
+    [Fact]
+    public void HeadlessHost_PortOccupied_CleansStaleReadyJsonInDataDir()
+    {
+        using var tmp = new TempDirectory();
+        foreach (var p in Process.GetProcessesByName("AgentRecorder.Headless"))
+        {
+            try { p.Kill(); p.WaitForExit(3000); } catch { }
+        }
+
+        // Pre-create a stale runtime\ready.json in the target data dir.
+        var runtimeDir = Path.Combine(tmp.Path, "runtime");
+        Directory.CreateDirectory(runtimeDir);
+        var staleReadyPath = Path.Combine(runtimeDir, "ready.json");
+        File.WriteAllText(staleReadyPath, "{\"ready\":true,\"pid\":99999,\"port\":37891}");
+        Assert.True(File.Exists(staleReadyPath), "Stale ready.json should exist before test");
+
+        // Occupy the port so server.Start() fails.
+        var blocker = new TcpListener(IPAddress.Loopback, ApiServer.Port);
+        blocker.Start();
+        try
+        {
+            var shutdownEvent = $"AgentRecorder.Test.StaleReady.{Guid.NewGuid():N}";
+            var proc = StartHeadless(tmp.Path, shutdownEventName: shutdownEvent);
+            try
+            {
+                // Wait for process to exit (should fail to start).
+                var exited = proc.WaitForExit(15000);
+                Assert.True(exited, "Headless should exit when port is occupied");
+                Assert.NotEqual(0, proc.ExitCode);
+
+                // The stale ready.json in --data-dir should have been cleaned up
+                // before the port bind attempt (and thus cleaned even on failure).
+                Assert.False(File.Exists(staleReadyPath),
+                    "Stale ready.json should be deleted from --data-dir even when startup fails");
+            }
+            finally
+            {
+                try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+            }
+        }
+        finally
+        {
+            try { blocker.Stop(); } catch { }
+        }
+    }
+
+    [Fact]
+    public void HeadlessHost_NormalStart_WritesReadyJsonInDataDir()
+    {
+        using var tmp = new TempDirectory();
+        foreach (var p in Process.GetProcessesByName("AgentRecorder.Headless"))
+        {
+            try { p.Kill(); p.WaitForExit(3000); } catch { }
+        }
+
+        var shutdownEvent = $"AgentRecorder.Test.ReadyJson.{Guid.NewGuid():N}";
+        var proc = StartHeadless(tmp.Path, shutdownEventName: shutdownEvent);
+        try
+        {
+            Assert.True(WaitForHealthy(30), "Headless host should become healthy");
+
+            var readyPath = Path.Combine(tmp.Path, "runtime", "ready.json");
+            Assert.True(File.Exists(readyPath), "ready.json should exist in --data-dir/runtime");
+
+            // Verify the JSON is parseable and contains expected fields.
+            var json = File.ReadAllText(readyPath);
+            var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            Assert.True(root.GetProperty("ready").GetBoolean());
+            Assert.Equal("headless", root.GetProperty("mode").GetString());
+            Assert.Equal(ApiServer.Port, root.GetProperty("port").GetInt32());
+            Assert.True(root.TryGetProperty("startup_elapsed_ms", out _));
+            Assert.True(root.TryGetProperty("api_key_file", out _));
+        }
+        finally
+        {
+            StopHeadlessGraceful(shutdownEvent, proc);
+        }
+    }
+
+    [Fact]
+    public void HeadlessHost_GracefulShutdown_DeletesReadyJson()
+    {
+        using var tmp = new TempDirectory();
+        foreach (var p in Process.GetProcessesByName("AgentRecorder.Headless"))
+        {
+            try { p.Kill(); p.WaitForExit(3000); } catch { }
+        }
+
+        var shutdownEvent = $"AgentRecorder.Test.ShutdownReady.{Guid.NewGuid():N}";
+        var proc = StartHeadless(tmp.Path, shutdownEventName: shutdownEvent);
+        try
+        {
+            Assert.True(WaitForHealthy(30), "Headless host should become healthy");
+
+            var readyPath = Path.Combine(tmp.Path, "runtime", "ready.json");
+            Assert.True(File.Exists(readyPath), "ready.json should exist during runtime");
+
+            // Graceful shutdown via named event.
+            StopHeadlessGraceful(shutdownEvent, proc);
+
+            // After graceful shutdown, ready.json should be deleted.
+            Assert.False(File.Exists(readyPath), "ready.json should be deleted after graceful shutdown");
+
+            // Audit log should contain ready_file_deleted (not ready_file_delete_failed).
+            var logPath = Path.Combine(tmp.Path, "logs", "audit.jsonl");
+            Assert.True(File.Exists(logPath), "Audit log should exist");
+
+            var events = File.ReadAllLines(logPath)
+                .Where(l => !string.IsNullOrWhiteSpace(l))
+                .Select(l => System.Text.Json.JsonDocument.Parse(l).RootElement.GetProperty("event").GetString())
+                .ToList();
+
+            Assert.Contains("service.ready_file_deleted", events);
+            Assert.DoesNotContain("service.ready_file_delete_failed", events);
         }
         finally
         {

@@ -20,6 +20,7 @@ internal static class Program
     private static AuditLogger? _audit;
     private static string? _dataDir;
     private static string? _shutdownEventName;
+    private static RuntimeReadiness? _readiness;
     private const string DefaultShutdownEventName = "AgentRecorder.Headless.Shutdown";
 
     // Windows console APIs: optional signal handling and console detach.
@@ -39,6 +40,9 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // Start timing as early as possible.
+        _readiness = new RuntimeReadiness("headless", ApiServer.Port);
+
         // Detach from the launching console as early as possible so that the
         // headless host does not get terminated when the parent PowerShell/script
         // closes its console or job object.
@@ -73,6 +77,12 @@ internal static class Program
             shutdownThread.Start();
 
             ApplyEnvironment(opts);
+
+            // Clean up stale ready.json AFTER the data-dir has been resolved,
+            // but BEFORE binding the API port. This ensures the data dir
+            // specified via --data-dir is the one that gets cleaned.
+            _readiness?.CleanupOldReadyFile();
+
             Run(opts);
             return 0;
         }
@@ -209,7 +219,7 @@ internal static class Program
         var engine = new RecordingEngine(audit);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
-        var server = new ApiServer(engine, audit, tray);
+        var server = new ApiServer(engine, audit, tray, _readiness);
 
         _engine = engine;
         _server = server;
@@ -236,6 +246,20 @@ internal static class Program
         }
 
         audit.Log("service.started", new { mode = "headless", port = ApiServer.Port, pid = Environment.ProcessId });
+
+        // Mark readiness: write ready.json, set named event.
+        var snapshot = _readiness!.MarkReady();
+        audit.Log("service.api_ready", new
+        {
+            mode = snapshot.Mode,
+            port = snapshot.Port,
+            pid = snapshot.Pid,
+            startup_elapsed_ms = snapshot.StartupElapsedMs,
+            ready_file = snapshot.ReadyFile,
+            named_event = snapshot.NamedEvent
+        });
+        audit.Log("service.ready_file_written", new { path = snapshot.ReadyFile, pid = snapshot.Pid });
+
         SafeConsoleWrite($"AgentRecorder.Headless listening on http://127.0.0.1:{ApiServer.Port}/ (PID={Environment.ProcessId})");
 
         _exitSignal.Wait();
@@ -268,13 +292,45 @@ internal static class Program
             var engine = _engine;
             var server = _server;
             var audit = _audit;
+            var readiness = _readiness;
             _engine = null;
             _server = null;
             _audit = null;
+            _readiness = null;
 
             try { engine?.StopAllSync("service_exit"); } catch { }
             try { server?.Stop(); } catch { }
             try { _exitSignal.Set(); } catch { }
+
+            // Cleanup readiness: delete ready.json, release named event.
+            if (readiness != null && audit != null)
+            {
+                try
+                {
+                    var deleteResult = readiness.TryDeleteReadyFile();
+                    if (deleteResult.Success)
+                    {
+                        audit.Log("service.ready_file_deleted",
+                            new { pid = Environment.ProcessId, path = deleteResult.Path, was_present = deleteResult.WasPresent });
+                    }
+                    else
+                    {
+                        audit.Log("service.ready_file_delete_failed",
+                            new { pid = Environment.ProcessId, path = deleteResult.Path, error = deleteResult.Error, type = deleteResult.ErrorType });
+                    }
+                    readiness.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        audit.Log("service.ready_file_delete_failed",
+                            new { pid = Environment.ProcessId, error = ex.Message, type = ex.GetType().FullName });
+                    }
+                    catch { }
+                }
+            }
+
             try { audit?.Log("service.stopped", new { mode = "headless", pid = Environment.ProcessId }); } catch { }
         }
     }

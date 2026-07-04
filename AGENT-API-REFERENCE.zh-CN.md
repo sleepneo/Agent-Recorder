@@ -1,4 +1,4 @@
-﻿# Agent Recorder 原始 API 快速手册
+# Agent Recorder 原始 API 快速手册
 
 本文档给本地 AI agent 使用。录制流程由 AI agent 通过 Agent Recorder 原始 HTTP API 编排。
 
@@ -44,6 +44,30 @@ GET /capabilities
 用途：确认服务已启动，并读取是否支持 `display`、`window`、`region`、嵌套录制和确认机制。
 
 该接口不需要 API key。
+
+返回中包含 `readiness` 字段，提供启动就绪信息：
+
+```json
+{
+  "readiness": {
+    "ready": true,
+    "pid": 1234,
+    "port": 37891,
+    "api_version": "v1",
+    "mode": "tray",
+    "startup_elapsed_ms": 850,
+    "ready_file": "...",
+    "api_key_file": "...",
+    "named_event": "Local\\AgentRecorderReady"
+  }
+}
+```
+
+`readiness` 不泄露 API key 内容，只提供文件路径。
+
+### 就绪文件（推荐）
+
+服务启动成功后还会写入 `<data-dir>\runtime\ready.json`，AI Agent 可以轮询该文件判断服务就绪，无需盲轮询 `/capabilities`。
 
 ## 2. 列出显示器
 

@@ -1,4 +1,4 @@
-﻿# Agent Recorder：AI Agent 操作指令
+# Agent Recorder：AI Agent 操作指令
 
 本文档面向本地 AI agent。AI agent 应直接启动应用并调用 Agent Recorder 原始 HTTP API 完成录屏流程。
 
@@ -43,7 +43,17 @@ AGENT_RECORDER_DATA_DIR=<package-root>\.local-data
 
 这样 API key、审计日志和录制文件都保存在发布包本地目录下。
 
-3. 轮询能力接口，直到服务就绪：
+3. 等待服务就绪（推荐方式）：
+
+服务成功启动后，会在 `<data-dir>\runtime\ready.json` 原子写入 JSON 文件。AI Agent 可以：
+
+- **轮询 ready.json**：检查文件是否出现，而非盲轮询 `/capabilities`
+- **读取 ready.json**：获取 pid、port、startup_elapsed_ms、api_key_file 路径等信息
+- **二次确认**：调用 `GET /api/v1/capabilities`，检查返回的 `readiness.ready` 字段
+
+ready.json 只包含路径和状态，**不包含 API key 内容**。
+
+如果 ready.json 不存在（如旧版本），仍可回退轮询：
 
 ```http
 GET http://127.0.0.1:37891/api/v1/capabilities

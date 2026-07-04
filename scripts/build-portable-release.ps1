@@ -26,12 +26,14 @@
 #>
 
 param(
-    [string]$Version = "v0.1.0",
+    [string]$Version = "v0.1.0-trae-initial-demo",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
 
-    [string]$ProjectRoot = ""
+    [string]$ProjectRoot = "",
+
+    [switch]$DisableReadyToRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +74,11 @@ if (-not (Test-Path $appProject)) {
 $appPublishDir = Join-Path $StagingDir "AgentRecorder.App"
 
 Write-Host "[1/6] Publishing AgentRecorder.App ($PublishMode)..." -ForegroundColor Yellow
+
+# ReadyToRun: enabled by default for self-contained, disabled for framework-dependent or when explicitly requested.
+$enableR2R = ($PublishMode -eq "self-contained") -and -not $DisableReadyToRun
+Write-Host "  ReadyToRun: $(if ($enableR2R) { 'enabled' } else { 'disabled' })" -ForegroundColor Gray
+
 if ($PublishMode -eq "self-contained") {
     $publishArgs = @(
         "publish", $appProject,
@@ -81,7 +88,7 @@ if ($PublishMode -eq "self-contained") {
         "--output", $appPublishDir,
         "-p:DebugType=none",
         "-p:DebugSymbols=false",
-        "-p:PublishReadyToRun=false",
+        "-p:PublishReadyToRun=$($enableR2R.ToString().ToLowerInvariant())",
         "-p:Deterministic=false"
     )
 } else {
@@ -91,6 +98,7 @@ if ($PublishMode -eq "self-contained") {
         "--output", $appPublishDir,
         "-p:DebugType=none",
         "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=false",
         "-p:Deterministic=false"
     )
 }

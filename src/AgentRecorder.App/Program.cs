@@ -27,6 +27,10 @@ internal static class Program
 
     private static void Run()
     {
+        // Start timing as early as possible.
+        var readiness = new RuntimeReadiness("tray", ApiServer.Port);
+        readiness.CleanupOldReadyFile();
+
         ApplicationConfiguration.Initialize();
         var audit = new AuditLogger();
 
@@ -65,7 +69,7 @@ internal static class Program
         var engine = new RecordingEngine(audit);
         var tray = new TrayContext(engine, audit);
         engine.SetTray(tray);
-        var server = new ApiServer(engine, audit, tray);
+        var server = new ApiServer(engine, audit, tray, readiness);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -79,6 +83,19 @@ internal static class Program
         }
         audit.Log("service.started", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
 
+        // Mark readiness: write ready.json, set named event.
+        var snapshot = readiness.MarkReady();
+        audit.Log("service.api_ready", new
+        {
+            mode = snapshot.Mode,
+            port = snapshot.Port,
+            pid = snapshot.Pid,
+            startup_elapsed_ms = snapshot.StartupElapsedMs,
+            ready_file = snapshot.ReadyFile,
+            named_event = snapshot.NamedEvent
+        });
+        audit.Log("service.ready_file_written", new { path = snapshot.ReadyFile, pid = snapshot.Pid });
+
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {
             try
@@ -86,6 +103,7 @@ internal static class Program
                 engine.StopAllSync("process_exit");
                 audit.Log("service.stopped", new { mode = "tray", reason = "process_exit", pid = Environment.ProcessId });
                 server.Stop();
+                CleanupReadiness(readiness, audit);
             }
             catch { }
         };
@@ -95,8 +113,37 @@ internal static class Program
             engine.StopAllSync("application_exit");
             audit.Log("service.stopped", new { mode = "tray", reason = "application_exit", pid = Environment.ProcessId });
             server.Stop();
+            CleanupReadiness(readiness, audit);
         };
         Application.Run(tray);
+    }
+
+    private static void CleanupReadiness(RuntimeReadiness readiness, AuditLogger audit)
+    {
+        try
+        {
+            var deleteResult = readiness.TryDeleteReadyFile();
+            if (deleteResult.Success)
+            {
+                audit.Log("service.ready_file_deleted",
+                    new { pid = Environment.ProcessId, path = deleteResult.Path, was_present = deleteResult.WasPresent });
+            }
+            else
+            {
+                audit.Log("service.ready_file_delete_failed",
+                    new { pid = Environment.ProcessId, path = deleteResult.Path, error = deleteResult.Error, type = deleteResult.ErrorType });
+            }
+            readiness.Dispose();
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                audit.Log("service.ready_file_delete_failed",
+                    new { pid = Environment.ProcessId, error = ex.Message, type = ex.GetType().FullName });
+            }
+            catch { }
+        }
     }
 
     private static void LogStartupError(Exception ex)

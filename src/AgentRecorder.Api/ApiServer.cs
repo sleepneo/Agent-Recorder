@@ -26,11 +26,12 @@ public sealed class ApiServer
     private readonly RecordingEngine _engine;
     private readonly AuditLogger _audit;
     private readonly ITrayContext _tray;
+    private readonly RuntimeReadiness? _readiness;
     private CancellationTokenSource _cts = new();
 
-    public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray)
+    public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray, RuntimeReadiness? readiness = null)
     {
-        _engine = engine; _audit = audit; _tray = tray;
+        _engine = engine; _audit = audit; _tray = tray; _readiness = readiness;
     }
 
     public void Start()
@@ -409,7 +410,8 @@ public sealed class ApiServer
             region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi
         },
         safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
-        auth = new { required = true, header = "X-Agent-Recorder-Key" }
+        auth = new { required = true, header = "X-Agent-Recorder-Key" },
+        readiness = _readiness?.ToCapabilitiesObject()
     };
 
     private static object Permissions() => new
