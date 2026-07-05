@@ -187,7 +187,61 @@ X-Agent-Recorder-Key: <api-key>
 X-Agent-Name: <your-agent-name>
 ```
 
-## 场景 1：用户说“帮我录制当前对话窗口 5 分钟”
+## 开机自启管理（autostart）
+
+Agent Recorder 支持当前用户级别的开机自启（登录自启），通过写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 实现。
+
+### 查询自启状态
+
+```text
+AgentRecorder.Cli.exe autostart status --json
+```
+
+返回字段：
+
+| 字段 | 说明 |
+|------|------|
+| `ok` | `true` 表示查询成功 |
+| `status` | `enabled` / `enabled_mismatch` / `disabled` |
+| `enabled` | 是否已启用自启 |
+| `matches_current_app` | 自启路径是否匹配当前 App 路径 |
+| `value_name` | 注册表值名称，固定为 `Agent Recorder` |
+| `app_path` | 当前 App 可执行文件路径 |
+| `configured_command` | 注册表中配置的启动命令（仅启用时有值） |
+
+### 启用/禁用自启
+
+```text
+AgentRecorder.Cli.exe autostart enable --json
+AgentRecorder.Cli.exe autostart disable --json
+```
+
+**何时建议用户启用自启：**
+
+- 用户频繁使用录屏功能，且希望减少冷启动等待时间
+- 用户在长会话中可能多次触发录制
+- 用户明确要求"开机自动启动"
+
+**注意事项：**
+
+- `ensure-running` 仍是录制前的推荐入口，autostart 只是减少冷启动概率
+- 启用/禁用自启需要用户明确同意，不要自动启用
+- 自启仅对当前用户生效，不影响其他用户
+- 不要通过 HTTP API 启用/禁用自启，只能通过 CLI 显式操作
+
+## FFmpeg 预热
+
+服务启动并 ready 后，会在后台低优先级预热 FFmpeg/FFprobe（执行 `-version` 检查），减少第一次录制时的启动抖动。
+
+- 预热不阻塞 `ready.json` 写入和 API 就绪
+- 预热失败不影响服务可用性，只是第一次录制可能稍慢
+- 可通过 `/api/v1/capabilities` 查看预热状态：`ffmpeg.prewarm.status`
+
+预热状态值：`not_started` | `running` | `completed` | `failed` | `skipped`
+
+这是纯后台优化，不改变任何安全确认流程。
+
+## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 
 推荐用选区录制，因为“当前对话窗口”对 AI agent 来说可能不等同于稳定窗口句柄。
 

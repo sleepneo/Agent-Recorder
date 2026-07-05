@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -27,11 +28,19 @@ public sealed class ApiServer
     private readonly AuditLogger _audit;
     private readonly ITrayContext _tray;
     private readonly RuntimeReadiness? _readiness;
+    private readonly WindowsAutoStartManager? _autoStart;
+    private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
     private CancellationTokenSource _cts = new();
 
-    public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray, RuntimeReadiness? readiness = null)
+    public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
+        RuntimeReadiness? readiness = null,
+        WindowsAutoStartManager? autoStart = null,
+        FfmpegPrewarmer? ffmpegPrewarmer = null)
     {
-        _engine = engine; _audit = audit; _tray = tray; _readiness = readiness;
+        _engine = engine; _audit = audit; _tray = tray;
+        _readiness = readiness;
+        _autoStart = autoStart;
+        _ffmpegPrewarmer = ffmpegPrewarmer;
     }
 
     public void Start()
@@ -375,44 +384,87 @@ public sealed class ApiServer
         catch { return "user_requested"; }
     }
 
-    private object Capabilities() => new
+    private static string PrewarmStatusToString(PrewarmStatus status) => status switch
     {
-        app = new { name = "Agent Recorder", version = "0.1.0", platform = "windows" },
-        host = new
-        {
-            mode = _tray.HostMode,
-            supports_region_selection_ui = _tray.SupportsRegionSelectionUi,
-            region_selection_blocker = _tray.SupportsRegionSelectionUi ? null : "headless_host"
-        },
-        recording = new
-        {
-            sources = new[] { "display", "window", "region" },
-            audio = new[] { "microphone" },
-            containers = new[] { "mp4" },
-            codecs = new[] { "h264" },
-            fps = new[] { 15, 24, 30, 60 },
-            stop_conditions = new[] { "duration", "manual" },
-            max_duration_seconds = 7200,
-            max_concurrent_recordings = 2,
-            default_concurrency_policy = "single_unless_explicit_nested",
-            pause_resume = false,
-            nested_recording_mvp = new
-            {
-                supported = true,
-                max_concurrent = 2,
-                roles = new[] { "outer", "inner" }
-            }
-        },
-        interaction = new
-        {
-            region_selection_endpoint = true,
-            region_selection_requires_local_user = true,
-            region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi
-        },
-        safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
-        auth = new { required = true, header = "X-Agent-Recorder-Key" },
-        readiness = _readiness?.ToCapabilitiesObject()
+        PrewarmStatus.NotStarted => "not_started",
+        PrewarmStatus.Running => "running",
+        PrewarmStatus.Completed => "completed",
+        PrewarmStatus.Failed => "failed",
+        PrewarmStatus.Skipped => "skipped",
+        _ => "unknown"
     };
+
+    private object Capabilities()
+    {
+        var autoStartInfo = _autoStart?.GetStatus();
+        var ffmpegPrewarm = _ffmpegPrewarmer?.CurrentResult;
+        string? ffmpegSource = null;
+        bool ffmpegResolved = false;
+        try
+        {
+            ffmpegSource = FfmpegLocator.Source;
+            ffmpegResolved = !string.IsNullOrEmpty(ffmpegSource)
+                && File.Exists(FfmpegLocator.FfmpegPath)
+                && File.Exists(FfmpegLocator.FfprobePath);
+        }
+        catch { }
+
+        return new
+        {
+            app = new { name = "Agent Recorder", version = "0.1.0", platform = "windows" },
+            host = new
+            {
+                mode = _tray.HostMode,
+                supports_region_selection_ui = _tray.SupportsRegionSelectionUi,
+                region_selection_blocker = _tray.SupportsRegionSelectionUi ? null : "headless_host",
+                autostart = new
+                {
+                    supported = true,
+                    enabled = autoStartInfo?.Enabled ?? false,
+                    matches_current_app = autoStartInfo?.MatchesCurrentApp ?? false,
+                    value_name = autoStartInfo?.ValueName ?? WindowsAutoStartManager.DefaultValueName
+                }
+            },
+            ffmpeg = new
+            {
+                resolved = ffmpegResolved,
+                source = ffmpegSource,
+                prewarm = new
+                {
+                    status = ffmpegPrewarm != null ? PrewarmStatusToString(ffmpegPrewarm.Status) : "not_started",
+                    elapsed_ms = ffmpegPrewarm?.ElapsedMs > 0 ? ffmpegPrewarm.ElapsedMs : (long?)null
+                }
+            },
+            recording = new
+            {
+                sources = new[] { "display", "window", "region" },
+                audio = new[] { "microphone" },
+                containers = new[] { "mp4" },
+                codecs = new[] { "h264" },
+                fps = new[] { 15, 24, 30, 60 },
+                stop_conditions = new[] { "duration", "manual" },
+                max_duration_seconds = 7200,
+                max_concurrent_recordings = 2,
+                default_concurrency_policy = "single_unless_explicit_nested",
+                pause_resume = false,
+                nested_recording_mvp = new
+                {
+                    supported = true,
+                    max_concurrent = 2,
+                    roles = new[] { "outer", "inner" }
+                }
+            },
+            interaction = new
+            {
+                region_selection_endpoint = true,
+                region_selection_requires_local_user = true,
+                region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi
+            },
+            safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
+            auth = new { required = true, header = "X-Agent-Recorder-Key" },
+            readiness = _readiness?.ToCapabilitiesObject()
+        };
+    }
 
     private static object Permissions() => new
     {

@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows.Forms;
 using AgentRecorder.Api;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Logging;
 using AgentRecorder.Infrastructure;
@@ -100,7 +101,12 @@ internal static class Program
         var engine = new RecordingEngine(audit);
         var tray = new TrayContext(engine, audit);
         engine.SetTray(tray);
-        var server = new ApiServer(engine, audit, tray, readiness);
+
+        var appExePath = Application.ExecutablePath;
+        var autoStart = new WindowsAutoStartManager(appExePath);
+        var ffmpegPrewarmer = new FfmpegPrewarmer();
+
+        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -126,6 +132,9 @@ internal static class Program
             named_event = snapshot.NamedEvent
         });
         audit.Log("service.ready_file_written", new { path = snapshot.ReadyFile, pid = snapshot.Pid });
+
+        // Kick off FFmpeg prewarm in background - does not block readiness.
+        ffmpegPrewarmer.Start(audit);
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {

@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="AgentRecorder.App" />
+    <InternalsVisibleTo Include="AgentRecorder.Cli" />
     <InternalsVisibleTo Include="AgentRecorder.Tests" />
   </ItemGroup>
 

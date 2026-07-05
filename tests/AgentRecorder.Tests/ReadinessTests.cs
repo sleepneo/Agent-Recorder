@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using AgentRecorder.Api;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -286,6 +287,64 @@ public class ReadinessTests
         {
             try { server.Stop(); } catch { }
             Cleanup(dataDir, readiness);
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task Capabilities_IncludesAutostartAndFfmpeg()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"cap-autostart-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDir);
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", dataDir, EnvironmentVariableTarget.Process);
+        ApiKeyAuth.InitializeForTesting(dataDir);
+
+        var readiness = new RuntimeReadiness("headless", ApiServer.Port);
+        readiness.CleanupOldReadyFile();
+
+        var audit = new AuditLogger();
+        var engine = new RecordingEngine(audit);
+        var tray = new FakeTray();
+        engine.SetTray(tray);
+
+        var fakeRegistry = new FakeRegistryRunKey();
+        var appExe = Path.Combine(AppContext.BaseDirectory, "AgentRecorder.App.exe");
+        var autoStart = new WindowsAutoStartManager(fakeRegistry, appExe, "AgentRecorder_Test114");
+        var prewarmer = new FfmpegPrewarmer();
+
+        var server = new ApiServer(engine, audit, tray, readiness, autoStart, prewarmer);
+        try
+        {
+            server.Start();
+            readiness.MarkReady();
+
+            using var client = CreateClient();
+            var resp = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(System.Net.HttpStatusCode.OK, resp.StatusCode);
+
+            var body = await resp.Content.ReadAsStringAsync();
+
+            // Autostart fields
+            Assert.Contains("\"autostart\"", body);
+            Assert.Contains("\"supported\"", body);
+            Assert.Contains("\"enabled\"", body);
+            Assert.Contains("\"matches_current_app\"", body);
+            Assert.Contains("\"value_name\"", body);
+            Assert.Contains("AgentRecorder_Test114", body);
+
+            // FFmpeg fields
+            Assert.Contains("\"ffmpeg\"", body);
+            Assert.Contains("\"resolved\"", body);
+            Assert.Contains("\"prewarm\"", body);
+            Assert.Contains("\"status\"", body);
+            Assert.Contains("\"not_started\"", body);
+        }
+        finally
+        {
+            try { server.Stop(); } catch { }
+            try { readiness.Dispose(); } catch { }
+            try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { }
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
+            ApiKeyAuth.ResetForTesting(null);
         }
     }
 }

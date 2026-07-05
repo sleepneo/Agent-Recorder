@@ -32,6 +32,10 @@ internal static class Program
             var opts = ParseOpts(args, 1);
             return RunEnsureRunning(opts);
         }
+        if (command == "autostart")
+        {
+            return RunAutoStart(args);
+        }
         return command switch
         {
             "help" or "--help" or "-h" => RunHelp(),
@@ -211,6 +215,327 @@ internal static class Program
             }
             return 1;
         }
+    }
+
+    private static int RunAutoStart(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Error: autostart requires a subcommand (status/enable/disable)");
+            Console.Error.WriteLine("Run 'AgentRecorder.Cli.exe autostart --help' for usage.");
+            return 1;
+        }
+
+        var subCmd = args[1].ToLowerInvariant();
+        var opts = ParseAutoStartOpts(args, 2);
+
+        if (opts.ParseError != null)
+        {
+            var error = BuildAutoStartError(opts, "INVALID_ARGUMENT", opts.ParseError,
+                "Run 'AgentRecorder.Cli.exe autostart --help'.");
+            if (opts.Json)
+                WriteAutoStartJson(error);
+            else
+                Console.Error.WriteLine($"Error: {opts.ParseError}");
+            return 1;
+        }
+
+        if (opts.ShowHelp || subCmd == "help" || subCmd == "--help" || subCmd == "-h")
+        {
+            PrintAutoStartHelp();
+            return 0;
+        }
+
+        try
+        {
+            var result = RunAutoStartCore(subCmd, opts, new RegistryRunKey());
+
+            if (opts.Json)
+            {
+                WriteAutoStartJson(result);
+            }
+            else
+            {
+                if (result.Ok)
+                {
+                    Console.WriteLine($"Status: {result.Status}");
+                    Console.WriteLine($"Enabled: {result.Enabled}");
+                    Console.WriteLine($"Matches current app: {result.MatchesCurrentApp}");
+                    Console.WriteLine($"Value name: {result.ValueName}");
+                    Console.WriteLine($"Run key: {result.RunKey}");
+                    Console.WriteLine($"App path: {result.AppPath}");
+                    if (result.ConfiguredCommand != null)
+                        Console.WriteLine($"Configured command: {result.ConfiguredCommand}");
+                }
+                else
+                {
+                    Console.Error.WriteLine($"Error: {result.Message}");
+                    if (!string.IsNullOrEmpty(result.Code))
+                        Console.Error.WriteLine($"Code: {result.Code}");
+                    if (!string.IsNullOrEmpty(result.SuggestedAction))
+                        Console.Error.WriteLine($"Suggested action: {result.SuggestedAction}");
+                }
+            }
+
+            return result.Ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            var error = BuildAutoStartError(opts, "INTERNAL_ERROR", ex.Message,
+                "Check the CLI arguments and try again.");
+            if (opts.Json)
+                WriteAutoStartJson(error);
+            else
+                Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Testable core logic for autostart subcommands. Uses the provided registry
+    /// so unit tests can inject a fake without touching real HKCU.
+    /// </summary>
+    internal static AutoStartResult RunAutoStartCore(string subCommand, AutoStartOptions opts, IRegistryRunKey registry)
+    {
+        var appPath = ResolveAutoStartAppPath(opts);
+        var valueName = opts.ValueName ?? WindowsAutoStartManager.DefaultValueName;
+        var manager = new WindowsAutoStartManager(registry, appPath, valueName);
+
+        return subCommand switch
+        {
+            "status" => ToAutoStartResult(manager.GetStatus(), ok: true),
+            "enable" => ToAutoStartResult(manager.Enable()),
+            "disable" => ToAutoStartResult(manager.Disable()),
+            _ => new AutoStartResult
+            {
+                Ok = false,
+                Status = "error",
+                Enabled = false,
+                MatchesCurrentApp = false,
+                ValueName = valueName,
+                RunKey = WindowsAutoStartManager.RunKeyPath,
+                AppPath = appPath,
+                ConfiguredCommand = null,
+                Code = "INVALID_ARGUMENT",
+                Message = $"Unknown autostart subcommand: '{subCommand}'",
+                SuggestedAction = "Use status, enable, or disable."
+            }
+        };
+    }
+
+    private static AutoStartResult ToAutoStartResult(AutoStartStatus s, bool ok)
+    {
+        return new AutoStartResult
+        {
+            Ok = ok && s.Code != "unavailable",
+            Status = s.Code ?? "unknown",
+            Enabled = s.Enabled,
+            MatchesCurrentApp = s.MatchesCurrentApp,
+            ValueName = s.ValueName,
+            RunKey = s.RunKey,
+            AppPath = s.AppPath,
+            ConfiguredCommand = s.ConfiguredCommand,
+            Code = s.Code,
+            Message = s.Message
+        };
+    }
+
+    private static AutoStartResult ToAutoStartResult(AutoStartOperationResult r)
+    {
+        return new AutoStartResult
+        {
+            Ok = r.Ok,
+            Status = r.Ok ? (r.Enabled ? "enabled" : "disabled") : "error",
+            Enabled = r.Enabled,
+            MatchesCurrentApp = r.MatchesCurrentApp,
+            ValueName = r.ValueName,
+            RunKey = r.RunKey,
+            AppPath = r.AppPath,
+            ConfiguredCommand = r.ConfiguredCommand,
+            Code = r.Code,
+            Message = r.Message,
+            SuggestedAction = r.SuggestedAction
+        };
+    }
+
+    private static AutoStartResult BuildAutoStartError(AutoStartOptions opts, string code, string message, string suggestedAction)
+    {
+        return new AutoStartResult
+        {
+            Ok = false,
+            Status = "error",
+            Enabled = false,
+            MatchesCurrentApp = false,
+            ValueName = opts.ValueName ?? WindowsAutoStartManager.DefaultValueName,
+            RunKey = WindowsAutoStartManager.RunKeyPath,
+            AppPath = opts.AppPath ?? "",
+            ConfiguredCommand = null,
+            Code = code,
+            Message = message,
+            SuggestedAction = suggestedAction
+        };
+    }
+
+    internal static string ResolveAutoStartAppPath(AutoStartOptions opts)
+    {
+        return ResolveAutoStartAppPath(opts, AppContext.BaseDirectory);
+    }
+
+    /// <summary>
+    /// Resolves the App exe path for autostart. Supports:
+    /// - Explicit --app (highest priority, used as-is)
+    /// - Portable package: &lt;package&gt;/AgentRecorder.App/AgentRecorder.App.exe
+    /// - Source tree build: tools/AgentRecorder.Cli/bin/&lt;Config&gt;/&lt;tfm&gt;/ -> src/AgentRecorder.App/bin/&lt;Config&gt;/&lt;tfm&gt;/
+    /// </summary>
+    internal static string ResolveAutoStartAppPath(AutoStartOptions opts, string baseDir)
+    {
+        // 1. Explicit --app takes highest priority
+        if (!string.IsNullOrWhiteSpace(opts.AppPath))
+            return Path.GetFullPath(opts.AppPath);
+
+        // 2. Reuse package root resolution (same as ensure-running)
+        var packageRoot = ResolvePackageRootFromBase(baseDir);
+
+        // 3. Portable package layout: <package>/AgentRecorder.App/AgentRecorder.App.exe
+        var portablePaths = new[]
+        {
+            Path.Combine(packageRoot, "AgentRecorder.App"),
+            baseDir,
+            Path.Combine(Directory.GetParent(baseDir)?.FullName ?? baseDir, "AgentRecorder.App"),
+        };
+
+        foreach (var dir in portablePaths)
+        {
+            var path = Path.Combine(dir, "AgentRecorder.App.exe");
+            if (File.Exists(path))
+                return Path.GetFullPath(path);
+        }
+
+        // 4. Source tree build output: walk up to find repo root (AgentRecorder.sln),
+        //    then construct src/AgentRecorder.App/bin/<Config>/<tfm>/AgentRecorder.App.exe
+        var sourceTreePath = FindSourceTreeAppPath(baseDir);
+        if (sourceTreePath != null && File.Exists(sourceTreePath))
+            return Path.GetFullPath(sourceTreePath);
+
+        // 5. Fallback: return a path even if not found. status won't fail,
+        //    but enable will report app_not_found.
+        return Path.Combine(baseDir, "AgentRecorder.App.exe");
+    }
+
+    /// <summary>
+    /// Walks up from baseDir to find the repo root (where AgentRecorder.sln is),
+    /// then constructs the path to AgentRecorder.App.exe in the source tree build output.
+    /// </summary>
+    private static string? FindSourceTreeAppPath(string baseDir)
+    {
+        // baseDir is like: .../tools/AgentRecorder.Cli/bin/Release/<tfm>/
+        // We need:   .../src/AgentRecorder.App/bin/Release/<tfm>/AgentRecorder.App.exe
+
+        // Extract config and tfm from baseDir
+        var binIdx = baseDir.IndexOf("\\bin\\", StringComparison.OrdinalIgnoreCase);
+        if (binIdx < 0) return null;
+
+        var afterBin = baseDir.Substring(binIdx + 5); // e.g. "Release\net8.0-windows10.0.19041.0"
+        var slashIdx = afterBin.IndexOf('\\');
+        if (slashIdx <= 0) return null;
+
+        var config = afterBin.Substring(0, slashIdx);
+        var tfm = afterBin.Substring(slashIdx + 1).TrimEnd('\\', '/');
+
+        // Walk up to find repo root
+        var dir = new DirectoryInfo(baseDir);
+        while (dir != null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "AgentRecorder.sln")))
+            {
+                var appPath = Path.Combine(dir.FullName, "src", "AgentRecorder.App", "bin", config, tfm, "AgentRecorder.App.exe");
+                return appPath;
+            }
+            dir = dir.Parent;
+        }
+
+        return null;
+    }
+
+    private static string ResolvePackageRootFromBase(string baseDir)
+    {
+        var dir = new DirectoryInfo(baseDir);
+        while (dir != null)
+        {
+            if (Directory.Exists(Path.Combine(dir.FullName, "AgentRecorder.App")) ||
+                Directory.Exists(Path.Combine(dir.FullName, "AgentRecorder.Cli")) ||
+                File.Exists(Path.Combine(dir.FullName, "AgentRecorder.App.exe")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+        return baseDir;
+    }
+
+    internal static AutoStartOptions ParseAutoStartOpts(string[] args, int startIdx)
+    {
+        var opts = new AutoStartOptions();
+        for (int i = startIdx; i < args.Length; i++)
+        {
+            var arg = args[i];
+            try
+            {
+                switch (arg)
+                {
+                    case "--json":
+                        opts.Json = true;
+                        break;
+                    case "--app":
+                        opts.AppPath = GetArgValue(args, ref i, "--app");
+                        break;
+                    case "--value-name":
+                        opts.ValueName = GetArgValue(args, ref i, "--value-name");
+                        break;
+                    case "--help":
+                    case "-h":
+                        opts.ShowHelp = true;
+                        break;
+                    default:
+                        throw new FormatException($"Unknown option: {arg}");
+                }
+            }
+            catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
+            {
+                if (opts.ParseError == null)
+                    opts.ParseError = ex.Message;
+            }
+        }
+        return opts;
+    }
+
+    private static void WriteAutoStartJson(AutoStartResult result)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        }));
+    }
+
+    private static void PrintAutoStartHelp()
+    {
+        Console.WriteLine("autostart - Manage Agent Recorder per-user autostart setting");
+        Console.WriteLine();
+        Console.WriteLine("Query or change whether Agent Recorder starts automatically on user login.");
+        Console.WriteLine("Uses HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run registry key.");
+        Console.WriteLine();
+        Console.WriteLine("Subcommands:");
+        Console.WriteLine("  status    Show current autostart status (read-only, no registry changes)");
+        Console.WriteLine("  enable    Enable autostart for the current user");
+        Console.WriteLine("  disable   Disable autostart for the current user");
+        Console.WriteLine();
+        Console.WriteLine("Options:");
+        Console.WriteLine("  --json              Output result as JSON (recommended for AI agents)");
+        Console.WriteLine("  --app <path>        Path to AgentRecorder.App.exe (default: auto-detect)");
+        Console.WriteLine("  --value-name <n>    Custom registry value name (for testing)");
+        Console.WriteLine("  --help, -h          Show this help");
     }
 
     internal static EnsureRunningResult EnsureRunningCore(CliOptions opts)
@@ -700,6 +1025,7 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  ensure-running   Ensure Agent Recorder is running and return readiness info");
+        Console.WriteLine("  autostart        Manage per-user autostart (login startup) setting");
         Console.WriteLine("  help             Show this help");
         Console.WriteLine();
         Console.WriteLine("Run 'AgentRecorder.Cli ensure-running --help' for command-specific options.");
@@ -772,4 +1098,28 @@ internal sealed class CapabilitiesValidation
     public string ApiVersion { get; set; } = "v1";
     public string? ErrorCode { get; set; }
     public string? Message { get; set; }
+}
+
+internal sealed class AutoStartOptions
+{
+    public bool Json { get; set; }
+    public string? AppPath { get; set; }
+    public string? ValueName { get; set; }
+    public bool ShowHelp { get; set; }
+    public string? ParseError { get; set; }
+}
+
+internal sealed class AutoStartResult
+{
+    public bool Ok { get; set; }
+    public string Status { get; set; } = "";
+    public bool Enabled { get; set; }
+    public bool MatchesCurrentApp { get; set; }
+    public string ValueName { get; set; } = "";
+    public string RunKey { get; set; } = "";
+    public string AppPath { get; set; } = "";
+    public string? ConfiguredCommand { get; set; }
+    public string? Code { get; set; }
+    public string? Message { get; set; }
+    public string? SuggestedAction { get; set; }
 }

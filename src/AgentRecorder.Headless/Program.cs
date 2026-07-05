@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using AgentRecorder.Api;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -22,6 +23,7 @@ internal static class Program
     private static string? _shutdownEventName;
     private static RuntimeReadiness? _readiness;
     private static SingleInstanceGuard? _instanceGuard;
+    private static FfmpegPrewarmer? _ffmpegPrewarmer;
     private const string DefaultShutdownEventName = "AgentRecorder.Headless.Shutdown";
 
     // Windows console APIs: optional signal handling and console detach.
@@ -250,7 +252,13 @@ internal static class Program
         var engine = new RecordingEngine(audit);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
-        var server = new ApiServer(engine, audit, tray, _readiness);
+
+        var exePath = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "AgentRecorder.Headless.exe");
+        var autoStart = new WindowsAutoStartManager(exePath);
+        var ffmpegPrewarmer = new FfmpegPrewarmer();
+        _ffmpegPrewarmer = ffmpegPrewarmer;
+
+        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer);
 
         _engine = engine;
         _server = server;
@@ -290,6 +298,9 @@ internal static class Program
             named_event = snapshot.NamedEvent
         });
         audit.Log("service.ready_file_written", new { path = snapshot.ReadyFile, pid = snapshot.Pid });
+
+        // Kick off FFmpeg prewarm in background - does not block readiness.
+        ffmpegPrewarmer.Start(audit);
 
         SafeConsoleWrite($"AgentRecorder.Headless listening on http://127.0.0.1:{ApiServer.Port}/ (PID={Environment.ProcessId})");
 

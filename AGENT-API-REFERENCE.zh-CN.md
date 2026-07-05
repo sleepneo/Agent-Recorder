@@ -108,6 +108,61 @@ AgentRecorder.Cli.exe ensure-running [options]
 - CLI 通过 `/api/v1/capabilities` 二次确认服务健康，不接受仅凭 PID 的 ready 文件
 - 默认启动 Tray App 模式（支持本地选区和确认 UI），仅显式 `--headless` 时使用 headless 模式
 
+### autostart 命令
+
+```text
+AgentRecorder.Cli.exe autostart <status|enable|disable> [options]
+```
+
+管理当前用户的开机自启设置（写入/读取 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`）。
+
+**子命令：**
+
+| 子命令 | 说明 |
+|--------|------|
+| `status` | 查询当前自启状态（只读，不修改注册表） |
+| `enable` | 启用开机自启 |
+| `disable` | 禁用开机自启 |
+
+**选项：**
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `--json` | 输出 JSON 格式（推荐 AI agent 使用） | - |
+| `--app <path>` | 指定 App exe 路径 | 自动查找 |
+| `--help, -h` | 显示帮助 | - |
+
+**status 输出示例：**
+
+```json
+{
+  "ok": true,
+  "status": "disabled",
+  "enabled": false,
+  "matches_current_app": false,
+  "value_name": "Agent Recorder",
+  "run_key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+  "app_path": "C:\\...\\AgentRecorder.App.exe",
+  "code": "disabled",
+  "message": "Autostart is disabled."
+}
+```
+
+**status 状态值：**
+
+| 状态 | 说明 |
+|------|------|
+| `enabled` | 自启已启用，且路径匹配当前 App |
+| `enabled_mismatch` | 自启已启用，但路径指向旧位置或其他位置 |
+| `disabled` | 自启未启用 |
+| `error` | 查询/操作失败 |
+
+**注意事项：**
+- 仅对当前用户生效，不影响系统级或其他用户
+- `enable`/`disable` 必须显式调用才修改注册表，不会在应用启动或 `ensure-running` 中自动启用
+- 只能通过 CLI 操作，HTTP API 仅暴露状态，不提供启用/禁用能力
+- 不要在未经用户同意的情况下启用自启
+
 ## 1. 检查能力
 
 ```http
@@ -137,6 +192,38 @@ GET /capabilities
 ```
 
 `readiness` 不泄露 API key 内容，只提供文件路径。
+
+返回中还包含 `host.autostart` 字段，提供自启状态：
+
+```json
+{
+  "host": {
+    "autostart": {
+      "supported": true,
+      "enabled": false,
+      "matches_current_app": false,
+      "value_name": "Agent Recorder"
+    }
+  }
+}
+```
+
+返回中包含 `ffmpeg` 字段，提供 FFmpeg 解析和预热状态：
+
+```json
+{
+  "ffmpeg": {
+    "resolved": true,
+    "source": "project_tools",
+    "prewarm": {
+      "status": "completed",
+      "elapsed_ms": 250
+    }
+  }
+}
+```
+
+预热状态值：`not_started` | `running` | `completed` | `failed` | `skipped`
 
 ### 就绪文件（推荐）
 
