@@ -27,6 +27,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{8BD3A57E
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentRecorder.ProcessLauncher", "tools\ProcessLauncher\AgentRecorder.ProcessLauncher.csproj", "{8213111D-FC48-4A8C-8D0F-1475E2375EB4}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentRecorder.Cli", "tools\AgentRecorder.Cli\AgentRecorder.Cli.csproj", "{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -77,8 +79,13 @@ Global
 		{8213111D-FC48-4A8C-8D0F-1475E2375EB4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8213111D-FC48-4A8C-8D0F-1475E2375EB4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8213111D-FC48-4A8C-8D0F-1475E2375EB4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{8213111D-FC48-4A8C-8D0F-1475E2375EB4} = {8BD3A57E-B728-4E56-BAD4-D64D265861B8}
+		{F308E813-0BD6-4AB7-AAB3-57F4A3636B2B} = {8BD3A57E-B728-4E56-BAD4-D64D265861B8}
 	EndGlobalSection
 EndGlobal

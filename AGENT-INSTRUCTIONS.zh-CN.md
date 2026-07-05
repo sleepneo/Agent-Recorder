@@ -21,7 +21,114 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 - 不要静默录制敏感或隐私区域。
 - 每次录制前都要说明即将录制的对象和时长，并等待本地用户确认。
 
-## 启动与就绪检查
+## 启动与就绪检查（推荐使用 CLI 握手）
+
+**强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**，它会自动处理单实例检测、`/capabilities` 二次确认、启动等待，并返回机器可读的就绪信息。
+
+### 方式一：CLI 握手（推荐）
+
+1. 定位 CLI 工具：
+
+```text
+<package-root>\AgentRecorder.Cli\AgentRecorder.Cli.exe
+```
+
+2. 执行 ensure-running 命令：
+
+```text
+AgentRecorder.Cli.exe ensure-running --json
+```
+
+3. 解析 JSON 输出：
+
+**成功时（ok=true）：**
+
+| 字段 | 说明 |
+|------|------|
+| `ok` | `true` 表示成功 |
+| `status` | `ready` |
+| `started` | `true` 表示新启动，`false` 表示复用已有实例 |
+| `mode` | `tray` 或 `headless` |
+| `port` | API 服务监听端口 |
+| `api_key_file` | API key 文件的绝对路径（不包含 key 内容） |
+| `pid` | 服务进程 ID |
+| `api_version` | API 版本，如 `v1` |
+| `ready_file` | ready.json 路径 |
+| `data_dir` | 数据目录路径 |
+
+**失败时（ok=false）：**
+
+| 字段 | 说明 |
+|------|------|
+| `ok` | `false` 表示失败 |
+| `code` | 稳定错误码（见下方列表） |
+| `message` | 人类可读错误信息 |
+| `suggested_action` | 建议的下一步操作 |
+
+成功输出示例：
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "started": false,
+  "pid": 12345,
+  "port": 37891,
+  "api_version": "v1",
+  "mode": "tray",
+  "data_dir": "C:\\...\\.local-data",
+  "ready_file": "C:\\...\\runtime\\ready.json",
+  "api_key_file": "C:\\...\\config\\api-key.txt",
+  "startup_elapsed_ms": 850
+}
+```
+
+失败输出示例：
+
+```json
+{
+  "ok": false,
+  "code": "READY_TIMEOUT",
+  "message": "Agent Recorder did not become ready within 30 seconds.",
+  "suggested_action": "Check whether AgentRecorder.App.exe can start in the current desktop session."
+}
+```
+
+**稳定错误码：**
+
+| 错误码 | 说明 |
+|--------|------|
+| `READY_TIMEOUT` | 服务在超时时间内未就绪 |
+| `SERVICE_NOT_FOUND` | 找不到 AgentRecorder.App.exe 或 AgentRecorder.Headless.exe |
+| `SERVICE_EXITED` | 服务进程启动后提前退出 |
+| `STALE_READY_FILE` | ready 文件存在但 PID 不是 Agent Recorder 进程 |
+| `CAPABILITIES_UNAVAILABLE` | PID 存活但 `/capabilities` 不可用 |
+| `INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY` | 有实例在运行（mutex 持有）但当前 data-dir 下不健康 |
+| `INVALID_ARGUMENT` | 参数错误 |
+
+CLI 会自动：
+- 检测已有运行实例并复用
+- 通过 `/api/v1/capabilities` 二次确认服务健康状态
+- 如未运行则启动新实例（默认 Tray/App 模式，支持本地选区和确认 UI）
+- 等待服务就绪（30秒超时）
+- 返回统一格式的 JSON
+
+**CLI 参数：**
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--json` | 输出 JSON 格式（推荐 AI agent 使用） | - |
+| `--package-root <path>` | portable 包根目录 | 自动推断 |
+| `--app <path>` | 指定 App exe 路径 | 自动查找 |
+| `--data-dir <path>` | 数据目录 | `<package-root>\.local-data` |
+| `--timeout-seconds <n>` | 等待就绪秒数 | 30 |
+| `--headless` | 以 headless 模式启动（高级选项） | - |
+| `--tray` | 以 tray (GUI) 模式启动 | 默认 |
+| `--help` | 显示帮助 | - |
+
+**注意：** 默认启动 Tray App 模式，它提供本地选区和确认 UI，是主产品路径。仅在确无 GUI 需求时使用 `--headless`。
+
+### 方式二：直接启动（备选）
 
 1. 定位发布包根目录，例如：
 
@@ -43,7 +150,7 @@ AGENT_RECORDER_DATA_DIR=<package-root>\.local-data
 
 这样 API key、审计日志和录制文件都保存在发布包本地目录下。
 
-3. 等待服务就绪（推荐方式）：
+3. 等待服务就绪：
 
 服务成功启动后，会在 `<data-dir>\runtime\ready.json` 原子写入 JSON 文件。AI Agent 可以：
 

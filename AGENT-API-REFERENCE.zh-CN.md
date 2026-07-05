@@ -35,6 +35,79 @@
 }
 ```
 
+## CLI 工具（推荐启动方式）
+
+Agent Recorder 提供 `AgentRecorder.Cli` 命令行工具，用于可靠地启动或复用服务实例，并获取就绪信息。CLI 仅负责启动接管，不涉及录制流程。
+
+### ensure-running 命令
+
+```text
+AgentRecorder.Cli.exe ensure-running [options]
+```
+
+**选项：**
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `--json` | 输出 JSON 格式（推荐 AI agent 使用） | - |
+| `--package-root <path>` | portable 包根目录 | 自动推断 |
+| `--app <path>` | 指定 App exe 路径 | 自动查找 |
+| `--data-dir <path>` | 数据目录 | `<package-root>\.local-data` |
+| `--timeout-seconds <n>` | 等待就绪的最大秒数 | `30` |
+| `--timeout-ms <ms>` | 等待就绪的最大毫秒数（兼容） | - |
+| `--headless` | 以 headless 模式启动（高级选项） | - |
+| `--tray` | 以 tray (GUI) 模式启动 | 默认 |
+| `--verbose` | 输出人类可读诊断信息 | - |
+| `--help, -h` | 显示帮助 | - |
+
+**成功输出（ok=true, status=ready）：**
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "started": false,
+  "pid": 12345,
+  "port": 37891,
+  "api_version": "v1",
+  "mode": "tray",
+  "data_dir": "C:\\...\\.local-data",
+  "ready_file": "C:\\...\\runtime\\ready.json",
+  "api_key_file": "C:\\...\\config\\api-key.txt",
+  "startup_elapsed_ms": 850
+}
+```
+
+**失败输出（ok=false）：**
+
+```json
+{
+  "ok": false,
+  "code": "READY_TIMEOUT",
+  "message": "Agent Recorder did not become ready within 30 seconds.",
+  "suggested_action": "Check whether AgentRecorder.App.exe can start in the current desktop session."
+}
+```
+
+**稳定错误码：**
+
+| 错误码 | 说明 |
+|--------|------|
+| `READY_TIMEOUT` | 服务在超时时间内未就绪 |
+| `SERVICE_NOT_FOUND` | 找不到 AgentRecorder.App.exe 或 Headless.exe |
+| `SERVICE_EXITED` | 服务进程启动后提前退出 |
+| `STALE_READY_FILE` | ready 文件存在但 PID 不是 Agent Recorder 进程 |
+| `CAPABILITIES_UNAVAILABLE` | PID 存活但 `/capabilities` 不可用 |
+| `INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY` | 有实例在运行（mutex 持有）但当前 data-dir 下不健康 |
+| `INVALID_ARGUMENT` | 参数错误 |
+
+**注意事项：**
+- `api_key_file` 字段仅提供文件路径，不包含 API key 内容
+- `started` 为 `false` 表示复用已有实例，`true` 表示新启动
+- CLI 自动处理单实例检测，不会启动多个服务
+- CLI 通过 `/api/v1/capabilities` 二次确认服务健康，不接受仅凭 PID 的 ready 文件
+- 默认启动 Tray App 模式（支持本地选区和确认 UI），仅显式 `--headless` 时使用 headless 模式
+
 ## 1. 检查能力
 
 ```http

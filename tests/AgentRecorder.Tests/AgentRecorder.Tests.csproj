@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\AgentRecorder.Api\AgentRecorder.Api.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.App\AgentRecorder.App.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Headless\AgentRecorder.Headless.csproj" />
+    <ProjectReference Include="..\..\tools\AgentRecorder.Cli\AgentRecorder.Cli.csproj" />
   </ItemGroup>
 
 </Project>

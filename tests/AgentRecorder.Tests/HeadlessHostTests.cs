@@ -21,7 +21,11 @@ namespace AgentRecorder.Tests;
 /// Headless API host tests: verifies that the headless host never auto-approves
 /// recording confirmations and that audit logging does not misreport a failed
 /// startup as a successful service start.
+///
+/// Shares the fixed port 37891 with other tests in HeadlessHostIntegration collection.
+/// Serialized via xUnit collection to prevent port binding races.
 /// </summary>
+[Collection("HeadlessHostIntegration")]
 public class HeadlessHostTests
 {
     private class CapturingAuditLogger : AuditLogger
@@ -138,8 +142,10 @@ public class HeadlessHostTests
 }
 
 /// <summary>
-/// Integration tests that start the real headless host executable.
-/// Serialized into a dedicated collection because they bind the fixed port 37891.
+/// Shared collection for all tests that bind or block the fixed port 37891 (ApiServer.Port).
+/// Includes: HeadlessHostTests, HeadlessHostIntegrationTests, HeadlessSingleInstanceTests,
+/// TcpHttpAdapterTests, ReadinessTests.
+/// Serialized via DisableParallelization=true to prevent port binding races.
 /// </summary>
 [CollectionDefinition("HeadlessHostIntegration", DisableParallelization = true)]
 public class HeadlessHostIntegrationCollection { }

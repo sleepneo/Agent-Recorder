@@ -71,9 +71,23 @@ if (-not (Test-Path $appProject)) {
     exit 1
 }
 
-$appPublishDir = Join-Path $StagingDir "AgentRecorder.App"
+$headlessProject = Join-Path $ProjectRoot "src\AgentRecorder.Headless\AgentRecorder.Headless.csproj"
+if (-not (Test-Path $headlessProject)) {
+    Write-Host "[ERROR] AgentRecorder.Headless.csproj not found at $headlessProject" -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "[1/6] Publishing AgentRecorder.App ($PublishMode)..." -ForegroundColor Yellow
+$cliProject = Join-Path $ProjectRoot "tools\AgentRecorder.Cli\AgentRecorder.Cli.csproj"
+if (-not (Test-Path $cliProject)) {
+    Write-Host "[ERROR] AgentRecorder.Cli.csproj not found at $cliProject" -ForegroundColor Red
+    exit 1
+}
+
+$appPublishDir = Join-Path $StagingDir "AgentRecorder.App"
+$headlessPublishDir = Join-Path $StagingDir "AgentRecorder.Headless"
+$cliPublishDir = Join-Path $StagingDir "AgentRecorder.Cli"
+
+Write-Host "[1/8] Publishing AgentRecorder.App ($PublishMode)..." -ForegroundColor Yellow
 
 # ReadyToRun: enabled by default for self-contained, disabled for framework-dependent or when explicitly requested.
 $enableR2R = ($PublishMode -eq "self-contained") -and -not $DisableReadyToRun
@@ -111,9 +125,77 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[OK] Published to $appPublishDir" -ForegroundColor Green
 
-Write-Host "[2/6] Removing PDBs, XML docs, and dev artifacts..." -ForegroundColor Yellow
+Write-Host "[2/8] Publishing AgentRecorder.Headless ($PublishMode)..." -ForegroundColor Yellow
+
+if ($PublishMode -eq "self-contained") {
+    $headlessPublishArgs = @(
+        "publish", $headlessProject,
+        "--configuration", "Release",
+        "--runtime", "win-x64",
+        "--self-contained", "true",
+        "--output", $headlessPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=$($enableR2R.ToString().ToLowerInvariant())",
+        "-p:Deterministic=false"
+    )
+} else {
+    $headlessPublishArgs = @(
+        "publish", $headlessProject,
+        "--configuration", "Release",
+        "--output", $headlessPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=false",
+        "-p:Deterministic=false"
+    )
+}
+
+$headlessPublishResult = dotnet @headlessPublishArgs 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] dotnet publish (Headless) failed:" -ForegroundColor Red
+    Write-Host $headlessPublishResult
+    exit 1
+}
+Write-Host "[OK] Published to $headlessPublishDir" -ForegroundColor Green
+
+Write-Host "[3/8] Publishing AgentRecorder.Cli ($PublishMode)..." -ForegroundColor Yellow
+
+if ($PublishMode -eq "self-contained") {
+    $cliPublishArgs = @(
+        "publish", $cliProject,
+        "--configuration", "Release",
+        "--runtime", "win-x64",
+        "--self-contained", "true",
+        "--output", $cliPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=$($enableR2R.ToString().ToLowerInvariant())",
+        "-p:Deterministic=false"
+    )
+} else {
+    $cliPublishArgs = @(
+        "publish", $cliProject,
+        "--configuration", "Release",
+        "--output", $cliPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=false",
+        "-p:Deterministic=false"
+    )
+}
+
+$cliPublishResult = dotnet @cliPublishArgs 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] dotnet publish (Cli) failed:" -ForegroundColor Red
+    Write-Host $cliPublishResult
+    exit 1
+}
+Write-Host "[OK] Published to $cliPublishDir" -ForegroundColor Green
+
+Write-Host "[4/8] Removing PDBs, XML docs, and dev artifacts..." -ForegroundColor Yellow
 $removed = 0
-Get-ChildItem -Path $appPublishDir -Recurse -File | Where-Object {
+Get-ChildItem -Path $appPublishDir,$headlessPublishDir,$cliPublishDir -Recurse -File | Where-Object {
     $_.Extension -eq ".pdb" -or
     $_.Extension -eq ".xml" -or
     ($_.Name -like "*Tests*") -or
@@ -124,7 +206,7 @@ Get-ChildItem -Path $appPublishDir -Recurse -File | Where-Object {
 }
 Write-Host "[OK] Removed $removed non-essential files" -ForegroundColor Green
 
-Write-Host "[3/6] Copying FFmpeg binaries..." -ForegroundColor Yellow
+Write-Host "[5/8] Copying FFmpeg binaries..." -ForegroundColor Yellow
 $ffmpegSrc = Join-Path $ProjectRoot "tools\ffmpeg\bin"
 if (-not (Test-Path $ffmpegSrc)) {
     Write-Host "[ERROR] FFmpeg bin not found at $ffmpegSrc" -ForegroundColor Red
@@ -147,10 +229,10 @@ foreach ($file in $ffmpegFiles) {
 }
 Write-Host "[OK] FFmpeg copied to app directory" -ForegroundColor Green
 
-Write-Host "[4/6] Preparing portable package layout..." -ForegroundColor Yellow
+Write-Host "[6/8] Preparing portable package layout..." -ForegroundColor Yellow
 Write-Host "[OK] Portable package layout prepared" -ForegroundColor Green
 
-Write-Host "[5/6] Adding documentation..." -ForegroundColor Yellow
+Write-Host "[7/8] Adding documentation..." -ForegroundColor Yellow
 
 # Root-level docs (including agent instructions and raw API reference)
 foreach ($rootDoc in @("README.md", "README.zh-CN.md", "AGENT-INSTRUCTIONS.zh-CN.md", "AGENT-API-REFERENCE.zh-CN.md")) {
@@ -169,7 +251,7 @@ foreach ($packageDoc in @("QUICKSTART.md", "QUICKSTART.zh-CN.md", "LICENSE", "LI
 
 Write-Host "[OK] Documentation added" -ForegroundColor Green
 
-Write-Host "[6/6] Creating zip archive..." -ForegroundColor Yellow
+Write-Host "[8/8] Creating zip archive..." -ForegroundColor Yellow
 $zipParent = Split-Path $ZipPath -Parent
 if (-not (Test-Path $zipParent)) {
     New-Item -ItemType Directory -Path $zipParent -Force | Out-Null
@@ -193,7 +275,7 @@ Write-Host "  Staging: $StagingDir"
 Write-Host ""
 Write-Host "Smoke test (after extracting):" -ForegroundColor Cyan
 Write-Host "  cd <extract-dir>"
-Write-Host "  Start AgentRecorder.App\AgentRecorder.App.exe"
+Write-Host "  AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json"
 Write-Host "  Let the local AI agent read AGENT-INSTRUCTIONS.zh-CN.md and AGENT-API-REFERENCE.zh-CN.md"
 Write-Host "  Verify GET http://127.0.0.1:37891/api/v1/capabilities via raw API"
 Write-Host ""

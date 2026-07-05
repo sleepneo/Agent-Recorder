@@ -21,6 +21,7 @@ internal static class Program
     private static string? _dataDir;
     private static string? _shutdownEventName;
     private static RuntimeReadiness? _readiness;
+    private static SingleInstanceGuard? _instanceGuard;
     private const string DefaultShutdownEventName = "AgentRecorder.Headless.Shutdown";
 
     // Windows console APIs: optional signal handling and console detach.
@@ -78,9 +79,31 @@ internal static class Program
 
             ApplyEnvironment(opts);
 
-            // Clean up stale ready.json AFTER the data-dir has been resolved,
-            // but BEFORE binding the API port. This ensures the data dir
-            // specified via --data-dir is the one that gets cleaned.
+            // Single-instance guard BEFORE ready-file cleanup.
+            // If another instance already holds the mutex, we must NOT delete
+            // its ready.json or bind the API port.
+            _instanceGuard = SingleInstanceGuard.TryAcquire();
+            if (!_instanceGuard.IsAcquired)
+            {
+                // Audit logger needs data dir resolved, so create it now.
+                var audit = new AuditLogger();
+                _audit = audit;
+                var existingSnapshot = SingleInstanceGuard.ReadExistingReadyFile(_readiness!.DataDir);
+                audit.Log("service.instance_already_running", new
+                {
+                    mode = "headless",
+                    pid = Environment.ProcessId,
+                    mutex_name = SingleInstanceGuard.MutexName,
+                    existing_pid = existingSnapshot?.Pid ?? 0,
+                    ready_file = existingSnapshot?.ReadyFile ?? _readiness.ReadyFilePath,
+                    note = "second instance exiting without binding port or deleting ready file"
+                });
+                _instanceGuard.Dispose();
+                _instanceGuard = null;
+                return 0;
+            }
+
+            // Now safe to clean up stale ready.json (we own the instance).
             _readiness?.CleanupOldReadyFile();
 
             Run(opts);
@@ -216,6 +239,14 @@ internal static class Program
 
         var audit = new AuditLogger();
         _audit = audit;
+
+        audit.Log("service.instance_acquired", new
+        {
+            mode = "headless",
+            pid = Environment.ProcessId,
+            mutex_name = SingleInstanceGuard.MutexName
+        });
+
         var engine = new RecordingEngine(audit);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
@@ -293,10 +324,12 @@ internal static class Program
             var server = _server;
             var audit = _audit;
             var readiness = _readiness;
+            var instanceGuard = _instanceGuard;
             _engine = null;
             _server = null;
             _audit = null;
             _readiness = null;
+            _instanceGuard = null;
 
             try { engine?.StopAllSync("service_exit"); } catch { }
             try { server?.Stop(); } catch { }
@@ -330,6 +363,18 @@ internal static class Program
                     catch { }
                 }
             }
+
+            try
+            {
+                if (instanceGuard != null && audit != null)
+                {
+                    audit.Log("service.instance_released",
+                        new { mode = "headless", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
+                }
+            }
+            catch { }
+
+            try { instanceGuard?.Dispose(); } catch { }
 
             try { audit?.Log("service.stopped", new { mode = "headless", pid = Environment.ProcessId }); } catch { }
         }

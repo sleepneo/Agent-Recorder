@@ -29,10 +29,41 @@ internal static class Program
     {
         // Start timing as early as possible.
         var readiness = new RuntimeReadiness("tray", ApiServer.Port);
-        readiness.CleanupOldReadyFile();
+
+        // Single-instance guard BEFORE ready-file cleanup.
+        // If another instance already holds the mutex, we must NOT delete
+        // its ready.json or bind the API port.
+        var instanceGuard = SingleInstanceGuard.TryAcquire();
 
         ApplicationConfiguration.Initialize();
         var audit = new AuditLogger();
+
+        if (!instanceGuard.IsAcquired)
+        {
+            // Another instance is already running. Log diagnostics and exit.
+            var existingSnapshot = SingleInstanceGuard.ReadExistingReadyFile(readiness.DataDir);
+            audit.Log("service.instance_already_running", new
+            {
+                mode = "tray",
+                pid = Environment.ProcessId,
+                mutex_name = SingleInstanceGuard.MutexName,
+                existing_pid = existingSnapshot?.Pid ?? 0,
+                ready_file = existingSnapshot?.ReadyFile ?? readiness.ReadyFilePath,
+                note = "second instance exiting without binding port or deleting ready file"
+            });
+            instanceGuard.Dispose();
+            return;
+        }
+
+        audit.Log("service.instance_acquired", new
+        {
+            mode = "tray",
+            pid = Environment.ProcessId,
+            mutex_name = SingleInstanceGuard.MutexName
+        });
+
+        // Now safe to clean up stale ready.json (we own the instance).
+        readiness.CleanupOldReadyFile();
 
         Application.ThreadException += (_, e) =>
         {
@@ -104,6 +135,8 @@ internal static class Program
                 audit.Log("service.stopped", new { mode = "tray", reason = "process_exit", pid = Environment.ProcessId });
                 server.Stop();
                 CleanupReadiness(readiness, audit);
+                audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
+                instanceGuard.Dispose();
             }
             catch { }
         };
@@ -114,6 +147,8 @@ internal static class Program
             audit.Log("service.stopped", new { mode = "tray", reason = "application_exit", pid = Environment.ProcessId });
             server.Stop();
             CleanupReadiness(readiness, audit);
+            audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
+            instanceGuard.Dispose();
         };
         Application.Run(tray);
     }
