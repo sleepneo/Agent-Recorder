@@ -15,7 +15,8 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 ## 你必须遵守的原则
 
 - 由你完成应用启动、API 调用、状态轮询和结果汇报。
-- 使用 Agent Recorder 原始 HTTP API 编排录制流程。
+- **常见录制意图优先使用 `POST /api/v1/recordings/quick`**（quick API），减少往返次数。
+- 复杂或精确控制场景使用 Agent Recorder 原始 HTTP API 编排录制流程。
 - 不要在用户确认前声称录制已经开始。
 - 不要尝试调用 HTTP 自批准接口；`POST /confirmations/{id}/approve` 被禁止。
 - 不要静默录制敏感或隐私区域。
@@ -240,6 +241,61 @@ AgentRecorder.Cli.exe autostart disable --json
 预热状态值：`not_started` | `running` | `completed` | `failed` | `skipped`
 
 这是纯后台优化，不改变任何安全确认流程。
+
+## Quick Recording 意图 API（推荐）
+
+**常见录制意图请优先使用 `POST /api/v1/recordings/quick`**，它把"目标解析 + 录制创建"合并为一次 HTTP 调用，减少往返次数。
+
+支持三种目标类型：
+
+| `target.type` | 说明 | 适用场景 |
+|---------------|------|----------|
+| `primary_display` | 录主显示器 | "录整个屏幕"、"录主屏 5 分钟" |
+| `active_window` | 录当前活动窗口 | "录当前窗口"、"录这个窗口 3 分钟" |
+| `selected_region` | 让用户选区后录制 | "录选区"、"录这个区域 1 分钟" |
+
+所有 quick 请求仍然进入本地确认流程，不能绕过用户确认。
+
+### 快速调用模板
+
+录主屏 5 分钟：
+
+```json
+{
+  "target": { "type": "primary_display" },
+  "duration_seconds": 300,
+  "video": { "fps": 30, "quality": "medium" }
+}
+```
+
+录当前活动窗口 3 分钟：
+
+```json
+{
+  "target": { "type": "active_window" },
+  "duration_seconds": 180,
+  "audio": { "microphone": { "enabled": false } }
+}
+```
+
+让用户选区并录制 1 分钟：
+
+```json
+{
+  "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
+  "duration_seconds": 60
+}
+```
+
+### 响应说明
+
+- 成功创建待确认录制：响应包含 `status: "requires_user_confirmation"` 和 `quick` 元数据（`target_type`、`recording_created: true`、`resolved_source`、`requires_user_confirmation: true`）。
+- `selected_region` 被取消/超时/不可用：响应包含对应 `status`（`selection_cancelled` / `selection_timeout` / `display_unavailable` / `selection_failed`）和 `quick.recording_created: false`，此时没有创建 recording。
+- `primary_display` / `active_window` 找不到来源：返回 `SOURCE_NOT_FOUND` 错误，附带 `suggested_action`。
+
+**注意**：quick API 仍然需要本地用户确认才能真正开始录制。在用户确认前，不要声称"录制已经开始"。
+
+复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、音频配置等）仍可使用原始 `POST /api/v1/recordings`。
 
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 

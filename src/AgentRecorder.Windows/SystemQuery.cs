@@ -17,6 +17,7 @@ public static class SystemQuery
     /// displays from this provider instead of the real Win32 API.
     /// </summary>
     private static Func<List<DisplayInfo>>? _displayProvider;
+    private static Func<WindowInfo?>? _activeWindowProvider;
 
     /// <summary>
     /// Set a custom display provider for testing purposes.
@@ -25,6 +26,15 @@ public static class SystemQuery
     public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider)
     {
         _displayProvider = provider;
+    }
+
+    /// <summary>
+    /// Set a custom active window provider for testing purposes.
+    /// Pass null to restore the default Win32-based implementation.
+    /// </summary>
+    public static void SetActiveWindowProvider(Func<WindowInfo?>? provider)
+    {
+        _activeWindowProvider = provider;
     }
 
     public static List<DisplayInfo> EnumDisplays()
@@ -86,6 +96,9 @@ public static class SystemQuery
 
     public static WindowInfo? ActiveWindow()
     {
+        if (_activeWindowProvider != null)
+            return _activeWindowProvider();
+
         var fg = GetForegroundWindow();
         return EnumWindows(false, false).FirstOrDefault(w => w.id == $"window_{fg.ToInt64()}");
     }

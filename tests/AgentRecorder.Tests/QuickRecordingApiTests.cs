@@ -1,0 +1,447 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using AgentRecorder.Api;
+using AgentRecorder.Core;
+using AgentRecorder.Infrastructure;
+using AgentRecorder.Logging;
+using AgentRecorder.Windows;
+using Xunit;
+
+namespace AgentRecorder.Tests;
+
+[Collection("HeadlessHostIntegration")]
+public class QuickRecordingApiTests
+{
+    private sealed class ControllableTray : ITrayContext
+    {
+        public string HostMode => "headless";
+        public bool SupportsRegionSelectionUi => true;
+
+        public string RegionSelectionStatus { get; set; } = "display_unavailable";
+        public int RegionX { get; set; }
+        public int RegionY { get; set; }
+        public int RegionW { get; set; } = 800;
+        public int RegionH { get; set; } = 600;
+        public string RegionDisplayId { get; set; } = "display_1";
+        public string RegionCoordSpace { get; set; } = "virtual_screen";
+
+        public int ConfirmationCallbackDelayMs { get; set; } = 0;
+        public bool AutoApprove { get; set; } = false;
+
+        public void RequestConfirmation(object summary, Action<bool> callback)
+        {
+            if (ConfirmationCallbackDelayMs > 0)
+                _ = Task.Delay(ConfirmationCallbackDelayMs).ContinueWith(_ => callback(AutoApprove));
+            else
+                callback(AutoApprove);
+        }
+
+        public void RequestRegionSelection(int timeoutSeconds,
+            Action<string, int, int, int, int, string, string> callback)
+        {
+            callback(RegionSelectionStatus, RegionX, RegionY, RegionW, RegionH, RegionDisplayId, RegionCoordSpace);
+        }
+
+        public void SetRecording(object rec) { }
+        public void SetIdle(object rec) { }
+        public void SetAllIdle() { }
+        public void ShowError(string text) { }
+    }
+
+    private static ApiServer CreateServer(ControllableTray tray, out string dataDir)
+    {
+        dataDir = Path.Combine(Path.GetTempPath(), $"quick-api-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDir);
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", dataDir, EnvironmentVariableTarget.Process);
+        ApiKeyAuth.InitializeForTesting(dataDir);
+
+        var audit = new AuditLogger();
+        var engine = new RecordingEngine(audit);
+        engine.SetTray(tray);
+        return new ApiServer(engine, audit, tray);
+    }
+
+    private static void Cleanup(string dataDir)
+    {
+        SystemQuery.SetDisplayProvider(null);
+        SystemQuery.SetActiveWindowProvider(null);
+        try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { }
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
+        ApiKeyAuth.ResetForTesting(null);
+    }
+
+    private static HttpClient CreateClient()
+    {
+        var handler = new HttpClientHandler { UseProxy = false };
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+    }
+
+    private static StringContent JsonContent(string json) =>
+        new(json, Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task QuickRecording_MissingApiKey_Returns401()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"}}"));
+            Assert.Equal(401, (int)response.StatusCode);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_MissingTargetType_Returns400()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{}"));
+            Assert.Equal(400, (int)response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("INVALID_ARGUMENT", body);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_InvalidTargetType_Returns400()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"invalid_type\"}}"));
+            Assert.Equal(400, (int)response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("INVALID_ARGUMENT", body);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_PrimaryDisplay_CreatesPendingConfirmation()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+            Assert.True(data.TryGetProperty("confirmation_id", out _));
+            Assert.True(data.TryGetProperty("summary", out _));
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("primary_display", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("display", resolved.GetProperty("type").GetString());
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_PrimaryDisplay_NoDisplays_ReturnsSourceNotFound()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>());
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"}}"));
+            Assert.Equal(400, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var error = doc.RootElement.GetProperty("error");
+            Assert.Equal("SOURCE_NOT_FOUND", error.GetProperty("code").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_ActiveWindow_NoWindow_ReturnsSourceNotFound()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetActiveWindowProvider(() => null);
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"active_window\"}}"));
+            Assert.Equal(400, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var error = doc.RootElement.GetProperty("error");
+            Assert.Equal("SOURCE_NOT_FOUND", error.GetProperty("code").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_SelectedRegion_Selected_CreatesRecordingWithResolvedSource()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = 100,
+            RegionY = 150,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("selected_region", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("region", resolved.GetProperty("type").GetString());
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal("virtual_screen", resolved.GetProperty("coordinate_space").GetString());
+
+            var bounds = resolved.GetProperty("bounds");
+            Assert.Equal(100, bounds.GetProperty("x").GetInt32());
+            Assert.Equal(150, bounds.GetProperty("y").GetInt32());
+            Assert.Equal(800, bounds.GetProperty("width").GetInt32());
+            Assert.Equal(600, bounds.GetProperty("height").GetInt32());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Theory]
+    [InlineData("selection_cancelled")]
+    [InlineData("selection_timeout")]
+    [InlineData("display_unavailable")]
+    [InlineData("selection_failed")]
+    public async Task QuickRecording_SelectedRegion_NotSelected_DoesNotCreateRecording(string status)
+    {
+        var tray = new ControllableTray { RegionSelectionStatus = status };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\"}}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+
+            var data = doc.RootElement.GetProperty("data");
+            Assert.Equal(status, data.GetProperty("status").GetString());
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("selected_region", quick.GetProperty("target_type").GetString());
+            Assert.False(quick.GetProperty("recording_created").GetBoolean());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task ConfirmationApprove_StillReturns405()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/confirmations/test-id/approve",
+                JsonContent("{}"));
+            Assert.Equal(405, (int)response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("METHOD_NOT_ALLOWED", body);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ContainsQuickRecordingInfo()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var interaction = doc.RootElement.GetProperty("data").GetProperty("interaction");
+
+            Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
+            Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
+
+            var recipes = interaction.GetProperty("quick_recipes");
+            Assert.Equal(3, recipes.GetArrayLength());
+
+            var recipeNames = new List<string>();
+            foreach (var r in recipes.EnumerateArray())
+                recipeNames.Add(r.GetProperty("name").GetString()!);
+
+            Assert.Contains("record_primary_display", recipeNames);
+            Assert.Contains("record_active_window", recipeNames);
+            Assert.Contains("record_selected_region", recipeNames);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_NestedRoleOuter_PassesThrough()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"nested\":{\"role\":\"outer\",\"session_id\":\"test-session\"},\"duration_seconds\":60}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var summary = doc.RootElement.GetProperty("data").GetProperty("summary");
+            Assert.Equal("outer", summary.GetProperty("nested_role").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+}

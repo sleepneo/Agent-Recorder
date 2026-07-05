@@ -267,6 +267,9 @@ public sealed class ApiServer
             case ("POST", "/recordings"):
                 return CreateRecording(req, reqBody, reqId);
 
+            case ("POST", "/recordings/quick"):
+                return CreateQuickRecording(req, reqBody, reqId);
+
             case ("POST", "/region-selections"):
                 return CreateRegionSelection(req, reqBody, reqId);
 
@@ -378,6 +381,210 @@ public sealed class ApiServer
         return ApiResponse.Ok(response, reqId);
     }
 
+    private string CreateQuickRecording(HttpRequest req, string reqBody, string reqId)
+    {
+        var agent = req.Headers.GetValueOrDefault("X-Agent-Name") ?? "unknown";
+        JsonNode body = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
+                        ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+
+        var targetNode = body["target"];
+        if (targetNode == null)
+            throw new ApiException(400, "INVALID_ARGUMENT", "target is required");
+
+        var targetType = targetNode["type"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(targetType))
+            throw new ApiException(400, "INVALID_ARGUMENT", "target.type is required");
+
+        JsonObject cfg = BuildQuickRecordingConfig(body);
+
+        switch (targetType)
+        {
+            case "primary_display":
+                {
+                    var display = ResolvePrimaryDisplay();
+                    cfg["source"] = new JsonObject
+                    {
+                        ["type"] = "display",
+                        ["display_id"] = display.id
+                    };
+                    var result = _engine.CreateRecording(cfg, agent, _tray);
+                    var resolved = new JsonObject
+                    {
+                        ["type"] = "display",
+                        ["display_id"] = display.id
+                    };
+                    var data = AddQuickMetadataToObject(result, "primary_display", resolved, true);
+                    return ApiResponse.Ok(data, reqId);
+                }
+
+            case "active_window":
+                {
+                    var window = ResolveActiveWindow();
+                    cfg["source"] = new JsonObject
+                    {
+                        ["type"] = "window",
+                        ["window_id"] = window.id
+                    };
+                    var result = _engine.CreateRecording(cfg, agent, _tray);
+                    var resolved = new JsonObject
+                    {
+                        ["type"] = "window",
+                        ["window_id"] = window.id
+                    };
+                    var data = AddQuickMetadataToObject(result, "active_window", resolved, true);
+                    return ApiResponse.Ok(data, reqId);
+                }
+
+            case "selected_region":
+                {
+                    var timeoutSec = targetNode["selection_timeout_seconds"]?.GetValue<int?>() ?? 120;
+                    if (timeoutSec < 10 || timeoutSec > 600)
+                        throw new ApiException(400, "INVALID_ARGUMENT",
+                            "target.selection_timeout_seconds must be between 10 and 600");
+
+                    var sel = WaitForRegionSelection(timeoutSec);
+
+                    if (sel.status != "selected")
+                    {
+                        return ApiResponse.Ok(new
+                        {
+                            status = sel.status,
+                            quick = new
+                            {
+                                target_type = "selected_region",
+                                recording_created = false
+                            }
+                        }, reqId);
+                    }
+
+                    cfg["source"] = new JsonObject
+                    {
+                        ["type"] = "region",
+                        ["display_id"] = sel.displayId,
+                        ["coordinate_space"] = sel.coordSpace,
+                        ["bounds"] = new JsonObject
+                        {
+                            ["x"] = sel.x,
+                            ["y"] = sel.y,
+                            ["width"] = sel.w,
+                            ["height"] = sel.h
+                        }
+                    };
+
+                    var result = _engine.CreateRecording(cfg, agent, _tray);
+                    var resolved = new JsonObject
+                    {
+                        ["type"] = "region",
+                        ["display_id"] = sel.displayId,
+                        ["coordinate_space"] = sel.coordSpace,
+                        ["bounds"] = new JsonObject
+                        {
+                            ["x"] = sel.x,
+                            ["y"] = sel.y,
+                            ["width"] = sel.w,
+                            ["height"] = sel.h
+                        }
+                    };
+                    var data = AddQuickMetadataToObject(result, "selected_region", resolved, true);
+                    return ApiResponse.Ok(data, reqId);
+                }
+
+            default:
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region");
+        }
+    }
+
+    private static JsonObject BuildQuickRecordingConfig(JsonNode body)
+    {
+        var cfg = new JsonObject();
+
+        var videoNode = body["video"];
+        if (videoNode != null)
+            cfg["video"] = videoNode.DeepClone();
+
+        var audioNode = body["audio"];
+        if (audioNode != null)
+            cfg["audio"] = audioNode.DeepClone();
+
+        var outputNode = body["output"];
+        if (outputNode != null)
+            cfg["output"] = outputNode.DeepClone();
+
+        var nestedNode = body["nested"];
+        if (nestedNode != null)
+            cfg["nested"] = nestedNode.DeepClone();
+
+        var durationSec = body["duration_seconds"]?.GetValue<int?>();
+        if (durationSec.HasValue)
+        {
+            cfg["stop_condition"] = new JsonObject
+            {
+                ["type"] = "duration",
+                ["seconds"] = durationSec.Value
+            };
+        }
+
+        return cfg;
+    }
+
+    private static SystemQuery.DisplayInfo ResolvePrimaryDisplay()
+    {
+        var displays = SystemQuery.EnumDisplays();
+        if (displays.Count == 0)
+            throw new ApiException(400, "SOURCE_NOT_FOUND",
+                "No display is available for quick recording.",
+                new { suggested_action = "use_selected_region_or_check_desktop_session" });
+
+        var primary = displays.FirstOrDefault(d => d.is_primary) ?? displays[0];
+        return primary;
+    }
+
+    private static SystemQuery.WindowInfo ResolveActiveWindow()
+    {
+        var window = SystemQuery.ActiveWindow();
+        if (window == null)
+            throw new ApiException(400, "SOURCE_NOT_FOUND",
+                "No active recordable window is available.",
+                new { suggested_action = "ask_user_to_focus_a_window_or_use_selected_region" });
+        return window;
+    }
+
+    private (string status, int x, int y, int w, int h, string displayId, string coordSpace) WaitForRegionSelection(int timeoutSeconds)
+    {
+        var tcs = new TaskCompletionSource<(string status, int x, int y, int w, int h, string displayId, string coordSpace)>();
+
+        _tray.RequestRegionSelection(timeoutSeconds, (status, x, y, w, h, displayId, coordSpace) =>
+        {
+            tcs.TrySetResult((status, x, y, w, h, displayId, coordSpace));
+        });
+
+        var timeoutTask = Task.Delay((timeoutSeconds + 10) * 1000);
+        var completed = Task.WaitAny(tcs.Task, timeoutTask);
+
+        if (completed == 1)
+            return ("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
+
+        return tcs.Task.Result;
+    }
+
+    private static JsonObject AddQuickMetadataToObject(object createResult, string targetType, JsonObject resolvedSource, bool requiresConfirmation)
+    {
+        var resultJson = JsonSerializer.Serialize(createResult, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        });
+        var node = JsonNode.Parse(resultJson) as JsonObject ?? new JsonObject();
+        node["quick"] = new JsonObject
+        {
+            ["target_type"] = targetType,
+            ["recording_created"] = true,
+            ["resolved_source"] = resolvedSource,
+            ["requires_user_confirmation"] = requiresConfirmation
+        };
+        return node;
+    }
+
     private static string ReasonFrom(string body)
     {
         try { return JsonNode.Parse(body)?["reason"]?.GetValue<string>() ?? "user_requested"; }
@@ -458,7 +665,30 @@ public sealed class ApiServer
             {
                 region_selection_endpoint = true,
                 region_selection_requires_local_user = true,
-                region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi
+                region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi,
+                quick_recording_endpoint = "/api/v1/recordings/quick",
+                quick_recording_supported = true,
+                quick_recipes = new[]
+                {
+                    new
+                    {
+                        name = "record_primary_display",
+                        target_type = "primary_display",
+                        description = "Record the primary display with local confirmation."
+                    },
+                    new
+                    {
+                        name = "record_active_window",
+                        target_type = "active_window",
+                        description = "Record the current active window with local confirmation."
+                    },
+                    new
+                    {
+                        name = "record_selected_region",
+                        target_type = "selected_region",
+                        description = "Ask the local user to select a region, then create a recording with local confirmation."
+                    }
+                }
             },
             safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },

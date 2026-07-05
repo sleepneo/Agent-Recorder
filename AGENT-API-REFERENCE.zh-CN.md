@@ -1,6 +1,6 @@
-# Agent Recorder 原始 API 快速手册
+# Agent Recorder API 手册
 
-本文档给本地 AI agent 使用。录制流程由 AI agent 通过 Agent Recorder 原始 HTTP API 编排。
+本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
 ## 基本信息
 
@@ -297,7 +297,175 @@ Content-Type: application/json
 | `selection_timeout` | 用户超时未选择 |
 | `display_unavailable` | 当前桌面会话无法枚举显示器 |
 
-## 5. 创建录制
+## 5. Quick Recording 意图 API（推荐）
+
+```http
+POST /recordings/quick
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+X-Agent-Name: <agent-name>
+```
+
+把"目标解析 + 录制创建"合并为一次 HTTP 调用，减少 agent 往返。仍然进入本地确认流程，不能绕过用户确认。
+
+### 请求体
+
+```json
+{
+  "target": {
+    "type": "selected_region",
+    "selection_timeout_seconds": 120
+  },
+  "duration_seconds": 180,
+  "video": {
+    "fps": 30,
+    "quality": "medium"
+  },
+  "audio": {
+    "microphone": { "enabled": false }
+  },
+  "output": {
+    "directory": "default",
+    "filename_template": "recording-{datetime}"
+  },
+  "nested": {
+    "role": "inner",
+    "parent_recording_id": "rec_xxx",
+    "session_id": "session_xxx"
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `target.type` | 是 | `primary_display` / `active_window` / `selected_region` |
+| `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
+| `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
+| `video` | 否 | 透传到原始录制配置，默认值同原始 API |
+| `audio` | 否 | 透传到原始录制配置 |
+| `output` | 否 | 透传到原始录制配置 |
+| `nested` | 否 | 透传到原始录制配置，使用现有 nested 规则 |
+
+### 三种目标类型
+
+**`primary_display`**：自动选择主显示器（`is_primary=true`），没有 primary 则选第一个。
+
+内部生成：
+```json
+{ "source": { "type": "display", "display_id": "display_1" } }
+```
+
+**`active_window`**：自动选择当前活动窗口。
+
+内部生成：
+```json
+{ "source": { "type": "window", "window_id": "window_123" } }
+```
+
+窗口 denylist、最小化窗口检查等安全校验继续交给现有策略。
+
+**`selected_region`**：弹出本地选区窗口，用户拖拽选择后创建录制。
+
+内部生成：
+```json
+{
+  "source": {
+    "type": "region",
+    "display_id": "display_1",
+    "coordinate_space": "virtual_screen",
+    "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
+  }
+}
+```
+
+选区未成功（取消/超时/不可用/失败）时，不创建 recording，返回业务状态：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "selection_cancelled",
+    "quick": {
+      "target_type": "selected_region",
+      "recording_created": false
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+可能状态：`selection_cancelled` / `selection_timeout` / `display_unavailable` / `selection_failed`。
+
+### 成功响应
+
+创建录制成功后，响应包含原始 `CreateRecording` 的所有字段，并额外包含 `quick` 元数据：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "requires_user_confirmation",
+    "confirmation_id": "conf_xxx",
+    "summary": {
+      "source": "region: Display 1",
+      "audio": "No audio",
+      "duration": "180s",
+      "output": "D:\\...\\recording.mp4",
+      "nested_role": "none"
+    },
+    "quick": {
+      "target_type": "selected_region",
+      "recording_created": true,
+      "resolved_source": {
+        "type": "region",
+        "display_id": "display_1",
+        "coordinate_space": "virtual_screen",
+        "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
+      },
+      "requires_user_confirmation": true
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+### 错误响应
+
+找不到来源时返回 `SOURCE_NOT_FOUND`：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "SOURCE_NOT_FOUND",
+    "message": "No display is available for quick recording.",
+    "details": {
+      "suggested_action": "use_selected_region_or_check_desktop_session"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+`active_window` 无活动窗口：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "SOURCE_NOT_FOUND",
+    "message": "No active recordable window is available.",
+    "details": {
+      "suggested_action": "ask_user_to_focus_a_window_or_use_selected_region"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+## 6. 创建录制（原始 API）
 
 ```http
 POST /recordings
@@ -403,7 +571,7 @@ X-Agent-Name: <agent-name>
 
 AI agent 必须等待本地用户确认。
 
-## 6. 查询确认状态
+## 7. 查询确认状态
 
 ```http
 GET /confirmations/{confirmation_id}
@@ -437,7 +605,7 @@ POST /confirmations/{id}/approve
 
 该接口会返回 405。AI agent 不得绕过本地确认。
 
-## 7. 查询录制状态
+## 8. 查询录制状态
 
 ```http
 GET /recordings/{recording_id}
@@ -473,7 +641,7 @@ X-Agent-Recorder-Key: <api-key>
 | `rejected` | 用户拒绝 |
 | `expired` | 确认超时 |
 
-## 8. 停止手动录制
+## 9. 停止手动录制
 
 ```http
 POST /recordings/{recording_id}/stop
@@ -485,7 +653,7 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
-## 9. 嵌套录制
+## 10. 嵌套录制
 
 外层录制：
 
@@ -558,13 +726,13 @@ X-Agent-Recorder-Key: <api-key>
 
 限制：当前 MVP 最多 2 个并发录制，即 1 个 outer + 1 个 inner。
 
-## 10. AI agent 推荐轮询节奏
+## 11. AI agent 推荐轮询节奏
 
 - `/capabilities`：每 500ms 轮询，最多 30 秒。
 - `/confirmations/{id}`：每 500ms 轮询，最多 120 秒。
 - `/recordings/{id}`：每 1 秒轮询，直到完成或超时。
 
-## 11. 最小使用闭环
+## 12. 最小使用闭环
 
 1. AI agent 启动 `AgentRecorder.App.exe`。
 2. AI agent 等待 `/capabilities` 可用。
