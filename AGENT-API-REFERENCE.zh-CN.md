@@ -258,7 +258,7 @@ GET /windows?include_minimized=false&include_system_windows=false
 X-Agent-Recorder-Key: <api-key>
 ```
 
-用途：当用户明确要录制某个窗口时，AI agent 可以列出窗口并选择匹配项。选区录制仍是最稳妥的演示路径。
+用途：当用户明确要录制某个窗口时，AI agent 可以列出窗口并选择匹配项。常见“录当前窗口/选区录屏”请求优先使用 quick API。
 
 ## 4. 请求用户选区
 
@@ -738,8 +738,7 @@ X-Agent-Recorder-Key: <api-key>
 2. AI agent 等待 `/capabilities` 可用。
 3. AI agent 读取 API key。
 4. 人类用户说：“帮我选区录屏 30 秒。”
-5. AI agent 请求 `/region-selections`。
+5. AI agent 请求 `/recordings/quick`，`target.type=selected_region`。
 6. 人类用户框选区域。
-7. AI agent 创建 `/recordings`。
-8. 人类用户确认录制。
-9. AI agent 轮询完成并报告 MP4 路径。
+7. 人类用户确认录制。
+8. AI agent 轮询完成并报告 MP4 路径。

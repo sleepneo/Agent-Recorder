@@ -26,7 +26,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.0-trae-initial-demo",
+    [string]$Version = "v0.1.0",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
@@ -234,7 +234,7 @@ Write-Host "[OK] Portable package layout prepared" -ForegroundColor Green
 
 Write-Host "[7/8] Adding documentation..." -ForegroundColor Yellow
 
-# Root-level docs (including agent instructions and raw API reference)
+# Root-level docs (including agent instructions and API reference)
 foreach ($rootDoc in @("README.md", "README.zh-CN.md", "AGENT-INSTRUCTIONS.zh-CN.md", "AGENT-API-REFERENCE.zh-CN.md")) {
     $src = Join-Path $ProjectRoot $rootDoc
     if (Test-Path $src) {
@@ -277,5 +277,5 @@ Write-Host "Smoke test (after extracting):" -ForegroundColor Cyan
 Write-Host "  cd <extract-dir>"
 Write-Host "  AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json"
 Write-Host "  Let the local AI agent read AGENT-INSTRUCTIONS.zh-CN.md and AGENT-API-REFERENCE.zh-CN.md"
-Write-Host "  Verify GET http://127.0.0.1:37891/api/v1/capabilities via raw API"
+Write-Host "  Prefer POST http://127.0.0.1:37891/api/v1/recordings/quick for common recording intents"
 Write-Host ""

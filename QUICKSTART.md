@@ -1,7 +1,8 @@
 # Quick Start - Agent Recorder
 
 Agent Recorder is an **AI agent-native local screen recording capability layer**.
-A local AI agent should drive the recording flow through the raw HTTP API.
+The normal path is: human speaks, local AI agent calls the quick API, Agent
+Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
@@ -9,21 +10,48 @@ A local AI agent should drive the recording flow through the raw HTTP API.
 2. Ask your local AI agent to read:
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`
-3. Tell the agent what to record in natural language:
+3. Tell the agent what to record:
 
 ```text
 Record a selected region for 30 seconds.
 ```
 
 4. The AI agent should:
-   - start `AgentRecorder.App\AgentRecorder.App.exe`
-   - set `AGENT_RECORDER_DATA_DIR=<package-root>\.local-data`
-   - wait for `GET /api/v1/capabilities`
-   - read `.local-data\config\api-key.txt`
-   - call the raw API endpoints for region selection, recording, confirmation polling, and completion polling
+   - run `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
+   - read the API key from the returned `api_key_file`
+   - call `POST /api/v1/recordings/quick`
+   - poll `/confirmations/{id}` until the local user approves or rejects
+   - poll `/recordings/{id}` until completion
    - report the final MP4 path
 
-5. The human user only selects the region, confirms recording locally, and plays the returned MP4.
+5. The human user only selects the region, confirms recording locally, and plays
+   the returned MP4.
+
+## Quick API Targets
+
+| target.type | Use case |
+| --- | --- |
+| `primary_display` | Record the primary display |
+| `active_window` | Record the current active window |
+| `selected_region` | Ask the user to draw a region, then record it |
+
+Example request:
+
+```json
+{
+  "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
+  "duration_seconds": 30,
+  "video": { "fps": 30, "quality": "medium" }
+}
+```
+
+## Files
+
+When the app is started with `AGENT_RECORDER_DATA_DIR=<package-root>\.local-data`:
+
+- API key: `.local-data\config\api-key.txt`
+- Videos: `.local-data\Videos\`
+- Audit log: `.local-data\logs\audit.jsonl`
 
 ## Safety
 
@@ -31,4 +59,4 @@ Record a selected region for 30 seconds.
 - State-changing calls require `X-Agent-Recorder-Key`.
 - AI agents can request recording but cannot silently approve it.
 - Local user confirmation is mandatory.
-- HTTP self-approval is blocked with 405.
+- HTTP self-approval is blocked with `405 METHOD_NOT_ALLOWED`.

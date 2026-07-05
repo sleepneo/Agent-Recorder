@@ -1,430 +1,307 @@
-# Agent Recorder API 文档
+# Agent Recorder API
 
-## 基础信息
+Base URL: `http://127.0.0.1:37891/api/v1`
 
-- **基础 URL**: `http://127.0.0.1:37891`
-- **API 前缀**: `/api/v1`
-- **认证**: 部分接口需要 `X-Agent-Recorder-Key` header
+Agent Recorder exposes a localhost HTTP API for local AI agents. Common natural
+language recording intents should use the quick recording endpoint. Lower-level
+endpoints remain available for precise control.
 
-## 认证要求
+## Response Envelope
 
-| 接口 | 是否需要认证 |
-|------|-------------|
-| GET /capabilities | 否 |
-| GET /permissions | 否 |
-| GET /displays | 否 |
-| GET /windows | 否 |
-| GET /windows/active | 否 |
-| GET /audio/devices | 否 |
-| POST /recordings | 是 |
-| GET /recordings | 是 |
-| GET /recordings/{id} | 是 |
-| POST /recordings/{id}/stop | 是 |
-| GET /confirmations/{id} | 是 |
-
-## 通用响应格式
-
-所有响应都包含 `ok` 字段表示成功状态：
+Success:
 
 ```json
 {
   "ok": true,
-  "data": { /* 响应数据 */ },
-  "request_id": "req_abc123"
+  "data": {},
+  "request_id": "req_xxx"
 }
 ```
 
-错误响应：
+Error:
 
 ```json
 {
   "ok": false,
-  "error": "ERROR_CODE",
-  "message": "错误描述",
-  "details": { /* 可选详情 */ },
-  "request_id": "req_abc123"
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "...",
+    "details": {}
+  },
+  "request_id": "req_xxx"
 }
 ```
 
-## 接口列表
+## Authentication
 
-### 1. GET /capabilities
+State-changing and sensitive endpoints require:
 
-获取服务能力信息。
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "app": {
-      "name": "Agent Recorder",
-      "version": "0.1.0",
-      "platform": "windows"
-    },
-    "recording": {
-      "sources": ["display", "window"],
-      "audio": ["microphone"],
-      "containers": ["mp4"],
-      "codecs": ["h264"],
-      "fps": [15, 24, 30, 60],
-      "stop_conditions": ["duration", "manual"],
-      "max_duration_seconds": 7200,
-      "pause_resume": false
-    },
-    "safety": {
-      "requires_confirmation": true,
-      "recording_indicator": true,
-      "audit_log": true
-    },
-    "auth": {
-      "required": true,
-      "header": "X-Agent-Recorder-Key"
-    }
-  }
-}
+```http
+X-Agent-Recorder-Key: <api-key>
 ```
 
-### 2. GET /permissions
+The key is stored in `.local-data\config\api-key.txt` when the app is started
+with `AGENT_RECORDER_DATA_DIR=<package-root>\.local-data`.
 
-获取权限状态。
+| Endpoint | Auth |
+| --- | --- |
+| `GET /capabilities` | No |
+| `GET /permissions` | No |
+| `GET /displays` | No |
+| `GET /windows` | No |
+| `GET /windows/active` | No |
+| `GET /audio/devices` | No |
+| `POST /recordings/quick` | Yes |
+| `POST /region-selections` | Yes |
+| `POST /recordings` | Yes |
+| `GET /recordings` | Yes |
+| `GET /recordings/{id}` | Yes |
+| `POST /recordings/{id}/stop` | Yes |
+| `GET /confirmations/{id}` | Yes |
 
-**响应示例**：
+## Capabilities
 
-```json
-{
-  "ok": true,
-  "data": {
-    "screen_capture": { "status": "granted" },
-    "microphone": { "status": "granted" },
-    "output_directory": { 
-      "status": "granted", 
-      "default_path": "D:\\works\\python\\007-Agent-Recorder\\.local-data\\Videos" 
-    }
-  }
-}
+```http
+GET /capabilities
 ```
 
-### 3. GET /displays
+The response includes:
 
-列出可用显示器。
+- app name/version/platform
+- host mode and autostart status
+- FFmpeg resolution and prewarm status
+- recording source support: `display`, `window`, `region`
+- quick recording endpoint and recipes
+- safety and auth policy
+- readiness data when available
 
-**响应示例**：
+Quick recipe fields:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "displays": [
-      {
-        "id": "display_0",
-        "name": "Primary",
-        "bounds": { "x": 0, "y": 0, "width": 3840, "height": 2160 },
-        "is_primary": true
-      }
+  "interaction": {
+    "quick_recording_supported": true,
+    "quick_recording_endpoint": "/api/v1/recordings/quick",
+    "quick_recipes": [
+      { "name": "record_primary_display", "target_type": "primary_display" },
+      { "name": "record_active_window", "target_type": "active_window" },
+      { "name": "record_selected_region", "target_type": "selected_region" }
     ]
   }
 }
 ```
 
-### 4. GET /windows
+## Quick Recording
 
-列出窗口。
-
-**查询参数**：
-- `include_minimized` (bool): 是否包含最小化窗口，默认 false
-- `include_system_windows` (bool): 是否包含系统窗口，默认 false
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "windows": [
-      {
-        "id": "window_123",
-        "title": "Visual Studio Code",
-        "process_name": "Code",
-        "bounds": { "x": 100, "y": 100, "width": 1920, "height": 1080 },
-        "is_minimized": false
-      }
-    ]
-  }
-}
+```http
+POST /recordings/quick
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+X-Agent-Name: <agent-name>
 ```
 
-### 5. GET /windows/active
-
-获取当前活动窗口。
-
-**响应示例**：
+Use this endpoint first for common natural-language intents.
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "window": {
-      "id": "window_456",
-      "title": "PowerShell",
-      "process_name": "powershell",
-      "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 },
-      "is_minimized": false
-    }
-  }
-}
-```
-
-### 6. GET /audio/devices
-
-列出音频输入设备。
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "input_devices": [
-      { "id": "mic_0", "name": "Microphone (Realtek High Definition Audio)" }
-    ],
-    "system_audio_supported": false
-  }
-}
-```
-
-### 7. POST /recordings
-
-发起录制请求。需要认证。
-
-**请求体**：
-
-```json
-{
-  "source": {
-    "type": "display",
-    "display_id": "display_0"
+  "target": {
+    "type": "selected_region",
+    "selection_timeout_seconds": 120
   },
-  "audio": {
-    "microphone": {
-      "enabled": false
-    }
-  },
+  "duration_seconds": 60,
   "video": {
     "fps": 30,
     "quality": "medium"
   },
-  "stop_condition": {
-    "type": "duration",
-    "seconds": 5
+  "audio": {
+    "microphone": { "enabled": false }
+  },
+  "output": {
+    "directory": "default",
+    "filename_template": "recording-{datetime}"
   }
 }
 ```
 
-**请求字段说明**：
+Supported `target.type` values:
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| source.type | string | 是 | `display` 或 `window` |
-| source.display_id | string | 否 | 显示器 ID（type=display 时必填） |
-| source.window_id | string | 否 | 窗口 ID（type=window 时必填） |
-| audio.microphone.enabled | bool | 是 | 是否启用麦克风 |
-| video.fps | int | 否 | 帧率，默认 30 |
-| video.quality | string | 否 | `low`, `medium`, `high`，默认 `medium` |
-| stop_condition.type | string | 是 | `duration` 或 `manual` |
-| stop_condition.seconds | int | 否 | 录制时长（type=duration 时必填） |
+| target.type | Behavior |
+| --- | --- |
+| `primary_display` | Resolve the primary display, then create a recording |
+| `active_window` | Resolve the active window, then create a recording |
+| `selected_region` | Show local region-selection UI, then create a recording |
 
-**响应示例（需要用户确认）**：
+Successful creation returns `requires_user_confirmation`:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "status": "requires_user_confirmation",
-    "confirmation_id": "confirm_abc123",
-    "summary": {
-      "source": "Display: Primary (3840x2160)",
-      "duration": "5 seconds",
-      "audio": "microphone disabled"
-    }
-  }
-}
-```
-
-**响应示例（已确认，直接开始）**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "recording_id": "rec_xyz789",
-    "status": "recording",
-    "started_at": "2026-06-18T08:00:00Z",
-    "expected_output": "D:\\...\\recording-2026-06-18-080000.mp4"
-  }
-}
-```
-
-### 8. GET /recordings
-
-列出所有录制记录。需要认证。
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "recordings": [
-      {
-        "recording_id": "rec_xyz789",
-        "status": "completed",
-        "started_at": "2026-06-18T08:00:00Z",
-        "completed_at": "2026-06-18T08:00:05Z",
-        "output_path": "D:\\...\\recording-2026-06-18-080000.mp4"
-      }
-    ]
-  }
-}
-```
-
-### 9. GET /recordings/{id}
-
-获取单个录制状态。需要认证。
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "recording_id": "rec_xyz789",
-    "status": "completed",
-    "source": { "type": "display", "title": "Primary" },
-    "started_at": "2026-06-18T08:00:00Z",
-    "completed_at": "2026-06-18T08:00:05Z",
-    "elapsed_seconds": 5,
-    "audio": { "microphone": { "enabled": false } },
-    "output": {
-      "path": "D:\\...\\recording-2026-06-18-080000.mp4",
-      "bytes_written": 133446,
-      "duration_seconds": 5.034,
-      "ffmpeg_exit_code": 0
+  "status": "requires_user_confirmation",
+  "confirmation_id": "conf_xxx",
+  "summary": {},
+  "quick": {
+    "target_type": "selected_region",
+    "recording_created": true,
+    "resolved_source": {
+      "type": "region",
+      "display_id": "display_1",
+      "coordinate_space": "virtual_screen",
+      "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
     },
-    "warnings": [],
-    "stderr_excerpt": ""
+    "requires_user_confirmation": true
   }
 }
 ```
 
-**状态说明**：
-
-| 状态 | 说明 |
-|------|------|
-| `pending_confirmation` | 等待用户确认 |
-| `recording` | 录制中 |
-| `stopping` | 正在停止 |
-| `completed` | 完成 |
-| `failed` | 失败 |
-| `cancelled` | 已取消 |
-| `rejected` | 用户拒绝 |
-| `expired` | 确认超时 |
-
-### 10. POST /recordings/{id}/stop
-
-停止录制。需要认证。
-
-**请求体（可选）**：
+If selected-region interaction is cancelled, times out, or is unavailable, no
+recording is created:
 
 ```json
 {
-  "reason": "user_requested"
-}
-```
-
-**响应示例**：
-
-```json
-{
-  "ok": true,
-  "data": {
-    "recording_id": "rec_xyz789",
-    "status": "completed",
-    "output": {
-      "path": "D:\\...\\recording-2026-06-18-080000.mp4",
-      "size_bytes": 133446,
-      "duration_seconds": 5.034,
-      "container": "mp4",
-      "codec": "h264"
-    }
+  "status": "selection_cancelled",
+  "quick": {
+    "target_type": "selected_region",
+    "recording_created": false
   }
 }
 ```
 
-### 11. GET /confirmations/{id}
+## Lower-Level Endpoints
 
-查询确认状态。需要认证。
+### Displays
 
-**响应示例**：
+```http
+GET /displays
+```
+
+Returns display IDs, names, primary flag, scale factor, and virtual-screen
+bounds.
+
+### Windows
+
+```http
+GET /windows?include_minimized=false&include_system_windows=false
+GET /windows/active
+```
+
+Returns window IDs, titles, process names, active/minimized state, and bounds.
+
+### Region Selection
+
+```http
+POST /region-selections
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "purpose": "recording",
+  "timeout_seconds": 120
+}
+```
+
+This endpoint only asks the user to select a region. The agent must create the
+recording separately with `POST /recordings`. Prefer `/recordings/quick` for
+common selected-region requests.
+
+### Raw Recording
+
+```http
+POST /recordings
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+X-Agent-Name: <agent-name>
+```
+
+Display source:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "confirmation_id": "confirm_abc123",
-    "status": "approved",
-    "recording_id": "rec_xyz789"
+  "source": { "type": "display", "display_id": "display_1" },
+  "stop_condition": { "type": "duration", "seconds": 60 },
+  "audio": { "microphone": { "enabled": false } },
+  "video": { "fps": 30, "quality": "medium" }
+}
+```
+
+Region source:
+
+```json
+{
+  "source": {
+    "type": "region",
+    "display_id": "display_1",
+    "coordinate_space": "virtual_screen",
+    "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
+  },
+  "stop_condition": { "type": "duration", "seconds": 60 }
+}
+```
+
+Nested outer:
+
+```json
+{
+  "source": { "type": "display", "display_id": "display_1" },
+  "stop_condition": { "type": "duration", "seconds": 300 },
+  "nested": { "role": "outer", "session_id": "session_001" }
+}
+```
+
+Nested inner:
+
+```json
+{
+  "source": { "type": "window", "window_id": "window_123" },
+  "stop_condition": { "type": "duration", "seconds": 60 },
+  "nested": {
+    "role": "inner",
+    "parent_recording_id": "rec_outer",
+    "session_id": "session_001"
   }
 }
 ```
 
-**确认状态说明**：
+## Confirmation And Status
 
-| 状态 | 说明 |
-|------|------|
-| `pending` | 等待用户确认 |
-| `approved` | 用户已批准 |
-| `rejected` | 用户已拒绝 |
-| `expired` | 确认超时 |
-
-## 错误码
-
-| 错误码 | HTTP 状态 | 说明 |
-|--------|-----------|------|
-| `UNAUTHORIZED` | 401 | 缺少 API Key |
-| `FORBIDDEN` | 403 | API Key 无效 |
-| `SOURCE_UNAVAILABLE` | 403 | 窗口被安全策略阻止 |
-| `PERMISSION_DENIED` | 403 | 路径被安全策略阻止 |
-| `RECORDING_ALREADY_RUNNING` | 409 | 已有录制在进行中 |
-| `RECORDING_NOT_FOUND` | 404 | 录制或确认不存在 |
-| `INVALID_ARGUMENT` | 400 | 参数无效 |
-| `OUTPUT_PATH_INVALID` | 400 | 输出路径无效 |
-| `INTERNAL_ERROR` | 500 | 服务器内部错误 |
-
-## 使用示例
-
-### curl 示例
-
-```bash
-# 获取能力
-curl http://127.0.0.1:37891/api/v1/capabilities
-
-# 获取显示器列表
-curl http://127.0.0.1:37891/api/v1/displays
-
-# 发起录制（需要 API Key）
-curl -X POST http://127.0.0.1:37891/api/v1/recordings \
-  -H "X-Agent-Recorder-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": { "type": "display", "display_id": "display_0" },
-    "audio": { "microphone": { "enabled": false } },
-    "video": { "fps": 30, "quality": "medium" },
-    "stop_condition": { "type": "duration", "seconds": 5 }
-  }'
-
-# 查询录制状态
-curl -H "X-Agent-Recorder-Key: your-api-key" \
-  http://127.0.0.1:37891/api/v1/recordings/rec_xyz789
+```http
+GET /confirmations/{confirmation_id}
+GET /recordings/{recording_id}
+GET /recordings/{recording_id}/output
+POST /recordings/{recording_id}/stop
 ```
+
+Recording states:
+
+| State | Meaning |
+| --- | --- |
+| `pending_confirmation` | Waiting for local user confirmation |
+| `recording` | Recording is active |
+| `stopping` | Stop requested |
+| `completed` | Recording completed |
+| `failed` | Recording failed |
+| `cancelled` | Recording cancelled |
+| `rejected` | User rejected the confirmation |
+| `expired` | Confirmation timed out |
+
+HTTP confirmation approval is intentionally blocked:
+
+```http
+POST /confirmations/{id}/approve
+```
+
+returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
+
+## Common Error Codes
+
+| Code | Meaning |
+| --- | --- |
+| `UNAUTHORIZED` | Missing API key |
+| `FORBIDDEN` | Invalid API key |
+| `INVALID_ARGUMENT` | Request body or parameter is invalid |
+| `SOURCE_NOT_FOUND` | Display/window/source is unavailable |
+| `SOURCE_UNAVAILABLE` | Source blocked by safety policy |
+| `PERMISSION_DENIED` | Output path or operation denied |
+| `RECORDING_ALREADY_RUNNING` | Non-nested recording already active |
+| `OUTER_RECORDING_ALREADY_EXISTS` | Nested outer already active |
+| `INNER_RECORDING_ALREADY_EXISTS` | Nested inner already active |
+| `PARENT_NOT_RECORDING` | Nested inner parent is not recording |
+| `METHOD_NOT_ALLOWED` | HTTP confirmation approval/rejection is blocked |

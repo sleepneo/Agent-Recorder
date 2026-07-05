@@ -276,13 +276,13 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 6) 演示脚本不应调用 API approve（它们应等待手动用户确认）
+    // 6) 回归脚本不应调用 API approve（它们应等待手动用户确认）
     // =====================================================================
 
     [Fact]
     public void RecordingFlowScript_DoesNotCallConfirmationApprove()
     {
-        // 确保演示脚本不包含 POST /confirmations/{id}/approve 作为自动步骤
+        // 确保回归脚本不包含 POST /confirmations/{id}/approve 作为自动步骤
         // （那会误导开发者认为 API 自确认是可行的）
         // 注意：脚本中可以有注释说明 API 返回 405，但不能有实际的 Invoke-RestMethod 调用
         var root = GetProjectRoot();

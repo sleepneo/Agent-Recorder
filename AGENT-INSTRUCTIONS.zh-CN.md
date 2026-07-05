@@ -1,13 +1,13 @@
 # Agent Recorder：AI Agent 操作指令
 
-本文档面向本地 AI agent。AI agent 应直接启动应用并调用 Agent Recorder 原始 HTTP API 完成录屏流程。
+本文档面向本地 AI agent。AI agent 应启动或复用 Agent Recorder，并优先调用 quick API 完成常见录屏流程。
 
 ## 产品定位
 
 Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 ```text
-人类用户 -> 自然语言指令 -> 本地 AI agent -> Agent Recorder 原始 API -> 本地选区/确认 UI -> MP4 输出
+人类用户 -> 自然语言指令 -> 本地 AI agent -> Agent Recorder quick API -> 本地选区/确认 UI -> MP4 输出
 ```
 
 你的职责是把人类用户的自然语言意图转换为 API 调用，并在必要时引导用户完成本地 UI 选区和确认。
@@ -299,7 +299,7 @@ AgentRecorder.Cli.exe autostart disable --json
 
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 
-推荐用选区录制，因为“当前对话窗口”对 AI agent 来说可能不等同于稳定窗口句柄。
+推荐用 quick API 的 `selected_region`，因为“当前对话窗口”对 AI agent 来说可能不等同于稳定窗口句柄。
 
 1. 回复用户：
 
@@ -307,44 +307,17 @@ AgentRecorder.Cli.exe autostart disable --json
 好的，我会请求 Agent Recorder 进行选区录制。请在弹出的界面中框选当前对话窗口区域，随后确认录制。
 ```
 
-2. 请求用户选区：
+2. 发起 quick 录制请求：
 
 ```http
-POST /api/v1/region-selections
-Content-Type: application/json
-
-{
-  "purpose": "recording",
-  "timeout_seconds": 300
-}
-```
-
-3. 如果返回：
-
-```json
-{
-  "status": "selected",
-  "display_id": "display_1",
-  "coordinate_space": "virtual_screen",
-  "bounds": { "x": 100, "y": 100, "width": 1200, "height": 800 }
-}
-```
-
-用这些坐标创建录制：
-
-```http
-POST /api/v1/recordings
+POST /api/v1/recordings/quick
 Content-Type: application/json
 X-Agent-Recorder-Key: <api-key>
 X-Agent-Name: <your-agent-name>
 
 {
-  "source": {
-    "type": "region",
-    "display_id": "display_1",
-    "coordinate_space": "virtual_screen",
-    "bounds": { "x": 100, "y": 100, "width": 1200, "height": 800 }
-  },
+  "target": { "type": "selected_region", "selection_timeout_seconds": 300 },
+  "duration_seconds": 300,
   "audio": {
     "microphone": { "enabled": false }
   },
@@ -355,16 +328,11 @@ X-Agent-Name: <your-agent-name>
   "output": {
     "directory": "default",
     "filename_template": "recording-{datetime}"
-  },
-  "stop_condition": {
-    "type": "duration",
-    "seconds": 300
-  },
-  "safety": {
-    "require_user_confirmation": true
   }
 }
 ```
+
+3. 如果返回 `selection_cancelled`、`selection_timeout` 或 `display_unavailable`，向用户说明没有创建录制。
 
 4. 如果返回 `requires_user_confirmation`，告诉用户：
 
@@ -398,7 +366,7 @@ GET /api/v1/recordings/{recording_id}
 
 ## 场景 2：用户说“选区录屏 3 分钟”
 
-同场景 1，但 `stop_condition.seconds` 设置为 `180`。
+同场景 1，但 `duration_seconds` 设置为 `180`。
 
 你可以直接说：
 
@@ -410,23 +378,12 @@ GET /api/v1/recordings/{recording_id}
 
 这是嵌套录制。外层记录整个过程，内层记录再次选择的区域。
 
-1. 获取显示器：
-
-```http
-GET /api/v1/displays
-X-Agent-Recorder-Key: <api-key>
-```
-
-选择主显示器或第一个可用显示器。
-
-2. 创建外层录制：
+1. 创建外层录制：
 
 ```json
 {
-  "source": {
-    "type": "display",
-    "display_id": "display_1"
-  },
+  "target": { "type": "primary_display" },
+  "duration_seconds": 300,
   "audio": {
     "microphone": { "enabled": false }
   },
@@ -438,19 +395,14 @@ X-Agent-Recorder-Key: <api-key>
     "directory": "default",
     "filename_template": "nested-outer-{datetime}"
   },
-  "stop_condition": {
-    "type": "duration",
-    "seconds": 300
-  },
   "nested": {
     "role": "outer",
     "session_id": "nested-<timestamp>"
-  },
-  "safety": {
-    "require_user_confirmation": true
   }
 }
 ```
+
+2. 发送到 `POST /api/v1/recordings/quick`。
 
 3. 等待用户确认外层录制，并取得外层 `recording_id`。
 
@@ -458,12 +410,8 @@ X-Agent-Recorder-Key: <api-key>
 
 ```json
 {
-  "source": {
-    "type": "region",
-    "display_id": "<region display_id>",
-    "coordinate_space": "virtual_screen",
-    "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
-  },
+  "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
+  "duration_seconds": 60,
   "audio": {
     "microphone": { "enabled": false }
   },
@@ -475,20 +423,15 @@ X-Agent-Recorder-Key: <api-key>
     "directory": "default",
     "filename_template": "nested-inner-{datetime}"
   },
-  "stop_condition": {
-    "type": "duration",
-    "seconds": 60
-  },
   "nested": {
     "role": "inner",
     "parent_recording_id": "<outer recording_id>",
     "session_id": "nested-<same timestamp>"
-  },
-  "safety": {
-    "require_user_confirmation": true
   }
 }
 ```
+
+发送到 `POST /api/v1/recordings/quick`。内层仍需本地选区和确认。
 
 5. 等待内层和外层都完成，然后报告两段视频路径，并说明外层视频记录了内层录制的发起过程。
 

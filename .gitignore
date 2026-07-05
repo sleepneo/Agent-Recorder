@@ -3,7 +3,7 @@ bin/
 obj/
 TestResults/
 
-# Keep bundled FFmpeg binaries used by local recording scripts.
+# Keep bundled FFmpeg binaries used by the capture backend.
 !tools/ffmpeg/
 !tools/ffmpeg/bin/
 !tools/ffmpeg/bin/**
