@@ -194,8 +194,7 @@ internal static class Program
     {
         try
         {
-            var dataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR")
-                ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".local-data");
+            var dataDir = DataDirResolver.Resolve();
             var logDir = Path.Combine(dataDir, "logs");
             Directory.CreateDirectory(logDir);
             var logPath = Path.Combine(logDir, "startup-errors.jsonl");

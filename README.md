@@ -38,6 +38,20 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
 Advanced agents may still use the lower-level API for precise display, window,
 region, output, or nested-recording control.
 
+## Runtime Data
+
+For the portable package, `AgentRecorder.Cli.exe ensure-running` defaults the
+data directory to `<package-root>\.local-data` and passes that path to the app
+through `AGENT_RECORDER_DATA_DIR`.
+
+If `AgentRecorder.App.exe` or `AgentRecorder.Headless.exe` is launched directly
+without `AGENT_RECORDER_DATA_DIR`, the default data directory is
+`%LOCALAPPDATA%\AgentRecorder`.
+
+Agents should use the paths returned by `ensure-running` or
+`GET /api/v1/capabilities`, especially `data_dir`, `ready_file`, and
+`api_key_file`.
+
 ## Capabilities
 
 - Quick intent API for primary display, active window, and selected region.

@@ -5,6 +5,7 @@ using AgentRecorder.Infrastructure;
 
 namespace AgentRecorder.Tests;
 
+[Collection("NonParallel-AgentRecorderDataDir")]
 public class ApiKeyAuthTests
 {
     private static string GetTestDataDir() =>
@@ -64,29 +65,33 @@ public class ApiKeyAuthTests
     public void InitializeForTesting_WithEmptyDataDir_CreatesTokenFile()
     {
         var testDataDir = GetTestDataDir();
+        var originalEnv = Environment.GetEnvironmentVariable("AGENT_RECORDER_API_KEY");
         try
         {
-            // 确保目录不存在
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_API_KEY", null);
+            DataDirResolver.ClearOverride();
+            ApiKeyAuth.ResetForTesting(null);
+
             Assert.False(Directory.Exists(testDataDir));
 
-            // 初始化
             ApiKeyAuth.InitializeForTesting(testDataDir);
 
-            // 验证 token 文件被创建
             var tokenFile = ApiKeyAuth.GetTokenFilePath();
             Assert.True(File.Exists(tokenFile), "Token file should be created");
 
-            // 验证 token 内容有效
             var savedToken = File.ReadAllText(tokenFile).Trim();
             Assert.False(string.IsNullOrWhiteSpace(savedToken));
-            Assert.Equal(savedToken, ApiKeyAuth.CurrentApiKey);
 
-            // 验证来源是 generated
+            var currentKey = ApiKeyAuth.CurrentApiKey;
+            Assert.Equal(savedToken, currentKey);
+
             Assert.Equal("generated", ApiKeyAuth.GetTokenSource());
         }
         finally
         {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_API_KEY", originalEnv);
             ApiKeyAuth.ResetForTesting(null);
+            DataDirResolver.ClearOverride();
             CleanupDirectory(testDataDir);
         }
     }

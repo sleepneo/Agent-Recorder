@@ -9,8 +9,9 @@
 | Base URL | `http://127.0.0.1:37891/api/v1` |
 | 认证 Header | `X-Agent-Recorder-Key: <api-key>` |
 | Agent Header | `X-Agent-Name: <agent-name>` |
-| API key 文件 | `<package-root>\.local-data\config\api-key.txt` |
-| 默认视频目录 | `<package-root>\.local-data\Videos\`，前提是启动时设置 `AGENT_RECORDER_DATA_DIR` |
+| API key 文件 | 由 `ensure-running` 返回的 `api_key_file` 指定 |
+| portable 默认 data-dir | `<package-root>\.local-data` |
+| 直接启动默认 data-dir | `%LOCALAPPDATA%\AgentRecorder` |
 
 所有响应格式：
 
@@ -98,7 +99,9 @@ AgentRecorder.Cli.exe ensure-running [options]
 | `SERVICE_EXITED` | 服务进程启动后提前退出 |
 | `STALE_READY_FILE` | ready 文件存在但 PID 不是 Agent Recorder 进程 |
 | `CAPABILITIES_UNAVAILABLE` | PID 存活但 `/capabilities` 不可用 |
+| `CAPABILITIES_IDENTITY_MISMATCH` | ready 文件与 `/capabilities` 身份字段不匹配，且已有实例持有 mutex |
 | `INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY` | 有实例在运行（mutex 持有）但当前 data-dir 下不健康 |
+| `STALE_READY_FILE_DELETE_FAILED` | stale ready 文件无法删除，需要人工清理后重试 |
 | `INVALID_ARGUMENT` | 参数错误 |
 
 **注意事项：**
@@ -184,8 +187,10 @@ GET /capabilities
     "api_version": "v1",
     "mode": "tray",
     "startup_elapsed_ms": 850,
+    "data_dir": "...",
     "ready_file": "...",
     "api_key_file": "...",
+    "audit_log_path": "...",
     "named_event": "Local\\AgentRecorderReady"
   }
 }

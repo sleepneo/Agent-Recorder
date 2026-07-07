@@ -9,8 +9,7 @@ public static class ApiKeyAuth
     private const string HeaderName = "X-Agent-Recorder-Key";
     private static string? _apiKey;
     private static bool _initialized;
-    private static string? _initializationSource; // 记录初始化时的真实来源
-    private static string? _dataDirOverride; // 测试用：可覆盖数据目录
+    private static string? _initializationSource;
     private static readonly object _lock = new();
 
     private const string TokenFileName = "api-key.txt";
@@ -63,7 +62,7 @@ public static class ApiKeyAuth
 
     internal static string GetTokenFilePath()
     {
-        var dataDir = _dataDirOverride ?? Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR") ?? ".local-data";
+        var dataDir = DataDirResolver.Resolve();
         var configDir = Path.Combine(dataDir, ConfigDirName);
         return Path.Combine(configDir, TokenFileName);
     }
@@ -108,7 +107,7 @@ public static class ApiKeyAuth
             _apiKey = null;
             _initialized = false;
             _initializationSource = null;
-            _dataDirOverride = dataDirOverride;
+            DataDirResolver.SetOverride(dataDirOverride);
         }
     }
 

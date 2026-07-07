@@ -42,12 +42,7 @@ public sealed class RuntimeReadiness : IDisposable
     /// </summary>
     public static string ResolveDataDir()
     {
-        var env = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
-        if (!string.IsNullOrWhiteSpace(env) && Path.IsPathFullyQualified(env))
-            return env;
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AgentRecorder");
+        return DataDirResolver.Resolve();
     }
 
     public string DataDir => ResolveDataDir();
@@ -151,8 +146,10 @@ public sealed class RuntimeReadiness : IDisposable
             api_version = "v1",
             mode = _mode,
             startup_elapsed_ms = _stopwatch.IsRunning ? (long?)null : _stopwatch.ElapsedMilliseconds,
+            data_dir = DataDir,
             ready_file = ReadyFilePath,
             api_key_file = ApiKeyFilePath,
+            audit_log_path = AuditLogPathResolved,
             named_event = NamedEventName
         };
     }

@@ -53,11 +53,18 @@ Example request:
 
 ## Files
 
-When the app is started with `AGENT_RECORDER_DATA_DIR=<package-root>\.local-data`:
+When started through `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
+from the portable package, the default data directory is
+`<package-root>\.local-data`:
 
 - API key: `.local-data\config\api-key.txt`
 - Videos: `.local-data\Videos\`
 - Audit log: `.local-data\logs\audit.jsonl`
+
+If `AgentRecorder.App.exe` or `AgentRecorder.Headless.exe` is launched directly
+without `AGENT_RECORDER_DATA_DIR`, the default data directory is
+`%LOCALAPPDATA%\AgentRecorder`. Agents should trust the returned `data_dir` and
+`api_key_file` fields.
 
 ## Safety
 

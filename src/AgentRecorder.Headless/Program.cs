@@ -234,8 +234,7 @@ internal static class Program
 
     private static void Run(HeadlessOptions opts)
     {
-        _dataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR")
-            ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".local-data");
+        _dataDir = DataDirResolver.Resolve();
 
         WritePidFile(opts.PidFile);
 
@@ -267,7 +266,7 @@ internal static class Program
         {
             mode = "headless",
             port = ApiServer.Port,
-            data_dir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR"),
+            data_dir = _dataDir,
             ffmpeg_dir = Environment.GetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR"),
             window_backend = Environment.GetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND") ?? "ffmpeg_gdigrab",
             shutdown_event = _shutdownEventName,
@@ -405,9 +404,7 @@ internal static class Program
     {
         try
         {
-            var dataDir = _dataDir
-                ?? Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR")
-                ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".local-data");
+            var dataDir = DataDirResolver.Resolve();
             var logDir = Path.Combine(dataDir, "logs");
             Directory.CreateDirectory(logDir);
             var logPath = Path.Combine(logDir, "startup-errors.jsonl");

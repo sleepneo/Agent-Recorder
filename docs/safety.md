@@ -30,27 +30,32 @@ The agent must not say "recording has started" while the state is still
 
 ## API Key Storage
 
-When started with:
+When started through the portable CLI, the default data directory is:
 
 ```text
-AGENT_RECORDER_DATA_DIR=<package-root>\.local-data
+<package-root>\.local-data
 ```
 
-the key is stored at:
+and the key is stored at:
 
 ```text
 .local-data\config\api-key.txt
 ```
+
+If the app or headless host is launched directly without
+`AGENT_RECORDER_DATA_DIR`, the default data directory is
+`%LOCALAPPDATA%\AgentRecorder`. Agents should use the `api_key_file` path
+reported by `ensure-running` or `/capabilities`.
 
 The key authenticates local API calls. It is not a substitute for local user
 confirmation.
 
 ## Audit Data
 
-Audit logs are written under:
+Audit logs are written under the active data directory:
 
 ```text
-.local-data\logs\
+<data-dir>\logs\
 ```
 
 Typical event categories:

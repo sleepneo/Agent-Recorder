@@ -53,17 +53,13 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 
 ## 文件位置
 
-如果应用启动时设置：
-
-```text
-AGENT_RECORDER_DATA_DIR=<package-root>\.local-data
-```
-
-则默认文件位置为：
+通过 portable 包中的 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json` 启动时，默认 data-dir 是 `<package-root>\.local-data`，文件位置为：
 
 - API key：`.local-data\config\api-key.txt`
 - 录制文件：`.local-data\Videos\`
 - 审计日志：`.local-data\logs\audit.jsonl`
+
+如果直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR`，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。AI agent 应以 `ensure-running` 返回的 `data_dir` 和 `api_key_file` 为准。
 
 ## 安全边界
 

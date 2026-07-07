@@ -540,63 +540,42 @@ internal static class Program
 
     internal static EnsureRunningResult EnsureRunningCore(CliOptions opts)
     {
-        // Resolve package root and data dir
         var packageRoot = ResolvePackageRoot(opts);
         var dataDir = ResolveDataDir(opts, packageRoot);
         var readyPath = Path.Combine(dataDir, "runtime", "ready.json");
 
-        // Step 1: Check if a ready instance already exists with a live PID and valid /capabilities.
-        var existing = ReadReadySnapshot(readyPath);
-        if (existing != null && IsAgentRecorderProcess(existing.Pid))
-        {
-            var validation = ValidateReadySnapshot(existing);
-            if (validation.Valid)
-            {
-                return BuildSuccessResult(existing, "existing", validation.ApiVersion);
-            }
+        var decision = EvaluateStaleReadyDecision(readyPath);
 
-            // If identity mismatch (STALE_READY_FILE), return immediately - don't try to start new instance
-            // because the mutex is likely held by the real instance.
-            if (validation.ErrorCode == "STALE_READY_FILE")
-            {
+        switch (decision.Action)
+        {
+            case StaleReadyDecisionAction.ReuseExisting:
+                return BuildSuccessResult(decision.Existing!, "existing", decision.ApiVersion!);
+
+            case StaleReadyDecisionAction.ReturnError:
                 return new EnsureRunningResult
                 {
                     Ok = false,
                     Status = "error",
-                    Code = "STALE_READY_FILE",
-                    Message = validation.Message ?? "Ready file identity does not match /capabilities response.",
-                    SuggestedAction = "The ready.json file does not match the running service. Use the correct data-dir or remove the stale ready file."
+                    Code = decision.ErrorCode!,
+                    Message = decision.Message!,
+                    SuggestedAction = decision.SuggestedAction
                 };
-            }
+
+            case StaleReadyDecisionAction.DeleteFailed:
+                return new EnsureRunningResult
+                {
+                    Ok = false,
+                    Status = "error",
+                    Code = "STALE_READY_FILE_DELETE_FAILED",
+                    Message = $"Stale ready file exists at {readyPath} but could not be deleted: {decision.Message}",
+                    SuggestedAction = $"Delete {readyPath} manually and try again."
+                };
+
+            case StaleReadyDecisionAction.ProceedToStart:
+            default:
+                break;
         }
 
-        // Step 2: Check if mutex is held but ready file is missing/stale
-        bool mutexHeld = IsMutexHeld(SingleInstanceGuard.MutexName);
-        if (mutexHeld && existing == null)
-        {
-            return new EnsureRunningResult
-            {
-                Ok = false,
-                Status = "error",
-                Code = "INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY",
-                Message = "An Agent Recorder instance is already running (mutex held), but no healthy ready file was found in the current data-dir.",
-                SuggestedAction = "Use the same package/data-dir as the running instance, or stop the existing instance and try again."
-            };
-        }
-
-        if (mutexHeld && existing != null && !IsAgentRecorderProcess(existing.Pid))
-        {
-            return new EnsureRunningResult
-            {
-                Ok = false,
-                Status = "error",
-                Code = "STALE_READY_FILE",
-                Message = "Ready file exists but PID is not an Agent Recorder process, and another instance holds the mutex.",
-                SuggestedAction = "Use the same package/data-dir as the running instance, or stop the existing instance and try again."
-            };
-        }
-
-        // Step 3: No existing ready instance. Try to start a new one.
         string exePath = ResolveServiceExe(opts, packageRoot);
         if (string.IsNullOrEmpty(exePath))
         {
@@ -610,7 +589,6 @@ internal static class Program
             };
         }
 
-        // Start the service process.
         var psi = new ProcessStartInfo
         {
             FileName = exePath,
@@ -624,7 +602,6 @@ internal static class Program
         var stopwatch = Stopwatch.StartNew();
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start service process.");
 
-        // Step 4: Wait for the named event or ready file to appear.
         var namedEventName = RuntimeReadiness.NamedEventName;
         bool readySignaled = false;
 
@@ -638,7 +615,6 @@ internal static class Program
         }
         catch (WaitHandleCannotBeOpenedException)
         {
-            // Event doesn't exist yet; poll for ready file as fallback.
         }
 
         if (!readySignaled)
@@ -655,7 +631,6 @@ internal static class Program
                 return BuildSuccessResult(final, "started", validation.ApiVersion);
             }
 
-            // If identity mismatch after startup, return STALE_READY_FILE
             if (validation.ErrorCode == "STALE_READY_FILE")
             {
                 return new EnsureRunningResult
@@ -669,7 +644,6 @@ internal static class Program
             }
         }
 
-        // Timeout or process exited.
         if (proc.HasExited)
         {
             return new EnsureRunningResult
@@ -690,6 +664,155 @@ internal static class Program
             Message = $"Agent Recorder did not become ready within {opts.TimeoutMs / 1000} seconds.",
             SuggestedAction = "Check whether AgentRecorder.App.exe can start in the current desktop session."
         };
+    }
+
+    internal enum StaleReadyDecisionAction
+    {
+        ReuseExisting,
+        ReturnError,
+        DeleteFailed,
+        ProceedToStart
+    }
+
+    internal sealed class StaleReadyDecision
+    {
+        public StaleReadyDecisionAction Action { get; set; }
+        public ReadySnapshot? Existing { get; set; }
+        public string? ApiVersion { get; set; }
+        public string? ErrorCode { get; set; }
+        public string? Message { get; set; }
+        public string? SuggestedAction { get; set; }
+    }
+
+    internal sealed class StaleReadyDecisionContext
+    {
+        public Func<string, ReadySnapshot?> ReadReadySnapshot { get; set; } = Program.ReadReadySnapshot;
+        public Func<bool> IsMutexHeld { get; set; } = () => Program.IsMutexHeld(SingleInstanceGuard.MutexName);
+        public Func<int, bool> IsAgentRecorderProcess { get; set; } = Program.IsAgentRecorderProcess;
+        public Func<ReadySnapshot, CapabilitiesValidation> ValidateReadySnapshot { get; set; } = Program.ValidateReadySnapshot;
+        public Func<string, (bool Ok, string? Error)> DeleteReadyFile { get; set; } = path =>
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        };
+    }
+
+    internal static StaleReadyDecision EvaluateStaleReadyDecision(string readyPath)
+    {
+        return EvaluateStaleReadyDecision(readyPath, new StaleReadyDecisionContext());
+    }
+
+    internal static StaleReadyDecision EvaluateStaleReadyDecision(string readyPath, StaleReadyDecisionContext context)
+    {
+        var existing = context.ReadReadySnapshot(readyPath);
+        bool mutexHeld = context.IsMutexHeld();
+        bool isAgentProc = existing != null && context.IsAgentRecorderProcess(existing.Pid);
+
+        if (existing == null)
+        {
+            if (mutexHeld)
+            {
+                return new StaleReadyDecision
+                {
+                    Action = StaleReadyDecisionAction.ReturnError,
+                    ErrorCode = "INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY",
+                    Message = "An Agent Recorder instance is already running (mutex held), but no healthy ready file was found in the current data-dir.",
+                    SuggestedAction = "Use the same package/data-dir as the running instance, or stop the existing instance and try again."
+                };
+            }
+            return new StaleReadyDecision { Action = StaleReadyDecisionAction.ProceedToStart };
+        }
+
+        if (isAgentProc)
+        {
+            var validation = context.ValidateReadySnapshot(existing);
+            if (validation.Valid)
+            {
+                return new StaleReadyDecision
+                {
+                    Action = StaleReadyDecisionAction.ReuseExisting,
+                    Existing = existing,
+                    ApiVersion = validation.ApiVersion
+                };
+            }
+
+            if (validation.ErrorCode == "STALE_READY_FILE")
+            {
+                if (mutexHeld)
+                {
+                    return new StaleReadyDecision
+                    {
+                        Action = StaleReadyDecisionAction.ReturnError,
+                        ErrorCode = "CAPABILITIES_IDENTITY_MISMATCH",
+                        Message = validation.Message ?? "Ready file identity does not match /capabilities response, and another instance holds the mutex.",
+                        SuggestedAction = "Use the correct data-dir that matches the running instance, or stop the existing instance and try again."
+                    };
+                }
+
+                var deleteResult = context.DeleteReadyFile(readyPath);
+                if (!deleteResult.Ok)
+                {
+                    return new StaleReadyDecision
+                    {
+                        Action = StaleReadyDecisionAction.DeleteFailed,
+                        Message = deleteResult.Error
+                    };
+                }
+                return new StaleReadyDecision { Action = StaleReadyDecisionAction.ProceedToStart };
+            }
+
+            if (mutexHeld)
+            {
+                return new StaleReadyDecision
+                {
+                    Action = StaleReadyDecisionAction.ReturnError,
+                    ErrorCode = "INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY",
+                    Message = validation.Message ?? "Running AgentRecorder instance is unhealthy (no valid /capabilities) and mutex is held.",
+                    SuggestedAction = "Check whether the existing instance is still responding, or stop it and try again."
+                };
+            }
+
+            var delResult = context.DeleteReadyFile(readyPath);
+            if (!delResult.Ok)
+            {
+                return new StaleReadyDecision
+                {
+                    Action = StaleReadyDecisionAction.DeleteFailed,
+                    Message = delResult.Error
+                };
+            }
+            return new StaleReadyDecision { Action = StaleReadyDecisionAction.ProceedToStart };
+        }
+
+        if (mutexHeld)
+        {
+            return new StaleReadyDecision
+            {
+                Action = StaleReadyDecisionAction.ReturnError,
+                ErrorCode = "STALE_READY_FILE",
+                Message = "Ready file exists but PID is not an Agent Recorder process, and another instance holds the mutex.",
+                SuggestedAction = "Use the same package/data-dir as the running instance, or stop the existing instance and try again."
+            };
+        }
+
+        var deleteResult2 = context.DeleteReadyFile(readyPath);
+        if (!deleteResult2.Ok)
+        {
+            return new StaleReadyDecision
+            {
+                Action = StaleReadyDecisionAction.DeleteFailed,
+                Message = deleteResult2.Error
+            };
+        }
+        return new StaleReadyDecision { Action = StaleReadyDecisionAction.ProceedToStart };
     }
 
     private static string ResolvePackageRoot(CliOptions opts)
@@ -716,6 +839,9 @@ internal static class Program
         return baseDir;
     }
 
+    internal static string ResolveDataDirForTest(CliOptions opts, string packageRoot) =>
+        ResolveDataDir(opts, packageRoot);
+
     private static string ResolveDataDir(CliOptions opts, string packageRoot)
     {
         if (!string.IsNullOrWhiteSpace(opts.DataDir))
@@ -723,9 +849,7 @@ internal static class Program
             return Path.GetFullPath(opts.DataDir);
         }
 
-        // Default: <package-root>\.local-data
-        var defaultDataDir = Path.Combine(packageRoot, ".local-data");
-        return defaultDataDir;
+        return Path.GetFullPath(Path.Combine(packageRoot, ".local-data"));
     }
 
     private static string ResolveServiceExe(CliOptions opts, string packageRoot)
@@ -950,6 +1074,13 @@ internal static class Program
             var capApiKeyFile = apiKeyFileProp.GetString() ?? "";
             if (!PathsEqual(capApiKeyFile, snap.ApiKeyFile))
                 return new CapabilitiesValidation { Valid = false, ErrorCode = "STALE_READY_FILE", Message = $"api_key_file mismatch: ready.json has '{snap.ApiKeyFile}', capabilities has '{capApiKeyFile}'." };
+
+            // Check data_dir - required field (path normalized, case-insensitive on Windows)
+            if (!readinessProp.TryGetProperty("data_dir", out var dataDirProp))
+                return new CapabilitiesValidation { Valid = false, ErrorCode = "CAPABILITIES_UNAVAILABLE", Message = "Missing required readiness identity field: data_dir" };
+            var capDataDir = dataDirProp.GetString() ?? "";
+            if (!PathsEqual(capDataDir, snap.DataDir))
+                return new CapabilitiesValidation { Valid = false, ErrorCode = "STALE_READY_FILE", Message = $"data_dir mismatch: ready.json has '{snap.DataDir}', capabilities has '{capDataDir}'." };
 
             // Get api_version
             var apiVersion = "v1";

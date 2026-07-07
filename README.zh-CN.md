@@ -46,6 +46,12 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
 POST /api/v1/recordings/quick
 ```
 
+运行数据目录：
+
+- portable 包中通过 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json` 启动时，默认 data-dir 是 `<package-root>\.local-data`。
+- 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
+- AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。
+
 `target.type` 支持：
 
 | target.type | 说明 |
@@ -107,8 +113,8 @@ dotnet test tests\AgentRecorder.Tests\AgentRecorder.Tests.csproj --configuration
 - 状态变更接口需要 API key。
 - 录制前必须由本地用户确认。
 - HTTP 自批准接口被明确阻止。
-- API key 保存在本地 `.local-data\config\api-key.txt`。
-- 录制生命周期写入 `.local-data\logs\audit.jsonl`。
+- API key 文件路径由 `ensure-running` 返回的 `api_key_file` 指定。
+- 录制生命周期写入当前 data-dir 下的 `logs\audit.jsonl`。
 
 ## 许可证
 

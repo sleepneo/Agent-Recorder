@@ -40,8 +40,13 @@ State-changing and sensitive endpoints require:
 X-Agent-Recorder-Key: <api-key>
 ```
 
-The key is stored in `.local-data\config\api-key.txt` when the app is started
-with `AGENT_RECORDER_DATA_DIR=<package-root>\.local-data`.
+When started through the portable CLI, `ensure-running` defaults `data_dir` to
+`<package-root>\.local-data` and returns the absolute `api_key_file` path. If
+the app or headless host is launched directly without `AGENT_RECORDER_DATA_DIR`,
+the default data directory is `%LOCALAPPDATA%\AgentRecorder`.
+
+Agents should use the returned `api_key_file` field instead of assuming a fixed
+path.
 
 | Endpoint | Auth |
 | --- | --- |

@@ -29,7 +29,8 @@ public class CliReadinessIdentityTests
         bool includePort = true,
         bool includeMode = true,
         bool includeReadyFile = true,
-        bool includeApiKeyFile = true)
+        bool includeApiKeyFile = true,
+        string dataDir = @"C:\data")
     {
         var readyFileStr = readyFile ?? @"C:\data\runtime\ready.json";
         var apiKeyFileStr = apiKeyFile ?? @"C:\data\config\api-key.txt";
@@ -39,7 +40,8 @@ public class CliReadinessIdentityTests
             ["ready"] = ready,
             ["api_version"] = apiVersion,
             ["startup_elapsed_ms"] = 850,
-            ["named_event"] = @"Local\AgentRecorderReady"
+            ["named_event"] = @"Local\AgentRecorderReady",
+            ["data_dir"] = dataDir
         };
         if (includePid) readinessObj["pid"] = pid;
         if (includePort) readinessObj["port"] = port;

@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using AgentRecorder.Cli;
+using AgentRecorder.Infrastructure;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -328,5 +329,334 @@ public class CliEnsureRunningTests : IDisposable
         Assert.True(opts.Json);
         Assert.Equal(30, opts.TimeoutSeconds);
         Assert.Equal(@"C:\tmp", opts.DataDir);
+    }
+
+    [Fact]
+    public void ResolveDataDir_NoDataDirArg_ReturnsPackageRootLocalData()
+    {
+        var opts = new CliOptions();
+        var packageRoot = Path.Combine(_testDir, "pkg");
+        Directory.CreateDirectory(packageRoot);
+
+        var result = Program.ResolveDataDirForTest(opts, packageRoot);
+
+        Assert.True(Path.IsPathFullyQualified(result));
+        Assert.Equal(Path.GetFullPath(Path.Combine(packageRoot, ".local-data")), result);
+    }
+
+    [Fact]
+    public void ResolveDataDir_WithDataDirArg_PrefersExplicitPath()
+    {
+        var explicitDir = Path.Combine(_testDir, "explicit-data");
+        Directory.CreateDirectory(explicitDir);
+        var opts = new CliOptions { DataDir = explicitDir };
+        var packageRoot = Path.Combine(_testDir, "pkg");
+
+        var result = Program.ResolveDataDirForTest(opts, packageRoot);
+
+        Assert.True(Path.IsPathFullyQualified(result));
+        Assert.Equal(Path.GetFullPath(explicitDir), result);
+    }
+
+    [Fact]
+    public void ResolveDataDir_RelativeDataDirArg_ReturnsAbsolutePath()
+    {
+        var opts = new CliOptions { DataDir = "relative-data" };
+        var packageRoot = Path.Combine(_testDir, "pkg");
+        Directory.CreateDirectory(packageRoot);
+
+        var result = Program.ResolveDataDirForTest(opts, packageRoot);
+
+        Assert.True(Path.IsPathFullyQualified(result));
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_NoFile_NoMutex_ReturnsProceedToStart()
+    {
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => null,
+            IsMutexHeld = () => false
+        };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ProceedToStart, decision.Action);
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_NoFile_MutexHeld_ReturnsInstanceUnhealthy()
+    {
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => null,
+            IsMutexHeld = () => true
+        };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ReturnError, decision.Action);
+        Assert.Equal("INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY", decision.ErrorCode);
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_LiveAgentPid_CapabilitiesUnavailable_MutexHeld_ReturnsInstanceUnhealthy()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => true,
+            IsAgentRecorderProcess = pid => pid == 12345,
+            ValidateReadySnapshot = _ => new CapabilitiesValidation { Valid = false, ErrorCode = "CAPABILITIES_UNAVAILABLE" }
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ReturnError, decision.Action);
+        Assert.Equal("INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY", decision.ErrorCode);
+        Assert.False(deleteCalled, "Delete should not be called when mutex is held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_LiveAgentPid_CapabilitiesUnavailable_MutexNotHeld_DeletesAndProceeds()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => false,
+            IsAgentRecorderProcess = pid => pid == 12345,
+            ValidateReadySnapshot = _ => new CapabilitiesValidation { Valid = false, ErrorCode = "CAPABILITIES_UNAVAILABLE" }
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ProceedToStart, decision.Action);
+        Assert.True(deleteCalled, "Delete should be called when mutex is not held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_LiveAgentPid_IdentityMismatch_MutexHeld_ReturnsIdentityMismatch()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => true,
+            IsAgentRecorderProcess = pid => pid == 12345,
+            ValidateReadySnapshot = _ => new CapabilitiesValidation { Valid = false, ErrorCode = "STALE_READY_FILE" }
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ReturnError, decision.Action);
+        Assert.Equal("CAPABILITIES_IDENTITY_MISMATCH", decision.ErrorCode);
+        Assert.False(deleteCalled, "Delete should not be called when mutex is held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_LiveAgentPid_IdentityMismatch_MutexNotHeld_DeletesAndProceeds()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => false,
+            IsAgentRecorderProcess = pid => pid == 12345,
+            ValidateReadySnapshot = _ => new CapabilitiesValidation { Valid = false, ErrorCode = "STALE_READY_FILE" }
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ProceedToStart, decision.Action);
+        Assert.True(deleteCalled, "Delete should be called when mutex is not held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_NonAgentPid_MutexHeld_ReturnsStaleReadyFile()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => true,
+            IsAgentRecorderProcess = pid => false
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ReturnError, decision.Action);
+        Assert.Equal("STALE_READY_FILE", decision.ErrorCode);
+        Assert.False(deleteCalled, "Delete should not be called when mutex is held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_NonAgentPid_MutexNotHeld_DeletesAndProceeds()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 12345,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => false,
+            IsAgentRecorderProcess = pid => false
+        };
+
+        bool deleteCalled = false;
+        context.DeleteReadyFile = path => { deleteCalled = true; return (true, null); };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ProceedToStart, decision.Action);
+        Assert.True(deleteCalled, "Delete should be called when mutex is not held");
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_DeleteFailed_ReturnsDeleteFailed()
+    {
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 99999,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = "test-ready.json",
+            ApiKeyFile = "test-api-key.txt",
+            DataDir = "test-data-dir",
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => false,
+            IsAgentRecorderProcess = pid => false,
+            DeleteReadyFile = path => (false, "Access denied")
+        };
+
+        var decision = Program.EvaluateStaleReadyDecision("test-ready.json", context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.DeleteFailed, decision.Action);
+        Assert.Equal("Access denied", decision.Message);
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_DecisionEnum_ContainsAllExpectedActions()
+    {
+        var actions = Enum.GetNames(typeof(Program.StaleReadyDecisionAction));
+        Assert.Contains("ReuseExisting", actions);
+        Assert.Contains("ReturnError", actions);
+        Assert.Contains("DeleteFailed", actions);
+        Assert.Contains("ProceedToStart", actions);
+    }
+
+    [Fact]
+    public void EnsureRunningResult_StaleReadyFileDeleteFailed_CodeIsStable()
+    {
+        var result = new EnsureRunningResult
+        {
+            Ok = false,
+            Status = "error",
+            Code = "STALE_READY_FILE_DELETE_FAILED",
+            Message = "Stale ready file exists at C:\\data\\runtime\\ready.json but could not be deleted: Access denied.",
+            SuggestedAction = "Delete C:\\data\\runtime\\ready.json manually and try again."
+        };
+
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false
+        });
+
+        Assert.Contains("\"code\":\"STALE_READY_FILE_DELETE_FAILED\"", json);
+        Assert.Contains("\"suggested_action\"", json);
     }
 }

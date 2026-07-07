@@ -104,7 +104,9 @@ AgentRecorder.Cli.exe ensure-running --json
 | `SERVICE_EXITED` | 服务进程启动后提前退出 |
 | `STALE_READY_FILE` | ready 文件存在但 PID 不是 Agent Recorder 进程 |
 | `CAPABILITIES_UNAVAILABLE` | PID 存活但 `/capabilities` 不可用 |
+| `CAPABILITIES_IDENTITY_MISMATCH` | ready 文件与 `/capabilities` 身份字段不匹配，且已有实例持有 mutex |
 | `INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY` | 有实例在运行（mutex 持有）但当前 data-dir 下不健康 |
+| `STALE_READY_FILE_DELETE_FAILED` | stale ready 文件无法删除，需要人工清理后重试 |
 | `INVALID_ARGUMENT` | 参数错误 |
 
 CLI 会自动：
@@ -149,7 +151,7 @@ CLI 会自动：
 AGENT_RECORDER_DATA_DIR=<package-root>\.local-data
 ```
 
-这样 API key、审计日志和录制文件都保存在发布包本地目录下。
+这样 API key、审计日志和录制文件都保存在发布包本地目录下。如果直接启动 App/Headless 且不设置该环境变量，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。读取 API key、ready 文件和日志路径时，以 `ready.json` 或 `/capabilities` 返回的绝对路径为准。
 
 3. 等待服务就绪：
 
@@ -172,7 +174,7 @@ GET http://127.0.0.1:37891/api/v1/capabilities
 4. 读取 API key：
 
 ```text
-<package-root>\.local-data\config\api-key.txt
+<data-dir>\config\api-key.txt
 ```
 
 如果文件暂未出现，可以先请求一次受保护接口触发生成：
