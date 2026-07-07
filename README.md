@@ -42,6 +42,8 @@ region, output, or nested-recording control.
 
 - Quick intent API for primary display, active window, and selected region.
 - Lower-level display, window, and region recording APIs.
+- Active-window recording uses visible window bounds clipped to the virtual
+  desktop, then records via the FFmpeg `ffmpeg-window-region` backend.
 - Interactive selected-region UI.
 - Mandatory local user confirmation before recording starts.
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.

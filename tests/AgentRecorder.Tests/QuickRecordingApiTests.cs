@@ -257,6 +257,71 @@ public class QuickRecordingApiTests
     }
 
     [Fact]
+    public async Task QuickRecording_ActiveWindow_Resolves_CreatesWindowRecording()
+    {
+        var tray = new ControllableTray { AutoApprove = false };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+            SystemQuery.SetActiveWindowProvider(() => new SystemQuery.WindowInfo(
+                "window_1234", "Active Test Window", "test.exe", 123,
+                true, false,
+                new SystemQuery.Bounds(100, 50, 801, 603)));
+            SystemQuery.SetWindowProvider((includeMin, includeSys) => new List<SystemQuery.WindowInfo>
+            {
+                new("window_1234", "Active Test Window", "test.exe", 123,
+                    true, false,
+                    new SystemQuery.Bounds(100, 50, 801, 603))
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"active_window\"},\"duration_seconds\":10}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("active_window", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("window", resolved.GetProperty("type").GetString());
+            Assert.Equal("window_1234", resolved.GetProperty("window_id").GetString());
+            Assert.Equal("Active Test Window", resolved.GetProperty("title").GetString());
+            Assert.Equal(100, resolved.GetProperty("bounds").GetProperty("x").GetInt32());
+            Assert.Equal(50, resolved.GetProperty("bounds").GetProperty("y").GetInt32());
+            Assert.Equal(801, resolved.GetProperty("bounds").GetProperty("width").GetInt32());
+            Assert.Equal(603, resolved.GetProperty("bounds").GetProperty("height").GetInt32());
+
+            // capture_bounds reflects the clamped/normalized bounds actually used by the backend
+            Assert.True(resolved.TryGetProperty("capture_bounds", out var captureBounds), "capture_bounds should be present");
+            Assert.True(captureBounds.GetProperty("width").GetInt32() > 0);
+            Assert.True(captureBounds.GetProperty("height").GetInt32() > 0);
+        }
+        finally
+        {
+            SystemQuery.SetDisplayProvider(null);
+            SystemQuery.SetActiveWindowProvider(null);
+            SystemQuery.SetWindowProvider(null);
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
     public async Task QuickRecording_SelectedRegion_Selected_CreatesRecordingWithResolvedSource()
     {
         var tray = new ControllableTray

@@ -29,7 +29,7 @@ public static class CaptureBackendSelector
             {
                 return (new WgcWindowCaptureBackend(), "wgc");
             }
-            return (new FfmpegCaptureBackend(), "ffmpeg-gdigrab");
+            return (new FfmpegCaptureBackend(), "ffmpeg-window-region");
         }
 
         if (string.Equals(sourceType, "region", StringComparison.Ordinal))
@@ -56,7 +56,7 @@ public static class CaptureBackendSelector
             var flag = Environment.GetEnvironmentVariable(WgcEnvVar)?.Trim() ?? "";
             if (string.Equals(flag, "wgc", StringComparison.OrdinalIgnoreCase))
                 return "wgc";
-            return "ffmpeg-gdigrab";
+            return "ffmpeg-window-region";
         }
 
         if (string.Equals(sourceType, "region", StringComparison.Ordinal))

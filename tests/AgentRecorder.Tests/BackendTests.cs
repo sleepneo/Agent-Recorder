@@ -43,23 +43,23 @@ public class CaptureBackendSelectorTests
     }
 
     [Fact]
-    public void Select_WindowSource_NoFlag_ReturnsFfmpegGdigrab()
+    public void Select_WindowSource_NoFlag_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
         var (backend, type) = CaptureBackendSelector.Select("window");
         Assert.NotNull(backend);
-        Assert.Equal("ffmpeg-gdigrab", type);
+        Assert.Equal("ffmpeg-window-region", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
     }
 
     [Fact]
-    public void Select_WindowSource_EmptyFlag_ReturnsFfmpegGdigrab()
+    public void Select_WindowSource_EmptyFlag_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "");
         try
         {
             var (backend, type) = CaptureBackendSelector.Select("window");
-            Assert.Equal("ffmpeg-gdigrab", type);
+            Assert.Equal("ffmpeg-window-region", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
         finally
@@ -118,13 +118,13 @@ public class CaptureBackendSelectorTests
     }
 
     [Fact]
-    public void Select_WindowSource_WithOtherValue_ReturnsFfmpegGdigrab()
+    public void Select_WindowSource_WithOtherValue_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "something-else");
         try
         {
             var (backend, type) = CaptureBackendSelector.Select("window");
-            Assert.Equal("ffmpeg-gdigrab", type);
+            Assert.Equal("ffmpeg-window-region", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
         finally
@@ -149,10 +149,10 @@ public class CaptureBackendSelectorTests
     }
 
     [Fact]
-    public void SelectBackendType_WindowNoFlag_ReturnsGdigrab()
+    public void SelectBackendType_WindowNoFlag_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        Assert.Equal("ffmpeg-gdigrab", CaptureBackendSelector.SelectBackendType("window"));
+        Assert.Equal("ffmpeg-window-region", CaptureBackendSelector.SelectBackendType("window"));
     }
 
     [Fact]
@@ -1208,7 +1208,7 @@ public class RecordingEngineWgcStillFrameTests
             var (backend, backendType) = factory("window");
 
             Assert.NotNull(backend);
-            Assert.Equal("ffmpeg-gdigrab", backendType);
+            Assert.Equal("ffmpeg-window-region", backendType);
         }
 
         Assert.Equal(beforeDataDir, Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR"));

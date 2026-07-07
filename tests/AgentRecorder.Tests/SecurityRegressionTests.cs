@@ -127,7 +127,7 @@ public class SecurityRegressionTests
         var (backend, type) = CaptureBackendSelector.Select("window");
 
         Assert.NotNull(backend);
-        Assert.Equal("ffmpeg-gdigrab", type);
+        Assert.Equal("ffmpeg-window-region", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
     }
 

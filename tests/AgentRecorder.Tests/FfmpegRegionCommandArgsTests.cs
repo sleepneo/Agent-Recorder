@@ -72,6 +72,133 @@ public class FfmpegRegionCommandArgsTests
     }
 
     [Fact]
+    public void BuildArgs_Window_HasDesktopRegionFlags()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowTitle = "Test Window",
+            WindowHandle = new nint(0x1234),
+            Bounds = (100, 200, 800, 600),
+            Fps = 30,
+            Quality = "medium",
+            DurationSeconds = 10,
+            OutputPath = Path.Combine(Path.GetTempPath(), "test-window-output.mp4")
+        };
+
+        var method = typeof(FfmpegCaptureBackend).GetMethod(
+            "BuildArgs",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var args = (string)method.Invoke(null, new object[] { cfg })!;
+
+        Assert.NotEmpty(args);
+        Assert.Contains("-f gdigrab", args);
+        Assert.Contains("-offset_x 100", args);
+        Assert.Contains("-offset_y 200", args);
+        Assert.Contains("-video_size 800x600", args);
+        Assert.Contains("-i desktop", args);
+    }
+
+    [Fact]
+    public void BuildArgs_Window_DoesNotHaveTitleFlag()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowTitle = "Test Window",
+            WindowHandle = new nint(0x1234),
+            Bounds = (100, 200, 800, 600),
+            Fps = 15,
+            Quality = "medium",
+            OutputPath = Path.Combine(Path.GetTempPath(), "test-window-no-title.mp4")
+        };
+
+        var method = typeof(FfmpegCaptureBackend).GetMethod(
+            "BuildArgs",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var args = (string)method.Invoke(null, new object[] { cfg })!;
+
+        Assert.DoesNotContain("-i title=", args);
+        Assert.DoesNotContain("title=\"", args);
+    }
+
+    [Fact]
+    public void BuildArgs_Window_NegativeOffset_GeneratesCorrectOffsetFlags()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowTitle = "Negative Coord Window",
+            WindowHandle = new nint(0x5678),
+            Bounds = (-1920, 100, 1280, 720),
+            Fps = 24,
+            Quality = "high",
+            DurationSeconds = 60,
+            OutputPath = Path.Combine(Path.GetTempPath(), "test-window-neg.mp4")
+        };
+
+        var method = typeof(FfmpegCaptureBackend).GetMethod(
+            "BuildArgs",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var args = (string)method.Invoke(null, new object[] { cfg })!;
+
+        Assert.Contains("-offset_x -1920", args);
+        Assert.Contains("-offset_y 100", args);
+        Assert.Contains("-video_size 1280x720", args);
+        Assert.Contains("-i desktop", args);
+    }
+
+    [Fact]
+    public void BuildArgs_Window_HasDurationFlag()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowTitle = "Duration Test",
+            WindowHandle = new nint(0xABCD),
+            Bounds = (0, 0, 640, 480),
+            Fps = 30,
+            DurationSeconds = 25,
+            OutputPath = Path.Combine(Path.GetTempPath(), "test-window-dur.mp4")
+        };
+
+        var method = typeof(FfmpegCaptureBackend).GetMethod(
+            "BuildArgs",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var args = (string)method.Invoke(null, new object[] { cfg })!;
+
+        Assert.Contains("-t 25", args);
+    }
+
+    [Fact]
+    public void BuildArgs_Window_ClampedBounds_NoNegativeOffsetBeyondDesktop()
+    {
+        // Simulates a maximized window after clamping: original (-13,-13,3866,2090)
+        // clamped to (0,0,3854,2088) on a 6400x3220 desktop
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowTitle = "Maximized Window",
+            WindowHandle = new nint(0x1234),
+            Bounds = (0, 0, 3854, 2088),
+            Fps = 30,
+            DurationSeconds = 10,
+            OutputPath = Path.Combine(Path.GetTempPath(), "test-window-clamped.mp4")
+        };
+
+        var method = typeof(FfmpegCaptureBackend).GetMethod(
+            "BuildArgs",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var args = (string)method.Invoke(null, new object[] { cfg })!;
+
+        Assert.Contains("-offset_x 0", args);
+        Assert.Contains("-offset_y 0", args);
+        Assert.Contains("-video_size 3854x2088", args);
+        Assert.Contains("-i desktop", args);
+        Assert.DoesNotContain("-i title=", args);
+    }
+
+    [Fact]
     public void BuildArgs_Region_NegativeOffset_GeneratesCorrectOffsetFlags()
     {
         // Simulates a region on a negative-coordinate display

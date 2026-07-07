@@ -166,6 +166,10 @@ POST /api/v1/recordings/{recording_id}/stop
    `expired`.
 8. Report the MP4 path and relevant metadata.
 
+For `active_window`, agents may surface `resolved_source.capture_bounds` when
+diagnosing what area was actually recorded. This field is produced by Agent
+Recorder after clipping the window's visible bounds to the virtual desktop.
+
 ## Safety Requirements
 
 - The agent must never call or simulate HTTP confirmation approval.

@@ -16,6 +16,12 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 Record a selected region for 30 seconds.
 ```
 
+or:
+
+```text
+Record the current conversation window for 5 minutes.
+```
+
 4. The AI agent should:
    - run `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
    - read the API key from the returned `api_key_file`
@@ -32,7 +38,7 @@ Record a selected region for 30 seconds.
 | target.type | Use case |
 | --- | --- |
 | `primary_display` | Record the primary display |
-| `active_window` | Record the current active window |
+| `active_window` | Record the current active window using its visible bounds |
 | `selected_region` | Ask the user to draw a region, then record it |
 
 Example request:

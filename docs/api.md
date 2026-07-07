@@ -128,7 +128,7 @@ Supported `target.type` values:
 | target.type | Behavior |
 | --- | --- |
 | `primary_display` | Resolve the primary display, then create a recording |
-| `active_window` | Resolve the active window, then create a recording |
+| `active_window` | Resolve the active window, clamp its visible bounds to the virtual desktop, then create a recording |
 | `selected_region` | Show local region-selection UI, then create a recording |
 
 Successful creation returns `requires_user_confirmation`:
@@ -149,6 +149,25 @@ Successful creation returns `requires_user_confirmation`:
     },
     "requires_user_confirmation": true
   }
+}
+```
+
+For `active_window`, `resolved_source.bounds` is the visible window bounds
+reported by Windows, while `resolved_source.capture_bounds` is the clamped and
+normalized region actually passed to the capture backend:
+
+```json
+{
+  "target_type": "active_window",
+  "recording_created": true,
+  "resolved_source": {
+    "type": "window",
+    "window_id": "window_123",
+    "title": "Codex",
+    "bounds": { "x": 0, "y": 0, "width": 3200, "height": 2050 },
+    "capture_bounds": { "x": 0, "y": 0, "width": 3200, "height": 2050 }
+  },
+  "requires_user_confirmation": true
 }
 ```
 
@@ -184,6 +203,8 @@ GET /windows/active
 ```
 
 Returns window IDs, titles, process names, active/minimized state, and bounds.
+Window bounds prefer DWM visible-frame bounds and fall back to `GetWindowRect`
+when DWM data is unavailable.
 
 ### Region Selection
 

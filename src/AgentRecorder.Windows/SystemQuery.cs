@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 namespace AgentRecorder.Windows;
@@ -12,30 +13,19 @@ public static class SystemQuery
     public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds);
     public record AudioDevice(string id, string name, bool is_default, string state);
 
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
     /// <summary>
     /// Injectable display provider for testing. When set, EnumDisplays() returns
     /// displays from this provider instead of the real Win32 API.
     /// </summary>
     private static Func<List<DisplayInfo>>? _displayProvider;
     private static Func<WindowInfo?>? _activeWindowProvider;
+    private static Func<bool, bool, List<WindowInfo>>? _windowProvider;
 
-    /// <summary>
-    /// Set a custom display provider for testing purposes.
-    /// Pass null to restore the default Win32-based implementation.
-    /// </summary>
-    public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider)
-    {
-        _displayProvider = provider;
-    }
-
-    /// <summary>
-    /// Set a custom active window provider for testing purposes.
-    /// Pass null to restore the default Win32-based implementation.
-    /// </summary>
-    public static void SetActiveWindowProvider(Func<WindowInfo?>? provider)
-    {
-        _activeWindowProvider = provider;
-    }
+    public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider) => _displayProvider = provider;
+    public static void SetActiveWindowProvider(Func<WindowInfo?>? provider) => _activeWindowProvider = provider;
+    public static void SetWindowProvider(Func<bool, bool, List<WindowInfo>>? provider) => _windowProvider = provider;
 
     public static List<DisplayInfo> EnumDisplays()
     {
@@ -61,8 +51,40 @@ public static class SystemQuery
         return list;
     }
 
+    /// <summary>
+    /// Returns the union of all display bounds (virtual screen).
+    /// Uses the injectable display provider when set for test stability.
+    /// </summary>
+    public static Bounds VirtualScreenBounds()
+    {
+        var displays = EnumDisplays();
+        if (displays.Count == 0)
+            return new Bounds(0, 0, 0, 0);
+
+        int minX = displays[0].bounds.x;
+        int minY = displays[0].bounds.y;
+        int maxRight = displays[0].bounds.x + displays[0].bounds.width;
+        int maxBottom = displays[0].bounds.y + displays[0].bounds.height;
+
+        foreach (var d in displays.Skip(1))
+        {
+            var b = d.bounds;
+            if (b.x < minX) minX = b.x;
+            if (b.y < minY) minY = b.y;
+            int right = b.x + b.width;
+            int bottom = b.y + b.height;
+            if (right > maxRight) maxRight = right;
+            if (bottom > maxBottom) maxBottom = bottom;
+        }
+
+        return new Bounds(minX, minY, maxRight - minX, maxBottom - minY);
+    }
+
     public static List<WindowInfo> EnumWindows(bool includeMinimized, bool includeSystem)
     {
+        if (_windowProvider != null)
+            return _windowProvider(includeMinimized, includeSystem);
+
         var list = new List<WindowInfo>();
         var fg = GetForegroundWindow();
         EnumWindowsApi((hWnd, _) =>
@@ -84,14 +106,38 @@ public static class SystemQuery
             if (!includeSystem && app is "TextInputHost.exe" or "ApplicationFrameHost.exe" && title.Length < 2)
                 return true;
 
-            GetWindowRect(hWnd, out var r);
+            var bounds = TryGetVisibleWindowBounds(hWnd);
             list.Add(new WindowInfo(
                 $"window_{hWnd.ToInt64()}", title, app, pid,
-                hWnd == fg, min,
-                new Bounds(r.left, r.top, r.right - r.left, r.bottom - r.top)));
+                hWnd == fg, min, bounds));
             return true;
         }, IntPtr.Zero);
         return list;
+    }
+
+    /// <summary>
+    /// Attempts to get the visible client-area bounds of a window.
+    /// Prefers DWM extended frame bounds (excludes invisible resize borders),
+    /// falling back to GetWindowRect if DWM is unavailable.
+    /// </summary>
+    private static Bounds TryGetVisibleWindowBounds(IntPtr hWnd)
+    {
+        try
+        {
+            var hr = DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                out RECT dwmRect, Marshal.SizeOf<RECT>());
+            if (hr == 0)
+            {
+                int w = dwmRect.right - dwmRect.left;
+                int h = dwmRect.bottom - dwmRect.top;
+                if (w > 0 && h > 0)
+                    return new Bounds(dwmRect.left, dwmRect.top, w, h);
+            }
+        }
+        catch { }
+
+        GetWindowRect(hWnd, out var r);
+        return new Bounds(r.left, r.top, r.right - r.left, r.bottom - r.top);
     }
 
     public static WindowInfo? ActiveWindow()
@@ -126,4 +172,5 @@ public static class SystemQuery
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out int pid);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 }

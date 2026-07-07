@@ -425,11 +425,29 @@ public sealed class ApiServer
                         ["type"] = "window",
                         ["window_id"] = window.id
                     };
+                    // Pre-build to get the clamped capture bounds for the response
+                    var preBuilt = ConfigParser.Build(cfg, agent, out _);
+                    var capBounds = preBuilt.Config.Bounds;
                     var result = _engine.CreateRecording(cfg, agent, _tray);
                     var resolved = new JsonObject
                     {
                         ["type"] = "window",
-                        ["window_id"] = window.id
+                        ["window_id"] = window.id,
+                        ["title"] = window.title,
+                        ["bounds"] = new JsonObject
+                        {
+                            ["x"] = window.bounds.x,
+                            ["y"] = window.bounds.y,
+                            ["width"] = window.bounds.width,
+                            ["height"] = window.bounds.height
+                        },
+                        ["capture_bounds"] = new JsonObject
+                        {
+                            ["x"] = capBounds.x,
+                            ["y"] = capBounds.y,
+                            ["width"] = capBounds.w,
+                            ["height"] = capBounds.h
+                        }
                     };
                     var data = AddQuickMetadataToObject(result, "active_window", resolved, true);
                     return ApiResponse.Ok(data, reqId);

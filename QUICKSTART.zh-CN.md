@@ -38,7 +38,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 | target.type | 说明 |
 | --- | --- |
 | `primary_display` | 录制主显示器 |
-| `active_window` | 录制当前活动窗口 |
+| `active_window` | 按当前活动窗口的可见边界录制 |
 | `selected_region` | 弹出选区 UI，让用户框选区域后录制 |
 
 请求示例：

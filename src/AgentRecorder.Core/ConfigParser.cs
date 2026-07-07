@@ -75,6 +75,7 @@ public static class ConfigParser
                 rec.SourceTitle = $"Test Window ({wid})";
                 cap.SourceKind = "window";
                 cap.WindowTitle = wid;
+                cap.Bounds = (0, 0, 1280, 720);
             }
             else
             {
@@ -84,12 +85,30 @@ public static class ConfigParser
                             new { suggested_action = "list_windows" });
                 PolicyEngine.CheckDenylist(w.title);
                 PolicyEngine.CheckDenylistByProcessName(w.app_name);
+                WindowIdParser.RejectMinimized(w.is_minimized, w.title);
+
+                var capBounds = ClampWindowBoundsToVirtualScreen(w.bounds);
+
+                if (capBounds.width <= 0 || capBounds.height <= 0)
+                    throw new ApiException(400, "SOURCE_UNAVAILABLE",
+                        "Window is outside the capturable desktop area.",
+                        new { suggested_action = "restore_or_move_window_then_retry" });
+
+                const int MinSize = 32;
+                if (capBounds.width < MinSize || capBounds.height < MinSize)
+                    throw new ApiException(400, "INVALID_ARGUMENT",
+                        $"Window is too small ({capBounds.width}x{capBounds.height}). Minimum recording size is {MinSize}x{MinSize}.",
+                        new { suggested_action = "enlarge_the_window_or_select_a_different_window" });
+
+                var normalizedBw = NormalizeDimension(capBounds.width);
+                var normalizedBh = NormalizeDimension(capBounds.height);
+
                 rec.SourceType = "window";
                 rec.SourceTitle = w.title;
                 cap.SourceKind = "window";
                 cap.WindowTitle = w.title;
                 cap.WindowHandle = WindowIdParser.Parse(wid);
-                WindowIdParser.RejectMinimized(w.is_minimized, w.title);
+                cap.Bounds = (capBounds.x, capBounds.y, normalizedBw, normalizedBh);
             }
         }
         else if (type == "region")
@@ -302,6 +321,35 @@ public static class ConfigParser
         new(400, "UNSUPPORTED_FEATURE",
             $"WGC continuous recording is not implemented. '{field}'='{value}' is not supported. " +
             "Current supported capabilities: standard FFmpeg recording and WGC still-frame PNG when enabled via feature flag.");
+
+    /// <summary>
+    /// Clamps window bounds to the virtual screen bounds so that FFmpeg gdigrab
+    /// capture region never extends outside the capturable desktop area.
+    /// </summary>
+    private static SystemQuery.Bounds ClampWindowBoundsToVirtualScreen(SystemQuery.Bounds window)
+    {
+        var screen = SystemQuery.VirtualScreenBounds();
+
+        int screenLeft = screen.x;
+        int screenTop = screen.y;
+        int screenRight = screen.x + screen.width;
+        int screenBottom = screen.y + screen.height;
+
+        int winLeft = window.x;
+        int winTop = window.y;
+        int winRight = window.x + window.width;
+        int winBottom = window.y + window.height;
+
+        int clampedLeft = Math.Max(winLeft, screenLeft);
+        int clampedTop = Math.Max(winTop, screenTop);
+        int clampedRight = Math.Min(winRight, screenRight);
+        int clampedBottom = Math.Min(winBottom, screenBottom);
+
+        int clampedW = clampedRight - clampedLeft;
+        int clampedH = clampedBottom - clampedTop;
+
+        return new SystemQuery.Bounds(clampedLeft, clampedTop, clampedW, clampedH);
+    }
 
     /// <summary>
     /// Normalize dimension to even number (required by x264/yuv420p).

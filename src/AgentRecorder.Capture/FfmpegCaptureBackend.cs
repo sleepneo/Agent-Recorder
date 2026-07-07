@@ -154,20 +154,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
 
         if (cfg.SourceKind == "window")
         {
-            sb.Append($"-f gdigrab -framerate {cfg.Fps} ");
-            if (cfg.DurationSeconds.HasValue && cfg.DurationSeconds > 0)
-                sb.Append($"-t {cfg.DurationSeconds.Value} ");
-            sb.Append($"-i title=\"{cfg.WindowTitle}\" ");
+            AppendGdigrabRegionArgs(sb, cfg);
         }
         else if (cfg.SourceKind == "region")
         {
-            // Region uses gdigrab with desktop source and offset parameters
-            var (x, y, w, h) = cfg.Bounds;
-            sb.Append($"-f gdigrab -framerate {cfg.Fps} ");
-            if (cfg.DurationSeconds.HasValue && cfg.DurationSeconds > 0)
-                sb.Append($"-t {cfg.DurationSeconds.Value} ");
-            sb.Append($"-offset_x {x} -offset_y {y} -video_size {w}x{h} ");
-            sb.Append("-i desktop ");
+            AppendGdigrabRegionArgs(sb, cfg);
         }
         else
         {
@@ -187,7 +178,6 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
             sb.Append($"-f dshow -i audio=\"{dev}\" ");
         }
 
-        // Only apply auto-scale for display source; region users explicitly choose their size
         var (_, _, capW, capH) = cfg.Bounds;
         if (cfg.SourceKind == "display" && (capW > 1920 || capH > 1080))
         {
@@ -198,6 +188,16 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
 
         sb.Append($"-movflags +faststart \"{cfg.OutputPath}\"");
         return sb.ToString();
+    }
+
+    private static void AppendGdigrabRegionArgs(StringBuilder sb, CaptureConfig cfg)
+    {
+        var (x, y, w, h) = cfg.Bounds;
+        sb.Append($"-f gdigrab -framerate {cfg.Fps} ");
+        if (cfg.DurationSeconds.HasValue && cfg.DurationSeconds > 0)
+            sb.Append($"-t {cfg.DurationSeconds.Value} ");
+        sb.Append($"-offset_x {x} -offset_y {y} -video_size {w}x{h} ");
+        sb.Append("-i desktop ");
     }
 
     public static OutputMeta Probe(string path)
