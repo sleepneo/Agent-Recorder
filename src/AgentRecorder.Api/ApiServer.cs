@@ -32,7 +32,7 @@ public sealed class ApiServer
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
     private CancellationTokenSource _cts = new();
 
-    private object? _lastSelectedRegion;
+    private SelectedRegionState? _lastSelectedRegion;
     private readonly object _regionLock = new();
 
     public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
@@ -44,6 +44,7 @@ public sealed class ApiServer
         _readiness = readiness;
         _autoStart = autoStart;
         _ffmpegPrewarmer = ffmpegPrewarmer;
+        _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
 
     public void Start()
@@ -366,16 +367,19 @@ public sealed class ApiServer
 
         if (result.status == "selected")
         {
-            var region = new
-            {
-                available = true,
-                display_id = result.displayId,
-                coordinate_space = result.coordSpace,
-                bounds = new { x = result.x, y = result.y, width = result.w, height = result.h },
-                updated_at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                source = "region_selection"
-            };
-            lock (_regionLock) { _lastSelectedRegion = region; }
+            var state = new SelectedRegionState(
+                Available: true,
+                DisplayId: result.displayId,
+                CoordinateSpace: result.coordSpace,
+                X: result.x,
+                Y: result.y,
+                Width: result.w,
+                Height: result.h,
+                UpdatedAt: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                Source: "region_selection");
+
+            RegionSelectionStateStore.Save(state);
+            lock (_regionLock) { _lastSelectedRegion = state; }
         }
 
         object response = result.status switch
@@ -521,18 +525,19 @@ public sealed class ApiServer
                         }
                     };
 
-                    lock (_regionLock)
-                    {
-                        _lastSelectedRegion = new
-                        {
-                            available = true,
-                            display_id = sel.displayId,
-                            coordinate_space = sel.coordSpace,
-                            bounds = new { x = sel.x, y = sel.y, width = sel.w, height = sel.h },
-                            updated_at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                            source = "quick_selected_region"
-                        };
-                    }
+                    var state = new SelectedRegionState(
+                        Available: true,
+                        DisplayId: sel.displayId,
+                        CoordinateSpace: sel.coordSpace,
+                        X: sel.x,
+                        Y: sel.y,
+                        Width: sel.w,
+                        Height: sel.h,
+                        UpdatedAt: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        Source: "quick_selected_region");
+
+                    RegionSelectionStateStore.Save(state);
+                    lock (_regionLock) { _lastSelectedRegion = state; }
 
                     var result = _engine.CreateRecording(cfg, agent, _tray);
                     var resolved = new JsonObject
@@ -552,9 +557,54 @@ public sealed class ApiServer
                     return ApiResponse.Ok(data, reqId);
                 }
 
+            case "last_region":
+                {
+                    SelectedRegionState? last;
+                    lock (_regionLock) { last = _lastSelectedRegion; }
+
+                    if (last == null)
+                    {
+                        throw new ApiException(404, "SOURCE_NOT_FOUND",
+                            "No last selected region is available.",
+                            new { suggested_action = "use_selected_region_first" });
+                    }
+
+                    cfg["source"] = new JsonObject
+                    {
+                        ["type"] = "region",
+                        ["display_id"] = last.DisplayId,
+                        ["coordinate_space"] = last.CoordinateSpace,
+                        ["bounds"] = new JsonObject
+                        {
+                            ["x"] = last.X,
+                            ["y"] = last.Y,
+                            ["width"] = last.Width,
+                            ["height"] = last.Height
+                        }
+                    };
+
+                    var result = _engine.CreateRecording(cfg, agent, _tray);
+                    var resolved = new JsonObject
+                    {
+                        ["type"] = "region",
+                        ["display_id"] = last.DisplayId,
+                        ["coordinate_space"] = last.CoordinateSpace,
+                        ["bounds"] = new JsonObject
+                        {
+                            ["x"] = last.X,
+                            ["y"] = last.Y,
+                            ["width"] = last.Width,
+                            ["height"] = last.Height
+                        },
+                        ["source"] = "last_selected_region"
+                    };
+                    var data = AddQuickMetadataToObject(result, "last_region", resolved, true);
+                    return ApiResponse.Ok(data, reqId);
+                }
+
             default:
                 throw new ApiException(400, "INVALID_ARGUMENT",
-                    $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region");
+                    $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region, last_region");
         }
     }
 
@@ -693,8 +743,9 @@ public sealed class ApiServer
         var hasActiveWindow = windowsContext.Active != null;
         var supportsRegionSelection = _tray.SupportsRegionSelectionUi;
 
-        object? lastRegion;
+        SelectedRegionState? lastRegion;
         lock (_regionLock) { lastRegion = _lastSelectedRegion; }
+        bool hasLastRegion = lastRegion != null;
 
         return new
         {
@@ -782,6 +833,17 @@ public sealed class ApiServer
                         request_template = new { target = new { type = "selected_region" }, duration_seconds = 60 },
                         available = supportsRegionSelection,
                         unavailable_reason = supportsRegionSelection ? null : "headless_host"
+                    },
+                    new
+                    {
+                        name = "record_last_region",
+                        target_type = "last_region",
+                        description = "Record the last selected region with local confirmation.",
+                        endpoint = "/api/v1/recordings/quick",
+                        method = "POST",
+                        request_template = new { target = new { type = "last_region" }, duration_seconds = 60 },
+                        available = hasLastRegion,
+                        unavailable_reason = hasLastRegion ? null : "no_last_selected_region"
                     }
                 }
             },
@@ -809,10 +871,26 @@ public sealed class ApiServer
                     sample_limit = 10,
                     error = windowsContext.Error
                 },
-                last_selected_region = lastRegion
+                last_selected_region = lastRegion == null ? null : LastRegionToCapabilitiesObject(lastRegion)
             }
         };
     }
+
+    private static object LastRegionToCapabilitiesObject(SelectedRegionState state) => new
+    {
+        available = true,
+        display_id = state.DisplayId,
+        coordinate_space = state.CoordinateSpace,
+        bounds = new
+        {
+            x = state.X,
+            y = state.Y,
+            width = state.Width,
+            height = state.Height
+        },
+        updated_at = state.UpdatedAt,
+        source = state.Source
+    };
 
     private (bool Available, int Count, string? PrimaryDisplayId, object? VirtualBounds, object[] Items, string? Error) BuildDisplaysContext()
     {

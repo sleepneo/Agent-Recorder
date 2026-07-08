@@ -42,9 +42,12 @@ public class QuickRecordingApiTests
                 callback(AutoApprove);
         }
 
+        public int RegionSelectionRequestCount { get; private set; }
+
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
         {
+            RegionSelectionRequestCount++;
             callback(RegionSelectionStatus, RegionX, RegionY, RegionW, RegionH, RegionDisplayId, RegionCoordSpace);
         }
 
@@ -462,7 +465,7 @@ public class QuickRecordingApiTests
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
 
             var recipes = interaction.GetProperty("quick_recipes");
-            Assert.Equal(3, recipes.GetArrayLength());
+            Assert.Equal(4, recipes.GetArrayLength());
 
             var recipeNames = new List<string>();
             foreach (var r in recipes.EnumerateArray())
@@ -471,6 +474,7 @@ public class QuickRecordingApiTests
             Assert.Contains("record_primary_display", recipeNames);
             Assert.Contains("record_active_window", recipeNames);
             Assert.Contains("record_selected_region", recipeNames);
+            Assert.Contains("record_last_region", recipeNames);
         }
         finally
         {
@@ -858,6 +862,229 @@ public class QuickRecordingApiTests
     }
 
     [Fact]
+    public async Task QuickRecording_LastRegion_NoState_ReturnsSourceNotFound()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"last_region\"},\"duration_seconds\":60}"));
+            Assert.Equal(404, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
+
+            var error = doc.RootElement.GetProperty("error");
+            Assert.Equal("SOURCE_NOT_FOUND", error.GetProperty("code").GetString());
+            Assert.Equal("use_selected_region_first", error.GetProperty("details").GetProperty("suggested_action").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_LastRegion_UsesSavedRegionWithoutOpeningSelectionUi()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = 100,
+            RegionY = 150,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+            // First call selected_region to establish the persisted last region.
+            var selectedResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
+            Assert.Equal(200, (int)selectedResponse.StatusCode);
+
+            var initialRequestCount = tray.RegionSelectionRequestCount;
+
+            // Now call last_region - it should not open the selection UI again.
+            var lastRegionResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"last_region\"},\"duration_seconds\":60}"));
+            Assert.Equal(200, (int)lastRegionResponse.StatusCode);
+
+            Assert.Equal(initialRequestCount, tray.RegionSelectionRequestCount);
+
+            var body = await lastRegionResponse.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("last_region", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("region", resolved.GetProperty("type").GetString());
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal("virtual_screen", resolved.GetProperty("coordinate_space").GetString());
+
+            var bounds = resolved.GetProperty("bounds");
+            Assert.Equal(100, bounds.GetProperty("x").GetInt32());
+            Assert.Equal(150, bounds.GetProperty("y").GetInt32());
+            Assert.Equal(800, bounds.GetProperty("width").GetInt32());
+            Assert.Equal(600, bounds.GetProperty("height").GetInt32());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_LastRegionRecipe_AvailabilityReflectsState()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = 100,
+            RegionY = 150,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+
+            // Before any selection, record_last_region should be unavailable.
+            var beforeResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)beforeResponse.StatusCode);
+            var beforeBody = await beforeResponse.Content.ReadAsStringAsync();
+            using var beforeDoc = JsonDocument.Parse(beforeBody);
+            var beforeRecipes = beforeDoc.RootElement.GetProperty("data").GetProperty("interaction").GetProperty("quick_recipes");
+            var beforeLastRegionRecipe = FindRecipe(beforeRecipes, "record_last_region");
+            Assert.False(beforeLastRegionRecipe.GetProperty("available").GetBoolean());
+            Assert.Equal("no_last_selected_region", beforeLastRegionRecipe.GetProperty("unavailable_reason").GetString());
+
+            // Create a selection to persist last region.
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var createResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
+            Assert.Equal(200, (int)createResponse.StatusCode);
+
+            // After selection, record_last_region should be available.
+            var afterResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)afterResponse.StatusCode);
+            var afterBody = await afterResponse.Content.ReadAsStringAsync();
+            using var afterDoc = JsonDocument.Parse(afterBody);
+            var afterRecipes = afterDoc.RootElement.GetProperty("data").GetProperty("interaction").GetProperty("quick_recipes");
+            var afterLastRegionRecipe = FindRecipe(afterRecipes, "record_last_region");
+            Assert.True(afterLastRegionRecipe.GetProperty("available").GetBoolean());
+            Assert.Null(afterLastRegionRecipe.GetProperty("unavailable_reason").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_LastSelectedRegion_LoadsFromPersistedStateAfterRestart()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = 100,
+            RegionY = 150,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+            var createResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
+            Assert.Equal(200, (int)createResponse.StatusCode);
+
+            server.Stop();
+
+            // Create a new server instance with the same data dir.
+            var audit = new AuditLogger();
+            var engine = new RecordingEngine(audit);
+            engine.SetTray(tray);
+            var newServer = new ApiServer(engine, audit, tray);
+            newServer.Start();
+            try
+            {
+                using var newClient = CreateClient();
+                var capsResponse = await newClient.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+                Assert.Equal(200, (int)capsResponse.StatusCode);
+
+                var body = await capsResponse.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(body);
+                var lastRegion = doc.RootElement.GetProperty("data").GetProperty("context").GetProperty("last_selected_region");
+
+                Assert.True(lastRegion.GetProperty("available").GetBoolean());
+                Assert.Equal("display_1", lastRegion.GetProperty("display_id").GetString());
+                Assert.Equal("virtual_screen", lastRegion.GetProperty("coordinate_space").GetString());
+
+                var bounds = lastRegion.GetProperty("bounds");
+                Assert.Equal(100, bounds.GetProperty("x").GetInt32());
+                Assert.Equal(150, bounds.GetProperty("y").GetInt32());
+                Assert.Equal(800, bounds.GetProperty("width").GetInt32());
+                Assert.Equal(600, bounds.GetProperty("height").GetInt32());
+            }
+            finally
+            {
+                newServer.Stop();
+            }
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
     public async Task Capabilities_QuickRecipes_EnhancedWithNewFields()
     {
         var tray = new ControllableTray();
@@ -881,7 +1108,7 @@ public class QuickRecordingApiTests
             using var doc = JsonDocument.Parse(body);
             var recipes = doc.RootElement.GetProperty("data").GetProperty("interaction").GetProperty("quick_recipes");
 
-            Assert.Equal(3, recipes.GetArrayLength());
+            Assert.Equal(4, recipes.GetArrayLength());
 
             foreach (var recipe in recipes.EnumerateArray())
             {
@@ -916,5 +1143,15 @@ public class QuickRecordingApiTests
             server.Stop();
             Cleanup(dataDir);
         }
+    }
+
+    private static JsonElement FindRecipe(JsonElement recipes, string name)
+    {
+        foreach (var recipe in recipes.EnumerateArray())
+        {
+            if (recipe.GetProperty("name").GetString() == name)
+                return recipe;
+        }
+        throw new InvalidOperationException($"Recipe '{name}' not found in quick_recipes.");
     }
 }

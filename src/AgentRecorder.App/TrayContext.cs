@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -416,7 +417,15 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             {
                 _audit.Log("region_selection.ui_opening", new { thread_id = Thread.CurrentThread.ManagedThreadId });
 
-                using var form = new RegionSelectionForm();
+                // Load last selected region to pre-populate the selection UI.
+                Rectangle? initialBounds = null;
+                var lastState = RegionSelectionStateStore.Load();
+                if (lastState != null)
+                {
+                    initialBounds = new Rectangle(lastState.X, lastState.Y, lastState.Width, lastState.Height);
+                }
+
+                using var form = new RegionSelectionForm(initialBounds);
                 callbackState.FormHandle = form.Handle;
 
                 _audit.Log("region_selection.ui_opened", new

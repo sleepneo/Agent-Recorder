@@ -34,6 +34,7 @@ public sealed class RegionSelectionForm : Form
     private readonly Button _cancelButton;
     private const int HandleSize = 10;
     private const int MinSize = 32;
+    private Rectangle? _initialVirtualBounds;
 
     /// <summary>
     /// Selected bounds in virtual screen coordinates.
@@ -50,8 +51,9 @@ public sealed class RegionSelectionForm : Form
     /// </summary>
     public string CoordinateSpace { get; private set; } = "virtual_screen";
 
-    public RegionSelectionForm()
+    public RegionSelectionForm(Rectangle? initialVirtualBounds = null)
     {
+        _initialVirtualBounds = initialVirtualBounds;
         // Initialize button fields FIRST (null guards) before any property that could trigger OnResize
         _confirmButton = new Button
         {
@@ -114,6 +116,9 @@ public sealed class RegionSelectionForm : Form
         Controls.Add(_confirmButton);
         Controls.Add(_cancelButton);
 
+        AcceptButton = _confirmButton;
+        CancelButton = _cancelButton;
+
         // Now set form properties
         FormBorderStyle = FormBorderStyle.None;
         WindowState = FormWindowState.Normal;
@@ -128,6 +133,10 @@ public sealed class RegionSelectionForm : Form
         // Use virtual screen bounds to cover all monitors including negative coordinates
         var virtualScreen = SystemInformation.VirtualScreen;
         Bounds = virtualScreen;
+
+        // Apply initial selection immediately while still on the creating thread.
+        // OnShown is message-pump dependent and may not run before tests inspect state.
+        ApplyInitialSelection();
     }
 
     private void UpdateButtonPositions()
@@ -157,6 +166,33 @@ public sealed class RegionSelectionForm : Form
         Activate();
         Focus();
         UpdateButtonPositions();
+
+        // Apply initial selection after the form bounds are finalized.
+        ApplyInitialSelection();
+    }
+
+    /// <summary>
+    /// Pre-sets the selection rectangle using virtual screen coordinates.
+    /// The form will translate it to client coordinates when shown.
+    /// </summary>
+    public void SetInitialVirtualBounds(Rectangle virtualBounds)
+    {
+        _initialVirtualBounds = virtualBounds;
+    }
+
+    private void ApplyInitialSelection()
+    {
+        if (!_initialVirtualBounds.HasValue)
+            return;
+
+        var clamped = RegionSelectionGeometry.ClampInitialSelection(Bounds, _initialVirtualBounds.Value, MinSize);
+        if (!clamped.HasValue)
+            return;
+
+        _selection = clamped.Value;
+        _confirmButton.Enabled = true;
+        UpdateInfoLabel();
+        Invalidate();
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -472,7 +508,7 @@ public sealed class RegionSelectionForm : Form
     /// Show region selection dialog on a new STA thread.
     /// Returns bounds in virtual screen coordinates.
     /// </summary>
-    public static (DialogResult Result, Rectangle Bounds, string DisplayId) ShowSelection()
+    public static (DialogResult Result, Rectangle Bounds, string DisplayId) ShowSelection(Rectangle? initialVirtualBounds = null)
     {
         Rectangle bounds = Rectangle.Empty;
         string displayId = "";
@@ -480,7 +516,7 @@ public sealed class RegionSelectionForm : Form
 
         var thread = new Thread(() =>
         {
-            using var form = new RegionSelectionForm();
+            using var form = new RegionSelectionForm(initialVirtualBounds);
             result = form.ShowDialog();
             bounds = form.SelectedBounds;
             displayId = form.DisplayId;

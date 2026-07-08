@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Infrastructure\AgentRecorder.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

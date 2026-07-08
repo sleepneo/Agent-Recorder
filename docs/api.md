@@ -114,6 +114,15 @@ Quick recipe fields:
         "request_template": { "target": { "type": "selected_region" } },
         "available": true,
         "unavailable_reason": null
+      },
+      {
+        "name": "record_last_region",
+        "target_type": "last_region",
+        "endpoint": "/api/v1/recordings/quick",
+        "method": "POST",
+        "request_template": { "target": { "type": "last_region" } },
+        "available": true,
+        "unavailable_reason": null
       }
     ]
   }
@@ -184,6 +193,7 @@ The response includes a `context` object that provides a snapshot of system stat
 **Notes:**
 - `displays` and `windows` may return `available: false` with an `error` message if enumeration fails
 - `last_selected_region` is `null` if no region has been selected
+- `last_selected_region` is persisted to `<data-dir>\state\last-selected-region.json` and survives service restarts
 - The API returns 200 even if context enumeration partially fails
 
 ## Quick Recording
@@ -225,6 +235,7 @@ Supported `target.type` values:
 | `primary_display` | Resolve the primary display, then create a recording |
 | `active_window` | Resolve the active window, clamp its visible bounds to the virtual desktop, then create a recording |
 | `selected_region` | Show local region-selection UI, then create a recording |
+| `last_region` | Reuse the last successful region selection, then create a recording without showing the UI |
 
 Successful creation returns `requires_user_confirmation`:
 
@@ -275,6 +286,21 @@ recording is created:
   "quick": {
     "target_type": "selected_region",
     "recording_created": false
+  }
+}
+```
+
+`last_region` returns `SOURCE_NOT_FOUND` when no prior selection is available:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "SOURCE_NOT_FOUND",
+    "message": "No last selected region is available.",
+    "details": {
+      "suggested_action": "use_selected_region_first"
+    }
   }
 }
 ```

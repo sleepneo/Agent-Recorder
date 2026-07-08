@@ -88,6 +88,37 @@ public static class RegionSelectionGeometry
     }
 
     /// <summary>
+    /// Converts virtual screen bounds to form client coordinates and clamps to the form's client area.
+    /// Returns null if the initial bounds do not intersect the client area or are smaller than minSize.
+    /// </summary>
+    public static Rectangle? ClampInitialSelection(Rectangle formBounds, Rectangle virtualBounds, int minSize = 32)
+    {
+        int clientX = virtualBounds.X - formBounds.X;
+        int clientY = virtualBounds.Y - formBounds.Y;
+
+        var clientBounds = new Rectangle(clientX, clientY, virtualBounds.Width, virtualBounds.Height);
+        var clientRectangle = new Rectangle(0, 0, formBounds.Width, formBounds.Height);
+
+        if (!clientBounds.IntersectsWith(clientRectangle))
+            return null;
+        if (clientBounds.Width < minSize || clientBounds.Height < minSize)
+            return null;
+
+        int left = Math.Max(0, clientBounds.Left);
+        int top = Math.Max(0, clientBounds.Top);
+        int right = Math.Min(clientRectangle.Width, clientBounds.Right);
+        int bottom = Math.Min(clientRectangle.Height, clientBounds.Bottom);
+
+        int width = right - left;
+        int height = bottom - top;
+
+        if (width < minSize || height < minSize)
+            return null;
+
+        return new Rectangle(left, top, width, height);
+    }
+
+    /// <summary>
     /// Finds the display that contains the most area of the given bounds.
     /// Fallback when center is not inside any display.
     /// </summary>

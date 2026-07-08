@@ -248,13 +248,14 @@ AgentRecorder.Cli.exe autostart disable --json
 
 **常见录制意图请优先使用 `POST /api/v1/recordings/quick`**，它把"目标解析 + 录制创建"合并为一次 HTTP 调用，减少往返次数。
 
-支持三种目标类型：
+支持四种目标类型：
 
 | `target.type` | 说明 | 适用场景 |
 |---------------|------|----------|
 | `primary_display` | 录主显示器 | "录整个屏幕"、"录主屏 5 分钟" |
 | `active_window` | 录当前活动窗口 | "录当前窗口"、"录这个窗口 3 分钟" |
 | `selected_region` | 让用户选区后录制 | "录选区"、"录这个区域 1 分钟" |
+| `last_region` | 复用最近一次成功选区 | "录上次选区"、"录刚才那个区域 1 分钟" |
 
 所有 quick 请求仍然进入本地确认流程，不能绕过用户确认。
 
@@ -289,11 +290,23 @@ AgentRecorder.Cli.exe autostart disable --json
 }
 ```
 
+复用上次选区录制 1 分钟（`last_region` 不会弹出选区窗口，直接进入本地确认）：
+
+```json
+{
+  "target": { "type": "last_region" },
+  "duration_seconds": 60
+}
+```
+
+如果 `context.last_selected_region == null`，调用 `last_region` 会返回 `SOURCE_NOT_FOUND`，此时应改用 `selected_region` 先让用户选区。
+
 ### 响应说明
 
 - 成功创建待确认录制：响应包含 `status: "requires_user_confirmation"` 和 `quick` 元数据（`target_type`、`recording_created: true`、`resolved_source`、`requires_user_confirmation: true`）。
 - `selected_region` 被取消/超时/不可用：响应包含对应 `status`（`selection_cancelled` / `selection_timeout` / `display_unavailable` / `selection_failed`）和 `quick.recording_created: false`，此时没有创建 recording。
-- `primary_display` / `active_window` 找不到来源：返回 `SOURCE_NOT_FOUND` 错误，附带 `suggested_action`。
+- `primary_display` / `active_window` / `last_region` 找不到来源：返回 `SOURCE_NOT_FOUND` 错误，附带 `suggested_action`。
+- `last_region` 无上次选区：`suggested_action = "use_selected_region_first"`。
 
 **注意**：quick API 仍然需要本地用户确认才能真正开始录制。在用户确认前，不要声称"录制已经开始"。
 
@@ -353,8 +366,8 @@ AgentRecorder.Cli.exe autostart disable --json
 | "录当前窗口" | `context.windows.active != null` | 使用 `quick_recipes.record_active_window` |
 | "录当前窗口" | `context.windows.active == null` | 提示用户聚焦窗口或改用 `selected_region` |
 | "录主屏幕" | `context.displays.primary_display_id != null` | 使用 `quick_recipes.record_primary_display` |
-| "录上次选区" | `context.last_selected_region != null` | 使用上次选区 bounds 创建 region 录制 |
-| "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用其他方式 |
+| "录上次选区" | `context.last_selected_region != null` | 使用 `quick_recipes.record_last_region` |
+| "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用 `selected_region` |
 
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 

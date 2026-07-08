@@ -208,6 +208,71 @@ public class RegionSelectionGeometryTests
     }
 
     // -------------------------------------------------------------------------
+    // ClampInitialSelection tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ClampInitialSelection_InsideFormBounds_ReturnsClampedRectangle()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var virtualBounds = new Rectangle(100, 150, 800, 600);
+
+        var result = RegionSelectionGeometry.ClampInitialSelection(formBounds, virtualBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(new Rectangle(100, 150, 800, 600), result.Value);
+    }
+
+    [Fact]
+    public void ClampInitialSelection_PartiallyOutsideFormBounds_ReturnsClampedRectangle()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var virtualBounds = new Rectangle(1800, 900, 300, 300);
+
+        var result = RegionSelectionGeometry.ClampInitialSelection(formBounds, virtualBounds);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+        Assert.True(result.Value.Right <= formBounds.Width);
+        Assert.True(result.Value.Bottom <= formBounds.Height);
+    }
+
+    [Fact]
+    public void ClampInitialSelection_OutsideFormBounds_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var virtualBounds = new Rectangle(3000, 2000, 800, 600);
+
+        var result = RegionSelectionGeometry.ClampInitialSelection(formBounds, virtualBounds);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void ClampInitialSelection_TooSmall_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var virtualBounds = new Rectangle(100, 100, 10, 10);
+
+        var result = RegionSelectionGeometry.ClampInitialSelection(formBounds, virtualBounds);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void ClampInitialSelection_NegativeCoordinateDisplay_ReturnsClampedRectangle()
+    {
+        var formBounds = new Rectangle(-2560, 0, 6400, 2160);
+        var virtualBounds = new Rectangle(-2460, 200, 800, 600);
+
+        var result = RegionSelectionGeometry.ClampInitialSelection(formBounds, virtualBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(new Rectangle(100, 200, 800, 600), result.Value);
+    }
+
+    // -------------------------------------------------------------------------
     // Integration: full coordinate conversion flow
     // -------------------------------------------------------------------------
 

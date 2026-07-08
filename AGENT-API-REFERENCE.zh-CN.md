@@ -324,12 +324,14 @@ GET /capabilities
 | `updated_at` | 更新时间 |
 | `source` | 来源（`region_selection` 或 `quick_selected_region`） |
 
+**注意**：`last_selected_region` 是持久化状态，保存在 `<data-dir>\state\last-selected-region.json`。服务重启后仍可能返回历史选区。
+
 **agent 使用建议：**
 
 - 启动后优先调用 `/capabilities` 获取 `context` 快照
 - 对“录当前窗口”“录主屏幕”“录上次选区”这类请求，优先基于 `context` 和 `quick_recipes` 决策
 - 如果 `context.windows.active == null`，应让用户聚焦窗口或改用 `selected_region`
-- 如果 `context.last_selected_region == null`，不要假设存在上次选区
+- 如果 `context.last_selected_region == null`，不要假设存在上次选区；可改用 `selected_region` 先让用户选区
 - 显示器/窗口枚举失败时，`/capabilities` 仍返回 200，错误信息在对应 `error` 字段中
 
 ### 就绪文件（推荐）
@@ -447,7 +449,7 @@ X-Agent-Name: <agent-name>
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `target.type` | 是 | `primary_display` / `active_window` / `selected_region` |
+| `target.type` | 是 | `primary_display` / `active_window` / `selected_region` / `last_region` |
 | `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
 | `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
 | `video` | 否 | 透传到原始录制配置，默认值同原始 API |
@@ -484,6 +486,36 @@ X-Agent-Name: <agent-name>
     "coordinate_space": "virtual_screen",
     "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
   }
+}
+```
+
+**`last_region`**：复用最近一次成功保存的选区，不弹出选区窗口，直接进入本地确认。
+
+内部生成：
+```json
+{
+  "source": {
+    "type": "region",
+    "display_id": "display_1",
+    "coordinate_space": "virtual_screen",
+    "bounds": { "x": 100, "y": 100, "width": 800, "height": 600 }
+  }
+}
+```
+
+如果没有上次选区，返回 `SOURCE_NOT_FOUND`：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "SOURCE_NOT_FOUND",
+    "message": "No last selected region is available.",
+    "details": {
+      "suggested_action": "use_selected_region_first"
+    }
+  },
+  "request_id": "req_xxx"
 }
 ```
 
