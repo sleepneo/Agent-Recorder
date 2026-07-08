@@ -71,6 +71,7 @@ public class QuickRecordingApiTests
     {
         SystemQuery.SetDisplayProvider(null);
         SystemQuery.SetActiveWindowProvider(null);
+        SystemQuery.SetWindowProvider(null);
         try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { }
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
         ApiKeyAuth.ResetForTesting(null);
@@ -502,6 +503,365 @@ public class QuickRecordingApiTests
             using var doc = JsonDocument.Parse(body);
             var summary = doc.RootElement.GetProperty("data").GetProperty("summary");
             Assert.Equal("outer", summary.GetProperty("nested_role").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ContextDisplays_ContainsAllFields()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Primary Display", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0),
+                new("display_2", "Secondary Display", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.25)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+            var displays = context.GetProperty("displays");
+
+            Assert.True(displays.GetProperty("available").GetBoolean());
+            Assert.Equal(2, displays.GetProperty("count").GetInt32());
+            Assert.Equal("display_1", displays.GetProperty("primary_display_id").GetString());
+
+            var virtualBounds = displays.GetProperty("virtual_bounds");
+            Assert.Equal(-1920, virtualBounds.GetProperty("x").GetInt32());
+            Assert.Equal(0, virtualBounds.GetProperty("y").GetInt32());
+            Assert.Equal(3840, virtualBounds.GetProperty("width").GetInt32());
+            Assert.Equal(1080, virtualBounds.GetProperty("height").GetInt32());
+
+            var items = displays.GetProperty("items");
+            Assert.Equal(2, items.GetArrayLength());
+
+            var firstDisplay = items[0];
+            Assert.Equal("display_1", firstDisplay.GetProperty("id").GetString());
+            Assert.Equal("Primary Display", firstDisplay.GetProperty("name").GetString());
+            Assert.True(firstDisplay.GetProperty("is_primary").GetBoolean());
+
+            Assert.Null(displays.GetProperty("error").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ContextWindows_ActiveWindowFirstInSample()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            var activeWindow = new SystemQuery.WindowInfo(
+                "window_1", "Active Window", "app1.exe", 1001,
+                true, false, new SystemQuery.Bounds(10, 20, 1200, 800));
+
+            SystemQuery.SetActiveWindowProvider(() => activeWindow);
+            SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+            {
+                new("window_2", "Other Window 1", "app2.exe", 1002, false, false, new SystemQuery.Bounds(0, 0, 800, 600)),
+                activeWindow,
+                new("window_3", "Other Window 2", "app3.exe", 1003, false, false, new SystemQuery.Bounds(0, 0, 600, 400))
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+            var windows = context.GetProperty("windows");
+
+            Assert.True(windows.GetProperty("available").GetBoolean());
+            Assert.Equal(3, windows.GetProperty("visible_count").GetInt32());
+            Assert.Equal(10, windows.GetProperty("sample_limit").GetInt32());
+
+            var active = windows.GetProperty("active");
+            Assert.Equal("window_1", active.GetProperty("id").GetString());
+            Assert.Equal("Active Window", active.GetProperty("title").GetString());
+            Assert.Equal("app1.exe", active.GetProperty("app_name").GetString());
+
+            var itemsSample = windows.GetProperty("items_sample");
+            Assert.Equal(3, itemsSample.GetArrayLength());
+            Assert.Equal("window_1", itemsSample[0].GetProperty("id").GetString());
+            Assert.True(itemsSample[0].GetProperty("is_active").GetBoolean());
+
+            Assert.Null(windows.GetProperty("error").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ContextWindows_ActiveWindowNotInEnum_FirstInSample()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            var activeWindow = new SystemQuery.WindowInfo(
+                "window_active", "Active Window", "active.exe", 9999,
+                true, false, new SystemQuery.Bounds(10, 20, 1200, 800));
+
+            var enumWindows = new List<SystemQuery.WindowInfo>
+            {
+                new("window_2", "Other Window 1", "app2.exe", 1002, false, false, new SystemQuery.Bounds(0, 0, 800, 600)),
+                new("window_3", "Other Window 2", "app3.exe", 1003, false, false, new SystemQuery.Bounds(0, 0, 600, 400)),
+                new("window_4", "Other Window 3", "app4.exe", 1004, false, false, new SystemQuery.Bounds(0, 0, 500, 300))
+            };
+
+            SystemQuery.SetActiveWindowProvider(() => activeWindow);
+            SystemQuery.SetWindowProvider((_, _) => enumWindows);
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+            var windows = context.GetProperty("windows");
+
+            Assert.True(windows.GetProperty("available").GetBoolean());
+            Assert.Equal(3, windows.GetProperty("visible_count").GetInt32());
+
+            var active = windows.GetProperty("active");
+            Assert.Equal("window_active", active.GetProperty("id").GetString());
+
+            var itemsSample = windows.GetProperty("items_sample");
+            Assert.True(itemsSample.GetArrayLength() <= 10);
+            Assert.Equal(4, itemsSample.GetArrayLength());
+            Assert.Equal("window_active", itemsSample[0].GetProperty("id").GetString());
+            Assert.True(itemsSample[0].GetProperty("is_active").GetBoolean());
+
+            Assert.Null(windows.GetProperty("error").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ContextWindows_EnumFailsActiveSucceeds_AvailableWithError()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            var activeWindow = new SystemQuery.WindowInfo(
+                "window_active", "Active Window", "active.exe", 9999,
+                true, false, new SystemQuery.Bounds(10, 20, 1200, 800));
+
+            SystemQuery.SetActiveWindowProvider(() => activeWindow);
+            SystemQuery.SetWindowProvider((_, _) => throw new Exception("enum windows failed"));
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+            var windows = context.GetProperty("windows");
+
+            Assert.True(windows.GetProperty("available").GetBoolean());
+
+            var active = windows.GetProperty("active");
+            Assert.NotEqual(JsonValueKind.Null, active.ValueKind);
+            Assert.Equal("window_active", active.GetProperty("id").GetString());
+
+            Assert.Equal(0, windows.GetProperty("visible_count").GetInt32());
+
+            var itemsSample = windows.GetProperty("items_sample");
+            Assert.Equal(1, itemsSample.GetArrayLength());
+            Assert.Equal("window_active", itemsSample[0].GetProperty("id").GetString());
+            Assert.True(itemsSample[0].GetProperty("is_active").GetBoolean());
+
+            var error = windows.GetProperty("error").GetString();
+            Assert.NotNull(error);
+            Assert.Contains("enum windows", error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_ProviderException_Returns200WithError()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => throw new Exception("test display error"));
+            SystemQuery.SetActiveWindowProvider(() => throw new Exception("test active window error"));
+            SystemQuery.SetWindowProvider((_, _) => throw new Exception("test window error"));
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+
+            var displays = context.GetProperty("displays");
+            Assert.False(displays.GetProperty("available").GetBoolean());
+            Assert.Equal(0, displays.GetProperty("count").GetInt32());
+            Assert.Equal("test display error", displays.GetProperty("error").GetString());
+
+            var windows = context.GetProperty("windows");
+            Assert.False(windows.GetProperty("available").GetBoolean());
+            Assert.Equal(0, windows.GetProperty("visible_count").GetInt32());
+            var winError = windows.GetProperty("error").GetString();
+            Assert.NotNull(winError);
+            Assert.Contains("active window", winError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("test window error", winError, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_LastSelectedRegion_UpdatedAfterQuickSelectedRegion()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = 100,
+            RegionY = 150,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+            var createResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
+            Assert.Equal(200, (int)createResponse.StatusCode);
+
+            var capsResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)capsResponse.StatusCode);
+
+            var body = await capsResponse.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var context = doc.RootElement.GetProperty("data").GetProperty("context");
+            var lastRegion = context.GetProperty("last_selected_region");
+
+            Assert.True(lastRegion.GetProperty("available").GetBoolean());
+            Assert.Equal("display_1", lastRegion.GetProperty("display_id").GetString());
+            Assert.Equal("virtual_screen", lastRegion.GetProperty("coordinate_space").GetString());
+            Assert.Equal("quick_selected_region", lastRegion.GetProperty("source").GetString());
+
+            var bounds = lastRegion.GetProperty("bounds");
+            Assert.Equal(100, bounds.GetProperty("x").GetInt32());
+            Assert.Equal(150, bounds.GetProperty("y").GetInt32());
+            Assert.Equal(800, bounds.GetProperty("width").GetInt32());
+            Assert.Equal(600, bounds.GetProperty("height").GetInt32());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_QuickRecipes_EnhancedWithNewFields()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+            SystemQuery.SetActiveWindowProvider(() => new SystemQuery.WindowInfo(
+                "window_1", "Test Window", "test.exe", 123,
+                true, false, new SystemQuery.Bounds(0, 0, 800, 600)));
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var recipes = doc.RootElement.GetProperty("data").GetProperty("interaction").GetProperty("quick_recipes");
+
+            Assert.Equal(3, recipes.GetArrayLength());
+
+            foreach (var recipe in recipes.EnumerateArray())
+            {
+                Assert.True(recipe.TryGetProperty("endpoint", out _));
+                Assert.True(recipe.TryGetProperty("method", out _));
+                Assert.True(recipe.TryGetProperty("request_template", out _));
+                Assert.True(recipe.TryGetProperty("available", out _));
+                Assert.True(recipe.TryGetProperty("unavailable_reason", out _));
+
+                Assert.Equal("/api/v1/recordings/quick", recipe.GetProperty("endpoint").GetString());
+                Assert.Equal("POST", recipe.GetProperty("method").GetString());
+
+                var reqTemplate = recipe.GetProperty("request_template");
+                Assert.True(reqTemplate.TryGetProperty("target", out _));
+                Assert.Equal(60, reqTemplate.GetProperty("duration_seconds").GetInt32());
+            }
+
+            var primaryRecipe = recipes.EnumerateArray().First(r => r.GetProperty("name").GetString() == "record_primary_display");
+            Assert.True(primaryRecipe.GetProperty("available").GetBoolean());
+            Assert.Null(primaryRecipe.GetProperty("unavailable_reason").GetString());
+
+            var activeRecipe = recipes.EnumerateArray().First(r => r.GetProperty("name").GetString() == "record_active_window");
+            Assert.True(activeRecipe.GetProperty("available").GetBoolean());
+            Assert.Null(activeRecipe.GetProperty("unavailable_reason").GetString());
+
+            var regionRecipe = recipes.EnumerateArray().First(r => r.GetProperty("name").GetString() == "record_selected_region");
+            Assert.True(regionRecipe.GetProperty("available").GetBoolean());
+            Assert.Null(regionRecipe.GetProperty("unavailable_reason").GetString());
         }
         finally
         {

@@ -15,11 +15,15 @@ namespace AgentRecorder.Core;
 
 public sealed class RecordingEngine
 {
-    private readonly ConcurrentDictionary<string, Recording> _recs = new();
-    private readonly ConcurrentDictionary<string, Confirmation> _confs = new();
+    internal readonly ConcurrentDictionary<string, Recording> _recs = new();
+    internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
     private readonly AuditLogger _audit;
     private readonly object _lock = new();
     private ITrayContext? _tray;
+
+    // State change notification: incremented on every recording/confirmation state transition,
+    // used by GetConfirmationWait/GetStatusWait to detect changes via Monitor.Wait/PulseAll.
+    internal int _stateVersion = 0;
 
     /// <summary>
     /// Factory used to select an ICaptureBackend for a given source type.
@@ -32,6 +36,19 @@ public sealed class RecordingEngine
 
     public RecordingEngine(AuditLogger audit) => _audit = audit;
     public void SetTray(ITrayContext tray) => _tray = tray;
+
+    /// <summary>
+    /// Bumps _stateVersion and pulses all waiters on _lock.
+    /// Called after every recording/confirmation state transition.
+    /// </summary>
+    internal void BumpStateVersion()
+    {
+        lock (_lock)
+        {
+            _stateVersion++;
+            Monitor.PulseAll(_lock);
+        }
+    }
 
     public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray)
     {
@@ -202,13 +219,27 @@ public sealed class RecordingEngine
             rec.ConfirmationId = conf.Id;
             rec.State = RecState.pending_confirmation;
             _confs[conf.Id] = conf;
+            BumpStateVersion();
             _audit.Log("confirmation.created", new { recording_id = rec.Id, confirmation_id = conf.Id, nested_role = rec.NestedRole ?? "none" });
 
             tray.RequestConfirmation(summary, approved =>
             {
                 if (conf.Status != "pending") return;
-                if (approved) { conf.Status = "approved"; _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id }); StartCapture(rec, tray); }
-                else { conf.Status = "rejected"; rec.State = RecState.rejected; _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id }); TrySetIdleOnAllDone(tray); }
+                if (approved)
+                {
+                    conf.Status = "approved";
+                    BumpStateVersion();
+                    _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                    StartCapture(rec, tray);
+                }
+                else
+                {
+                    conf.Status = "rejected";
+                    rec.State = RecState.rejected;
+                    BumpStateVersion();
+                    _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                    TrySetIdleOnAllDone(tray);
+                }
             });
 
             Task.Delay(TimeSpan.FromSeconds(conf.TimeoutSeconds)).ContinueWith(_ =>
@@ -216,6 +247,7 @@ public sealed class RecordingEngine
                 if (conf.Status != "pending") return;
                 conf.Status = "expired";
                 if (rec.State == RecState.pending_confirmation) rec.State = RecState.expired;
+                BumpStateVersion();
                 _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
                 TrySetIdleOnAllDone(tray);
             });
@@ -280,6 +312,7 @@ public sealed class RecordingEngine
         // without being overwritten afterwards.
         rec.State = RecState.recording;
         rec.StartedAtUtc = DateTime.UtcNow;
+        BumpStateVersion();
         tray.SetRecording(rec);
 
         // Start the backend FIRST to populate CommandArgs,
@@ -304,6 +337,7 @@ public sealed class RecordingEngine
             if (rec.State == RecState.recording)
             {
                 rec.State = RecState.failed;
+                BumpStateVersion();
             }
             rec.Error = ex.Message;
             rec.Warnings.Add("launch_error: " + ex.Message);
@@ -379,6 +413,7 @@ public sealed class RecordingEngine
         if (success)
         {
             rec.State = RecState.completed;
+            BumpStateVersion();
             _audit.Log("recording.completed", new
             {
                 recording_id = rec.Id,
@@ -396,6 +431,7 @@ public sealed class RecordingEngine
         else
         {
             rec.State = RecState.failed;
+            BumpStateVersion();
             rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
             _audit.Log("recording.failed", new
             {
@@ -424,6 +460,7 @@ public sealed class RecordingEngine
             return StatusObj(rec);
 
         rec.State = RecState.stopping;
+        BumpStateVersion();
         _audit.Log("recording.stopping", new { recording_id = rec.Id, reason });
 
         var meta = rec.Backend?.Stop() ?? new OutputMeta();
@@ -518,7 +555,127 @@ public sealed class RecordingEngine
     {
         if (!_confs.TryGetValue(id, out var c))
             throw new ApiException(404, "RECORDING_NOT_FOUND", "Confirmation not found");
-        return new { confirmation_id = c.Id, status = c.Status, recording_id = c.RecordingId };
+        return new { ConfirmationId = c.Id, Status = c.Status, RecordingId = c.RecordingId };
+    }
+
+    /// <summary>
+    /// Long-polling wait for confirmation status change.
+    /// Returns immediately if status != since_status or if wait_ms expires.
+    /// Uses case-insensitive status comparison and deadline-based remaining time.
+    /// </summary>
+    public object GetConfirmationWait(string id, string sinceStatus, int waitMs)
+    {
+        if (!_confs.TryGetValue(id, out var c))
+            throw new ApiException(404, "RECORDING_NOT_FOUND", "Confirmation not found");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool timedOut = WaitForStateChange(() => !string.Equals(c.Status, sinceStatus, StringComparison.OrdinalIgnoreCase), waitMs);
+        sw.Stop();
+
+        bool changed = !string.Equals(c.Status, sinceStatus, StringComparison.OrdinalIgnoreCase);
+        int? nextPollHintMs = string.Equals(c.Status, "pending", StringComparison.OrdinalIgnoreCase) ? 500 : null;
+
+        return new
+        {
+            ConfirmationId = c.Id,
+            Status = c.Status,
+            RecordingId = c.RecordingId,
+            Wait = new { RequestedMs = waitMs, ElapsedMs = (int)sw.ElapsedMilliseconds, TimedOut = timedOut },
+            NextPollHintMs = nextPollHintMs
+        };
+    }
+
+    /// <summary>
+    /// Long-polling wait for recording status change.
+    /// Returns immediately if status != since_status or if wait_ms expires.
+    /// Uses case-insensitive status comparison and deadline-based remaining time.
+    /// </summary>
+    public object GetStatusWait(string id, string sinceStatus, int waitMs)
+    {
+        var rec = Get(id);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool timedOut = WaitForStateChange(() => !string.Equals(rec.State.ToString(), sinceStatus, StringComparison.OrdinalIgnoreCase), waitMs);
+        sw.Stop();
+
+        return BuildStatusWaitResponse(rec, waitMs, (int)sw.ElapsedMilliseconds, timedOut);
+    }
+
+    /// <summary>
+    /// Shared wait logic: blocks on _lock using Monitor.Wait with remaining time.
+    /// _stateVersion is only a wake-up signal; after waking, the predicate is re-evaluated.
+    /// This prevents unrelated state changes from causing premature returns.
+    /// </summary>
+    private bool WaitForStateChange(Func<bool> predicate, int waitMs)
+    {
+        if (predicate())
+            return false;
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(waitMs);
+
+        lock (_lock)
+        {
+            while (!predicate())
+            {
+                var remaining = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+                if (remaining <= 0)
+                    return true;
+
+                Monitor.Wait(_lock, remaining);
+                // After waking (spurious or PulseAll), re-evaluate predicate.
+                // Do NOT check _stateVersion; unrelated changes must not break the loop.
+            }
+        }
+
+        return false;
+    }
+
+    private object BuildStatusWaitResponse(Recording rec, int requestedMs, int elapsedMs, bool timedOut)
+    {
+        var elapsed = rec.State == RecState.recording
+            ? (int)(DateTime.UtcNow - rec.StartedAtUtc).TotalSeconds : 0;
+        var meta = rec.LastMeta;
+        string actualPath = meta?.OutputPath ?? rec.OutputPath;
+
+        // next_poll_hint_ms: null for terminal states, 1000 for active states.
+        bool isTerminal = rec.State is RecState.completed or RecState.failed or RecState.cancelled
+            or RecState.rejected or RecState.expired;
+        int? nextPollHintMs = isTerminal ? null : 1000;
+
+        return new
+        {
+            RecordingId = rec.Id,
+            Status = rec.State.ToString(),
+            Source = new { Type = rec.SourceType, Title = rec.SourceTitle },
+            Backend = rec.BackendType,
+            StartedAt = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
+            CompletedAt = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
+            ElapsedSeconds = elapsed,
+            Audio = new { Microphone = new { Enabled = rec.Microphone } },
+            Output = new
+            {
+                Path = actualPath,
+                BytesWritten = SafeSize(actualPath),
+                DurationSeconds = meta?.DurationSeconds ?? 0,
+                Container = meta?.Container ?? "",
+                Codec = meta?.Codec ?? "",
+                Width = meta?.Width ?? 0,
+                Height = meta?.Height ?? 0,
+                CaptureMethod = meta?.CaptureMethod ?? "",
+                FfmpegExitCode = rec.ExitCode
+            },
+            Warnings = rec.Warnings.ToArray(),
+            StderrExcerpt = rec.StderrExcerpt ?? "",
+            Nested = new
+            {
+                Role = rec.NestedRole ?? "none",
+                SessionId = rec.NestedSessionId ?? "",
+                ParentRecordingId = rec.ParentRecordingId ?? "",
+                IsParent = rec.IsNestedParent
+            },
+            Wait = new { RequestedMs = requestedMs, ElapsedMs = elapsedMs, TimedOut = timedOut },
+            NextPollHintMs = nextPollHintMs
+        };
     }
 
     public IEnumerable<object> List() => _recs.Values.Select(r => new

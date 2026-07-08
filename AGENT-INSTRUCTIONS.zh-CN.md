@@ -299,6 +299,47 @@ AgentRecorder.Cli.exe autostart disable --json
 
 复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、音频配置等）仍可使用原始 `POST /api/v1/recordings`。
 
+### 上下文快照（减少往返）
+
+服务启动后，优先调用 `/capabilities` 获取 `context` 快照，基于以下信息决策：
+
+```json
+{
+  "context": {
+    "displays": {
+      "available": true,
+      "count": 2,
+      "primary_display_id": "display_1",
+      "virtual_bounds": { "x": -1920, "y": 0, "width": 3840, "height": 1080 },
+      "items": [...]
+    },
+    "windows": {
+      "available": true,
+      "active": {
+        "id": "window_123456",
+        "title": "ChatGPT - Chrome",
+        "app_name": "chrome.exe"
+      },
+      "items_sample": [...]
+    },
+    "last_selected_region": {
+      "available": true,
+      "bounds": { "x": 100, "y": 150, "width": 800, "height": 600 }
+    }
+  }
+}
+```
+
+**决策逻辑：**
+
+| 用户请求 | 条件 | 推荐 action |
+|----------|------|-------------|
+| "录当前窗口" | `context.windows.active != null` | 使用 `quick_recipes.record_active_window` |
+| "录当前窗口" | `context.windows.active == null` | 提示用户聚焦窗口或改用 `selected_region` |
+| "录主屏幕" | `context.displays.primary_display_id != null` | 使用 `quick_recipes.record_primary_display` |
+| "录上次选区" | `context.last_selected_region != null` | 使用上次选区 bounds 创建 region 录制 |
+| "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用其他方式 |
+
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 
 推荐用 quick API 的 `selected_region`，因为“当前对话窗口”对 AI agent 来说可能不等同于稳定窗口句柄。
@@ -342,18 +383,18 @@ X-Agent-Name: <your-agent-name>
 选区已确认。请在本地确认窗口或系统托盘中批准录制。录制会在你确认后开始。
 ```
 
-5. 轮询：
+5. 使用长轮询等待确认状态变化（推荐）：
 
 ```http
-GET /api/v1/confirmations/{confirmation_id}
+GET /api/v1/confirmations/{confirmation_id}?wait_ms=25000&since_status=pending
 ```
 
 直到 `status=approved` 并取得 `recording_id`。如果状态是 `rejected` 或 `expired`，向用户说明录制没有开始。
 
-6. 轮询：
+6. 使用长轮询等待录制状态变化（推荐）：
 
 ```http
-GET /api/v1/recordings/{recording_id}
+GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording
 ```
 
 直到 `status=completed`，然后向用户报告：

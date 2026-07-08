@@ -88,13 +88,103 @@ Quick recipe fields:
     "quick_recording_supported": true,
     "quick_recording_endpoint": "/api/v1/recordings/quick",
     "quick_recipes": [
-      { "name": "record_primary_display", "target_type": "primary_display" },
-      { "name": "record_active_window", "target_type": "active_window" },
-      { "name": "record_selected_region", "target_type": "selected_region" }
+      {
+        "name": "record_primary_display",
+        "target_type": "primary_display",
+        "endpoint": "/api/v1/recordings/quick",
+        "method": "POST",
+        "request_template": { "target": { "type": "primary_display" } },
+        "available": true,
+        "unavailable_reason": null
+      },
+      {
+        "name": "record_active_window",
+        "target_type": "active_window",
+        "endpoint": "/api/v1/recordings/quick",
+        "method": "POST",
+        "request_template": { "target": { "type": "active_window" } },
+        "available": true,
+        "unavailable_reason": null
+      },
+      {
+        "name": "record_selected_region",
+        "target_type": "selected_region",
+        "endpoint": "/api/v1/recordings/quick",
+        "method": "POST",
+        "request_template": { "target": { "type": "selected_region" } },
+        "available": true,
+        "unavailable_reason": null
+      }
     ]
   }
 }
 ```
+
+### Context Snapshot
+
+The response includes a `context` object that provides a snapshot of system state, reducing the need for separate calls to `/displays`, `/windows`, and `/windows/active`:
+
+```json
+{
+  "context": {
+    "snapshot_at": "2026-07-07T09:30:00.000Z",
+    "displays": {
+      "available": true,
+      "count": 2,
+      "primary_display_id": "display_1",
+      "virtual_bounds": { "x": -1920, "y": 0, "width": 3840, "height": 1080 },
+      "items": [
+        {
+          "id": "display_1",
+          "name": "Display 1",
+          "is_primary": true,
+          "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+          "scale_factor": 1.0
+        }
+      ],
+      "error": null
+    },
+    "windows": {
+      "available": true,
+      "active": {
+        "id": "window_123456",
+        "title": "ChatGPT - Chrome",
+        "app_name": "chrome.exe",
+        "process_id": 1234,
+        "is_minimized": false,
+        "bounds": { "x": 10, "y": 20, "width": 1200, "height": 800 }
+      },
+      "visible_count": 8,
+      "items_sample": [
+        {
+          "id": "window_123456",
+          "title": "ChatGPT - Chrome",
+          "app_name": "chrome.exe",
+          "process_id": 1234,
+          "is_active": true,
+          "is_minimized": false,
+          "bounds": { "x": 10, "y": 20, "width": 1200, "height": 800 }
+        }
+      ],
+      "sample_limit": 10,
+      "error": null
+    },
+    "last_selected_region": {
+      "available": true,
+      "display_id": "display_1",
+      "coordinate_space": "virtual_screen",
+      "bounds": { "x": 100, "y": 150, "width": 800, "height": 600 },
+      "updated_at": "2026-07-07T09:30:00.000Z",
+      "source": "quick_selected_region"
+    }
+  }
+}
+```
+
+**Notes:**
+- `displays` and `windows` may return `available: false` with an `error` message if enumeration fails
+- `last_selected_region` is `null` if no region has been selected
+- The API returns 200 even if context enumeration partially fails
 
 ## Quick Recording
 
@@ -288,12 +378,85 @@ Nested inner:
 
 ## Confirmation And Status
 
+### Immediate Queries
+
 ```http
 GET /confirmations/{confirmation_id}
 GET /recordings/{recording_id}
 GET /recordings/{recording_id}/output
 POST /recordings/{recording_id}/stop
 ```
+
+### Long-Polling (Recommended)
+
+Wait for status changes instead of frequent short polling:
+
+```http
+GET /confirmations/{confirmation_id}?wait_ms=25000&since_status=pending
+GET /recordings/{recording_id}?wait_ms=25000&since_status=recording
+```
+
+Parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `wait_ms` | Maximum wait in milliseconds (max 25000) |
+| `since_status` | Known status at request time (case-insensitive) |
+
+Behavior:
+
+- If current status differs from `since_status`: return immediately
+- If current status equals `since_status`: wait until change or timeout
+- On timeout, return current status without error
+
+Long-polling response includes additional fields:
+
+```json
+{
+  "confirmation_id": "conf_xxx",
+  "status": "approved",
+  "recording_id": "rec_xxx",
+  "wait": {
+    "requested_ms": 25000,
+    "elapsed_ms": 3200,
+    "timed_out": false
+  },
+  "next_poll_hint_ms": null
+}
+```
+
+```json
+{
+  "recording_id": "rec_xxx",
+  "status": "completed",
+  "output": { "path": "...", "duration_seconds": 300.0 },
+  "wait": {
+    "requested_ms": 25000,
+    "elapsed_ms": 15200,
+    "timed_out": false
+  },
+  "next_poll_hint_ms": null
+}
+```
+
+New fields:
+
+| Field | Description |
+|-------|-------------|
+| `wait` | Wait info object |
+| `wait.requested_ms` | Requested wait duration in milliseconds |
+| `wait.elapsed_ms` | Actual wait duration in milliseconds |
+| `wait.timed_out` | Whether returned due to timeout (`false` = immediate or early return, `true` = timeout) |
+| `next_poll_hint_ms` | Suggested polling interval; `null` for terminal states, `500` for confirmation pending, `1000` for recording active |
+
+`since_status` comparison is case-insensitive.
+
+Recommended usage:
+
+1. Use long-polling `wait_ms=25000&since_status=pending` for confirmations
+2. Use long-polling `wait_ms=25000&since_status=<last_status>` for recordings
+3. After timeout, follow `next_poll_hint_ms` or retry long-polling
+4. Stop polling when status reaches terminal states
 
 Recording states:
 

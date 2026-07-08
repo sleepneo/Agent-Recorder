@@ -230,6 +230,108 @@ GET /capabilities
 
 预热状态值：`not_started` | `running` | `completed` | `failed` | `skipped`
 
+### 上下文快照（推荐）
+
+服务启动后，优先调用 `/capabilities` 获取 `context` 快照，可以减少额外调用 `/displays`、`/windows`、`/windows/active` 的次数。
+
+```json
+{
+  "context": {
+    "snapshot_at": "2026-07-07T09:30:00.000Z",
+    "displays": {
+      "available": true,
+      "count": 2,
+      "primary_display_id": "display_1",
+      "virtual_bounds": { "x": -1920, "y": 0, "width": 3840, "height": 1080 },
+      "items": [
+        {
+          "id": "display_1",
+          "name": "Display 1",
+          "is_primary": true,
+          "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
+          "scale_factor": 1.0
+        }
+      ],
+      "error": null
+    },
+    "windows": {
+      "available": true,
+      "active": {
+        "id": "window_123456",
+        "title": "ChatGPT - Chrome",
+        "app_name": "chrome.exe",
+        "process_id": 1234,
+        "is_minimized": false,
+        "bounds": { "x": 10, "y": 20, "width": 1200, "height": 800 }
+      },
+      "visible_count": 8,
+      "items_sample": [
+        {
+          "id": "window_123456",
+          "title": "ChatGPT - Chrome",
+          "app_name": "chrome.exe",
+          "process_id": 1234,
+          "is_active": true,
+          "is_minimized": false,
+          "bounds": { "x": 10, "y": 20, "width": 1200, "height": 800 }
+        }
+      ],
+      "sample_limit": 10,
+      "error": null
+    },
+    "last_selected_region": {
+      "available": true,
+      "display_id": "display_1",
+      "coordinate_space": "virtual_screen",
+      "bounds": { "x": 100, "y": 150, "width": 800, "height": 600 },
+      "updated_at": "2026-07-07T09:30:00.000Z",
+      "source": "quick_selected_region"
+    }
+  }
+}
+```
+
+**context.displays 字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `available` | 是否可用 |
+| `count` | 显示器数量 |
+| `primary_display_id` | 主显示器 ID |
+| `virtual_bounds` | 虚拟屏幕总边界 |
+| `items` | 显示器列表 |
+| `error` | 错误信息（不可用时） |
+
+**context.windows 字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `available` | 是否可用 |
+| `active` | 当前激活窗口 |
+| `visible_count` | 可见窗口总数 |
+| `items_sample` | 最多 10 个窗口样本（active 排在首位） |
+| `sample_limit` | 样本上限 |
+| `error` | 错误信息（不可用时） |
+
+**context.last_selected_region 字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `available` | 是否有历史选区 |
+| `display_id` | 选区所在显示器 |
+| `coordinate_space` | 坐标空间（`virtual_screen`） |
+| `bounds` | 选区边界 |
+| `updated_at` | 更新时间 |
+| `source` | 来源（`region_selection` 或 `quick_selected_region`） |
+
+**agent 使用建议：**
+
+- 启动后优先调用 `/capabilities` 获取 `context` 快照
+- 对“录当前窗口”“录主屏幕”“录上次选区”这类请求，优先基于 `context` 和 `quick_recipes` 决策
+- 如果 `context.windows.active == null`，应让用户聚焦窗口或改用 `selected_region`
+- 如果 `context.last_selected_region == null`，不要假设存在上次选区
+- 显示器/窗口枚举失败时，`/capabilities` 仍返回 200，错误信息在对应 `error` 字段中
+
 ### 就绪文件（推荐）
 
 服务启动成功后还会写入 `<data-dir>\runtime\ready.json`，AI Agent 可以轮询该文件判断服务就绪，无需盲轮询 `/capabilities`。
@@ -578,6 +680,8 @@ AI agent 必须等待本地用户确认。
 
 ## 7. 查询确认状态
 
+### 普通查询（立即返回）
+
 ```http
 GET /confirmations/{confirmation_id}
 X-Agent-Recorder-Key: <api-key>
@@ -592,6 +696,60 @@ X-Agent-Recorder-Key: <api-key>
   "recording_id": "rec_xxx"
 }
 ```
+
+### 长轮询（推荐，减少往返）
+
+```http
+GET /confirmations/{confirmation_id}?wait_ms=25000&since_status=pending
+X-Agent-Recorder-Key: <api-key>
+```
+
+参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `wait_ms` | 最大等待毫秒数（上限 25000） |
+| `since_status` | 当前已知状态（大小写不敏感） |
+
+行为规则：
+
+- 如果当前状态不同于 `since_status`：立即返回当前状态
+- 如果当前状态等于 `since_status`：等待直到状态变化或超时
+- 超时后返回当前状态，不返回错误
+
+长轮询返回：
+
+```json
+{
+  "confirmation_id": "confirm_xxx",
+  "status": "approved",
+  "recording_id": "rec_xxx",
+  "wait": {
+    "requested_ms": 25000,
+    "elapsed_ms": 3200,
+    "timed_out": false
+  },
+  "next_poll_hint_ms": null
+}
+```
+
+新增字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `wait` | 等待信息对象 |
+| `wait.requested_ms` | 请求的等待毫秒数 |
+| `wait.elapsed_ms` | 实际等待的毫秒数 |
+| `wait.timed_out` | 是否因超时返回（`false`=立即返回或状态变化提前返回，`true`=超时） |
+| `next_poll_hint_ms` | 下次轮询建议毫秒数；`null` 表示已终止无需轮询，`500` 表示仍在 pending 建议继续 |
+
+`since_status` 比较不区分大小写。
+
+推荐用法：
+
+1. 优先使用长轮询 `wait_ms=25000&since_status=pending`
+2. 超时后根据 `next_poll_hint_ms` 继续轮询或再次长轮询
+3. 状态变为 `approved/rejected/expired` 后停止轮询
 
 状态：
 
@@ -611,6 +769,8 @@ POST /confirmations/{id}/approve
 该接口会返回 405。AI agent 不得绕过本地确认。
 
 ## 8. 查询录制状态
+
+### 普通查询（立即返回）
 
 ```http
 GET /recordings/{recording_id}
@@ -633,6 +793,65 @@ X-Agent-Recorder-Key: <api-key>
   }
 }
 ```
+
+### 长轮询（推荐，减少往返）
+
+```http
+GET /recordings/{recording_id}?wait_ms=25000&since_status=recording
+X-Agent-Recorder-Key: <api-key>
+```
+
+参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `wait_ms` | 最大等待毫秒数（上限 25000） |
+| `since_status` | 当前已知状态（大小写不敏感） |
+
+行为规则：
+
+- 如果当前状态不同于 `since_status`：立即返回当前状态
+- 如果当前状态等于 `since_status`：等待直到状态变化或超时
+- 超时后返回当前状态，不返回错误
+
+长轮询返回：
+
+```json
+{
+  "recording_id": "rec_xxx",
+  "status": "completed",
+  "elapsed_seconds": 300,
+  "output": {
+    "path": "...\\recording-2026-07-02-120000.mp4",
+    "bytes_written": 1234567,
+    "duration_seconds": 300.0
+  },
+  "wait": {
+    "requested_ms": 25000,
+    "elapsed_ms": 15200,
+    "timed_out": false
+  },
+  "next_poll_hint_ms": null
+}
+```
+
+新增字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `wait` | 等待信息对象 |
+| `wait.requested_ms` | 请求的等待毫秒数 |
+| `wait.elapsed_ms` | 实际等待的毫秒数 |
+| `wait.timed_out` | 是否因超时返回（`false`=立即返回或状态变化提前返回，`true`=超时） |
+| `next_poll_hint_ms` | 下次轮询建议毫秒数；`null` 表示已终止无需轮询，`1000` 表示仍在进行建议继续 |
+
+`since_status` 比较不区分大小写。
+
+推荐用法：
+
+1. 根据当前状态传 `since_status=<last_status>`，`wait_ms=25000`
+2. 超时后根据 `next_poll_hint_ms` 继续轮询或再次长轮询
+3. 状态变为 `completed/failed/cancelled/rejected/expired` 后停止轮询
 
 状态：
 
@@ -731,7 +950,20 @@ X-Agent-Recorder-Key: <api-key>
 
 限制：当前 MVP 最多 2 个并发录制，即 1 个 outer + 1 个 inner。
 
-## 11. AI agent 推荐轮询节奏
+## 11. AI agent 推荐轮询策略
+
+### 长轮询优先（推荐）
+
+优先使用长轮询等待状态变化，减少 HTTP 往返：
+
+- `/confirmations/{id}?wait_ms=25000&since_status=pending`：等待确认状态变化
+- `/recordings/{id}?wait_ms=25000&since_status=<last_status>`：等待录制状态变化
+
+超时后根据返回的 `next_poll_hint_ms` 继续长轮询。
+
+### 短轮询备用（不推荐）
+
+仅在无法使用长轮询时使用短轮询：
 
 - `/capabilities`：每 500ms 轮询，最多 30 秒。
 - `/confirmations/{id}`：每 500ms 轮询，最多 120 秒。

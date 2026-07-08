@@ -32,6 +32,9 @@ public sealed class ApiServer
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
     private CancellationTokenSource _cts = new();
 
+    private object? _lastSelectedRegion;
+    private readonly object _regionLock = new();
+
     public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
         RuntimeReadiness? readiness = null,
         WindowsAutoStartManager? autoStart = null,
@@ -280,7 +283,15 @@ public sealed class ApiServer
         var seg = sub.Trim('/').Split('/');
 
         if (seg.Length >= 2 && seg[0] == "confirmations" && method == "GET")
-            return ApiResponse.Ok(_engine.GetConfirmation(seg[1]), reqId);
+        {
+            var confId = seg[1];
+            // Long-polling: wait_ms + since_status
+            var waitMs = ParseWaitMs(req.Query.GetValueOrDefault("wait_ms"));
+            var sinceStatus = req.Query.GetValueOrDefault("since_status");
+            if (waitMs > 0 && !string.IsNullOrEmpty(sinceStatus))
+                return ApiResponse.Ok(_engine.GetConfirmationWait(confId, sinceStatus, waitMs), reqId);
+            return ApiResponse.Ok(_engine.GetConfirmation(confId), reqId);
+        }
 
         if (seg.Length >= 3 && seg[0] == "confirmations" && method == "POST"
             && (seg[2] == "approve" || seg[2] == "reject"))
@@ -295,7 +306,14 @@ public sealed class ApiServer
         {
             var id = seg[1];
             if (seg.Length == 2 && method == "GET")
+            {
+                // Long-polling: wait_ms + since_status
+                var waitMs = ParseWaitMs(req.Query.GetValueOrDefault("wait_ms"));
+                var sinceStatus = req.Query.GetValueOrDefault("since_status");
+                if (waitMs > 0 && !string.IsNullOrEmpty(sinceStatus))
+                    return ApiResponse.Ok(_engine.GetStatusWait(id, sinceStatus, waitMs), reqId);
                 return ApiResponse.Ok(_engine.GetStatus(id), reqId);
+            }
             if (seg.Length == 3 && method == "POST" && seg[2] == "stop")
                 return ApiResponse.Ok(_engine.Stop(id, ReasonFrom(reqBody)), reqId);
             if (seg.Length == 3 && method == "GET" && seg[2] == "output")
@@ -345,6 +363,20 @@ public sealed class ApiServer
             throw new ApiException(504, "SELECTION_TIMEOUT", "Region selection timed out");
 
         var result = tcs.Task.Result;
+
+        if (result.status == "selected")
+        {
+            var region = new
+            {
+                available = true,
+                display_id = result.displayId,
+                coordinate_space = result.coordSpace,
+                bounds = new { x = result.x, y = result.y, width = result.w, height = result.h },
+                updated_at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                source = "region_selection"
+            };
+            lock (_regionLock) { _lastSelectedRegion = region; }
+        }
 
         object response = result.status switch
         {
@@ -489,6 +521,19 @@ public sealed class ApiServer
                         }
                     };
 
+                    lock (_regionLock)
+                    {
+                        _lastSelectedRegion = new
+                        {
+                            available = true,
+                            display_id = sel.displayId,
+                            coordinate_space = sel.coordSpace,
+                            bounds = new { x = sel.x, y = sel.y, width = sel.w, height = sel.h },
+                            updated_at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                            source = "quick_selected_region"
+                        };
+                    }
+
                     var result = _engine.CreateRecording(cfg, agent, _tray);
                     var resolved = new JsonObject
                     {
@@ -609,6 +654,14 @@ public sealed class ApiServer
         catch { return "user_requested"; }
     }
 
+    private static int ParseWaitMs(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return 0;
+        if (int.TryParse(value, out var ms) && ms > 0)
+            return Math.Min(ms, 25000);
+        return 0;
+    }
+
     private static string PrewarmStatusToString(PrewarmStatus status) => status switch
     {
         PrewarmStatus.NotStarted => "not_started",
@@ -633,6 +686,15 @@ public sealed class ApiServer
                 && File.Exists(FfmpegLocator.FfprobePath);
         }
         catch { }
+
+        var displaysContext = BuildDisplaysContext();
+        var windowsContext = BuildWindowsContext();
+        var hasPrimaryDisplay = displaysContext.Available && displaysContext.PrimaryDisplayId != null;
+        var hasActiveWindow = windowsContext.Active != null;
+        var supportsRegionSelection = _tray.SupportsRegionSelectionUi;
+
+        object? lastRegion;
+        lock (_regionLock) { lastRegion = _lastSelectedRegion; }
 
         return new
         {
@@ -692,26 +754,194 @@ public sealed class ApiServer
                     {
                         name = "record_primary_display",
                         target_type = "primary_display",
-                        description = "Record the primary display with local confirmation."
+                        description = "Record the primary display with local confirmation.",
+                        endpoint = "/api/v1/recordings/quick",
+                        method = "POST",
+                        request_template = new { target = new { type = "primary_display" }, duration_seconds = 60 },
+                        available = hasPrimaryDisplay,
+                        unavailable_reason = hasPrimaryDisplay ? null : "no_primary_display"
                     },
                     new
                     {
                         name = "record_active_window",
                         target_type = "active_window",
-                        description = "Record the current active window with local confirmation."
+                        description = "Record the current active window with local confirmation.",
+                        endpoint = "/api/v1/recordings/quick",
+                        method = "POST",
+                        request_template = new { target = new { type = "active_window" }, duration_seconds = 60 },
+                        available = hasActiveWindow,
+                        unavailable_reason = hasActiveWindow ? null : "no_active_window"
                     },
                     new
                     {
                         name = "record_selected_region",
                         target_type = "selected_region",
-                        description = "Ask the local user to select a region, then create a recording with local confirmation."
+                        description = "Ask the local user to select a region, then create a recording with local confirmation.",
+                        endpoint = "/api/v1/recordings/quick",
+                        method = "POST",
+                        request_template = new { target = new { type = "selected_region" }, duration_seconds = 60 },
+                        available = supportsRegionSelection,
+                        unavailable_reason = supportsRegionSelection ? null : "headless_host"
                     }
                 }
             },
             safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
-            readiness = _readiness?.ToCapabilitiesObject()
+            readiness = _readiness?.ToCapabilitiesObject(),
+            context = new
+            {
+                snapshot_at = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                displays = new
+                {
+                    available = displaysContext.Available,
+                    count = displaysContext.Count,
+                    primary_display_id = displaysContext.PrimaryDisplayId,
+                    virtual_bounds = displaysContext.VirtualBounds,
+                    items = displaysContext.Items,
+                    error = displaysContext.Error
+                },
+                windows = new
+                {
+                    available = windowsContext.Available,
+                    active = windowsContext.Active,
+                    visible_count = windowsContext.VisibleCount,
+                    items_sample = windowsContext.ItemsSample,
+                    sample_limit = 10,
+                    error = windowsContext.Error
+                },
+                last_selected_region = lastRegion
+            }
         };
+    }
+
+    private (bool Available, int Count, string? PrimaryDisplayId, object? VirtualBounds, object[] Items, string? Error) BuildDisplaysContext()
+    {
+        try
+        {
+            var displays = SystemQuery.EnumDisplays();
+            var virtualBounds = SystemQuery.VirtualScreenBounds();
+
+            var items = displays.Select(d => new
+            {
+                id = d.id,
+                name = d.name,
+                is_primary = d.is_primary,
+                bounds = new { x = d.bounds.x, y = d.bounds.y, width = d.bounds.width, height = d.bounds.height },
+                scale_factor = d.scale_factor
+            }).ToArray();
+
+            return (
+                Available: displays.Count > 0,
+                Count: displays.Count,
+                PrimaryDisplayId: displays.FirstOrDefault(d => d.is_primary)?.id,
+                VirtualBounds: new { x = virtualBounds.x, y = virtualBounds.y, width = virtualBounds.width, height = virtualBounds.height },
+                Items: items,
+                Error: null
+            );
+        }
+        catch (Exception ex)
+        {
+            return (
+                Available: false,
+                Count: 0,
+                PrimaryDisplayId: null,
+                VirtualBounds: null,
+                Items: Array.Empty<object>(),
+                Error: ex.Message
+            );
+        }
+    }
+
+    private (bool Available, object? Active, int VisibleCount, object[] ItemsSample, string? Error) BuildWindowsContext()
+    {
+        SystemQuery.WindowInfo? activeWindow = null;
+        string? activeError = null;
+        try
+        {
+            activeWindow = SystemQuery.ActiveWindow();
+        }
+        catch (Exception ex)
+        {
+            activeError = "Failed to query active window: " + ex.Message;
+        }
+
+        List<SystemQuery.WindowInfo> windows = new();
+        string? enumError = null;
+        try
+        {
+            windows = SystemQuery.EnumWindows(includeMinimized: false, includeSystem: false);
+        }
+        catch (Exception ex)
+        {
+            enumError = "Failed to enumerate windows: " + ex.Message;
+        }
+
+        object? activeObj = null;
+        if (activeWindow != null)
+        {
+            activeObj = new
+            {
+                id = activeWindow.id,
+                title = activeWindow.title,
+                app_name = activeWindow.app_name,
+                process_id = activeWindow.process_id,
+                is_minimized = activeWindow.is_minimized,
+                bounds = new { x = activeWindow.bounds.x, y = activeWindow.bounds.y, width = activeWindow.bounds.width, height = activeWindow.bounds.height }
+            };
+        }
+
+        List<object> sample = new();
+        if (activeWindow != null)
+        {
+            sample.Add(new
+            {
+                id = activeWindow.id,
+                title = activeWindow.title,
+                app_name = activeWindow.app_name,
+                process_id = activeWindow.process_id,
+                is_active = true,
+                is_minimized = activeWindow.is_minimized,
+                bounds = new { x = activeWindow.bounds.x, y = activeWindow.bounds.y, width = activeWindow.bounds.width, height = activeWindow.bounds.height }
+            });
+        }
+
+        var activeId = activeWindow?.id;
+        int remaining = 10 - sample.Count;
+        if (remaining > 0 && windows.Count > 0)
+        {
+            sample.AddRange(windows
+                .Where(w => w.id != activeId)
+                .Take(remaining)
+                .Select(w => new
+                {
+                    id = w.id,
+                    title = w.title,
+                    app_name = w.app_name,
+                    process_id = w.process_id,
+                    is_active = w.is_active,
+                    is_minimized = w.is_minimized,
+                    bounds = new { x = w.bounds.x, y = w.bounds.y, width = w.bounds.width, height = w.bounds.height }
+                }));
+        }
+
+        string? combinedError = null;
+        if (activeError != null || enumError != null)
+        {
+            var parts = new List<string>();
+            if (activeError != null) parts.Add(activeError);
+            if (enumError != null) parts.Add(enumError);
+            combinedError = string.Join("; ", parts);
+        }
+
+        bool available = activeWindow != null || windows.Count > 0;
+
+        return (
+            Available: available,
+            Active: activeObj,
+            VisibleCount: windows.Count,
+            ItemsSample: sample.ToArray(),
+            Error: combinedError
+        );
     }
 
     private static object Permissions() => new
