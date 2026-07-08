@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -27,21 +26,26 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private readonly ToolStripMenuItem _approveItem;
     private readonly ToolStripMenuItem _rejectItem;
     private readonly ToolStripSeparator _confirmSep;
-    private Action<bool>? _pendingCallback;
+    private readonly Control _uiInvoker;
 
-    // Win32 API: 将 MessageBox 强制带到前台
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
+    // Confirmation queue
+    private readonly ConfirmationQueue _confirmationQueue = new();
+    private ConfirmationForm? _currentForm;
 
     public TrayContext(RecordingEngine engine, AuditLogger audit)
     {
         _engine = engine; _audit = audit;
 
+        // UI dispatcher control: a hidden control created on the UI thread, used for
+        // marshalling calls from HTTP worker threads back to the WinForms UI thread.
+        // We must not depend on the first open form because tray apps may have
+        // zero open forms, which would cause UI operations to run on the wrong thread.
+        _uiInvoker = new Control();
+        _ = _uiInvoker.Handle; // Force handle creation on this thread
+
         var menu = new ContextMenuStrip();
 
-        // 确认区域（仅在有待确认请求时显示，仅由本地用户从系统托盘菜单触发）
+        // Confirmation area (shown only when pending requests, only triggered by local user from tray menu)
         _approveItem = new ToolStripMenuItem("✓ 确认录屏", null, (_, _) => ApproveFromMenu())
         {
             Visible = false,
@@ -77,103 +81,207 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     }
 
     /// <summary>
-    /// 弹出录屏确认（仅限本地用户通过托盘菜单或 MessageBox 操作；不允许通过 HTTP API 远程确认）。
+    /// Pop up recording confirmation (only local user via tray menu or confirmation form; no HTTP API remote confirmation).
     /// </summary>
     public void RequestConfirmation(object summary, Action<bool> callback)
     {
-        if (_pendingCallback != null)
+        var s = JsonNode.Parse(JsonSerializer.Serialize(summary))!;
+        var confirmationId = GetString(s, "confirmation_id");
+        var recordingId = GetString(s, "recording_id");
+        var timeoutSeconds = GetInt(s, "timeout_seconds") ?? 60;
+
+        var item = new PendingConfirmationItem(
+            confirmationId,
+            recordingId,
+            summary,
+            callback,
+            timeoutSeconds);
+
+        _confirmationQueue.Enqueue(item);
+
+        _audit.Log("confirmation.ui_queued", new
         {
-            callback(false);
-            return;
-        }
-        _pendingCallback = callback;
+            confirmation_id = confirmationId,
+            recording_id = recordingId,
+            queue_count = _confirmationQueue.PendingCount
+        });
 
         RunOnUi(() =>
+        {
+            UpdateConfirmationMenu();
+
+            // If no current form showing, show the queue head
+            if (_currentForm == null || !_currentForm.Visible)
+            {
+                ShowCurrentConfirmation();
+            }
+        });
+    }
+
+    private void ShowCurrentConfirmation()
+    {
+        var current = _confirmationQueue.Current;
+        if (current == null)
+        {
+            HideConfirmationForm();
+            return;
+        }
+
+        var items = _confirmationQueue.GetAllItems();
+        var position = items.IndexOf(current) + 1;
+
+        // Close any existing form
+        if (_currentForm != null)
+        {
+            HideConfirmationForm();
+        }
+
+        _currentForm = new ConfirmationForm(current, position, items.Count, approved =>
+        {
+            if (approved)
+            {
+                _audit.Log("confirmation.ui_approved", new
+                {
+                    confirmation_id = current.ConfirmationId,
+                    recording_id = current.RecordingId
+                });
+                _confirmationQueue.ApproveCurrent();
+            }
+            else
+            {
+                _audit.Log("confirmation.ui_rejected", new
+                {
+                    confirmation_id = current.ConfirmationId,
+                    recording_id = current.RecordingId
+                });
+                _confirmationQueue.RejectCurrent();
+            }
+
+            RunOnUi(() =>
+            {
+                HideConfirmationForm();
+                UpdateConfirmationMenu();
+
+                // Show next item if available
+                if (_confirmationQueue.PendingCount > 0)
+                {
+                    ShowCurrentConfirmation();
+                }
+            });
+        });
+
+        try
+        {
+            _currentForm.Show();
+        }
+        catch (Exception ex)
+        {
+            _audit.Log("confirmation.form_show_error", new { error = ex.Message });
+        }
+    }
+
+    private void HideConfirmationForm()
+    {
+        if (_currentForm != null)
+        {
+            try { _currentForm.CloseWithoutResult(); } catch { }
+            _currentForm = null;
+        }
+    }
+
+    private void UpdateConfirmationMenu()
+    {
+        var count = _confirmationQueue.PendingCount;
+        if (count > 0)
         {
             _approveItem.Visible = true;
             _rejectItem.Visible = true;
             _confirmSep.Visible = true;
-            _statusItem.Text = "状态：● 等待确认（60s 内请操作）";
-            _icon.Text = "Agent Recorder — 等待确认";
-            _icon.ShowBalloonTip(5000, "✓ 请确认录屏请求",
-                "右键单击托盘图标，选择 \"确认录屏\"，\n或点击弹窗中的 \"是(Y)\" 按钮。",
-                ToolTipIcon.Warning);
-        });
+            _approveItem.Text = $"✓ 确认录屏 (1/{count})";
+            _rejectItem.Text = $"✗ 拒绝录屏 (1/{count})";
 
-        var s = JsonNode.Parse(JsonSerializer.Serialize(summary))!;
-        var msg = "AI 助手请求开始录屏\n\n" +
-                  $"录制范围：{s["source"]}\n" +
-                  $"麦克风：{s["audio"]}\n" +
-                  $"时长：{s["duration"]}\n" +
-                  $"保存位置：{s["output"]}\n\n" +
-                  "【也可以右键托盘图标，选择 \"确认录屏\" 来确认】\n\n" +
-                  "录屏可能包含敏感信息。请确认是否开始。";
-
-        var thread = new Thread(() =>
-        {
-            try
+            var current = _confirmationQueue.Current;
+            if (current != null)
             {
-                var r = MessageBox.Show(msg,
-                    "Agent Recorder — 录屏确认 【右键托盘图标也可确认】",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2,
-                    MessageBoxOptions.DefaultDesktopOnly);
-                InvokePending(r == DialogResult.Yes);
+                _statusItem.Text = $"状态：● 等待确认（{current.TimeoutSeconds}s 内请操作）";
+                _icon.Text = $"Agent Recorder — 等待确认 ({count})";
+                _icon.ShowBalloonTip(5000, "✓ 请确认录屏请求",
+                    $"当前队列有 {count} 个待确认请求。\n右键单击托盘图标确认或拒绝。",
+                    ToolTipIcon.Warning);
             }
-            catch (Exception ex)
-            {
-                _audit.Log("tray.messagebox_error", new { error = ex.Message });
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-    }
-
-    /// <summary>
-    /// 由托盘菜单项触发确认（仅限本地 UI；不可被 HTTP API 调用）。
-    /// </summary>
-    private void ApproveFromMenu()
-    {
-        _audit.Log("confirmation.approved_from_menu", new { });
-        InvokePending(true);
-    }
-
-    /// <summary>
-    /// 由托盘菜单项触发拒绝（仅限本地 UI；不可被 HTTP API 调用）。
-    /// </summary>
-    private void RejectFromMenu()
-    {
-        _audit.Log("confirmation.rejected_from_menu", new { });
-        InvokePending(false);
-    }
-
-    /// <summary>
-    /// 统一触发回调入口：确保只触发一次，并清理菜单状态
-    /// </summary>
-    private void InvokePending(bool approved)
-    {
-        var cb = _pendingCallback;
-        _pendingCallback = null;
-
-        RunOnUi(() =>
+        }
+        else
         {
             _approveItem.Visible = false;
             _rejectItem.Visible = false;
             _confirmSep.Visible = false;
-            if (approved)
+
+            if (_activeRecordings.Count > 0)
             {
-                _statusItem.Text = "状态：● 正在启动录制...";
-                _icon.Text = "Agent Recorder — 正在启动";
+                UpdateRecordingUi();
             }
             else
             {
                 _statusItem.Text = "状态：空闲";
                 _icon.Text = "Agent Recorder — 空闲";
             }
+        }
+    }
+
+    /// <summary>
+    /// Triggered by tray menu item to approve (only local UI; cannot be called by HTTP API).
+    /// </summary>
+    private void ApproveFromMenu()
+    {
+        var current = _confirmationQueue.Current;
+        if (current == null) return;
+
+        _audit.Log("confirmation.approved_from_menu", new
+        {
+            confirmation_id = current.ConfirmationId,
+            recording_id = current.RecordingId
         });
 
-        cb?.Invoke(approved);
+        _confirmationQueue.ApproveCurrent();
+
+        RunOnUi(() =>
+        {
+            HideConfirmationForm();
+            UpdateConfirmationMenu();
+
+            if (_confirmationQueue.PendingCount > 0)
+            {
+                ShowCurrentConfirmation();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Triggered by tray menu item to reject (only local UI; cannot be called by HTTP API).
+    /// </summary>
+    private void RejectFromMenu()
+    {
+        var current = _confirmationQueue.Current;
+        if (current == null) return;
+
+        _audit.Log("confirmation.rejected_from_menu", new
+        {
+            confirmation_id = current.ConfirmationId,
+            recording_id = current.RecordingId
+        });
+
+        _confirmationQueue.RejectCurrent();
+
+        RunOnUi(() =>
+        {
+            HideConfirmationForm();
+            UpdateConfirmationMenu();
+
+            if (_confirmationQueue.PendingCount > 0)
+            {
+                ShowCurrentConfirmation();
+            }
+        });
     }
 
     public void SetRecording(object rec)
@@ -208,6 +316,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     public void SetAllIdle() => RunOnUi(() =>
     {
         _activeRecordings.Clear();
+        _confirmationQueue.Clear(invokeCallbacks: false); // Don't invoke callbacks, engine manages expiration
+        HideConfirmationForm();
         SetAllIdleUi();
     });
 
@@ -223,7 +333,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 
     private void SetAllIdleUi()
     {
-        _pendingCallback = null;
         _icon.Text = "Agent Recorder — 空闲";
         _icon.Icon = SystemIcons.Application;
         _statusItem.Text = "状态：空闲";
@@ -237,8 +346,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         RunOnUi(() => _icon.ShowBalloonTip(4000, "录制失败", text, ToolTipIcon.Error));
 
     /// <summary>
-    /// 请求本地用户进行区域选择。弹出全屏选区窗口，用户拖拽选择后确认/取消。
-    /// 仅限本地 UI 交互；不允许通过 HTTP API 静默选择。
+    /// Request local user to select a region. Shows full-screen selection window.
+    /// Only local UI interaction; no HTTP API silent selection.
     /// </summary>
     public void RequestRegionSelection(int timeoutSeconds,
         Action<string, int, int, int, int, string, string> callback)
@@ -256,10 +365,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         };
 
         // Check displays first
-        var displays = Windows.SystemQuery.EnumDisplays();
+        var displays = SystemQuery.EnumDisplays();
         var displayCount = displays.Count;
         var processId = Environment.ProcessId;
-        var sessionId = Windows.Native.GetCurrentSessionId();
+        var sessionId = Native.GetCurrentSessionId();
 
         if (displayCount == 0)
         {
@@ -446,13 +555,37 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private void ExitApp()
     {
         _icon.Visible = false;
+        _confirmationQueue.Clear(invokeCallbacks: false);
+        HideConfirmationForm();
+        try { _uiInvoker.Dispose(); } catch { }
         Application.Exit();
     }
 
+    /// <summary>
+    /// Executes an action on the WinForms UI thread.
+    /// Uses a dedicated hidden _uiInvoker control instead of relying on the first open form
+    /// because tray applications may have zero open forms, which would cause UI
+    /// operations to incorrectly run on the calling thread (e.g., HTTP worker thread).
+    /// </summary>
     private void RunOnUi(Action a)
     {
-        if (Application.OpenForms.Count > 0 && Application.OpenForms[0]!.InvokeRequired)
-            Application.OpenForms[0]!.Invoke(a);
-        else a();
+        if (_uiInvoker.InvokeRequired)
+            _uiInvoker.BeginInvoke(a);
+        else
+            a();
+    }
+
+    private static string GetString(JsonNode node, string key)
+    {
+        var val = node[key];
+        if (val == null) return "";
+        return val.ToString();
+    }
+
+    private static int? GetInt(JsonNode node, string key)
+    {
+        var val = node[key];
+        if (val == null) return null;
+        return (int?)val;
     }
 }

@@ -378,6 +378,22 @@ Nested inner:
 
 ## Confirmation And Status
 
+### Local Confirmation Flow
+
+When a recording requires confirmation, Agent Recorder shows a local confirmation form (non-blocking modeless window):
+
+- **Confirmation Form**: Displays recording info (source, duration, audio, output path, nested role, recording ID, confirmation ID, timeout), user clicks "Approve" or Enter to approve, clicks "Reject" or Esc/X to reject.
+- **Tray Menu**: Right-click tray icon, select "Approve recording" or "Reject recording".
+
+Multiple pending requests enter a **local confirmation queue**, not auto-rejected when there's already a pending confirmation. Queue items are processed in order, next item shows automatically after current completes.
+
+**Queue Features**:
+- Tray menu shows queue position, e.g., "Approve recording (1/2)"
+- Confirmation form shows current item info, next item shows after close
+- User actions affect only current queue head, not subsequent items
+
+**Important**: AI agents cannot approve or reject recordings, only wait for status changes. Use long-polling for efficient waiting.
+
 ### Immediate Queries
 
 ```http

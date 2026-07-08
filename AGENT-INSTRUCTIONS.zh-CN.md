@@ -297,6 +297,22 @@ AgentRecorder.Cli.exe autostart disable --json
 
 **注意**：quick API 仍然需要本地用户确认才能真正开始录制。在用户确认前，不要声称"录制已经开始"。
 
+### 本地确认队列
+
+多个待确认请求会进入**本地确认队列**，不会因为已有 pending confirmation 就被自动拒绝。用户操作流程：
+
+- Agent Recorder 弹出本地确认窗体（非阻塞 modeless），显示录制信息
+- 托盘菜单显示队列位置，如「确认录屏 (1/2)」「拒绝录屏 (1/2)」
+- 用户点击「确认」(Enter) 或「拒绝」(Esc/X) 操作当前队首
+- 当前项完成后自动显示下一个待确认项
+
+**AI agent 行为**：
+- 只能等待确认状态变化，不能批准或拒绝
+- 推荐使用长轮询：`GET /confirmations/{id}?wait_ms=25000&since_status=pending`
+- 状态 `approved` -> 录制开始，获取 `recording_id`
+- 状态 `rejected` -> 录制被拒绝，告知用户
+- 状态 `expired` -> 确认超时，建议重试
+
 复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、音频配置等）仍可使用原始 `POST /api/v1/recordings`。
 
 ### 上下文快照（减少往返）

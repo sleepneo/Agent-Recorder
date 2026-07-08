@@ -222,7 +222,21 @@ public sealed class RecordingEngine
             BumpStateVersion();
             _audit.Log("confirmation.created", new { recording_id = rec.Id, confirmation_id = conf.Id, nested_role = rec.NestedRole ?? "none" });
 
-            tray.RequestConfirmation(summary, approved =>
+            // Add metadata to summary for tray UI
+            var summaryWithMeta = new
+            {
+                source = GetSummaryField(summary, "source"),
+                audio = GetSummaryField(summary, "audio"),
+                duration = GetSummaryField(summary, "duration"),
+                output = GetSummaryField(summary, "output"),
+                nested_role = GetSummaryField(summary, "nested_role"),
+                recording_id = rec.Id,
+                confirmation_id = conf.Id,
+                timeout_seconds = conf.TimeoutSeconds,
+                expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            };
+
+            tray.RequestConfirmation(summaryWithMeta, approved =>
             {
                 if (conf.Status != "pending") return;
                 if (approved)
@@ -256,7 +270,7 @@ public sealed class RecordingEngine
             {
                 status = "requires_user_confirmation",
                 confirmation_id = conf.Id,
-                summary
+                summary = summaryWithMeta
             };
         }
 
@@ -752,4 +766,13 @@ public sealed class RecordingEngine
 
     private static long SafeSize(string p) { try { return new FileInfo(p).Length; } catch { return 0; } }
     private static string Iso(DateTime t) => t.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+    private static string GetSummaryField(object summary, string field)
+    {
+        var type = summary.GetType();
+        var prop = type.GetProperty(field);
+        if (prop == null) return "";
+        var value = prop.GetValue(summary);
+        return value?.ToString() ?? "";
+    }
 }

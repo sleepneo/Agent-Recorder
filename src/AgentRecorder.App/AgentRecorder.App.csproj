@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="AgentRecorder.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\AgentRecorder.Api\AgentRecorder.Api.csproj" />
     <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
     <ProjectReference Include="..\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />

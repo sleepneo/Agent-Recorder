@@ -512,6 +512,54 @@ public class QuickRecordingApiTests
     }
 
     [Fact]
+    public async Task CreateRecording_SummaryContainsMetadataFields()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+            Assert.True(data.TryGetProperty("confirmation_id", out _));
+            Assert.True(data.TryGetProperty("summary", out var summary));
+
+            // Verify summary metadata fields
+            Assert.True(summary.TryGetProperty("recording_id", out _), "summary.recording_id missing");
+            Assert.True(summary.TryGetProperty("confirmation_id", out _), "summary.confirmation_id missing");
+            Assert.True(summary.TryGetProperty("timeout_seconds", out _), "summary.timeout_seconds missing");
+            Assert.True(summary.TryGetProperty("expires_at", out _), "summary.expires_at missing");
+
+            var confId = data.GetProperty("confirmation_id").GetString();
+            var summaryConfId = summary.GetProperty("confirmation_id").GetString();
+            Assert.Equal(confId, summaryConfId);
+
+            Assert.True(summary.GetProperty("timeout_seconds").GetInt32() > 0);
+            Assert.Contains("T", summary.GetProperty("expires_at").GetString()!);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
     public async Task Capabilities_ContextDisplays_ContainsAllFields()
     {
         var tray = new ControllableTray();

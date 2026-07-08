@@ -296,4 +296,75 @@ public class SecurityRegressionTests
         Assert.False(approveCallPattern,
             "test-recording-flow.ps1 不应包含 POST /confirmations/*/approve 调用 (需要手动用户确认)");
     }
+
+    // =====================================================================
+    // 7) TrayContext.RequestConfirmation 不再使用 MessageBox 作为主确认路径
+    // =====================================================================
+
+    [Fact]
+    public void TrayContext_RequestConfirmation_DoesNotUseMessageBoxAsMainPath()
+    {
+        // 源代码级检查：RequestConfirmation 不应该调用 MessageBox.Show 作为主确认路径
+        string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
+
+        // RequestConfirmation 方法不应该包含 MessageBox.Show
+        // 注意：MessageBox.Show 在 TrayContext 中已完全移除
+        Assert.DoesNotContain("MessageBox.Show", trayContext);
+    }
+
+    // =====================================================================
+    // 8) TrayContext 使用 ConfirmationQueue
+    // =====================================================================
+
+    [Fact]
+    public void TrayContext_UsesConfirmationQueue()
+    {
+        string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
+
+        // 必须使用 ConfirmationQueue
+        Assert.Contains("ConfirmationQueue", trayContext);
+        Assert.Contains("_confirmationQueue", trayContext);
+
+        // 必须使用 ConfirmationForm
+        Assert.Contains("ConfirmationForm", trayContext);
+
+        // 必须移除旧的 _pendingCallback 单回调模式
+        Assert.DoesNotContain("_pendingCallback", trayContext);
+    }
+
+    // =====================================================================
+    // 9) TrayContext.RunOnUi 不依赖 Application.OpenForms[0]
+    // =====================================================================
+
+    [Fact]
+    public void TrayContext_RunOnUi_DoesNotDependOnOpenForms()
+    {
+        // 源码级检查：TrayContext 必须有独立的 UI dispatcher，
+        // 不能依赖第一个打开的窗体，因为托盘应用可能没有打开的窗体，
+        // 这会导致 HTTP worker 线程上直接执行 UI 操作。
+        string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
+
+        // 必须有 _uiInvoker 或类似的独立调度机制
+        Assert.Contains("_uiInvoker", trayContext);
+        // 不应再使用 OpenForms 索引作为调度方式
+        Assert.DoesNotContain("OpenForms[0]", trayContext);
+    }
+
+    // =====================================================================
+    // 10) TrayContext 程序化关闭必须使用 CloseWithoutResult
+    // =====================================================================
+
+    [Fact]
+    public void TrayContext_ProgrammaticClose_UsesCloseWithoutResult()
+    {
+        // 源码级检查：所有程序化关闭当前确认窗体的路径都必须使用 CloseWithoutResult，
+        // 不能使用普通的 Close()，否则会误触发用户 X 关闭语义（reject callback）。
+        string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
+
+        // 必须包含 CloseWithoutResult 调用
+        Assert.Contains("CloseWithoutResult()", trayContext);
+
+        // 不应包含普通的 _currentForm.Close() 调用
+        Assert.DoesNotContain("_currentForm.Close()", trayContext);
+    }
 }
