@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Core;
@@ -138,36 +139,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 
         _currentForm = new ConfirmationForm(current, position, items.Count, approved =>
         {
-            if (approved)
-            {
-                _audit.Log("confirmation.ui_approved", new
-                {
-                    confirmation_id = current.ConfirmationId,
-                    recording_id = current.RecordingId
-                });
-                _confirmationQueue.ApproveCurrent();
-            }
-            else
-            {
-                _audit.Log("confirmation.ui_rejected", new
-                {
-                    confirmation_id = current.ConfirmationId,
-                    recording_id = current.RecordingId
-                });
-                _confirmationQueue.RejectCurrent();
-            }
-
-            RunOnUi(() =>
-            {
-                HideConfirmationForm();
-                UpdateConfirmationMenu();
-
-                // Show next item if available
-                if (_confirmationQueue.PendingCount > 0)
-                {
-                    ShowCurrentConfirmation();
-                }
-            });
+            ResolveCurrentConfirmation(approved, approved ? "confirmation.ui_approved" : "confirmation.ui_rejected");
         });
 
         try
@@ -187,6 +159,60 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             try { _currentForm.CloseWithoutResult(); } catch { }
             _currentForm = null;
         }
+    }
+
+    /// <summary>
+    /// Resolves the current confirmation by removing it from the queue and executing the callback.
+    /// UI updates happen synchronously on the UI thread, while the callback (which may involve
+    /// heavy operations like starting FFmpeg recording) is executed on a background thread.
+    /// This prevents blocking the UI thread and the queue lock during recording startup.
+    /// </summary>
+    private void ResolveCurrentConfirmation(bool approved, string auditEvent)
+    {
+        var current = _confirmationQueue.Current;
+        if (current == null) return;
+
+        var confirmationId = current.ConfirmationId;
+        var recordingId = current.RecordingId;
+
+        _audit.Log(auditEvent, new
+        {
+            confirmation_id = confirmationId,
+            recording_id = recordingId
+        });
+
+        var item = _confirmationQueue.ResolveCurrent();
+        if (item == null) return;
+
+        RunOnUi(() =>
+        {
+            HideConfirmationForm();
+            UpdateConfirmationMenu();
+
+            if (_confirmationQueue.PendingCount > 0)
+            {
+                ShowCurrentConfirmation();
+            }
+        });
+
+        Task.Run(() =>
+        {
+            try
+            {
+                item.InvokeCallback(approved);
+            }
+            catch (Exception ex)
+            {
+                _audit.Log("confirmation.callback_error", new
+                {
+                    confirmation_id = confirmationId,
+                    recording_id = recordingId,
+                    approved,
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                });
+            }
+        });
     }
 
     private void UpdateConfirmationMenu()
@@ -233,27 +259,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// </summary>
     private void ApproveFromMenu()
     {
-        var current = _confirmationQueue.Current;
-        if (current == null) return;
-
-        _audit.Log("confirmation.approved_from_menu", new
-        {
-            confirmation_id = current.ConfirmationId,
-            recording_id = current.RecordingId
-        });
-
-        _confirmationQueue.ApproveCurrent();
-
-        RunOnUi(() =>
-        {
-            HideConfirmationForm();
-            UpdateConfirmationMenu();
-
-            if (_confirmationQueue.PendingCount > 0)
-            {
-                ShowCurrentConfirmation();
-            }
-        });
+        ResolveCurrentConfirmation(true, "confirmation.approved_from_menu");
     }
 
     /// <summary>
@@ -261,27 +267,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// </summary>
     private void RejectFromMenu()
     {
-        var current = _confirmationQueue.Current;
-        if (current == null) return;
-
-        _audit.Log("confirmation.rejected_from_menu", new
-        {
-            confirmation_id = current.ConfirmationId,
-            recording_id = current.RecordingId
-        });
-
-        _confirmationQueue.RejectCurrent();
-
-        RunOnUi(() =>
-        {
-            HideConfirmationForm();
-            UpdateConfirmationMenu();
-
-            if (_confirmationQueue.PendingCount > 0)
-            {
-                ShowCurrentConfirmation();
-            }
-        });
+        ResolveCurrentConfirmation(false, "confirmation.rejected_from_menu");
     }
 
     public void SetRecording(object rec)

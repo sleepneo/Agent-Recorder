@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 using AgentRecorder.App;
 
@@ -222,5 +224,83 @@ public class ConfirmationQueueTests
         Assert.Equal(1, callbackCount); // Still 1
 
         Assert.True(item.CallbackCalled);
+    }
+
+    [Fact]
+    public async Task ApproveCurrent_CallbackNotExecutedUnderLock()
+    {
+        var queue = new ConfirmationQueue();
+        var callbackStarted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCompleted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool readSucceeded = false;
+
+        var item = new PendingConfirmationItem(
+            "conf_1", "rec_1", new { source = "test" },
+            _ =>
+            {
+                callbackStarted.TrySetResult(null);
+                Thread.Sleep(200);
+                callbackCompleted.TrySetResult(null);
+            },
+            60);
+
+        queue.Enqueue(item);
+
+        var approveTask = Task.Run(() => queue.ApproveCurrent());
+
+        await callbackStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        var readTask = Task.Run(() =>
+        {
+            var count = queue.PendingCount;
+            readSucceeded = true;
+        });
+
+        var completedRead = await Task.WhenAny(readTask, Task.Delay(500));
+        Assert.Same(readTask, completedRead);
+        await readTask;
+        Assert.True(readSucceeded, "Read operation succeeded");
+
+        await callbackCompleted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.True(await approveTask.WaitAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task Clear_WithInvokeCallbacks_DoesNotHoldLockWhileInvokingCallbacks()
+    {
+        var queue = new ConfirmationQueue();
+        var callbackStarted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackCompleted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool readSucceeded = false;
+
+        var item = new PendingConfirmationItem(
+            "conf_1", "rec_1", new { source = "test" },
+            _ =>
+            {
+                callbackStarted.TrySetResult(null);
+                Thread.Sleep(200);
+                callbackCompleted.TrySetResult(null);
+            },
+            60);
+
+        queue.Enqueue(item);
+
+        var clearTask = Task.Run(() => queue.Clear(invokeCallbacks: true));
+
+        await callbackStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        var readTask = Task.Run(() =>
+        {
+            var count = queue.PendingCount;
+            readSucceeded = true;
+        });
+
+        var completedRead = await Task.WhenAny(readTask, Task.Delay(500));
+        Assert.Same(readTask, completedRead);
+        await readTask;
+        Assert.True(readSucceeded, "Read operation succeeded");
+
+        await callbackCompleted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await clearTask.WaitAsync(TimeSpan.FromSeconds(1));
     }
 }

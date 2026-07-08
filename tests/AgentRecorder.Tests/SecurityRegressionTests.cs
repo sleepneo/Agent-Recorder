@@ -13,7 +13,7 @@ namespace AgentRecorder.Tests;
 /// 安全回归测试 (Task 18)。
 ///
 /// 安全边界：HTTP client 不得通过 API 自行批准或拒绝录屏确认。
-/// 录屏确认必须是本地用户在托盘菜单或 MessageBox 中操作。
+/// 录屏确认必须是本地用户在确认窗体或托盘菜单中操作。
 /// </summary>
 public class SecurityRegressionTests
 {
@@ -366,5 +366,36 @@ public class SecurityRegressionTests
 
         // 不应包含普通的 _currentForm.Close() 调用
         Assert.DoesNotContain("_currentForm.Close()", trayContext);
+    }
+
+    // =====================================================================
+    // 11) TrayContext 确认 callback 不应同步运行在 UI 路径
+    // =====================================================================
+
+    [Fact]
+    public void TrayContext_ConfirmationCallback_NotOnUiThread()
+    {
+        // 源码级检查：TrayContext 的确认/拒绝操作不应在 UI 线程同步执行外部 callback，
+        // callback（可能包含录制启动重逻辑）应该在后台线程执行。
+        string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
+
+        // 必须包含后台调度，例如 Task.Run
+        Assert.Contains("Task.Run(", trayContext);
+
+        // 必须包含统一的确认解析方法
+        Assert.Contains("ResolveCurrentConfirmation", trayContext);
+
+        // ApproveFromMenu 方法体内部不应直接调用 ApproveCurrent
+        // （因为 ApproveCurrent 会同步执行 callback，阻塞 UI 线程）
+        var approveFromMenuPattern = new System.Text.RegularExpressions.Regex(
+            @"private\s+void\s+ApproveFromMenu\s*\([^)]*\)\s*\{[\s\S]*?ApproveCurrent\s*\(",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        Assert.DoesNotMatch(approveFromMenuPattern, trayContext);
+
+        // RejectFromMenu 方法体内部不应直接调用 RejectCurrent
+        var rejectFromMenuPattern = new System.Text.RegularExpressions.Regex(
+            @"private\s+void\s+RejectFromMenu\s*\([^)]*\)\s*\{[\s\S]*?RejectCurrent\s*\(",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        Assert.DoesNotMatch(rejectFromMenuPattern, trayContext);
     }
 }

@@ -108,45 +108,47 @@ internal sealed class ConfirmationQueue
     }
 
     /// <summary>
-    /// Approve the current confirmation. Moves to next item if available.
-    /// Returns true if approved, false if no current or callback already called.
+    /// Resolves the current confirmation by removing it from the queue.
+    /// Does NOT invoke the callback - returns the item so callback can be invoked outside the lock.
+    /// Returns null if queue is empty or callback already called.
     /// </summary>
-    public bool ApproveCurrent()
+    public PendingConfirmationItem? ResolveCurrent()
     {
         lock (_lock)
         {
-            if (_items.Count == 0) return false;
+            if (_items.Count == 0) return null;
             var current = _items[0];
-            if (current.CallbackCalled) return false;
+            if (current.CallbackCalled) return null;
 
-            var invoked = current.InvokeCallback(true);
-            if (invoked)
-            {
-                _items.RemoveAt(0);
-            }
-            return invoked;
+            _items.RemoveAt(0);
+            return current;
         }
+    }
+
+    /// <summary>
+    /// Approve the current confirmation. Moves to next item if available.
+    /// Returns true if approved, false if no current or callback already called.
+    /// Callback is invoked outside the lock to avoid blocking queue operations.
+    /// </summary>
+    public bool ApproveCurrent()
+    {
+        var item = ResolveCurrent();
+        if (item == null) return false;
+        item.InvokeCallback(true);
+        return true;
     }
 
     /// <summary>
     /// Reject the current confirmation. Moves to next item if available.
     /// Returns true if rejected, false if no current or callback already called.
+    /// Callback is invoked outside the lock to avoid blocking queue operations.
     /// </summary>
     public bool RejectCurrent()
     {
-        lock (_lock)
-        {
-            if (_items.Count == 0) return false;
-            var current = _items[0];
-            if (current.CallbackCalled) return false;
-
-            var invoked = current.InvokeCallback(false);
-            if (invoked)
-            {
-                _items.RemoveAt(0);
-            }
-            return invoked;
-        }
+        var item = ResolveCurrent();
+        if (item == null) return false;
+        item.InvokeCallback(false);
+        return true;
     }
 
     /// <summary>
@@ -157,17 +159,27 @@ internal sealed class ConfirmationQueue
     /// If false, items are just removed without callback invocation (for engine-managed expiration).</param>
     public void Clear(bool invokeCallbacks = false)
     {
+        List<PendingConfirmationItem> toCallback = new();
+
         lock (_lock)
         {
             if (invokeCallbacks)
             {
                 foreach (var item in _items)
                 {
-                    // Invoke callback(false) for each item that hasn't been called yet
-                    item.InvokeCallback(false);
+                    if (!item.CallbackCalled)
+                    {
+                        toCallback.Add(item);
+                    }
                 }
             }
             _items.Clear();
+        }
+
+        // Invoke callbacks outside the lock
+        foreach (var item in toCallback)
+        {
+            item.InvokeCallback(false);
         }
     }
 
