@@ -9,8 +9,9 @@ namespace AgentRecorder.Tests;
 
 /// <summary>
 /// Unit tests for RegionSelectionGeometry pure functions.
-/// Tests virtual screen coordinate conversion, even-bound normalization,
-/// and display lookup without requiring WinForms or a real desktop.
+/// Tests virtual screen coordinate conversion, display lookup, preset sizing,
+/// aspect-ratio fitting, and even-bound normalization without requiring WinForms
+/// or a real desktop.
 /// </summary>
 public class RegionSelectionGeometryTests
 {
@@ -71,11 +72,12 @@ public class RegionSelectionGeometryTests
     [InlineData(1592, 892, 1592, 892)] // already even
     [InlineData(1593, 893, 1592, 892)] // odd -> even (minus 1)
     [InlineData(1594, 894, 1594, 894)] // already even
-    [InlineData(1, 1, 64, 64)]         // below min -> clamped to 64
-    [InlineData(63, 63, 64, 64)]       // just below min -> 64
+    [InlineData(1, 1, 32, 32)]         // below min -> clamped to 32
+    [InlineData(63, 63, 62, 62)]       // odd -> even (minus 1)
     [InlineData(65, 65, 64, 64)]        // odd above min -> 64
-    [InlineData(64, 64, 64, 64)]        // exactly min -> 64
-    [InlineData(0, 0, 64, 64)]           // zero -> minimum 64
+    [InlineData(64, 64, 64, 64)]        // exactly even min -> 64
+    [InlineData(32, 32, 32, 32)]        // exactly default min -> 32
+    [InlineData(0, 0, 32, 32)]           // zero -> minimum 32
     public void NormalizeEvenBounds_VariousInputs_ReturnsExpectedOutput(
         int inputW, int inputH, int expectedW, int expectedH)
     {
@@ -273,6 +275,188 @@ public class RegionSelectionGeometryTests
     }
 
     // -------------------------------------------------------------------------
+    // ClampSelectionToClientRectangle tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ClampSelectionToClientRectangle_Inside_ReturnsSame()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(100, 100, 800, 600);
+
+        var result = RegionSelectionGeometry.ClampSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(clientBounds, result.Value);
+    }
+
+    [Fact]
+    public void ClampSelectionToClientRectangle_PartiallyOutside_ReturnsClamped()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(1800, 900, 300, 300);
+
+        var result = RegionSelectionGeometry.ClampSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Right <= formBounds.Width);
+        Assert.True(result.Value.Bottom <= formBounds.Height);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+    }
+
+    [Fact]
+    public void ClampSelectionToClientRectangle_SmallerThanMin_Expands()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(100, 100, 10, 10);
+
+        var result = RegionSelectionGeometry.ClampSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(32, result.Value.Width);
+        Assert.Equal(32, result.Value.Height);
+    }
+
+    [Fact]
+    public void ClampSelectionToClientRectangle_CompletelyOutside_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(3000, 2000, 800, 600);
+
+        var result = RegionSelectionGeometry.ClampSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.Null(result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Preset size tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_CenteredOnScreen_ReturnsPresetSize()
+    {
+        // 1920x1080 virtual screen, center (960, 540)
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var centerVirtual = new Point(960, 540);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1280, 720));
+
+        Assert.NotNull(result);
+        Assert.Equal(1280, result.Value.Width);
+        Assert.Equal(720, result.Value.Height);
+        // Centered: left = 960 - 1280/2 = 320, top = 540 - 720/2 = 180
+        Assert.Equal(320, result.Value.Left);
+        Assert.Equal(180, result.Value.Top);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_ExceedsScreen_Clamped()
+    {
+        // Small 800x600 screen, preset 1920x1080 should be clamped.
+        var formBounds = new Rectangle(0, 0, 800, 600);
+        var centerVirtual = new Point(400, 300);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1920, 1080));
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width <= 800);
+        Assert.True(result.Value.Height <= 600);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_OddDimensions_NormalizedToEven()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var centerVirtual = new Point(960, 540);
+
+        // 1281x721 are odd -> should normalize to 1280x720
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1281, 721));
+
+        Assert.NotNull(result);
+        Assert.Equal(1280, result.Value.Width);
+        Assert.Equal(720, result.Value.Height);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_32x32Minimum_IsValid()
+    {
+        var formBounds = new Rectangle(0, 0, 100, 100);
+        var centerVirtual = new Point(50, 50);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(32, 32));
+
+        Assert.NotNull(result);
+        Assert.Equal(32, result.Value.Width);
+        Assert.Equal(32, result.Value.Height);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_NegativeCoordinateDisplay_DoesNotOverflow()
+    {
+        // Virtual screen starts at -2560, left display is -2560..0.
+        var formBounds = new Rectangle(-2560, 0, 6400, 2160);
+        var centerVirtual = new Point(-1280, 800); // center of left display
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1280, 720));
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+        Assert.True(result.Value.Right <= formBounds.Width);
+        Assert.True(result.Value.Bottom <= formBounds.Height);
+        Assert.True(result.Value.Left >= 0);
+        Assert.True(result.Value.Top >= 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Aspect ratio fit tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void FitAspectRatio_On1920x1080Screen_Returns16x9()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var centerVirtual = new Point(960, 540);
+
+        var result = RegionSelectionGeometry.FitAspectRatio(formBounds, centerVirtual, 16.0 / 9.0);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+        Assert.True(result.Value.Width <= 1920);
+        Assert.True(result.Value.Height <= 1080);
+        Assert.True(result.Value.Width % 2 == 0);
+        Assert.True(result.Value.Height % 2 == 0);
+        // Centered
+        Assert.Equal(960, result.Value.Left + result.Value.Width / 2);
+        Assert.Equal(540, result.Value.Top + result.Value.Height / 2);
+    }
+
+    [Fact]
+    public void FitAspectRatio_TallScreen_LimitedByHeight()
+    {
+        var formBounds = new Rectangle(0, 0, 3840, 1080);
+        var centerVirtual = new Point(1920, 540);
+
+        var result = RegionSelectionGeometry.FitAspectRatio(formBounds, centerVirtual, 16.0 / 9.0);
+
+        Assert.NotNull(result);
+        // Height limited to 1080, so width should be close to 1920 (16:9)
+        Assert.True(result.Value.Height <= 1080);
+        Assert.True(result.Value.Width <= 3840);
+        Assert.True(result.Value.Height >= 32);
+        Assert.True(result.Value.Width >= 32);
+    }
+
+    // -------------------------------------------------------------------------
     // Integration: full coordinate conversion flow
     // -------------------------------------------------------------------------
 
@@ -310,5 +494,147 @@ public class RegionSelectionGeometryTests
         var finalBounds = new Rectangle(virtualBounds.X, virtualBounds.Y, normW, normH);
         var displayId = RegionSelectionGeometry.FindDisplayId(finalBounds, displays);
         Assert.Equal("display_neg", displayId);
+    }
+
+    // -------------------------------------------------------------------------
+    // ClampSizedSelectionToClientRectangle tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ClampSizedSelectionToClientRectangle_NearRightEdge_TranslatesPreservesSize()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(1700, 200, 1280, 720);
+
+        var result = RegionSelectionGeometry.ClampSizedSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(1280, result.Value.Width);
+        Assert.Equal(720, result.Value.Height);
+        Assert.True(result.Value.Right <= 1920);
+        Assert.True(result.Value.Bottom <= 1080);
+    }
+
+    [Fact]
+    public void ClampSizedSelectionToClientRectangle_ClippedResultRemainsEven()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var clientBounds = new Rectangle(1800, 900, 200, 200);
+
+        var result = RegionSelectionGeometry.ClampSizedSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.Equal(200, result.Value.Width);
+        Assert.Equal(200, result.Value.Height);
+        Assert.True(result.Value.Width % 2 == 0);
+        Assert.True(result.Value.Height % 2 == 0);
+        Assert.True(result.Value.Right <= 1920);
+        Assert.True(result.Value.Bottom <= 1080);
+    }
+
+    [Fact]
+    public void ClampSizedSelectionToClientRectangle_LargerThanScreen_ShrinksToEvenScreenBounds()
+    {
+        var formBounds = new Rectangle(0, 0, 1001, 701);
+        var clientBounds = new Rectangle(0, 0, 1920, 1080);
+
+        var result = RegionSelectionGeometry.ClampSizedSelectionToClientRectangle(formBounds, clientBounds);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width <= 1001);
+        Assert.True(result.Value.Height <= 701);
+        Assert.True(result.Value.Width % 2 == 0);
+        Assert.True(result.Value.Height % 2 == 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Preset size near-edge tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_NearRightEdge_PreservesPresetWidthWhenScreenCanFit()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var centerVirtual = new Point(1800, 540);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1280, 720));
+
+        Assert.NotNull(result);
+        Assert.Equal(1280, result.Value.Width);
+        Assert.Equal(720, result.Value.Height);
+        Assert.True(result.Value.Right <= 1920);
+        Assert.Equal(640, result.Value.Left);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_NearBottomEdge_PreservesPresetHeightWhenScreenCanFit()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var centerVirtual = new Point(960, 900);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1280, 720));
+
+        Assert.NotNull(result);
+        Assert.Equal(1280, result.Value.Width);
+        Assert.Equal(720, result.Value.Height);
+        Assert.True(result.Value.Bottom <= 1080);
+        Assert.Equal(360, result.Value.Top);
+    }
+
+    [Fact]
+    public void ApplyPresetSizeAroundCenter_WhenPresetLargerThanScreen_ShrinksToEvenScreenBounds()
+    {
+        var formBounds = new Rectangle(0, 0, 1001, 701);
+        var centerVirtual = new Point(500, 350);
+
+        var result = RegionSelectionGeometry.ApplyPresetSizeAroundCenter(
+            formBounds, centerVirtual, new Size(1920, 1080));
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.Width <= 1001);
+        Assert.True(result.Value.Height <= 701);
+        Assert.True(result.Value.Width % 2 == 0);
+        Assert.True(result.Value.Height % 2 == 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // FindDisplayIdByOverlap no-overlap test
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void FindDisplayIdByOverlap_NoOverlap_ReturnsNull()
+    {
+        var displays = new List<DisplayInfo>
+        {
+            new DisplayInfo("display_1", "Display 1", true,
+                new Bounds(0, 0, 100, 100), 1.0),
+        };
+
+        var bounds = new Rectangle(150, 150, 20, 20);
+
+        var result = RegionSelectionGeometry.FindDisplayIdByOverlap(bounds, displays);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void FindDisplayIdByOverlap_TieKeepsFirstPositiveOverlap()
+    {
+        var displays = new List<DisplayInfo>
+        {
+            new DisplayInfo("display_1", "Display 1", true,
+                new Bounds(0, 0, 100, 200), 1.0),
+            new DisplayInfo("display_2", "Display 2", false,
+                new Bounds(100, 0, 100, 200), 1.0),
+        };
+
+        // 100x200 region from (50,0) overlaps each display by 50x200 = 10000
+        var bounds = new Rectangle(50, 0, 100, 200);
+
+        var result = RegionSelectionGeometry.FindDisplayIdByOverlap(bounds, displays);
+
+        Assert.Equal("display_1", result);
     }
 }
