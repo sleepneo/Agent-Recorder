@@ -10,6 +10,7 @@ using ApiException = AgentRecorder.Infrastructure.ApiException;
 
 namespace AgentRecorder.Tests;
 
+[Collection("NonParallel-SystemQueryProviders")]
 public class ConfigParserWindowTests : IDisposable
 {
     private static JsonNode ParseJson(string json) => JsonNode.Parse(json)!;

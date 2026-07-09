@@ -402,6 +402,44 @@ Nested inner:
 }
 ```
 
+### Preflight checks
+
+`POST /recordings` runs a **before-confirmation** preflight before creating the pending confirmation:
+
+- Output directory is writable.
+- Output drive has enough free space.
+- FFmpeg / FFprobe are available.
+- Capture bounds are valid (positive, even, ≥32×32, and overlap the virtual screen).
+
+If this preflight fails, the API returns 400 immediately and no confirmation is created. The response contains a stable `error.code` and `error.details.suggested_action`:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "OUTPUT_DIRECTORY_UNWRITABLE",
+    "message": "Output directory is not writable: ...",
+    "details": {
+      "suggested_action": "choose_another_output_directory",
+      "stage": "before_confirmation"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+After the user approves and before `StartCapture`, a **before-start** preflight re-runs the same checks and also verifies the target window/display is still available. If the re-check fails, the recording transitions to `failed`, `warnings` includes `preflight_failed: <ERROR_CODE>`, the audit log records `recording.preflight_failed`, and the tray shows a local error balloon. This prevents empty recordings when the target window is closed or minimized during confirmation.
+
+Common preflight error codes:
+
+| error_code | scenario | suggested_action |
+| --- | --- | --- |
+| `OUTPUT_DIRECTORY_UNWRITABLE` | Output directory cannot be created or written | `choose_another_output_directory` |
+| `INSUFFICIENT_DISK_SPACE` | Free space below safety threshold | `free_disk_space_or_choose_another_directory` |
+| `ENCODER_UNAVAILABLE` | FFmpeg or FFprobe not found | `check_ffmpeg_files_or_reinstall_package` |
+| `SOURCE_NOT_FOUND` | Target window/display disappeared | `choose_source_again` |
+| `SOURCE_UNAVAILABLE` | Target window minimized, too small, or off-screen | `restore_or_move_window_then_retry` |
+
 ## Confirmation And Status
 
 ### Local Confirmation Flow
@@ -509,7 +547,7 @@ Recording states:
 | `recording` | Recording is active |
 | `stopping` | Stop requested |
 | `completed` | Recording completed |
-| `failed` | Recording failed |
+| `failed` | Recording failed (including preflight re-check failures and backend errors) |
 | `cancelled` | Recording cancelled |
 | `rejected` | User rejected the confirmation |
 | `expired` | Confirmation timed out |

@@ -76,6 +76,10 @@ public static class ConfigParser
                 cap.SourceKind = "window";
                 cap.WindowTitle = wid;
                 cap.Bounds = (0, 0, 1280, 720);
+                // In test mode we still want a stable HWND so preflight can look it up
+                // via the injectable SystemQuery.SetWindowProvider seam.
+                if (WindowIdParser.TryParse(wid, out var hwnd))
+                    cap.WindowHandle = hwnd;
             }
             else
             {

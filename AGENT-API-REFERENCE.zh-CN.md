@@ -711,6 +711,44 @@ X-Agent-Name: <agent-name>
 
 AI agent 必须等待本地用户确认。
 
+### 录制前 preflight 检查
+
+`POST /recordings` 在创建 confirmation 之前会先执行一次 **before-confirmation** preflight：
+
+- 输出目录是否可写；
+- 输出磁盘剩余空间是否满足安全阈值；
+- FFmpeg / FFprobe 是否可用；
+- 捕获区域尺寸是否合法（正数、偶数、≥32×32、与虚拟屏幕有正面积重叠）。
+
+如果 before-confirmation 失败，API 立即返回 400，不会创建 pending confirmation，响应包含稳定 `error.code` 与 `error.details.suggested_action`：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "OUTPUT_DIRECTORY_UNWRITABLE",
+    "message": "Output directory 'D:\\recordings' is not writable: ...",
+    "details": {
+      "suggested_action": "choose_another_output_directory",
+      "stage": "before_confirmation"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+用户批准之后、真正启动 FFmpeg 之前会再次执行 **before-start** preflight，复查上述项目并额外检查目标窗口/显示器是否仍然可用。如果复查失败，录制状态会变为 `failed`，`warnings` 包含 `preflight_failed: <ERROR_CODE>`，审计日志记录 `recording.preflight_failed`，本地托盘弹出错误提示。这能避免"用户已确认但窗口已关闭"导致的空录制。
+
+常见 preflight 错误码：
+
+| error_code | 场景 | suggested_action |
+| --- | --- | --- |
+| `OUTPUT_DIRECTORY_UNWRITABLE` | 输出目录无法创建或写入临时文件 | `choose_another_output_directory` |
+| `INSUFFICIENT_DISK_SPACE` | 磁盘剩余空间低于安全阈值 | `free_disk_space_or_choose_another_directory` |
+| `ENCODER_UNAVAILABLE` | FFmpeg 或 FFprobe 不可用 | `check_ffmpeg_files_or_reinstall_package` |
+| `SOURCE_NOT_FOUND` | 目标窗口/显示器已消失 | `choose_source_again` |
+| `SOURCE_UNAVAILABLE` | 目标窗口最小化、过小或移出可捕获区域 | `restore_or_move_window_then_retry` |
+
 ### 本地确认流程
 
 当录制请求需要确认时，Agent Recorder 会弹出本地确认窗体（非阻塞 modeless 窗体），用户可以通过以下方式操作：
@@ -910,7 +948,7 @@ X-Agent-Recorder-Key: <api-key>
 | `pending_confirmation` | 等待确认 |
 | `recording` | 正在录制 |
 | `completed` | 已完成 |
-| `failed` | 失败 |
+| `failed` | 失败（包括 preflight 复查失败、FFmpeg 异常退出等） |
 | `cancelled` | 已取消 |
 | `rejected` | 用户拒绝 |
 | `expired` | 确认超时 |

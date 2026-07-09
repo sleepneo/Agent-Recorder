@@ -14,6 +14,7 @@ namespace AgentRecorder.Tests;
 /// Tests for ConfigParser region source validation.
 /// Uses injectable display provider for deterministic tests.
 /// </summary>
+[Collection("NonParallel-SystemQueryProviders")]
 public class ConfigParserRegionTests : IDisposable
 {
     private static JsonNode ParseJson(string json) => JsonNode.Parse(json)!;

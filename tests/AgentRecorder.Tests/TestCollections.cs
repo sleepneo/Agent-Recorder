@@ -13,3 +13,13 @@ namespace AgentRecorder.Tests;
 public sealed class NonParallelAgentRecorderDataDirCollection
 {
 }
+
+/// <summary>
+/// Collection for tests that mutate the injectable SystemQuery display/window
+/// providers. Members of this collection never execute in parallel with each
+/// other so provider state does not leak between tests.
+/// </summary>
+[CollectionDefinition("NonParallel-SystemQueryProviders", DisableParallelization = true)]
+public sealed class NonParallelSystemQueryProvidersCollection
+{
+}

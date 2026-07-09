@@ -132,6 +132,33 @@ public sealed class RecordingEngine
         var rec = ConfigParser.Build(cfg, agent, out var summary);
 
         // =====================================================================
+        // Phase 3.5: Preflight dry-run before creating a pending confirmation.
+        // Fail fast for output-directory, disk-space, encoder, or bounds issues
+        // that do not require user interaction.
+        // =====================================================================
+        var beforeConfirmationPreflight = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+        if (!beforeConfirmationPreflight.Passed)
+        {
+            _audit.Log("recording.preflight_failed", new
+            {
+                recording_id = rec.Id,
+                stage = "before_confirmation",
+                source_type = rec.SourceType,
+                output_path = rec.OutputPath,
+                error_code = beforeConfirmationPreflight.ErrorCode,
+                message = beforeConfirmationPreflight.Message,
+                suggested_action = beforeConfirmationPreflight.SuggestedAction
+            });
+            throw new ApiException(400, beforeConfirmationPreflight.ErrorCode!,
+                beforeConfirmationPreflight.Message!,
+                new
+                {
+                    suggested_action = beforeConfirmationPreflight.SuggestedAction,
+                    stage = "before_confirmation"
+                });
+        }
+
+        // =====================================================================
         // Phase 4: Final guard + atomic register (prevents race condition where
         // two requests pass Phase-2 check, then both register.)
         // IMPORTANT: This Phase-4 must re-execute the COMPLETE guard logic,
@@ -268,6 +295,10 @@ public sealed class RecordingEngine
                     conf.Status = "approved";
                     BumpStateVersion();
                     _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
+
+                    if (!TryPreflightBeforeStart(rec, conf, tray))
+                        return;
+
                     StartCapture(rec, tray);
                 }
                 else
@@ -295,6 +326,17 @@ public sealed class RecordingEngine
                 status = "requires_user_confirmation",
                 confirmation_id = conf.Id,
                 summary = summaryWithMeta
+            };
+        }
+
+        if (!TryPreflightBeforeStart(rec, null, tray))
+        {
+            return new
+            {
+                recording_id = rec.Id,
+                status = "failed",
+                error = rec.Error,
+                expected_output = rec.OutputPath
             };
         }
 
@@ -363,6 +405,44 @@ public sealed class RecordingEngine
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Runs the before-start preflight checks. If they fail, marks the recording
+    /// as failed, logs a <c>recording.preflight_failed</c> audit event, shows a
+    /// local error, and transitions the tray to idle. Returns true if capture
+    /// may proceed.
+    /// </summary>
+    private bool TryPreflightBeforeStart(Recording rec, Confirmation? conf, ITrayContext tray)
+    {
+        var preflight = RecordingPreflightChecker.CheckBeforeStart(rec);
+        if (preflight.Passed)
+            return true;
+
+        if (conf != null)
+            conf.Status = "approved";
+        rec.State = RecState.failed;
+        rec.Error = preflight.Message;
+        rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
+        BumpStateVersion();
+        _audit.Log("recording.preflight_failed", new
+        {
+            recording_id = rec.Id,
+            stage = "before_start",
+            source_type = rec.SourceType,
+            output_path = rec.OutputPath,
+            error_code = preflight.ErrorCode,
+            message = preflight.Message,
+            suggested_action = preflight.SuggestedAction
+        });
+        tray.ShowError(preflight.Message!);
+
+        if (conf != null)
+            TrySetIdleOnAllDone(tray);
+        else
+            tray.SetIdle(rec);
+
+        return false;
     }
 
     /// <summary>
