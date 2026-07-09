@@ -59,7 +59,7 @@ Agents should use the paths returned by `ensure-running` or
 - Active-window recording uses visible window bounds clipped to the virtual
   desktop, then records via the FFmpeg `ffmpeg-window-region` backend.
 - Interactive selected-region UI.
-- Mandatory local user confirmation before recording starts.
+- Mandatory local user confirmation before recording starts, with an optional local save-directory choice in the confirmation window.
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.

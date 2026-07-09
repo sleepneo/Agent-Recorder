@@ -195,7 +195,7 @@ public static class ConfigParser
             cap.DurationSeconds = secs;
         }
 
-        rec.OutputPath = BuildOutputPath(cfg["output"], rec);
+        rec.OutputPath = OutputPathResolver.BuildOutputPath(cfg["output"], rec);
         cap.OutputPath = rec.OutputPath;
         rec.Config = cap;
 
@@ -232,58 +232,6 @@ public static class ConfigParser
         return rec;
     }
 
-    private static string BuildOutputPath(JsonNode? output, Recording rec)
-    {
-        string dir = Str(output?["directory"]) is { } d && d != "default"
-            ? d : Paths.DefaultOutputDir;
-        PolicyEngine.ValidateDirectory(dir);
-        Directory.CreateDirectory(dir);
-
-        string name;
-        if (Str(output?["filename"]) is { } fn)
-            name = fn.EndsWith(".mp4") ? fn : fn + ".mp4";
-        else
-        {
-            var tmpl = Str(output?["filename_template"]) ?? "recording-{datetime}";
-            name = ApplyTemplate(tmpl, rec) + ".mp4";
-        }
-
-        var policy = Str(output?["conflict_policy"]) ?? "rename";
-        var full = Path.Combine(dir, name);
-        return ResolveConflict(full, policy);
-    }
-
-    private static string ApplyTemplate(string t, Recording rec)
-    {
-        var now = DateTime.Now;
-        return t.Replace("{date}", now.ToString("yyyy-MM-dd"))
-                .Replace("{time}", now.ToString("HHmmss"))
-                .Replace("{datetime}", now.ToString("yyyy-MM-dd-HHmmss"))
-                .Replace("{source}", Sanitize(rec.SourceTitle))
-                .Replace("{id}", rec.Id);
-    }
-
-    private static string ResolveConflict(string full, string policy)
-    {
-        if (!File.Exists(full)) return full;
-        switch (policy)
-        {
-            case "fail": throw new ApiException(409, "OUTPUT_PATH_INVALID", "Output file already exists");
-            case "overwrite": throw new ApiException(403, "PERMISSION_DENIED", "Overwrite requires explicit confirmation");
-            default:
-                var dir = Path.GetDirectoryName(full)!;
-                var stem = Path.GetFileNameWithoutExtension(full);
-                var ext = Path.GetExtension(full);
-                for (int i = 1; ; i++)
-                {
-                    var cand = Path.Combine(dir, $"{stem}-{i}{ext}");
-                    if (!File.Exists(cand)) return cand;
-                }
-        }
-    }
-
-    private static string Sanitize(string s) =>
-        new string(s.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray());
     private static string? Str(JsonNode? n) => n?.GetValue<string>();
     private static ApiException Inv(string m) => new(400, "INVALID_ARGUMENT", m);
 

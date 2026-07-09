@@ -93,7 +93,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// <summary>
     /// Pop up recording confirmation (only local user via tray menu or confirmation form; no HTTP API remote confirmation).
     /// </summary>
-    public void RequestConfirmation(object summary, Action<bool> callback)
+    public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
     {
         var s = JsonNode.Parse(JsonSerializer.Serialize(summary))!;
         var confirmationId = GetString(s, "confirmation_id");
@@ -146,10 +146,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             HideConfirmationForm();
         }
 
-        _currentForm = new ConfirmationForm(current, position, items.Count, approved =>
-        {
-            ResolveCurrentConfirmation(approved, approved ? "confirmation.ui_approved" : "confirmation.ui_rejected");
-        });
+        _currentForm = new ConfirmationForm(current, position, items.Count,
+            onResult: decision =>
+            {
+                ResolveCurrentConfirmation(decision, decision.Approved ? "confirmation.ui_approved" : "confirmation.ui_rejected");
+            },
+            defaultOutputDirectory: OutputSettingsStore.GetEffectiveDefaultOutputDir());
 
         try
         {
@@ -176,7 +178,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// heavy operations like starting FFmpeg recording) is executed on a background thread.
     /// This prevents blocking the UI thread and the queue lock during recording startup.
     /// </summary>
-    private void ResolveCurrentConfirmation(bool approved, string auditEvent)
+    private void ResolveCurrentConfirmation(ConfirmationDecision decision, string auditEvent)
     {
         var current = _confirmationQueue.Current;
         if (current == null) return;
@@ -187,7 +189,9 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         _audit.Log(auditEvent, new
         {
             confirmation_id = confirmationId,
-            recording_id = recordingId
+            recording_id = recordingId,
+            approved = decision.Approved,
+            output_directory = decision.OutputDirectory ?? ""
         });
 
         var item = _confirmationQueue.ResolveCurrent();
@@ -208,7 +212,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         {
             try
             {
-                item.InvokeCallback(approved);
+                item.InvokeCallback(decision);
             }
             catch (Exception ex)
             {
@@ -216,7 +220,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
                 {
                     confirmation_id = confirmationId,
                     recording_id = recordingId,
-                    approved,
+                    approved = decision.Approved,
                     error = ex.Message,
                     stack = ex.StackTrace
                 });
@@ -268,7 +272,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// </summary>
     private void ApproveFromMenu()
     {
-        ResolveCurrentConfirmation(true, "confirmation.approved_from_menu");
+        ResolveCurrentConfirmation(ConfirmationDecision.Approve(), "confirmation.approved_from_menu");
     }
 
     /// <summary>
@@ -276,7 +280,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// </summary>
     private void RejectFromMenu()
     {
-        ResolveCurrentConfirmation(false, "confirmation.rejected_from_menu");
+        ResolveCurrentConfirmation(ConfirmationDecision.Reject(), "confirmation.rejected_from_menu");
     }
 
     public void SetRecording(object rec)

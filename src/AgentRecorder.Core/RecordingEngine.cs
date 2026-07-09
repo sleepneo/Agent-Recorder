@@ -242,11 +242,29 @@ public sealed class RecordingEngine
                     : null
             };
 
-            tray.RequestConfirmation(summaryWithMeta, approved =>
+            tray.RequestConfirmation(summaryWithMeta, decision =>
             {
                 if (conf.Status != "pending") return;
-                if (approved)
+                if (decision.Approved)
                 {
+                    var applied = ApplyConfirmationOutputDirectory(rec, decision, conf.Id);
+                    if (!applied)
+                    {
+                        conf.Status = "rejected";
+                        rec.State = RecState.rejected;
+                        BumpStateVersion();
+                        _audit.Log("confirmation.output_directory_rejected", new
+                        {
+                            recording_id = rec.Id,
+                            confirmation_id = conf.Id,
+                            directory = decision.OutputDirectory,
+                            reason = "directory_override_failed"
+                        });
+                        tray.ShowError("保存目录不可用，录制未开始。");
+                        TrySetIdleOnAllDone(tray);
+                        return;
+                    }
+
                     conf.Status = "approved";
                     BumpStateVersion();
                     _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
@@ -286,6 +304,65 @@ public sealed class RecordingEngine
             recording_id = rec.Id, status = "recording",
             started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath
         };
+    }
+
+    private bool ApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId)
+    {
+        if (string.IsNullOrWhiteSpace(decision.OutputDirectory))
+        {
+            // No override requested: still honor "remember default" if a directory is somehow absent.
+            return true;
+        }
+
+        try
+        {
+            PolicyEngine.ValidateDirectory(decision.OutputDirectory);
+            Directory.CreateDirectory(decision.OutputDirectory);
+            var newPath = OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory);
+            rec.OutputPath = newPath;
+            if (rec.Config != null)
+                rec.Config.OutputPath = newPath;
+
+            _audit.Log("confirmation.output_directory_selected", new
+            {
+                recording_id = rec.Id,
+                confirmation_id = confirmationId,
+                directory = decision.OutputDirectory,
+                remember_default = decision.RememberOutputDirectory
+            });
+        }
+        catch (Exception ex)
+        {
+            _audit.Log("confirmation.output_directory_override_failed", new
+            {
+                recording_id = rec.Id,
+                confirmation_id = confirmationId,
+                directory = decision.OutputDirectory,
+                error = ex.Message
+            });
+            return false;
+        }
+
+        if (decision.RememberOutputDirectory)
+        {
+            var saved = OutputSettingsStore.SaveDefaultOutputDir(decision.OutputDirectory);
+            if (saved)
+            {
+                _audit.Log("output.default_directory_saved", new
+                {
+                    directory = decision.OutputDirectory
+                });
+            }
+            else
+            {
+                _audit.Log("output.default_directory_save_failed", new
+                {
+                    directory = decision.OutputDirectory
+                });
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

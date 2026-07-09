@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using AgentRecorder.Infrastructure;
 
 namespace AgentRecorder.App;
 
@@ -11,7 +12,7 @@ internal sealed class PendingConfirmationItem
     public string ConfirmationId { get; }
     public string RecordingId { get; }
     public object Summary { get; }
-    public Action<bool> Callback { get; }
+    public Action<ConfirmationDecision> Callback { get; }
     public int TimeoutSeconds { get; }
     public DateTime CreatedAtUtc { get; }
     public DateTime ExpiresAtUtc { get; }
@@ -22,7 +23,7 @@ internal sealed class PendingConfirmationItem
         string confirmationId,
         string recordingId,
         object summary,
-        Action<bool> callback,
+        Action<ConfirmationDecision> callback,
         int timeoutSeconds)
     {
         ConfirmationId = confirmationId;
@@ -36,15 +37,15 @@ internal sealed class PendingConfirmationItem
     }
 
     /// <summary>
-    /// Invokes the callback with the given result. Guarantees callback is only called once.
+    /// Invokes the callback with the given decision. Guarantees callback is only called once.
     /// Returns true if callback was invoked, false if already called.
     /// </summary>
-    public bool InvokeCallback(bool approved)
+    public bool InvokeCallback(ConfirmationDecision decision)
     {
         if (Interlocked.Exchange(ref _callbackCalled, 1) == 1)
             return false; // Already called
 
-        Callback(approved);
+        Callback(decision);
         return true;
     }
 
@@ -130,11 +131,11 @@ internal sealed class ConfirmationQueue
     /// Returns true if approved, false if no current or callback already called.
     /// Callback is invoked outside the lock to avoid blocking queue operations.
     /// </summary>
-    public bool ApproveCurrent()
+    public bool ApproveCurrent(ConfirmationDecision? decision = null)
     {
         var item = ResolveCurrent();
         if (item == null) return false;
-        item.InvokeCallback(true);
+        item.InvokeCallback(decision ?? ConfirmationDecision.Approve());
         return true;
     }
 
@@ -147,7 +148,7 @@ internal sealed class ConfirmationQueue
     {
         var item = ResolveCurrent();
         if (item == null) return false;
-        item.InvokeCallback(false);
+        item.InvokeCallback(ConfirmationDecision.Reject());
         return true;
     }
 
@@ -179,7 +180,7 @@ internal sealed class ConfirmationQueue
         // Invoke callbacks outside the lock
         foreach (var item in toCallback)
         {
-            item.InvokeCallback(false);
+            item.InvokeCallback(ConfirmationDecision.Reject());
         }
     }
 

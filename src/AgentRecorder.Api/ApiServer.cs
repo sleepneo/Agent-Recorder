@@ -1026,7 +1026,7 @@ public sealed class ApiServer
     {
         screen_capture = new { status = "granted" },
         microphone = new { status = "granted" },
-        output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir }
+        output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
     };
 }
 

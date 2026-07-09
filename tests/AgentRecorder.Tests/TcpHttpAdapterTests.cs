@@ -28,7 +28,7 @@ public class TcpHttpAdapterTests
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
 
-        public void RequestConfirmation(object summary, Action<bool> callback) => callback(true);
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Approve());
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
             => callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");

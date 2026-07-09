@@ -10,11 +10,9 @@ public static class Paths
     {
         get
         {
-            if (DataDirResolver.UsingEnvOverride)
-                return Path.Combine(DataDirResolver.Resolve(), "Videos");
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
-                "AgentRecorder");
+            // Delegates to OutputSettingsStore so that a user-configured default
+            // directory (if valid) takes precedence over the built-in fallback.
+            return OutputSettingsStore.GetEffectiveDefaultOutputDir();
         }
     }
 

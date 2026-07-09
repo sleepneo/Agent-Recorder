@@ -1,10 +1,38 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Forms;
+using AgentRecorder.Infrastructure;
+using AgentRecorder.Logging;
 
 namespace AgentRecorder.App;
+
+/// <summary>
+/// Directory picker seam so the form can be unit-tested without showing a real FolderBrowserDialog.
+/// </summary>
+internal interface IOutputDirectoryPicker
+{
+    string? PickDirectory(string initialDirectory);
+}
+
+internal sealed class FolderBrowserDirectoryPicker : IOutputDirectoryPicker
+{
+    public string? PickDirectory(string initialDirectory)
+    {
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "选择视频保存位置",
+            UseDescriptionForTitle = true
+        };
+        if (Directory.Exists(initialDirectory))
+            dlg.InitialDirectory = initialDirectory;
+
+        var result = dlg.ShowDialog();
+        return result == DialogResult.OK ? dlg.SelectedPath : null;
+    }
+}
 
 /// <summary>
 /// Non-modal confirmation form for recording requests.
@@ -17,20 +45,28 @@ internal sealed class ConfirmationForm : Form
     private readonly PendingConfirmationItem _item;
     private readonly int _queuePosition;
     private readonly int _totalCount;
-    private readonly Action<bool>? _onResult;
+    private readonly Action<ConfirmationDecision>? _onResult;
     private readonly IScreenPreviewProvider _previewProvider;
+    private readonly IOutputDirectoryPicker _directoryPicker;
     private readonly Func<DateTime> _utcNowProvider;
+    private readonly string _initialOutputDirectory;
+    private string? _selectedOutputDirectory;
     private bool _resultHandled;
     private bool _suppressCloseResult;
 
     private Button _approveButton = null!;
     private Button _rejectButton = null!;
+    private Button _changeOutputButton = null!;
+    private CheckBox _rememberOutputCheckBox = null!;
+    private Label _outputPathLabel = null!;
+    private Panel _outputPanel = null!;
     private PictureBox _previewBox = null!;
     private Label _previewFallbackLabel = null!;
     private Label _previewBoundsLabel = null!;
     private Panel _previewPanel = null!;
     private ProgressBar _timeoutProgressBar = null!;
     private Label _timeoutLabel = null!;
+    private Label _warningLabel = null!;
     private System.Windows.Forms.Timer _countdownTimer = null!;
 
     internal bool HasPreviewAreaForTests => _previewPanel != null;
@@ -43,15 +79,38 @@ internal sealed class ConfirmationForm : Form
     internal Button? DefaultActionForTests => AcceptButton as Button;
     internal Button? CancelActionForTests => CancelButton as Button;
     internal int TimeoutProgressValueForTests => _timeoutProgressBar?.Value ?? 0;
+    internal string OutputPathTextForTests => _outputPathLabel?.Text ?? "";
+    internal bool ChangeOutputButtonEnabledForTests => _changeOutputButton?.Enabled ?? false;
+    internal bool RememberOutputCheckedForTests
+    {
+        get => _rememberOutputCheckBox?.Checked ?? false;
+        set { if (_rememberOutputCheckBox != null) _rememberOutputCheckBox.Checked = value; }
+    }
 
-    public ConfirmationForm(PendingConfirmationItem item, int queuePosition, int totalCount, Action<bool>? onResult = null, IScreenPreviewProvider? previewProvider = null, Func<DateTime>? utcNowProvider = null)
+    internal Rectangle OutputPanelBoundsForTests => _outputPanel?.Bounds ?? Rectangle.Empty;
+    internal Rectangle TimeoutProgressBoundsForTests => _timeoutProgressBar?.Bounds ?? Rectangle.Empty;
+    internal Rectangle TimeoutLabelBoundsForTests => _timeoutLabel?.Bounds ?? Rectangle.Empty;
+    internal Rectangle WarningLabelBoundsForTests => _warningLabel?.Bounds ?? Rectangle.Empty;
+    internal Rectangle ApproveButtonBoundsForTests => _approveButton?.Bounds ?? Rectangle.Empty;
+    internal Rectangle RejectButtonBoundsForTests => _rejectButton?.Bounds ?? Rectangle.Empty;
+    internal bool OutputPathLabelAutoEllipsisForTests => _outputPathLabel?.AutoEllipsis ?? false;
+
+    public ConfirmationForm(PendingConfirmationItem item, int queuePosition, int totalCount,
+        Action<ConfirmationDecision>? onResult = null,
+        IScreenPreviewProvider? previewProvider = null,
+        Func<DateTime>? utcNowProvider = null,
+        string? defaultOutputDirectory = null,
+        IOutputDirectoryPicker? directoryPicker = null)
     {
         _item = item;
         _queuePosition = queuePosition;
         _totalCount = totalCount;
         _onResult = onResult;
         _previewProvider = previewProvider ?? new GdiScreenPreviewProvider();
+        _directoryPicker = directoryPicker ?? new FolderBrowserDirectoryPicker();
         _utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
+        _initialOutputDirectory = GetInitialOutputDirectory(defaultOutputDirectory);
+        _selectedOutputDirectory = null;
         _resultHandled = false;
         _suppressCloseResult = false;
 
@@ -81,7 +140,7 @@ internal sealed class ConfirmationForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(620, 500);
+        ClientSize = new Size(620, 580);
 
         // Handle keyboard shortcuts and close button
         KeyPreview = true;
@@ -155,7 +214,7 @@ internal sealed class ConfirmationForm : Form
         var infoPanel = new Panel
         {
             Location = new Point(20, 80),
-            Size = new Size(300, 240),
+            Size = new Size(300, 260),
             BackColor = Color.FromArgb(245, 245, 245),
             BorderStyle = BorderStyle.FixedSingle
         };
@@ -166,7 +225,6 @@ internal sealed class ConfirmationForm : Form
         AddInfoLine(infoPanel, y, "来源标题", GetString(s, "source_title")); y += 20;
         AddInfoLine(infoPanel, y, "时长", GetString(s, "duration")); y += 20;
         AddInfoLine(infoPanel, y, "麦克风", GetString(s, "audio")); y += 20;
-        AddInfoLine(infoPanel, y, "保存位置", GetString(s, "output")); y += 20;
         AddInfoLine(infoPanel, y, "嵌套角色", GetString(s, "nested_role")); y += 20;
         AddInfoLine(infoPanel, y, "录制ID", GetString(s, "recording_id")); y += 20;
         AddInfoLine(infoPanel, y, "确认ID", GetString(s, "confirmation_id")); y += 20;
@@ -229,20 +287,61 @@ internal sealed class ConfirmationForm : Form
             _previewFallbackLabel.Visible = true;
         }
 
-        // Warning label
-        var warningLabel = new Label
+        // Output directory panel (full width at bottom of metadata area)
+        _outputPanel = new Panel
         {
-            Text = "录屏可能包含敏感信息。只有本地确认后才会开始录制。",
-            Font = new Font("Segoe UI", 9),
-            ForeColor = Color.DarkRed,
-            AutoSize = true,
-            Location = new Point(20, 340)
+            Location = new Point(20, 350),
+            Size = new Size(580, 80),
+            BackColor = Color.FromArgb(250, 250, 250),
+            BorderStyle = BorderStyle.FixedSingle
         };
+
+        var outputTitleLabel = new Label
+        {
+            Text = "保存位置:",
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            ForeColor = Color.Gray,
+            AutoSize = true,
+            Location = new Point(10, 8)
+        };
+
+        _outputPathLabel = new Label
+        {
+            Text = GetCurrentOutputPath(s),
+            Font = new Font("Segoe UI", 9),
+            AutoSize = false,
+            Size = new Size(558, 28),
+            Location = new Point(10, 24),
+            ForeColor = Color.Black,
+            AutoEllipsis = true
+        };
+
+        _changeOutputButton = new Button
+        {
+            Text = "更改...",
+            Size = new Size(80, 24),
+            Location = new Point(10, 48),
+            FlatStyle = FlatStyle.Standard
+        };
+        _changeOutputButton.Click += (_, _) => ChangeOutputDirectory();
+
+        _rememberOutputCheckBox = new CheckBox
+        {
+            Text = "记住为默认保存位置",
+            AutoSize = true,
+            Location = new Point(100, 51),
+            Checked = false
+        };
+
+        _outputPanel.Controls.Add(outputTitleLabel);
+        _outputPanel.Controls.Add(_outputPathLabel);
+        _outputPanel.Controls.Add(_changeOutputButton);
+        _outputPanel.Controls.Add(_rememberOutputCheckBox);
 
         // Countdown progress bar
         _timeoutProgressBar = new ProgressBar
         {
-            Location = new Point(20, 370),
+            Location = new Point(20, 442),
             Size = new Size(580, 16),
             Minimum = 0,
             Maximum = 1000,
@@ -256,7 +355,17 @@ internal sealed class ConfirmationForm : Form
             Font = new Font("Segoe UI", 9),
             ForeColor = Color.Gray,
             AutoSize = true,
-            Location = new Point(20, 392)
+            Location = new Point(20, 464)
+        };
+
+        // Warning label
+        _warningLabel = new Label
+        {
+            Text = "录屏可能包含敏感信息。只有本地确认后才会开始录制。",
+            Font = new Font("Segoe UI", 9),
+            ForeColor = Color.DarkRed,
+            AutoSize = true,
+            Location = new Point(20, 486)
         };
 
         // Approve button
@@ -264,7 +373,7 @@ internal sealed class ConfirmationForm : Form
         {
             Text = "✓ 确认",
             Size = new Size(120, 40),
-            Location = new Point(140, 430),
+            Location = new Point(140, 512),
             BackColor = Color.FromArgb(0, 128, 0),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
@@ -278,7 +387,7 @@ internal sealed class ConfirmationForm : Form
         {
             Text = "✗ 拒绝",
             Size = new Size(120, 40),
-            Location = new Point(320, 430),
+            Location = new Point(320, 512),
             BackColor = Color.FromArgb(200, 50, 50),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
@@ -292,9 +401,10 @@ internal sealed class ConfirmationForm : Form
         Controls.Add(infoPanel);
         Controls.Add(_previewPanel);
         Controls.Add(_previewBoundsLabel);
-        Controls.Add(warningLabel);
+        Controls.Add(_outputPanel);
         Controls.Add(_timeoutProgressBar);
         Controls.Add(_timeoutLabel);
+        Controls.Add(_warningLabel);
         Controls.Add(_approveButton);
         Controls.Add(_rejectButton);
 
@@ -333,12 +443,85 @@ internal sealed class ConfirmationForm : Form
         return val.ToString();
     }
 
+    private string GetInitialOutputDirectory(string? defaultOutputDirectory)
+    {
+        // Picker should start from the directory of the current recording output,
+        // so the user is anchored to where this specific recording will go.
+        try
+        {
+            var outputPath = GetCurrentOutputPathFromSummary();
+            if (!string.IsNullOrWhiteSpace(outputPath))
+            {
+                var dir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+                    return dir;
+            }
+        }
+        catch { }
+
+        if (!string.IsNullOrWhiteSpace(defaultOutputDirectory) && Directory.Exists(defaultOutputDirectory))
+            return defaultOutputDirectory;
+
+        return Paths.DefaultOutputDir;
+    }
+
+    private string GetCurrentOutputPath(JsonNode? summary)
+    {
+        var path = GetCurrentOutputPathFromSummary();
+        if (!string.IsNullOrWhiteSpace(path))
+            return path;
+
+        // Fallback: show the configured default directory.
+        return Path.Combine(_initialOutputDirectory, "(自动生成文件名)");
+    }
+
+    private string? GetCurrentOutputPathFromSummary()
+    {
+        try
+        {
+            var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary));
+            var output = s?["output"];
+            if (output != null)
+                return output.GetValue<string?>();
+        }
+        catch { }
+        return null;
+    }
+
+    private void ChangeOutputDirectory()
+    {
+        if (_resultHandled || (_item.IsExpiredLocal && !_approveButton.Enabled))
+            return;
+
+        var initial = _selectedOutputDirectory ?? _initialOutputDirectory;
+        var selected = _directoryPicker.PickDirectory(initial);
+        if (string.IsNullOrWhiteSpace(selected))
+            return;
+
+        _selectedOutputDirectory = selected;
+        UpdateOutputPathLabel();
+    }
+
+    private void UpdateOutputPathLabel()
+    {
+        var summaryPath = GetCurrentOutputPathFromSummary();
+        if (!string.IsNullOrWhiteSpace(summaryPath))
+        {
+            var name = Path.GetFileName(summaryPath);
+            _outputPathLabel.Text = Path.Combine(_selectedOutputDirectory ?? _initialOutputDirectory, name);
+        }
+        else
+        {
+            _outputPathLabel.Text = Path.Combine(_selectedOutputDirectory ?? _initialOutputDirectory, "(自动生成文件名)");
+        }
+    }
+
     private void Reject()
     {
         if (_resultHandled) return;
         _resultHandled = true;
         StopCountdownTimer();
-        _onResult?.Invoke(false);
+        _onResult?.Invoke(ConfirmationDecision.Reject());
         Close();
     }
 
@@ -370,6 +553,7 @@ internal sealed class ConfirmationForm : Form
             _timeoutLabel.Text = "确认已过期";
             _timeoutLabel.ForeColor = Color.DarkRed;
             _approveButton.Enabled = false;
+            _changeOutputButton.Enabled = false;
             StopCountdownTimer();
             return;
         }
@@ -391,7 +575,15 @@ internal sealed class ConfirmationForm : Form
         if (_resultHandled) return;
         _resultHandled = true;
         StopCountdownTimer();
-        _onResult?.Invoke(true);
+        var rememberOutputDirectory = _rememberOutputCheckBox?.Checked ?? false;
+        var outputDirectory = _selectedOutputDirectory;
+        if (rememberOutputDirectory && string.IsNullOrWhiteSpace(outputDirectory))
+            outputDirectory = _initialOutputDirectory;
+
+        var decision = ConfirmationDecision.Approve(
+            outputDirectory,
+            rememberOutputDirectory);
+        _onResult?.Invoke(decision);
         Close();
     }
 }

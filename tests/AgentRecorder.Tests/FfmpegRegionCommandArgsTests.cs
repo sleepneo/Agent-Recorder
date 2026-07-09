@@ -402,7 +402,7 @@ public class FfmpegRegionCommandArgsTests
     {
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public void RequestConfirmation(object summary, Action<bool> callback) { }
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { }
         public void SetRecording(object rec) { }

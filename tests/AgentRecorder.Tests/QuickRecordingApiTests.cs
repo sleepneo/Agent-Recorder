@@ -34,12 +34,13 @@ public class QuickRecordingApiTests
         public int ConfirmationCallbackDelayMs { get; set; } = 0;
         public bool AutoApprove { get; set; } = false;
 
-        public void RequestConfirmation(object summary, Action<bool> callback)
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
         {
+            var decision = AutoApprove ? ConfirmationDecision.Approve() : ConfirmationDecision.Reject();
             if (ConfirmationCallbackDelayMs > 0)
-                _ = Task.Delay(ConfirmationCallbackDelayMs).ContinueWith(_ => callback(AutoApprove));
+                _ = Task.Delay(ConfirmationCallbackDelayMs).ContinueWith(_ => callback(decision));
             else
-                callback(AutoApprove);
+                callback(decision);
         }
 
         public int RegionSelectionRequestCount { get; private set; }

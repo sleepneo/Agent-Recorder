@@ -52,7 +52,7 @@ public class HeadlessHostTests
             var tray = new HeadlessTrayContext(audit);
 
             bool? approved = null;
-            tray.RequestConfirmation(new { source = "display" }, result => approved = result);
+            tray.RequestConfirmation(new { source = "display" }, result => approved = result.Approved);
 
             Assert.False(approved);
             Assert.Contains("confirmation.headless_unavailable", audit.Events);

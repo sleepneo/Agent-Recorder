@@ -428,7 +428,7 @@ internal class FakeTrayContext : ITrayContext
     public void SetIdle(object rec) { }
     public void SetAllIdle() { }
     public void ShowError(string msg) { }
-    public void RequestConfirmation(object summary, Action<bool> callback) => callback(true);
+    public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Approve());
     public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) =>
         callback("selection_cancelled", 0, 0, 0, 0, "", "");
 }

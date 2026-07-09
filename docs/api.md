@@ -408,7 +408,8 @@ Nested inner:
 
 When a recording requires confirmation, Agent Recorder shows a local confirmation form (non-blocking modeless window):
 
-- **Confirmation Form**: Displays recording info (source, duration, audio, output path, nested role, recording ID, confirmation ID, timeout), user clicks "Approve" or Enter to approve, clicks "Reject" or Esc/X to reject.
+- **Confirmation Form**: Displays recording info (source, duration, audio, output path, nested role, recording ID, confirmation ID, timeout). The user approves by explicitly clicking "Approve"; the safe default keeps focus on "Reject", so Enter/Esc/close reject the request.
+- **Output directory**: Before approving, the user can click "Change..." to choose the save directory for this recording and optionally remember it as the new default. The API cannot approve the recording or change the confirmation result remotely.
 - **Tray Menu**: Right-click tray icon, select "Approve recording" or "Reject recording".
 
 Multiple pending requests enter a **local confirmation queue**, not auto-rejected when there's already a pending confirmation. Queue items are processed in order, next item shows automatically after current completes.

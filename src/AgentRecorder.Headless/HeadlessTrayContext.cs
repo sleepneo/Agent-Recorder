@@ -17,7 +17,7 @@ public sealed class HeadlessTrayContext : ITrayContext
 
     public HeadlessTrayContext(AuditLogger audit) => _audit = audit;
 
-    public void RequestConfirmation(object summary, Action<bool> callback)
+    public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
     {
         _audit.Log("confirmation.headless_unavailable", new
         {
@@ -25,7 +25,7 @@ public sealed class HeadlessTrayContext : ITrayContext
             action = "rejected"
         });
         // Headless 模式不能代表本地用户确认，必须立即拒绝，避免录制在无人确认的情况下开始。
-        callback(false);
+        callback(ConfirmationDecision.Reject());
     }
 
     public void RequestRegionSelection(int timeoutSeconds,

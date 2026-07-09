@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 using AgentRecorder.App;
+using AgentRecorder.Infrastructure;
 
 namespace AgentRecorder.Tests;
 
@@ -14,18 +15,16 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
         var callback1Called = false;
-        var callback1Result = false;
         var callback2Called = false;
-        var callback2Result = false;
 
         var item1 = new PendingConfirmationItem(
             "conf_1", "rec_1", new { source = "test1" },
-            result => { callback1Called = true; callback1Result = result; },
+            _ => { callback1Called = true; },
             60);
 
         var item2 = new PendingConfirmationItem(
             "conf_2", "rec_2", new { source = "test2" },
-            result => { callback2Called = true; callback2Result = result; },
+            _ => { callback2Called = true; },
             60);
 
         queue.Enqueue(item1);
@@ -41,9 +40,8 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
         var callback1Called = false;
-        var callback1Result = false;
+        ConfirmationDecision? callback1Result = null;
         var callback2Called = false;
-        var callback2Result = false;
 
         var item1 = new PendingConfirmationItem(
             "conf_1", "rec_1", new { source = "test1" },
@@ -52,7 +50,7 @@ public class ConfirmationQueueTests
 
         var item2 = new PendingConfirmationItem(
             "conf_2", "rec_2", new { source = "test2" },
-            result => { callback2Called = true; callback2Result = result; },
+            _ => { callback2Called = true; },
             60);
 
         queue.Enqueue(item1);
@@ -62,10 +60,35 @@ public class ConfirmationQueueTests
 
         Assert.True(approved);
         Assert.True(callback1Called);
-        Assert.True(callback1Result); // Approved = true
+        Assert.NotNull(callback1Result);
+        Assert.True(callback1Result!.Approved); // Approved = true
+        Assert.Null(callback1Result.OutputDirectory);
         Assert.False(callback2Called); // Second callback not called yet
         Assert.Equal(1, queue.PendingCount);
         Assert.Equal("conf_2", queue.Current?.ConfirmationId);
+    }
+
+    [Fact]
+    public void ApproveCurrent_WithDecision_PassesOutputDirectory()
+    {
+        var queue = new ConfirmationQueue();
+        ConfirmationDecision? received = null;
+
+        var item = new PendingConfirmationItem(
+            "conf_1", "rec_1", new { source = "test" },
+            result => { received = result; },
+            60);
+
+        queue.Enqueue(item);
+
+        var decision = ConfirmationDecision.Approve("D:\\Custom", true);
+        var approved = queue.ApproveCurrent(decision);
+
+        Assert.True(approved);
+        Assert.NotNull(received);
+        Assert.True(received!.Approved);
+        Assert.Equal("D:\\Custom", received.OutputDirectory);
+        Assert.True(received.RememberOutputDirectory);
     }
 
     [Fact]
@@ -73,7 +96,7 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
         var callbackCalled = false;
-        var callbackResult = false;
+        ConfirmationDecision? callbackResult = null;
 
         var item1 = new PendingConfirmationItem(
             "conf_1", "rec_1", new { source = "test1" },
@@ -86,7 +109,8 @@ public class ConfirmationQueueTests
 
         Assert.True(rejected);
         Assert.True(callbackCalled);
-        Assert.False(callbackResult); // Rejected = false
+        Assert.NotNull(callbackResult);
+        Assert.False(callbackResult!.Approved); // Rejected = false
         Assert.Equal(0, queue.PendingCount);
         Assert.Null(queue.Current);
     }
@@ -151,15 +175,16 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
         var callbackCount = 0;
+        var rejectedCount = 0;
 
         var item1 = new PendingConfirmationItem(
             "conf_1", "rec_1", new { source = "test1" },
-            _ => callbackCount++,
+            d => { callbackCount++; if (!d.Approved) rejectedCount++; },
             60);
 
         var item2 = new PendingConfirmationItem(
             "conf_2", "rec_2", new { source = "test2" },
-            _ => callbackCount++,
+            d => { callbackCount++; if (!d.Approved) rejectedCount++; },
             60);
 
         queue.Enqueue(item1);
@@ -169,7 +194,8 @@ public class ConfirmationQueueTests
 
         Assert.Equal(0, queue.PendingCount);
         Assert.Null(queue.Current);
-        Assert.Equal(2, callbackCount); // Both callbacks invoked with false
+        Assert.Equal(2, callbackCount); // Both callbacks invoked
+        Assert.Equal(2, rejectedCount); // Both rejected
     }
 
     [Fact]
@@ -214,12 +240,12 @@ public class ConfirmationQueueTests
             60);
 
         // First invoke
-        var first = item.InvokeCallback(true);
+        var first = item.InvokeCallback(ConfirmationDecision.Approve());
         Assert.True(first);
         Assert.Equal(1, callbackCount);
 
         // Second invoke should not work
-        var second = item.InvokeCallback(false);
+        var second = item.InvokeCallback(ConfirmationDecision.Reject());
         Assert.False(second);
         Assert.Equal(1, callbackCount); // Still 1
 

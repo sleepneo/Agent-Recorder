@@ -15,10 +15,11 @@ public interface ITrayContext
 
     /// <summary>
     /// 弹出录屏确认交互（确认窗体 + 托盘菜单，仅限本地用户操作）。
-    /// callback 参数：true = 用户在本机 UI 确认，false = 用户在本机 UI 拒绝。
+    /// callback 参数：<see cref="ConfirmationDecision"/> 描述用户在本机 UI 的确认结果，
+    /// 包括是否批准、本次保存目录覆盖以及是否记住为默认目录。
     /// 注意：这是唯一的确认入口，不允许通过 HTTP API 远程调用确认。
     /// </summary>
-    void RequestConfirmation(object summary, Action<bool> callback);
+    void RequestConfirmation(object summary, Action<ConfirmationDecision> callback);
 
     /// <summary>
     /// 请求本地用户进行区域选择，弹出全屏选区窗口。

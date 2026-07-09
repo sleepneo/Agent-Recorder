@@ -71,5 +71,5 @@ without `AGENT_RECORDER_DATA_DIR`, the default data directory is
 - API binds to `127.0.0.1`.
 - State-changing calls require `X-Agent-Recorder-Key`.
 - AI agents can request recording but cannot silently approve it.
-- Local user confirmation is mandatory.
+- Local user confirmation is mandatory. The confirmation window also lets the user choose the save directory for that recording.
 - HTTP self-approval is blocked with `405 METHOD_NOT_ALLOWED`.

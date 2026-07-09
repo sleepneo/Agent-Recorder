@@ -821,10 +821,10 @@ public class RecordingEngineWgcStillFrameTests
         public int SetIdleCallCount;
         public string? LastError;
 
-        public void RequestConfirmation(object summary, Action<bool> callback)
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
         {
             // Auto-approve so CreateRecording proceeds to StartCapture.
-            callback(true);
+            callback(ConfirmationDecision.Approve());
         }
 
         public void RequestRegionSelection(int timeoutSeconds,
