@@ -216,6 +216,8 @@ public sealed class FfmpegPrewarmer
                     Arguments = "-hide_banner -version",
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    ErrorDialog = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true
                 }

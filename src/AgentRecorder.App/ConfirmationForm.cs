@@ -9,7 +9,8 @@ namespace AgentRecorder.App;
 /// <summary>
 /// Non-modal confirmation form for recording requests.
 /// Displays recording metadata and allows user to approve/reject.
-/// Enter = Approve, Esc = Reject, Close X = Reject.
+/// Default Enter = Reject, Esc = Reject, Close X = Reject.
+/// Approve requires explicit click or focused confirmation button.
 /// </summary>
 internal sealed class ConfirmationForm : Form
 {
@@ -18,6 +19,7 @@ internal sealed class ConfirmationForm : Form
     private readonly int _totalCount;
     private readonly Action<bool>? _onResult;
     private readonly IScreenPreviewProvider _previewProvider;
+    private readonly Func<DateTime> _utcNowProvider;
     private bool _resultHandled;
     private bool _suppressCloseResult;
 
@@ -27,30 +29,43 @@ internal sealed class ConfirmationForm : Form
     private Label _previewFallbackLabel = null!;
     private Label _previewBoundsLabel = null!;
     private Panel _previewPanel = null!;
+    private ProgressBar _timeoutProgressBar = null!;
+    private Label _timeoutLabel = null!;
+    private System.Windows.Forms.Timer _countdownTimer = null!;
 
     internal bool HasPreviewAreaForTests => _previewPanel != null;
     internal bool HasPreviewImageForTests => _previewBox?.Image != null;
     internal string PreviewBoundsTextForTests => _previewBoundsLabel?.Text ?? "";
     internal string PreviewFallbackTextForTests => _previewFallbackLabel?.Text ?? "";
+    internal string TimeoutTextForTests => _timeoutLabel?.Text ?? "";
+    internal bool ApproveButtonEnabledForTests => _approveButton?.Enabled ?? false;
+    internal bool CountdownTimerEnabledForTests => _countdownTimer?.Enabled ?? false;
+    internal Button? DefaultActionForTests => AcceptButton as Button;
+    internal Button? CancelActionForTests => CancelButton as Button;
+    internal int TimeoutProgressValueForTests => _timeoutProgressBar?.Value ?? 0;
 
-    public ConfirmationForm(PendingConfirmationItem item, int queuePosition, int totalCount, Action<bool>? onResult = null, IScreenPreviewProvider? previewProvider = null)
+    public ConfirmationForm(PendingConfirmationItem item, int queuePosition, int totalCount, Action<bool>? onResult = null, IScreenPreviewProvider? previewProvider = null, Func<DateTime>? utcNowProvider = null)
     {
         _item = item;
         _queuePosition = queuePosition;
         _totalCount = totalCount;
         _onResult = onResult;
         _previewProvider = previewProvider ?? new GdiScreenPreviewProvider();
+        _utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
         _resultHandled = false;
         _suppressCloseResult = false;
 
         SetupForm();
         BuildLayout();
+        SetupCountdownTimer();
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            StopCountdownTimer();
+            _countdownTimer?.Dispose();
             _previewBox?.Image?.Dispose();
             if (_previewBox != null)
                 _previewBox.Image = null;
@@ -76,16 +91,20 @@ internal sealed class ConfirmationForm : Form
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.Enter)
-        {
-            e.Handled = true;
-            Approve();
-        }
-        else if (e.KeyCode == Keys.Escape)
+        // Default Enter is handled by AcceptButton (= reject) so that approving
+        // requires an explicit click or focused approve button.
+        if (e.KeyCode == Keys.Escape)
         {
             e.Handled = true;
             Reject();
         }
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        // Safe default: put focus on reject so a stray Enter does not approve.
+        _rejectButton?.Focus();
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
@@ -104,6 +123,7 @@ internal sealed class ConfirmationForm : Form
     /// </summary>
     internal void CloseWithoutResult()
     {
+        StopCountdownTimer();
         _suppressCloseResult = true;
         Close();
     }
@@ -219,12 +239,32 @@ internal sealed class ConfirmationForm : Form
             Location = new Point(20, 340)
         };
 
+        // Countdown progress bar
+        _timeoutProgressBar = new ProgressBar
+        {
+            Location = new Point(20, 370),
+            Size = new Size(580, 16),
+            Minimum = 0,
+            Maximum = 1000,
+            Value = 1000,
+            Style = ProgressBarStyle.Continuous
+        };
+
+        _timeoutLabel = new Label
+        {
+            Text = "正在初始化倒计时…",
+            Font = new Font("Segoe UI", 9),
+            ForeColor = Color.Gray,
+            AutoSize = true,
+            Location = new Point(20, 392)
+        };
+
         // Approve button
         _approveButton = new Button
         {
             Text = "✓ 确认",
             Size = new Size(120, 40),
-            Location = new Point(140, 420),
+            Location = new Point(140, 430),
             BackColor = Color.FromArgb(0, 128, 0),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
@@ -238,7 +278,7 @@ internal sealed class ConfirmationForm : Form
         {
             Text = "✗ 拒绝",
             Size = new Size(120, 40),
-            Location = new Point(320, 420),
+            Location = new Point(320, 430),
             BackColor = Color.FromArgb(200, 50, 50),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 10, FontStyle.Bold),
@@ -253,10 +293,13 @@ internal sealed class ConfirmationForm : Form
         Controls.Add(_previewPanel);
         Controls.Add(_previewBoundsLabel);
         Controls.Add(warningLabel);
+        Controls.Add(_timeoutProgressBar);
+        Controls.Add(_timeoutLabel);
         Controls.Add(_approveButton);
         Controls.Add(_rejectButton);
 
-        AcceptButton = _approveButton;
+        // Safe default: Enter maps to reject, not approve.
+        AcceptButton = _rejectButton;
         CancelButton = _rejectButton;
     }
 
@@ -290,19 +333,65 @@ internal sealed class ConfirmationForm : Form
         return val.ToString();
     }
 
-    private void Approve()
-    {
-        if (_resultHandled) return;
-        _resultHandled = true;
-        _onResult?.Invoke(true);
-        Close();
-    }
-
     private void Reject()
     {
         if (_resultHandled) return;
         _resultHandled = true;
+        StopCountdownTimer();
         _onResult?.Invoke(false);
+        Close();
+    }
+
+    private void SetupCountdownTimer()
+    {
+        _countdownTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 250
+        };
+        _countdownTimer.Tick += (_, _) => UpdateCountdown();
+        _countdownTimer.Start();
+        UpdateCountdown();
+    }
+
+    private void StopCountdownTimer()
+    {
+        _countdownTimer?.Stop();
+    }
+
+    private void UpdateCountdown()
+    {
+        var now = _utcNowProvider();
+        var total = _item.ExpiresAtUtc - _item.CreatedAtUtc;
+        var remaining = _item.ExpiresAtUtc - now;
+
+        if (remaining <= TimeSpan.Zero || _item.IsExpiredLocal)
+        {
+            _timeoutProgressBar.Value = 0;
+            _timeoutLabel.Text = "确认已过期";
+            _timeoutLabel.ForeColor = Color.DarkRed;
+            _approveButton.Enabled = false;
+            StopCountdownTimer();
+            return;
+        }
+
+        var totalMs = Math.Max(1, (int)total.TotalMilliseconds);
+        var remainingMs = (int)remaining.TotalMilliseconds;
+        var ratio = Math.Max(0, Math.Min(1.0, (double)remainingMs / totalMs));
+        _timeoutProgressBar.Value = (int)(ratio * _timeoutProgressBar.Maximum);
+
+        var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        _timeoutLabel.Text = seconds <= 5
+            ? $"剩余 {seconds} 秒，请尽快确认"
+            : $"剩余 {seconds} 秒后自动过期";
+        _timeoutLabel.ForeColor = seconds <= 5 ? Color.DarkRed : Color.Gray;
+    }
+
+    private void Approve()
+    {
+        if (_resultHandled) return;
+        _resultHandled = true;
+        StopCountdownTimer();
+        _onResult?.Invoke(true);
         Close();
     }
 }

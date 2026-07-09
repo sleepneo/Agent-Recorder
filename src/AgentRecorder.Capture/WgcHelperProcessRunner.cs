@@ -32,6 +32,8 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
         psi.CreateNoWindow = true;
+        psi.WindowStyle = ProcessWindowStyle.Hidden;
+        psi.ErrorDialog = false;
         foreach (var a in argumentList) psi.ArgumentList.Add(a);
 
         process.Start();

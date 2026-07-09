@@ -23,6 +23,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private readonly RecordingEngine _engine;
     private readonly AuditLogger _audit;
     private readonly Dictionary<string, Recording> _activeRecordings = new();
+    private readonly RecordingIndicatorManager _indicatorManager;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _stopItem;
     private readonly ToolStripMenuItem _approveItem;
@@ -37,12 +38,19 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     public TrayContext(RecordingEngine engine, AuditLogger audit)
     {
         _engine = engine; _audit = audit;
+        _indicatorManager = new RecordingIndicatorManager(audit);
 
-        // UI dispatcher control: a hidden control created on the UI thread, used for
-        // marshalling calls from HTTP worker threads back to the WinForms UI thread.
+        // UI dispatcher control: a hidden, zero-size control created on the UI thread,
+        // used for marshalling calls from HTTP worker threads back to the WinForms UI thread.
         // We must not depend on the first open form because tray apps may have
         // zero open forms, which would cause UI operations to run on the wrong thread.
-        _uiInvoker = new Control();
+        // Keep it invisible and zero-sized so it never appears as a blank window.
+        _uiInvoker = new Control
+        {
+            Visible = false,
+            Width = 0,
+            Height = 0
+        };
         _ = _uiInvoker.Handle; // Force handle creation on this thread
 
         var menu = new ContextMenuStrip();
@@ -278,6 +286,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         RunOnUi(() =>
         {
             _activeRecordings[recording.Id] = recording;
+            _indicatorManager.ShowFor(recording);
             UpdateRecordingUi();
             if (_activeRecordings.Count == 1)
             {
@@ -292,7 +301,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         RunOnUi(() =>
         {
             if (recording != null)
+            {
                 _activeRecordings.Remove(recording.Id);
+                _indicatorManager.CloseFor(recording.Id, "recording.set_idle");
+            }
             if (_activeRecordings.Count == 0)
                 SetAllIdleUi();
             else
@@ -303,6 +315,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     public void SetAllIdle() => RunOnUi(() =>
     {
         _activeRecordings.Clear();
+        _indicatorManager.CloseAll("recording.set_all_idle");
         _confirmationQueue.Clear(invokeCallbacks: false); // Don't invoke callbacks, engine manages expiration
         HideConfirmationForm();
         SetAllIdleUi();

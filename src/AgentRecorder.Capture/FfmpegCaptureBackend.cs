@@ -44,6 +44,8 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
                 Arguments = args,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                ErrorDialog = false,
                 RedirectStandardInput = true,
                 RedirectStandardError = true
             },
@@ -216,7 +218,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
             {
                 FileName = FfmpegLocator.FfprobePath,
                 Arguments = $"-v quiet -print_format json -show_format -show_streams \"{path}\"",
-                RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                ErrorDialog = false
             });
             if (p != null)
             {

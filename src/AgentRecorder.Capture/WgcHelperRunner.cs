@@ -45,6 +45,8 @@ public sealed class WgcHelperRunner
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            ErrorDialog = false
         };
 
         // Arguments (added via ArgumentList — never shell-joined).

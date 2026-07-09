@@ -173,22 +173,7 @@ public class ConfirmationFormTests
         });
     }
 
-    [Fact]
-    public void AcceptButtonAndCancelButton_AreSetAfterConstruction()
-    {
-        RunOnSta(() =>
-        {
-            var item = new PendingConfirmationItem(
-                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
-                _ => { },
-                60);
 
-            using var form = new ConfirmationForm(item, 1, 1);
-
-            Assert.NotNull(form.AcceptButton);
-            Assert.NotNull(form.CancelButton);
-        });
-    }
 
     [Fact]
     public void QueueAdvance_CloseWithoutResult_DoesNotRejectNext()
@@ -346,6 +331,129 @@ public class ConfirmationFormTests
             Assert.Contains("无法生成预览", form.PreviewFallbackTextForTests);
 
             form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void DefaultFocus_IsRejectButton()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.NotNull(form.DefaultActionForTests);
+            Assert.Same(form.DefaultActionForTests, form.CancelActionForTests);
+            Assert.Contains("拒绝", form.DefaultActionForTests!.Text);
+        });
+    }
+
+    [Fact]
+    public void AcceptButton_DoesNotApproveByDefault()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            // The default AcceptButton must not be the approve button.
+            Assert.NotNull(form.DefaultActionForTests);
+            Assert.Same(form.DefaultActionForTests, form.CancelActionForTests);
+            Assert.DoesNotContain("确认", form.DefaultActionForTests!.Text);
+            Assert.Contains("拒绝", form.DefaultActionForTests.Text);
+        });
+    }
+
+    [Fact]
+    public void CancelButton_IsRejectButton()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.NotNull(form.CancelActionForTests);
+            Assert.Contains("拒绝", form.CancelActionForTests!.Text);
+        });
+    }
+
+    [Fact]
+    public void Countdown_InitializesFromPendingItemTimeout()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.Contains("剩余", form.TimeoutTextForTests);
+            Assert.True(form.TimeoutProgressValueForTests > 0);
+            Assert.True(form.CountdownTimerEnabledForTests);
+
+            form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void Countdown_Expired_DisablesApproveAndShowsExpired()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            // Simulate that the confirmation already expired.
+            var expiredNow = item.ExpiresAtUtc.AddSeconds(1);
+            using var form = new ConfirmationForm(item, 1, 1, null, new FakePreviewProvider(), () => expiredNow);
+            form.Show();
+
+            Assert.Equal("确认已过期", form.TimeoutTextForTests);
+            Assert.Equal(0, form.TimeoutProgressValueForTests);
+            Assert.False(form.ApproveButtonEnabledForTests);
+            Assert.False(form.CountdownTimerEnabledForTests);
+
+            form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void CloseWithoutResult_DisposesCountdownTimer()
+    {
+        RunOnSta(() =>
+        {
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
+                _ => { },
+                60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+            Assert.True(form.CountdownTimerEnabledForTests);
+
+            form.CloseWithoutResult();
+
+            Assert.False(form.CountdownTimerEnabledForTests);
         });
     }
 }
