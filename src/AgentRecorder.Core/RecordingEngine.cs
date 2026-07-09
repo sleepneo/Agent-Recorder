@@ -233,7 +233,13 @@ public sealed class RecordingEngine
                 recording_id = rec.Id,
                 confirmation_id = conf.Id,
                 timeout_seconds = conf.TimeoutSeconds,
-                expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                source_type = rec.SourceType,
+                source_title = rec.SourceTitle,
+                coordinate_space = "virtual_screen",
+                capture_bounds = (rec.Config.Bounds.w > 0 && rec.Config.Bounds.h > 0)
+                    ? new { x = rec.Config.Bounds.x, y = rec.Config.Bounds.y, width = rec.Config.Bounds.w, height = rec.Config.Bounds.h }
+                    : null
             };
 
             tray.RequestConfirmation(summaryWithMeta, approved =>

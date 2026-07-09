@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
 using Xunit;
@@ -8,6 +9,10 @@ namespace AgentRecorder.Tests;
 
 public class ConfirmationFormTests
 {
+    private class FakePreviewProvider : IScreenPreviewProvider
+    {
+        public Bitmap Capture(CaptureBounds bounds, Size maxSize) => new Bitmap(maxSize.Width, maxSize.Height);
+    }
     private static T RunOnSta<T>(Func<T> func)
     {
         T result = default!;
@@ -231,6 +236,116 @@ public class ConfirmationFormTests
             // Item2 should NOT have been called yet
             Assert.False(item2Called);
             Assert.Null(item2Result);
+        });
+    }
+
+    [Fact]
+    public void Form_WithCaptureBounds_ShowsPreviewImageAndBounds()
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "region: test",
+                capture_bounds = new { x = 100, y = 200, width = 1280, height = 720 },
+                coordinate_space = "virtual_screen",
+                source_type = "region",
+                source_title = "test",
+                audio = "No audio",
+                duration = "30s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_1",
+                confirmation_id = "conf_1",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", summary, _ => { }, 60);
+
+            using var form = new ConfirmationForm(item, 1, 1, null, new FakePreviewProvider());
+            form.Show();
+
+            Assert.True(form.HasPreviewAreaForTests);
+            Assert.True(form.HasPreviewImageForTests);
+            Assert.Contains("X=100", form.PreviewBoundsTextForTests);
+            Assert.Contains("Y=200", form.PreviewBoundsTextForTests);
+            Assert.Contains("W=1280", form.PreviewBoundsTextForTests);
+            Assert.Contains("H=720", form.PreviewBoundsTextForTests);
+
+            form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void Form_WithMalformedCaptureBounds_ShowsFallbackAndKeepsButtons()
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "region: test",
+                capture_bounds = new { x = "bad", y = 200, width = 1280, height = 720 },
+                source_type = "region",
+                source_title = "test",
+                audio = "No audio",
+                duration = "30s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_1",
+                confirmation_id = "conf_1",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", summary, _ => { }, 60);
+
+            using var form = new ConfirmationForm(item, 1, 1, null, new FakePreviewProvider());
+            form.Show();
+
+            Assert.True(form.HasPreviewAreaForTests);
+            Assert.False(form.HasPreviewImageForTests);
+            Assert.Contains("无法生成预览", form.PreviewFallbackTextForTests);
+            Assert.NotNull(form.AcceptButton);
+            Assert.NotNull(form.CancelButton);
+
+            form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void Form_WithoutCaptureBounds_ShowsFallback()
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "display: primary",
+                source_type = "display",
+                source_title = "primary",
+                audio = "No audio",
+                duration = "30s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_1",
+                confirmation_id = "conf_1",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem(
+                "conf_1", "rec_1", summary, _ => { }, 60);
+
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.True(form.HasPreviewAreaForTests);
+            Assert.False(form.HasPreviewImageForTests);
+            Assert.Contains("无法生成预览", form.PreviewFallbackTextForTests);
+
+            form.CloseWithoutResult();
         });
     }
 }
