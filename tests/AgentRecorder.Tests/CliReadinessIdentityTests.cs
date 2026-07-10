@@ -51,7 +51,7 @@ public class CliReadinessIdentityTests
 
         var dataObj = new Dictionary<string, object?>
         {
-            ["app"] = new { name = "Agent Recorder", version = "0.1.0", platform = "windows" }
+            ["app"] = new { name = "Agent Recorder", version = "0.1.2", platform = "windows" }
         };
         if (includeReadiness)
             dataObj["readiness"] = readinessObj;

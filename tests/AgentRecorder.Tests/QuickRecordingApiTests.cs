@@ -460,7 +460,10 @@ public class QuickRecordingApiTests
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            var interaction = doc.RootElement.GetProperty("data").GetProperty("interaction");
+            var data = doc.RootElement.GetProperty("data");
+            var interaction = data.GetProperty("interaction");
+
+            Assert.Equal("0.1.2", data.GetProperty("app").GetProperty("version").GetString());
 
             Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());

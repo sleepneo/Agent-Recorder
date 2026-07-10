@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -22,6 +23,7 @@ public sealed class ApiServer
 {
     public const int Port = 37891;
     private const string Prefix = "/api/v1";
+    private static readonly string ProductVersion = ResolveProductVersion();
 
     private readonly TcpListener _listener = new(IPAddress.Loopback, Port);
     private readonly RecordingEngine _engine;
@@ -749,7 +751,7 @@ public sealed class ApiServer
 
         return new
         {
-            app = new { name = "Agent Recorder", version = "0.1.0", platform = "windows" },
+            app = new { name = "Agent Recorder", version = ProductVersion, platform = "windows" },
             host = new
             {
                 mode = _tray.HostMode,
@@ -874,6 +876,18 @@ public sealed class ApiServer
                 last_selected_region = lastRegion == null ? null : LastRegionToCapabilitiesObject(lastRegion)
             }
         };
+    }
+
+    private static string ResolveProductVersion()
+    {
+        var informationalVersion = typeof(ApiServer).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+
+        if (!string.IsNullOrWhiteSpace(informationalVersion))
+            return informationalVersion.Split('+', 2)[0];
+
+        return typeof(ApiServer).Assembly.GetName().Version?.ToString(3) ?? "unknown";
     }
 
     private static object LastRegionToCapabilitiesObject(SelectedRegionState state) => new
