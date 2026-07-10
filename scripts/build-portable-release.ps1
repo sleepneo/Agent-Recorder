@@ -10,7 +10,7 @@
     .local-data/release-candidates/.
 
 .PARAMETER Version
-    Version string for the zip name. Default: v0.1.0
+    Version string for the zip name. Default: v0.1.2
 
 .PARAMETER PublishMode
     "self-contained" (default) or "framework-dependent".
@@ -26,7 +26,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.0",
+    [string]$Version = "v0.1.2",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",

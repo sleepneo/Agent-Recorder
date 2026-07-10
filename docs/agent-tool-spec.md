@@ -16,7 +16,7 @@ requires local user confirmation before recording starts.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `target_type` | string | Yes | `primary_display`, `active_window`, or `selected_region` |
+| `target_type` | string | Yes | `primary_display`, `active_window`, `selected_region`, or `last_region` |
 | `duration_seconds` | integer | No | Recording duration. If omitted, recording is manual-stop |
 | `selection_timeout_seconds` | integer | No | Timeout for `selected_region`, default `120` |
 | `fps` | integer | No | `15`, `24`, `30`, or `60`, default `30` |
@@ -37,7 +37,7 @@ requires local user confirmation before recording starts.
     "properties": {
       "target_type": {
         "type": "string",
-        "enum": ["primary_display", "active_window", "selected_region"]
+        "enum": ["primary_display", "active_window", "selected_region", "last_region"]
       },
       "duration_seconds": {
         "type": "integer",
@@ -169,6 +169,11 @@ POST /api/v1/recordings/{recording_id}/stop
 For `active_window`, agents may surface `resolved_source.capture_bounds` when
 diagnosing what area was actually recorded. This field is produced by Agent
 Recorder after clipping the window's visible bounds to the virtual desktop.
+
+For `selected_region`, the local user can drag a custom rectangle or click a
+highlighted visible window. For `last_region`, the last successful region is
+reused without opening the selection UI, but local recording confirmation is
+still required.
 
 ## Safety Requirements
 

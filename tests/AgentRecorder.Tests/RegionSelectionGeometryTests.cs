@@ -637,4 +637,450 @@ public class RegionSelectionGeometryTests
 
         Assert.Equal("display_1", result);
     }
+
+    // -------------------------------------------------------------------------
+    // Snap target generation tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void GenerateSnapTargets_DisplayBounds_ReturnsClientTargets()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var displays = new List<DisplayInfo>
+        {
+            new DisplayInfo("display_1", "Display 1", true,
+                new Bounds(0, 0, 1920, 1080), 1.0)
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<WindowInfo>());
+
+        Assert.Single(targets);
+        Assert.Equal(new Rectangle(0, 0, 1920, 1080), targets[0]);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_NegativeDisplay_ReturnsClientTargets()
+    {
+        var formBounds = new Rectangle(-2560, 0, 6400, 2160);
+        var displays = new List<DisplayInfo>
+        {
+            new DisplayInfo("display_neg", "Left", false,
+                new Bounds(-2560, 0, 2560, 1600), 1.0),
+            new DisplayInfo("display_main", "Main", true,
+                new Bounds(0, 0, 3840, 2160), 1.0)
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<WindowInfo>());
+
+        Assert.Equal(2, targets.Count);
+        Assert.Contains(new Rectangle(0, 0, 2560, 1600), targets);
+        Assert.Contains(new Rectangle(2560, 0, 3840, 2160), targets);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_WindowBounds_ReturnsClientTargets()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, false,
+                new Bounds(120, 80, 640, 480))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Single(targets);
+        Assert.Equal(new Rectangle(120, 80, 640, 480), targets[0]);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_MinimizedWindow_IsIgnored()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, true,
+                new Bounds(120, 80, 640, 480))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Empty(targets);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_EmptyTitleWindow_IsIgnored()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "", "", 123, false, false,
+                new Bounds(120, 80, 640, 480))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Empty(targets);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_FullScreenOverlayWindow_IsIgnored()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "Overlay", "app.exe", 123, false, false,
+                new Bounds(0, 0, 1920, 1080))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Empty(targets);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_TooSmallWindow_IsIgnored()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "Tiny", "tiny.exe", 123, false, false,
+                new Bounds(10, 10, 10, 10))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Empty(targets);
+    }
+
+    // -------------------------------------------------------------------------
+    // ApplySnapping tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ApplySnapping_MoveNearDisplayLeftEdge_SnapsLeft()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(8, 200, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(0, result.X);
+        Assert.Equal(200, result.Y);
+        Assert.Equal(400, result.Width);
+        Assert.Equal(300, result.Height);
+    }
+
+    [Fact]
+    public void ApplySnapping_MoveNearDisplayRightEdge_SnapsRight()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(1512, 200, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(1520, result.X); // 1920 - 400
+        Assert.Equal(200, result.Y);
+        Assert.Equal(400, result.Width);
+        Assert.Equal(300, result.Height);
+    }
+
+    [Fact]
+    public void ApplySnapping_WindowEdge_SnapsToWindowBoundary()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(120, 80, 640, 480) };
+        var current = new Rectangle(112, 200, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(120, result.X);
+        Assert.Equal(200, result.Y);
+        Assert.Equal(400, result.Width);
+        Assert.Equal(300, result.Height);
+    }
+
+    [Fact]
+    public void ApplySnapping_BeyondThreshold_DoesNotSnap()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(15, 200, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(15, result.X);
+        Assert.Equal(200, result.Y);
+    }
+
+
+
+    [Fact]
+    public void ApplySnapping_ResizeRightEdge_SnapsAndPreservesLeft()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 800, 600) };
+        var current = new Rectangle(100, 100, 690, 200);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.Right);
+
+        Assert.Equal(100, result.X);
+        Assert.Equal(800, result.Right);
+    }
+
+    [Fact]
+    public void ApplySnapping_ResizeClampedToMinSize()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(100, 100, 30, 30);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.Right | SnapEdgeMask.Bottom);
+
+        Assert.True(result.Width >= 32);
+        Assert.True(result.Height >= 32);
+    }
+
+    [Fact]
+    public void ApplySnapping_CreateRightBottom_SnapsMovingEdges()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        // Dragging from (0,0) toward (1912, 1072) - right and bottom edges near screen edges.
+        var current = new Rectangle(0, 0, 1912, 1072);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.Right | SnapEdgeMask.Bottom);
+
+        Assert.Equal(1920, result.Right);
+        Assert.Equal(1080, result.Bottom);
+    }
+
+    // -------------------------------------------------------------------------
+    // Alt disabled / no targets clamping regression tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ApplySnapping_DisabledMoveStillClampsToClientArea()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(-50, -20, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true, enabled: false);
+
+        Assert.Equal(new Rectangle(0, 0, 400, 300), result);
+    }
+
+    [Fact]
+    public void ApplySnapping_DisabledMoveKeepsSizeWhenTranslatingFromRightBottom()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(1600, 800, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: true, enabled: false);
+
+        Assert.Equal(400, result.Width);
+        Assert.Equal(300, result.Height);
+        Assert.True(result.Right <= formBounds.Width);
+        Assert.True(result.Bottom <= formBounds.Height);
+    }
+
+    [Fact]
+    public void ApplySnapping_NoTargetsMoveStillClampsToClientArea()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var current = new Rectangle(1800, 900, 400, 300);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, Array.Empty<Rectangle>(), 10, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(400, result.Width);
+        Assert.Equal(300, result.Height);
+        Assert.True(result.Right <= formBounds.Width);
+        Assert.True(result.Bottom <= formBounds.Height);
+    }
+
+    [Fact]
+    public void ApplySnapping_DisabledCreateStillClampsAndKeepsMinSize()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        // Create raw starts off-screen and is smaller than minSize.
+        var current = new Rectangle(-10, -10, 20, 20);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.All, preserveSize: false, enabled: false);
+
+        Assert.True(result.X >= 0);
+        Assert.True(result.Y >= 0);
+        Assert.True(result.Right <= formBounds.Width);
+        Assert.True(result.Bottom <= formBounds.Height);
+        Assert.True(result.Width >= 32);
+        Assert.True(result.Height >= 32);
+    }
+
+    [Fact]
+    public void ApplySnapping_DisabledResizeStillClamps()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var targets = new List<Rectangle> { new Rectangle(0, 0, 1920, 1080) };
+        var current = new Rectangle(1900, 1000, 100, 100);
+
+        var result = RegionSelectionGeometry.ApplySnapping(
+            current, formBounds, targets, 10, SnapEdgeMask.Right | SnapEdgeMask.Bottom, preserveSize: false, enabled: false);
+
+        Assert.True(result.Right <= formBounds.Width);
+        Assert.True(result.Bottom <= formBounds.Height);
+        Assert.True(result.Width >= 32);
+        Assert.True(result.Height >= 32);
+    }
+
+    [Fact]
+    public void ClampSelectionAfterDrag_PreserveSizeTranslatesWithoutShrinking()
+    {
+        var clientBounds = new Rectangle(0, 0, 1920, 1080);
+        var current = new Rectangle(-100, -50, 400, 300);
+
+        var result = RegionSelectionGeometry.ClampSelectionAfterDrag(
+            current, clientBounds, SnapEdgeMask.All, preserveSize: true);
+
+        Assert.Equal(new Rectangle(0, 0, 400, 300), result);
+    }
+
+    [Fact]
+    public void ClampSelectionAfterDrag_CreateModeExpandsToMinSize()
+    {
+        var clientBounds = new Rectangle(0, 0, 1920, 1080);
+        var current = new Rectangle(100, 100, 10, 10);
+
+        var result = RegionSelectionGeometry.ClampSelectionAfterDrag(
+            current, clientBounds, SnapEdgeMask.All, preserveSize: false);
+
+        Assert.True(result.Width >= 32);
+        Assert.True(result.Height >= 32);
+        Assert.True(result.Right <= clientBounds.Width);
+        Assert.True(result.Bottom <= clientBounds.Height);
+    }
+
+    // -------------------------------------------------------------------------
+    // Window candidate filtering tests
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ComputeWindowClientBounds_ValidWindow_ReturnsClientBounds()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, false,
+            new Bounds(120, 80, 640, 480));
+
+        var result = RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window);
+
+        Assert.NotNull(result);
+        Assert.Equal(new Rectangle(120, 80, 640, 480), result.Value);
+    }
+
+    [Fact]
+    public void ComputeWindowClientBounds_Minimized_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, true,
+            new Bounds(120, 80, 640, 480));
+
+        Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
+    }
+
+    [Fact]
+    public void ComputeWindowClientBounds_EmptyTitle_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "", "", 123, false, false,
+            new Bounds(120, 80, 640, 480));
+
+        Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
+    }
+
+    [Fact]
+    public void ComputeWindowClientBounds_FullScreenOverlay_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "Overlay", "overlay.exe", 123, false, false,
+            new Bounds(0, 0, 1920, 1080));
+
+        Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
+    }
+
+    [Fact]
+    public void ComputeWindowClientBounds_TinyWindow_ReturnsNull()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "Tiny", "tiny.exe", 123, false, false,
+            new Bounds(10, 10, 10, 10));
+
+        Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
+    }
+
+    [Fact]
+    public void ComputeWindowPickBounds_PartiallyOffscreen_IsClampedToClientArea()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var window = new WindowInfo("window_1", "Offscreen", "offscreen.exe", 123, false, false,
+            new Bounds(1800, 900, 300, 300));
+
+        var result = RegionSelectionGeometry.ComputeWindowPickBounds(formBounds, window);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.X >= 0);
+        Assert.True(result.Value.Y >= 0);
+        Assert.True(result.Value.Right <= formBounds.Width);
+        Assert.True(result.Value.Bottom <= formBounds.Height);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+    }
+
+    [Fact]
+    public void ComputeWindowPickBounds_NegativeCoordinateDisplay_IsClamped()
+    {
+        var formBounds = new Rectangle(-2560, 0, 6400, 2160);
+        var window = new WindowInfo("window_1", "Left", "left.exe", 123, false, false,
+            new Bounds(-2600, 100, 400, 400));
+
+        var result = RegionSelectionGeometry.ComputeWindowPickBounds(formBounds, window);
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.X >= 0);
+        Assert.True(result.Value.Y >= 0);
+        Assert.True(result.Value.Right <= formBounds.Width);
+        Assert.True(result.Value.Bottom <= formBounds.Height);
+        Assert.True(result.Value.Width >= 32);
+        Assert.True(result.Value.Height >= 32);
+    }
+
+    [Fact]
+    public void GenerateSnapTargets_UsesClampedWindowBounds()
+    {
+        var formBounds = new Rectangle(0, 0, 1920, 1080);
+        var windows = new List<WindowInfo>
+        {
+            new WindowInfo("window_1", "Offscreen", "offscreen.exe", 123, false, false,
+                new Bounds(1800, 900, 300, 300))
+        };
+
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+
+        Assert.Single(targets);
+        Assert.Equal(1920, targets[0].Right);
+        Assert.Equal(1080, targets[0].Bottom);
+    }
 }

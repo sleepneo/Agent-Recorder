@@ -442,12 +442,14 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
                     initialBounds = new Rectangle(lastState.X, lastState.Y, lastState.Width, lastState.Height);
                 }
 
-                using var form = new RegionSelectionForm(initialBounds);
+                using var form = CreateRegionSelectionForm(initialBounds, e => _audit.Log(e.EventName, e.Payload));
                 callbackState.FormHandle = form.Handle;
 
                 _audit.Log("region_selection.ui_opened", new
                 {
+                    stage = "handle_created",
                     thread_id = Thread.CurrentThread.ManagedThreadId,
+                    form_handle = form.Handle.ToInt64(),
                     form_bounds = new { x = form.Bounds.X, y = form.Bounds.Y, w = form.Bounds.Width, h = form.Bounds.Height },
                     virtual_screen = new
                     {
@@ -539,6 +541,17 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         });
         timeoutThread.IsBackground = true;
         timeoutThread.Start();
+    }
+
+    /// <summary>
+    /// Centralizes the production wiring that ensures the audit callback is attached
+    /// before the form constructor emits <c>region_selection.ui_created</c>.
+    /// This is the only supported way for production code to create a region selection form.
+    /// </summary>
+    internal static RegionSelectionForm CreateRegionSelectionForm(Rectangle? initialBounds,
+        Action<RegionSelectionForm.RegionSelectionAuditEventArgs> auditCallback)
+    {
+        return new RegionSelectionForm(initialBounds, onAuditEvent: auditCallback);
     }
 
     private class CallbackState

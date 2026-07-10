@@ -29,7 +29,8 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
    - 录制完成后报告 MP4 输出路径和元数据
 
 5. 人类用户只需要：
-   - 在弹出的选区界面中框选区域
+   - 在弹出的选区界面中拖拽框选，或点击高亮窗口直接选择其区域
+   - 根据需要移动、缩放或输入精确坐标；边缘默认自动吸附，按住 `Alt` 可临时关闭吸附
    - 在本地确认窗口中检查录制信息，可按需更改保存目录，然后明确点击「确认」批准录制
    - 播放 AI agent 返回的视频文件
 
@@ -73,6 +74,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 
 ```text
 AgentRecorder.App\                 应用主体
+AgentRecorder.Headless\            无交互 UI 的高级服务宿主
 AgentRecorder.Cli\                 agent 启动握手工具
 README.zh-CN.md                    中文说明
 QUICKSTART.zh-CN.md                本文件

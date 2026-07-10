@@ -371,19 +371,15 @@ public class FfmpegRegionCommandArgsTests
         // The 'output' sub-object contains command_args, backend, source_type.
         var result = engine.GetOutput(rec.Id);
         var json = JsonSerializer.Serialize(result);
-        var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(json)!;
+        using var document = JsonDocument.Parse(json);
+        var output = document.RootElement.GetProperty("output");
 
-        Assert.True(dict.ContainsKey("output"), "output field missing from GetOutput result");
-        var outputObj = JsonSerializer.Deserialize<Dictionary<string, object>>(dict["output"]!.ToString())!;
+        Assert.True(output.TryGetProperty("command_args", out var commandArgs),
+            "command_args field missing from output");
+        Assert.False(string.IsNullOrWhiteSpace(commandArgs.GetString()));
 
-        Assert.True(outputObj.ContainsKey("command_args"), "command_args field missing from output");
-        Assert.NotEmpty(outputObj["command_args"]!.ToString());
-
-        Assert.True(outputObj.ContainsKey("backend"), "backend field missing from output");
-        Assert.Equal("ffmpeg-region", outputObj["backend"]!.ToString());
-
-        Assert.True(outputObj.ContainsKey("source_type"), "source_type field missing from output");
-        Assert.Equal("region", outputObj["source_type"]!.ToString());
+        Assert.Equal("ffmpeg-region", output.GetProperty("backend").GetString());
+        Assert.Equal("region", output.GetProperty("source_type").GetString());
 
         // Clean up
         try { rec.Backend?.Stop(); } catch { }

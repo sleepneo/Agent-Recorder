@@ -51,7 +51,45 @@ public sealed class RegionSelectionForm : Form
 
     private const int HandleSize = 10;
     private const int MinSize = 32;
+    private const int SnapThreshold = 10;
+    private const int ClickPickTolerance = 4;
     private Rectangle? _initialVirtualBounds;
+    private readonly IWindowActivator _windowActivator;
+    private int _foregroundAttempts;
+    private const int ForegroundVerifyDelayMs = 150;
+    private const int MaxForegroundAttempts = 2;
+    private System.Windows.Forms.Timer? _foregroundVerifyTimer;
+
+    /// <summary>
+    /// When true (default), OnShown schedules a single delayed foreground verification.
+    /// Tests can set this to false to avoid real timer waits and then call
+    /// <see cref="RunForegroundVerificationForTest"/> to simulate the delayed tick.
+    /// </summary>
+    internal bool EnableDelayedForegroundVerification { get; init; } = true;
+
+    internal sealed record WindowPickCandidate(WindowInfo Window, Rectangle ClientBounds);
+
+    /// <summary>
+    /// Audit event raised by the form to report lifecycle and foregrounding stages.
+    /// TrayContext subscribes to this event and forwards it to the audit logger.
+    /// </summary>
+    public sealed class RegionSelectionAuditEventArgs : EventArgs
+    {
+        public string EventName { get; init; } = "";
+        public object Payload { get; init; } = new();
+    }
+
+    internal event EventHandler<RegionSelectionAuditEventArgs>? AuditEvent;
+
+    private List<Rectangle> _snapTargets = new();
+    private List<WindowPickCandidate> _windowCandidates = new();
+    private Rectangle? _hoverWindowClientBounds;
+    private string? _hoverWindowTitle;
+    private Point _mouseDownPoint;
+    private DragMode _mouseDownHitTest = DragMode.None;
+    private Rectangle? _mouseDownWindowClientBounds;
+    private bool _mouseMovedBeyondClickTolerance;
+    private bool _isLeftMouseDownForSelection;
 
     /// <summary>
     /// Selected bounds in virtual screen coordinates.
@@ -68,9 +106,13 @@ public sealed class RegionSelectionForm : Form
     /// </summary>
     public string CoordinateSpace { get; private set; } = "virtual_screen";
 
-    public RegionSelectionForm(Rectangle? initialVirtualBounds = null)
+    public RegionSelectionForm(Rectangle? initialVirtualBounds = null, IWindowActivator? windowActivator = null,
+        Action<RegionSelectionAuditEventArgs>? onAuditEvent = null)
     {
         _initialVirtualBounds = initialVirtualBounds;
+        _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
+        if (onAuditEvent != null)
+            AuditEvent += (_, e) => onAuditEvent(e);
 
         // Initialize button fields FIRST (null guards) before any property that could trigger OnResize
         _confirmButton = new Button
@@ -107,7 +149,7 @@ public sealed class RegionSelectionForm : Form
         // Info label
         _infoLabel = new Label
         {
-            Text = "Click and drag to select a region. Press Enter to confirm, Esc to cancel.",
+            Text = "Click and drag to select a region. Hover a window and click to pick it. Hold Alt to disable snap. Press Enter to confirm, Esc to cancel.",
             ForeColor = Color.White,
             BackColor = Color.FromArgb(150, 0, 0, 0),
             Padding = new Padding(12),
@@ -225,6 +267,8 @@ public sealed class RegionSelectionForm : Form
         DoubleBuffered = true;
         ShowInTaskbar = false;
         TopMost = true;
+        MaximizeBox = false;
+        MinimizeBox = false;
         KeyPreview = true; // Ensure key events are captured even when child controls have focus
 
         // Use virtual screen bounds to cover all monitors including negative coordinates
@@ -235,9 +279,14 @@ public sealed class RegionSelectionForm : Form
         try { _displays = SystemQuery.EnumDisplays().ToList(); }
         catch { _displays = null; }
 
+        // Refresh window candidates and snap targets (displays + visible windows) for magnetic snapping.
+        RefreshCandidatesAndTargets();
+
         // Apply initial selection immediately while still on the creating thread.
         // OnShown is message-pump dependent and may not run before tests inspect state.
         ApplyInitialSelection();
+
+        RaiseAuditEvent("region_selection.ui_created", CreateLifecyclePayload("handle_created"));
     }
 
     private static NumericUpDown CreateInput(int min, int max)
@@ -297,6 +346,9 @@ public sealed class RegionSelectionForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+
+        RaiseAuditEvent("region_selection.ui_shown", CreateLifecyclePayload("shown"));
+
         // Ensure window is foreground and has focus
         BringToFront();
         Activate();
@@ -305,6 +357,169 @@ public sealed class RegionSelectionForm : Form
 
         // Apply initial selection after the form bounds are finalized.
         ApplyInitialSelection();
+
+        // Perform explicit Win32 top-most placement and foregrounding.
+        // An immediate attempt is followed by a single delayed verification tick
+        // to handle races where another window briefly steals the z-order right
+        // after the form becomes visible.
+        _foregroundAttempts = 0;
+        EnsureTopMostForeground();
+
+        if (EnableDelayedForegroundVerification && IsHandleCreated && !IsDisposed)
+        {
+            ScheduleForegroundVerification();
+        }
+    }
+
+    private void ScheduleForegroundVerification()
+    {
+        if (_foregroundVerifyTimer == null)
+        {
+            _foregroundVerifyTimer = new System.Windows.Forms.Timer
+            {
+                Interval = ForegroundVerifyDelayMs
+            };
+            _foregroundVerifyTimer.Tick += OnForegroundVerifyTimerTick;
+        }
+
+        _foregroundVerifyTimer.Stop();
+        _foregroundVerifyTimer.Start();
+    }
+
+    private void OnForegroundVerifyTimerTick(object? sender, EventArgs e)
+    {
+        _foregroundVerifyTimer?.Stop();
+        EnsureTopMostForeground();
+    }
+
+    private void EnsureTopMostForeground()
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        if (_foregroundAttempts >= MaxForegroundAttempts)
+            return;
+
+        _foregroundAttempts++;
+
+        var hWnd = Handle;
+        IntPtr beforeForeground = IntPtr.Zero;
+        try
+        {
+            beforeForeground = _windowActivator.GetForegroundWindow();
+        }
+        catch (Exception ex)
+        {
+            RecordForegroundError("get_foreground_before", ex, ref _foregroundError, ref _foregroundErrorStage);
+        }
+
+        RaiseAuditEvent("region_selection.foreground_attempt", new
+        {
+            attempt = _foregroundAttempts,
+            max_attempts = MaxForegroundAttempts,
+            form_handle = hWnd.ToInt64(),
+            visible = Visible,
+            topmost = TopMost,
+            bounds = new { x = Bounds.X, y = Bounds.Y, w = Bounds.Width, h = Bounds.Height },
+            foreground_before = beforeForeground.ToInt64()
+        });
+
+        bool setTopMostSuccess = false;
+        bool setForegroundSuccess = false;
+        bool bringToTopSuccess = false;
+
+        try
+        {
+            setTopMostSuccess = _windowActivator.SetTopMost(hWnd);
+        }
+        catch (Exception ex)
+        {
+            RecordForegroundError("set_topmost", ex, ref _foregroundError, ref _foregroundErrorStage);
+        }
+
+        try
+        {
+            setForegroundSuccess = _windowActivator.SetForeground(hWnd);
+        }
+        catch (Exception ex)
+        {
+            RecordForegroundError("set_foreground", ex, ref _foregroundError, ref _foregroundErrorStage);
+        }
+
+        if (!setForegroundSuccess)
+        {
+            try
+            {
+                bringToTopSuccess = _windowActivator.BringToTop(hWnd);
+            }
+            catch (Exception ex)
+            {
+                RecordForegroundError("bring_to_top", ex, ref _foregroundError, ref _foregroundErrorStage);
+            }
+        }
+
+        IntPtr afterForeground = IntPtr.Zero;
+        try
+        {
+            afterForeground = _windowActivator.GetForegroundWindow();
+        }
+        catch (Exception ex)
+        {
+            RecordForegroundError("get_foreground_after", ex, ref _foregroundError, ref _foregroundErrorStage);
+        }
+
+        bool becameForeground = afterForeground == hWnd;
+
+        RaiseAuditEvent("region_selection.foreground_result", new
+        {
+            attempt = _foregroundAttempts,
+            form_handle = hWnd.ToInt64(),
+            foreground_after = afterForeground.ToInt64(),
+            became_foreground = becameForeground,
+            set_window_pos_success = setTopMostSuccess,
+            set_foreground_window_success = setForegroundSuccess,
+            bring_window_to_top_success = bringToTopSuccess,
+            error = _foregroundError,
+            error_stage = _foregroundErrorStage
+        });
+
+        // Reset the transient error state so the next attempt starts clean.
+        _foregroundError = null;
+        _foregroundErrorStage = null;
+    }
+
+    private string? _foregroundError;
+    private string? _foregroundErrorStage;
+
+    private static void RecordForegroundError(string stage, Exception ex, ref string? error, ref string? errorStage)
+    {
+        error ??= ex.Message;
+        errorStage ??= stage;
+    }
+
+    private void RaiseAuditEvent(string eventName, object payload)
+    {
+        AuditEvent?.Invoke(this, new RegionSelectionAuditEventArgs { EventName = eventName, Payload = payload });
+    }
+
+    private object CreateLifecyclePayload(string stage)
+    {
+        var virtualScreen = SystemInformation.VirtualScreen;
+        return new
+        {
+            stage,
+            form_handle = IsHandleCreated ? Handle.ToInt64() : 0,
+            visible = Visible,
+            topmost = TopMost,
+            bounds = new { x = Bounds.X, y = Bounds.Y, w = Bounds.Width, h = Bounds.Height },
+            virtual_screen = new
+            {
+                x = virtualScreen.X,
+                y = virtualScreen.Y,
+                w = virtualScreen.Width,
+                h = virtualScreen.Height
+            }
+        };
     }
 
     /// <summary>
@@ -480,24 +695,158 @@ public sealed class RegionSelectionForm : Form
         Close();
     }
 
+    private void RefreshCandidatesAndTargets()
+    {
+        _windowCandidates = new List<WindowPickCandidate>();
+        _snapTargets = new List<Rectangle>();
+
+        List<DisplayInfo> displays = new();
+        try
+        {
+            displays = _displays ?? SystemQuery.EnumDisplays().ToList();
+        }
+        catch { }
+
+        IEnumerable<WindowInfo> windows = Enumerable.Empty<WindowInfo>();
+        try
+        {
+            windows = SystemQuery.EnumWindows(includeMinimized: false, includeSystem: false);
+        }
+        catch { }
+
+        try
+        {
+            foreach (var window in windows)
+            {
+                var bounds = RegionSelectionGeometry.ComputeWindowPickBounds(Bounds, window, MinSize);
+                if (bounds.HasValue)
+                    _windowCandidates.Add(new WindowPickCandidate(window, bounds.Value));
+            }
+        }
+        catch
+        {
+            _windowCandidates = new List<WindowPickCandidate>();
+        }
+
+        try
+        {
+            _snapTargets = RegionSelectionGeometry.GenerateSnapTargets(Bounds, displays, windows, MinSize);
+        }
+        catch
+        {
+            _snapTargets = new List<Rectangle>();
+        }
+    }
+
+    private Rectangle? GetWindowClientBoundsAtPoint(Point clientPoint)
+    {
+        foreach (var candidate in _windowCandidates)
+        {
+            if (candidate.ClientBounds.Contains(clientPoint))
+                return candidate.ClientBounds;
+        }
+        return null;
+    }
+
+    private void UpdateHoverWindow(Point clientPoint)
+    {
+        // Existing selection handles take priority over window hover.
+        if (GetHitTest(clientPoint) != DragMode.None)
+        {
+            _hoverWindowClientBounds = null;
+            _hoverWindowTitle = null;
+            return;
+        }
+
+        foreach (var candidate in _windowCandidates)
+        {
+            if (candidate.ClientBounds.Contains(clientPoint))
+            {
+                _hoverWindowClientBounds = candidate.ClientBounds;
+                _hoverWindowTitle = candidate.Window.title;
+                return;
+            }
+        }
+
+        _hoverWindowClientBounds = null;
+        _hoverWindowTitle = null;
+    }
+
+    private static SnapEdgeMask GetSnapEdgeMaskForDragMode(DragMode mode, Point current, Point dragStart)
+    {
+        return mode switch
+        {
+            DragMode.Move => SnapEdgeMask.All,
+            DragMode.ResizeNW => SnapEdgeMask.Left | SnapEdgeMask.Top,
+            DragMode.ResizeN => SnapEdgeMask.Top,
+            DragMode.ResizeNE => SnapEdgeMask.Right | SnapEdgeMask.Top,
+            DragMode.ResizeW => SnapEdgeMask.Left,
+            DragMode.ResizeE => SnapEdgeMask.Right,
+            DragMode.ResizeSW => SnapEdgeMask.Left | SnapEdgeMask.Bottom,
+            DragMode.ResizeS => SnapEdgeMask.Bottom,
+            DragMode.ResizeSE => SnapEdgeMask.Right | SnapEdgeMask.Bottom,
+            DragMode.Create => GetCreateSnapEdgeMask(current, dragStart),
+            _ => SnapEdgeMask.None
+        };
+    }
+
+    private static SnapEdgeMask GetCreateSnapEdgeMask(Point current, Point dragStart)
+    {
+        SnapEdgeMask mask = SnapEdgeMask.None;
+        if (current.X >= dragStart.X)
+            mask |= SnapEdgeMask.Right;
+        else
+            mask |= SnapEdgeMask.Left;
+        if (current.Y >= dragStart.Y)
+            mask |= SnapEdgeMask.Bottom;
+        else
+            mask |= SnapEdgeMask.Top;
+        return mask;
+    }
+
+    private bool IsAltPressed => (ModifierKeys & Keys.Alt) == Keys.Alt;
+
+    private Rectangle ApplySnappingToSelection(Rectangle selection, DragMode mode, Point current)
+    {
+        var mask = GetSnapEdgeMaskForDragMode(mode, current, _dragStart);
+        if (mask == SnapEdgeMask.None)
+            return selection;
+
+        bool preserveSize = mode == DragMode.Move;
+        return RegionSelectionGeometry.ApplySnapping(
+            selection,
+            ClientRectangle,
+            _snapTargets,
+            SnapThreshold,
+            mask,
+            preserveSize,
+            !IsAltPressed,
+            MinSize);
+    }
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
 
         if (e.Button != MouseButtons.Left) return;
 
-        var mode = GetHitTest(e.Location);
-        if (mode == DragMode.None)
+        _isLeftMouseDownForSelection = true;
+        Capture = true;
+        _mouseDownPoint = e.Location;
+        _mouseMovedBeyondClickTolerance = false;
+        _mouseDownWindowClientBounds = null;
+        _mouseDownHitTest = GetHitTest(e.Location);
+
+        if (_mouseDownHitTest == DragMode.None)
         {
-            // Start creating a new selection
-            _dragMode = DragMode.Create;
-            _dragStart = e.Location;
-            _selection = new Rectangle(e.X, e.Y, 0, 0);
-            _confirmButton.Enabled = false;
+            // Defer creating a selection; if the user does not drag beyond the
+            // click tolerance we will treat this as a window-pick click.
+            _mouseDownWindowClientBounds = GetWindowClientBoundsAtPoint(e.Location);
+            _dragMode = DragMode.None;
         }
         else
         {
-            _dragMode = mode;
+            _dragMode = _mouseDownHitTest;
             _dragStart = e.Location;
             _dragOrig = _selection;
         }
@@ -511,7 +860,9 @@ public sealed class RegionSelectionForm : Form
 
         if (_dragMode == DragMode.None)
         {
-            // Update cursor based on hover
+            // Update hover and cursor first so the cursor reflects the current
+            // state without a one-frame lag. Selection handles take priority.
+            UpdateHoverWindow(e.Location);
             var mode = GetHitTest(e.Location);
             Cursor = mode switch
             {
@@ -520,10 +871,54 @@ public sealed class RegionSelectionForm : Form
                 DragMode.ResizeNE or DragMode.ResizeSW => Cursors.SizeNESW,
                 DragMode.ResizeN or DragMode.ResizeS => Cursors.SizeNS,
                 DragMode.ResizeE or DragMode.ResizeW => Cursors.SizeWE,
-                _ => Cursors.Cross
+                _ => _hoverWindowClientBounds.HasValue ? Cursors.Hand : Cursors.Cross
             };
-            return;
+
+            // Only convert a pending click into a drag-to-create when the left
+            // button is actually held and the mouse was not pressed on an existing
+            // selection or resize handle.
+            if (_isLeftMouseDownForSelection &&
+                !_mouseMovedBeyondClickTolerance &&
+                _mouseDownHitTest == DragMode.None)
+            {
+                if (Math.Abs(e.X - _mouseDownPoint.X) > ClickPickTolerance ||
+                    Math.Abs(e.Y - _mouseDownPoint.Y) > ClickPickTolerance)
+                {
+                    _mouseMovedBeyondClickTolerance = true;
+                    _dragMode = DragMode.Create;
+                    _dragStart = _mouseDownPoint;
+                    _selection = new Rectangle(_dragStart.X, _dragStart.Y, 0, 0);
+                    _confirmButton.Enabled = false;
+                    UpdateInfoLabel();
+                }
+            }
+
+            if (_dragMode == DragMode.None)
+            {
+                if (_hoverWindowClientBounds.HasValue)
+                    Invalidate();
+                return;
+            }
         }
+
+        // Clear hover highlight while dragging.
+        if (_hoverWindowClientBounds.HasValue)
+        {
+            _hoverWindowClientBounds = null;
+            _hoverWindowTitle = null;
+            Invalidate();
+        }
+
+        Cursor = _dragMode switch
+        {
+            DragMode.Create => Cursors.Cross,
+            DragMode.Move => Cursors.SizeAll,
+            DragMode.ResizeNW or DragMode.ResizeSE => Cursors.SizeNWSE,
+            DragMode.ResizeNE or DragMode.ResizeSW => Cursors.SizeNESW,
+            DragMode.ResizeN or DragMode.ResizeS => Cursors.SizeNS,
+            DragMode.ResizeE or DragMode.ResizeW => Cursors.SizeWE,
+            _ => Cursor
+        };
 
         if (_dragMode == DragMode.Create)
         {
@@ -531,7 +926,8 @@ public sealed class RegionSelectionForm : Form
             int y = Math.Min(_dragStart.Y, e.Y);
             int w = Math.Abs(e.X - _dragStart.X);
             int h = Math.Abs(e.Y - _dragStart.Y);
-            _selection = new Rectangle(x, y, w, h);
+            var raw = new Rectangle(x, y, w, h);
+            _selection = ApplySnappingToSelection(raw, DragMode.Create, e.Location);
         }
         else if (_dragMode == DragMode.Move)
         {
@@ -540,15 +936,13 @@ public sealed class RegionSelectionForm : Form
             int newX = _dragOrig.X + dx;
             int newY = _dragOrig.Y + dy;
 
-            // Clamp to virtual screen bounds
-            newX = Math.Max(0, Math.Min(Width - _dragOrig.Width, newX));
-            newY = Math.Max(0, Math.Min(Height - _dragOrig.Height, newY));
-
-            _selection = new Rectangle(newX, newY, _dragOrig.Width, _dragOrig.Height);
+            var raw = new Rectangle(newX, newY, _dragOrig.Width, _dragOrig.Height);
+            _selection = ApplySnappingToSelection(raw, DragMode.Move, e.Location);
         }
         else
         {
             ResizeSelection(e.Location);
+            _selection = ApplySnappingToSelection(_selection, _dragMode, e.Location);
         }
 
         UpdateInfoLabel();
@@ -559,7 +953,20 @@ public sealed class RegionSelectionForm : Form
     {
         base.OnMouseUp(e);
 
-        if (e.Button == MouseButtons.Left && _dragMode != DragMode.None)
+        if (e.Button != MouseButtons.Left)
+            return;
+
+        if (_dragMode == DragMode.None &&
+            !_mouseMovedBeyondClickTolerance &&
+            _mouseDownWindowClientBounds.HasValue)
+        {
+            // Treat as a window-pick click.
+            _selection = _mouseDownWindowClientBounds.Value;
+            _confirmButton.Enabled = true;
+            UpdateInfoLabel();
+            Invalidate();
+        }
+        else if (_dragMode != DragMode.None)
         {
             if (_selection.Width > 0 && _selection.Height > 0)
             {
@@ -568,7 +975,55 @@ public sealed class RegionSelectionForm : Form
             _dragMode = DragMode.None;
             Invalidate();
         }
+
+        ReleaseMouseState();
     }
+
+    private void ReleaseMouseState()
+    {
+        _isLeftMouseDownForSelection = false;
+        _mouseMovedBeyondClickTolerance = false;
+        _mouseDownWindowClientBounds = null;
+        _mouseDownHitTest = DragMode.None;
+        if (Capture)
+            Capture = false;
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        ReleaseMouseState();
+        base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            StopForegroundVerificationTimer();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void StopForegroundVerificationTimer()
+    {
+        if (_foregroundVerifyTimer != null)
+        {
+            _foregroundVerifyTimer.Stop();
+            _foregroundVerifyTimer.Tick -= OnForegroundVerifyTimerTick;
+            _foregroundVerifyTimer.Dispose();
+            _foregroundVerifyTimer = null;
+        }
+    }
+
+    /// <summary>
+    /// Test seam to manually run a foreground verification tick without waiting
+    /// for the real timer. Does nothing if the form is disposed or the maximum
+    /// number of attempts has already been reached.
+    /// </summary>
+    internal void RunForegroundVerificationForTest() => EnsureTopMostForeground();
+
+    internal int ForegroundAttemptsForTest => _foregroundAttempts;
 
     private DragMode GetHitTest(Point p)
     {
@@ -719,6 +1174,16 @@ public sealed class RegionSelectionForm : Form
         // Draw multi-monitor boundaries and labels
         DrawDisplayBoundaries(g);
 
+        // Draw window hover highlight (behind the selection so it never obscures it).
+        if (_hoverWindowClientBounds.HasValue)
+        {
+            using var hoverPen = new Pen(Color.FromArgb(180, 0, 255, 255), 2)
+            {
+                DashStyle = DashStyle.Dash
+            };
+            g.DrawRectangle(hoverPen, _hoverWindowClientBounds.Value);
+        }
+
         if (_selection.Width > 0 && _selection.Height > 0)
         {
             // Draw dark overlay outside selection
@@ -818,5 +1283,26 @@ public sealed class RegionSelectionForm : Form
         thread.Join();
 
         return (result, bounds, displayId);
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal test seams
+    // -------------------------------------------------------------------------
+
+    internal Rectangle CurrentSelection => _selection;
+    internal Rectangle? HoverWindowClientBounds => _hoverWindowClientBounds;
+    internal IReadOnlyList<Rectangle> SnapTargets => _snapTargets;
+    internal IReadOnlyList<WindowPickCandidate> WindowCandidates => _windowCandidates;
+    internal IReadOnlyList<Rectangle> WindowCandidateBoundsForTests => _windowCandidates.Select(c => c.ClientBounds).ToList();
+    internal string CurrentDragModeForTests => _dragMode.ToString();
+
+    internal void RefreshCandidatesAndTargetsForTest() => RefreshCandidatesAndTargets();
+
+    internal void ApplyWindowPickForTest(Rectangle clientBounds)
+    {
+        _selection = clientBounds;
+        _confirmButton.Enabled = true;
+        UpdateInfoLabel();
+        Invalidate();
     }
 }

@@ -237,6 +237,12 @@ Supported `target.type` values:
 | `selected_region` | Show local region-selection UI, then create a recording |
 | `last_region` | Reuse the last successful region selection, then create a recording without showing the UI |
 
+The selected-region UI covers the virtual desktop and supports dragging,
+moving, resizing, precise coordinates, common size presets, edge/window
+snapping, and click-to-pick for highlighted visible windows. Holding `Alt`
+temporarily disables snapping. The overlay is explicitly kept above ordinary
+maximized windows across multi-monitor desktops.
+
 Successful creation returns `requires_user_confirmation`:
 
 ```json

@@ -31,7 +31,9 @@ Record the current conversation window for 5 minutes.
    - report the final MP4 path
 
 5. The human user only selects the region, confirms recording locally, and plays
-   the returned MP4.
+   the returned MP4. In the selection UI, drag a custom rectangle or click a
+   highlighted window; edges snap automatically, and holding `Alt` temporarily
+   disables snapping for precise adjustment.
 
 ## Quick API Targets
 
@@ -73,3 +75,7 @@ without `AGENT_RECORDER_DATA_DIR`, the default data directory is
 - AI agents can request recording but cannot silently approve it.
 - Local user confirmation is mandatory. The confirmation window also lets the user choose the save directory for that recording.
 - HTTP self-approval is blocked with `405 METHOD_NOT_ALLOWED`.
+
+Before showing confirmation and again before capture starts, Agent Recorder
+checks the output path, free space, encoder availability, capture bounds, and
+whether the selected source still exists.
