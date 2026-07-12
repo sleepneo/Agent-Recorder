@@ -589,10 +589,8 @@ internal static class Program
             };
         }
 
-        var psi = CreateServiceStartInfo(exePath, dataDir);
-
         var stopwatch = Stopwatch.StartNew();
-        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start service process.");
+        using var proc = StartServiceProcess(exePath, dataDir);
 
         var namedEventName = RuntimeReadiness.NamedEventName;
         bool readySignaled = false;
@@ -658,23 +656,34 @@ internal static class Program
         };
     }
 
-    internal static ProcessStartInfo CreateServiceStartInfo(string exePath, string dataDir)
+    internal static ProcessStartInfo CreateServiceStartInfo(string exePath)
     {
-        var psi = new ProcessStartInfo
+        return new ProcessStartInfo
         {
             FileName = exePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,
-            // The long-running service must not inherit the CLI caller's capture pipes.
-            // Otherwise shells and AI agents that capture --json output wait until the
-            // service exits even though the CLI process has already returned.
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
         };
+    }
 
-        psi.Environment["AGENT_RECORDER_DATA_DIR"] = dataDir;
-        return psi;
+    internal static Process StartServiceProcess(string exePath, string dataDir)
+    {
+        // Shell execution prevents the long-running service from inheriting the CLI
+        // caller's capture pipes. UseShellExecute cannot accept a custom environment,
+        // so set the variable only for the synchronous process-creation window.
+        const string dataDirVariable = "AGENT_RECORDER_DATA_DIR";
+        var previousDataDir = Environment.GetEnvironmentVariable(dataDirVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(dataDirVariable, dataDir);
+            return Process.Start(CreateServiceStartInfo(exePath))
+                ?? throw new InvalidOperationException("Failed to start service process.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(dataDirVariable, previousDataDir);
+        }
     }
 
     internal enum StaleReadyDecisionAction

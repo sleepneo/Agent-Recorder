@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -31,20 +32,18 @@ public class CliEnsureRunningTests : IDisposable
     }
 
     [Fact]
-    public void CreateServiceStartInfo_DetachesServiceFromCallerOutputPipes()
+    public void CreateServiceStartInfo_UsesHiddenShellLaunchToDetachCallerPipes()
     {
         var exePath = Path.Combine(_testDir, "AgentRecorder.App.exe");
-        var dataDir = Path.Combine(_testDir, ".local-data");
 
-        var startInfo = Program.CreateServiceStartInfo(exePath, dataDir);
+        var startInfo = Program.CreateServiceStartInfo(exePath);
 
         Assert.Equal(exePath, startInfo.FileName);
-        Assert.False(startInfo.UseShellExecute);
-        Assert.True(startInfo.CreateNoWindow);
-        Assert.True(startInfo.RedirectStandardOutput);
-        Assert.True(startInfo.RedirectStandardError);
+        Assert.True(startInfo.UseShellExecute);
+        Assert.Equal(ProcessWindowStyle.Hidden, startInfo.WindowStyle);
+        Assert.False(startInfo.RedirectStandardOutput);
+        Assert.False(startInfo.RedirectStandardError);
         Assert.Equal(_testDir, startInfo.WorkingDirectory);
-        Assert.Equal(dataDir, startInfo.Environment["AGENT_RECORDER_DATA_DIR"]);
     }
 
     [Fact]
