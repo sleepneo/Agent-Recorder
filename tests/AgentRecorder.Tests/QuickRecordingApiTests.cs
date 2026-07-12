@@ -463,7 +463,7 @@ public class QuickRecordingApiTests
             var data = doc.RootElement.GetProperty("data");
             var interaction = data.GetProperty("interaction");
 
-            Assert.Equal("0.1.2", data.GetProperty("app").GetProperty("version").GetString());
+            Assert.Equal("0.1.3", data.GetProperty("app").GetProperty("version").GetString());
 
             Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());

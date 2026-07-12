@@ -589,15 +589,7 @@ internal static class Program
             };
         }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = exePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
-        };
-
-        psi.Environment["AGENT_RECORDER_DATA_DIR"] = dataDir;
+        var psi = CreateServiceStartInfo(exePath, dataDir);
 
         var stopwatch = Stopwatch.StartNew();
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start service process.");
@@ -664,6 +656,25 @@ internal static class Program
             Message = $"Agent Recorder did not become ready within {opts.TimeoutMs / 1000} seconds.",
             SuggestedAction = "Check whether AgentRecorder.App.exe can start in the current desktop session."
         };
+    }
+
+    internal static ProcessStartInfo CreateServiceStartInfo(string exePath, string dataDir)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = exePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,
+            // The long-running service must not inherit the CLI caller's capture pipes.
+            // Otherwise shells and AI agents that capture --json output wait until the
+            // service exits even though the CLI process has already returned.
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        psi.Environment["AGENT_RECORDER_DATA_DIR"] = dataDir;
+        return psi;
     }
 
     internal enum StaleReadyDecisionAction
