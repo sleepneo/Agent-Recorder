@@ -148,6 +148,8 @@ internal sealed class RecordingIndicatorForm : Form
     internal RecordingIndicatorBounds BoundsForTests => _bounds;
     internal bool TimerEnabledForTests => _timer?.Enabled ?? false;
     internal string LabelTextForTests => _label?.Text ?? "";
+    internal Rectangle LabelBoundsForTests => _label?.Bounds ?? Rectangle.Empty;
+    internal Size LabelMeasuredSizeForTests => MeasureLabelSize(_nestedRole, _durationSeconds, _label?.Font ?? new Font("Segoe UI", 9, FontStyle.Bold), _label?.Padding ?? new Padding(4, 2, 4, 2));
 
     public RecordingIndicatorForm(
         string recordingId,
@@ -181,16 +183,23 @@ internal sealed class RecordingIndicatorForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         Text = "";
+        AutoScaleMode = AutoScaleMode.Dpi;
+
+        var font = new Font("Segoe UI", 9, FontStyle.Bold);
+        var padding = new Padding(4, 2, 4, 2);
+        var size = MeasureLabelSize(_nestedRole, _durationSeconds, font, padding);
 
         _label = new Label
         {
-            AutoSize = true,
+            AutoSize = false,
             BackColor = Color.FromArgb(180, 255, 0, 0),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            Padding = new Padding(4, 2, 4, 2),
+            Font = font,
+            Padding = padding,
             Text = FormatLabel(TimeSpan.Zero),
-            Visible = true
+            Visible = true,
+            Size = size,
+            TextAlign = ContentAlignment.MiddleCenter
         };
         Controls.Add(_label);
 
@@ -199,6 +208,52 @@ internal sealed class RecordingIndicatorForm : Form
             Interval = 500
         };
         _timer.Tick += (_, _) => UpdateLabel();
+    }
+
+    /// <summary>
+    /// Maximum manual recording duration supported by the product API. Used as the
+    /// conservative upper bound for label sizing when no explicit duration is set.
+    /// </summary>
+    internal const int MaxManualRecordingSeconds = 7200;
+
+    /// <summary>
+    /// Formats a non-negative time span for the REC label.
+    /// Uses mm:ss below one hour and h:mm:ss at or above one hour to avoid
+    /// minute-component wrap-around after 59:59.
+    /// </summary>
+    internal static string FormatTime(TimeSpan time)
+    {
+        if (time.TotalHours >= 1)
+            return $"{time.Hours}:{time.Minutes:D2}:{time.Seconds:D2}";
+        return $"{time.Minutes:D2}:{time.Seconds:D2}";
+    }
+
+    /// <summary>
+    /// Measures the label size required to display the longest possible text for this
+    /// recording without resizing during the recording. The elapsed and total portions
+    /// share the same formatting helper so measurement and runtime rendering stay in sync.
+    /// </summary>
+    internal static Size MeasureLabelSize(string? nestedRole, int? durationSeconds, Font font, Padding padding)
+    {
+        var prefix = string.IsNullOrEmpty(nestedRole)
+            ? "REC"
+            : $"REC {nestedRole.ToUpperInvariant()}";
+
+        string maxText;
+        if (durationSeconds.HasValue && durationSeconds.Value > 0)
+        {
+            var total = TimeSpan.FromSeconds(durationSeconds.Value);
+            var longestElapsed = total; // elapsed never exceeds total
+            maxText = $"{prefix} {FormatTime(longestElapsed)} / {FormatTime(total)}";
+        }
+        else
+        {
+            var longestElapsed = TimeSpan.FromSeconds(MaxManualRecordingSeconds);
+            maxText = $"{prefix} {FormatTime(longestElapsed)}";
+        }
+
+        var textSize = TextRenderer.MeasureText(maxText, font, Size.Empty, TextFormatFlags.SingleLine);
+        return new Size(textSize.Width + padding.Horizontal, textSize.Height + padding.Vertical);
     }
 
     protected override void OnShown(EventArgs e)
@@ -257,6 +312,7 @@ internal sealed class RecordingIndicatorForm : Form
         {
             _timer?.Stop();
             _timer?.Dispose();
+            _label?.Font?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -272,8 +328,7 @@ internal sealed class RecordingIndicatorForm : Form
     private void PositionLabel()
     {
         if (_label == null) return;
-        _label.Text = FormatLabel(TimeSpan.Zero);
-        var size = _label.PreferredSize;
+        var size = _label.Size;
         var loc = RecordingIndicatorGeometry.ComputeLabelLocation(_bounds, size);
         _label.Location = new Point(loc.X - _bounds.X, loc.Y - _bounds.Y);
     }
@@ -294,8 +349,8 @@ internal sealed class RecordingIndicatorForm : Form
         if (_durationSeconds.HasValue && _durationSeconds.Value > 0)
         {
             var total = TimeSpan.FromSeconds(_durationSeconds.Value);
-            return $"{prefix} {elapsed:mm\\:ss} / {total:mm\\:ss}";
+            return $"{prefix} {FormatTime(elapsed)} / {FormatTime(total)}";
         }
-        return $"{prefix} {elapsed:mm\\:ss}";
+        return $"{prefix} {FormatTime(elapsed)}";
     }
 }

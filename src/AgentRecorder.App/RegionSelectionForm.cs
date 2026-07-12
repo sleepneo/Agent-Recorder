@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Windows.Forms;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 using static AgentRecorder.Windows.SystemQuery;
 
@@ -59,6 +60,7 @@ public sealed class RegionSelectionForm : Form
     private const int ForegroundVerifyDelayMs = 150;
     private const int MaxForegroundAttempts = 2;
     private System.Windows.Forms.Timer? _foregroundVerifyTimer;
+    private readonly IUiTextProvider _text;
 
     /// <summary>
     /// When true (default), OnShown schedules a single delayed foreground verification.
@@ -107,22 +109,27 @@ public sealed class RegionSelectionForm : Form
     public string CoordinateSpace { get; private set; } = "virtual_screen";
 
     public RegionSelectionForm(Rectangle? initialVirtualBounds = null, IWindowActivator? windowActivator = null,
-        Action<RegionSelectionAuditEventArgs>? onAuditEvent = null)
+        Action<RegionSelectionAuditEventArgs>? onAuditEvent = null, IUiTextProvider? textProvider = null)
     {
         _initialVirtualBounds = initialVirtualBounds;
         _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
+        _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
         if (onAuditEvent != null)
             AuditEvent += (_, e) => onAuditEvent(e);
+
+        var buttonFont = new Font("Segoe UI", 11, FontStyle.Bold);
+        var confirmSize = MeasureButtonSize(_text.Get("RegionSelection_Button_Confirm"), buttonFont);
+        var cancelSize = MeasureButtonSize(_text.Get("RegionSelection_Button_Cancel"), buttonFont);
 
         // Initialize button fields FIRST (null guards) before any property that could trigger OnResize
         _confirmButton = new Button
         {
-            Text = "Confirm (Enter)",
-            Size = new Size(140, 40),
+            Text = _text.Get("RegionSelection_Button_Confirm"),
+            Size = confirmSize,
             ForeColor = Color.White,
             BackColor = Color.FromArgb(0, 150, 0),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Font = buttonFont,
             Enabled = false,
             Cursor = Cursors.Hand,
             Visible = true
@@ -133,12 +140,12 @@ public sealed class RegionSelectionForm : Form
 
         _cancelButton = new Button
         {
-            Text = "Cancel (Esc)",
-            Size = new Size(140, 40),
+            Text = _text.Get("RegionSelection_Button_Cancel"),
+            Size = cancelSize,
             ForeColor = Color.White,
             BackColor = Color.FromArgb(180, 0, 0),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Font = buttonFont,
             Cursor = Cursors.Hand,
             Visible = true
         };
@@ -149,19 +156,20 @@ public sealed class RegionSelectionForm : Form
         // Info label
         _infoLabel = new Label
         {
-            Text = "Click and drag to select a region. Hover a window and click to pick it. Hold Alt to disable snap. Press Enter to confirm, Esc to cancel.",
+            Text = _text.Get("RegionSelection_Info_Default"),
             ForeColor = Color.White,
             BackColor = Color.FromArgb(150, 0, 0, 0),
             Padding = new Padding(12),
             AutoSize = true,
             Font = new Font("Segoe UI", 11, FontStyle.Bold),
-            Location = new Point(20, 20)
+            Location = new Point(20, 20),
+            MaximumSize = new Size(800, 0)
         };
 
         // Coordinates label (virtual screen coordinates)
         _coordsLabel = new Label
         {
-            Text = "Virtual: X=0, Y=0, W=0, H=0",
+            Text = _text.Format("RegionSelection_Coords_VirtualScreen", 0, 0, 0, 0),
             ForeColor = Color.Cyan,
             BackColor = Color.FromArgb(150, 0, 0, 0),
             Padding = new Padding(12),
@@ -172,7 +180,7 @@ public sealed class RegionSelectionForm : Form
 
         _displayLabel = new Label
         {
-            Text = "Display: unknown",
+            Text = _text.Get("RegionSelection_Display_Unknown"),
             ForeColor = Color.Yellow,
             BackColor = Color.FromArgb(150, 0, 0, 0),
             Padding = new Padding(12),
@@ -192,10 +200,10 @@ public sealed class RegionSelectionForm : Form
             Visible = true
         };
 
-        var labelX = new Label { Text = "X", ForeColor = Color.White, AutoSize = true };
-        var labelY = new Label { Text = "Y", ForeColor = Color.White, AutoSize = true };
-        var labelW = new Label { Text = "W", ForeColor = Color.White, AutoSize = true };
-        var labelH = new Label { Text = "H", ForeColor = Color.White, AutoSize = true };
+        var labelX = new Label { Text = _text.Get("RegionSelection_Input_X"), ForeColor = Color.White, AutoSize = true };
+        var labelY = new Label { Text = _text.Get("RegionSelection_Input_Y"), ForeColor = Color.White, AutoSize = true };
+        var labelW = new Label { Text = _text.Get("RegionSelection_Input_W"), ForeColor = Color.White, AutoSize = true };
+        var labelH = new Label { Text = _text.Get("RegionSelection_Input_H"), ForeColor = Color.White, AutoSize = true };
 
         _inputX = CreateInput(-99999, 99999);
         _inputY = CreateInput(-99999, 99999);
@@ -207,10 +215,10 @@ public sealed class RegionSelectionForm : Form
         _inputW.ValueChanged += (_, _) => OnInputValueChanged();
         _inputH.ValueChanged += (_, _) => OnInputValueChanged();
 
-        _preset720 = CreatePresetButton("1280x720", new Size(80, 28));
-        _preset900 = CreatePresetButton("1600x900", new Size(80, 28));
-        _preset1080 = CreatePresetButton("1920x1080", new Size(80, 28));
-        _presetFit16x9 = CreatePresetButton("Fit 16:9", new Size(80, 28));
+        _preset720 = CreatePresetButton(_text.Get("RegionSelection_Preset_1280x720"));
+        _preset900 = CreatePresetButton(_text.Get("RegionSelection_Preset_1600x900"));
+        _preset1080 = CreatePresetButton(_text.Get("RegionSelection_Preset_1920x1080"));
+        _presetFit16x9 = CreatePresetButton(_text.Get("RegionSelection_Preset_Fit16x9"));
 
         _preset720.Click += (_, _) => ApplyPreset(new Size(1280, 720));
         _preset900.Click += (_, _) => ApplyPreset(new Size(1600, 900));
@@ -303,8 +311,10 @@ public sealed class RegionSelectionForm : Form
         };
     }
 
-    private static Button CreatePresetButton(string text, Size size)
+    private static Button CreatePresetButton(string text)
     {
+        var font = new Font("Segoe UI", 8);
+        var size = MeasureButtonSize(text, font, horizontalPadding: 10, verticalPadding: 6, minHeight: 28);
         var btn = new Button
         {
             Text = text,
@@ -312,7 +322,7 @@ public sealed class RegionSelectionForm : Form
             ForeColor = Color.White,
             BackColor = Color.FromArgb(80, 80, 80),
             FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 8),
+            Font = font,
             Cursor = Cursors.Hand
         };
         btn.FlatAppearance.BorderColor = Color.White;
@@ -320,19 +330,55 @@ public sealed class RegionSelectionForm : Form
         return btn;
     }
 
+    private static Size MeasureButtonSize(string text, Font font, int horizontalPadding = 32, int verticalPadding = 16, int minHeight = 44)
+    {
+        var measured = TextRenderer.MeasureText(text, font);
+        int width = measured.Width + horizontalPadding;
+        int height = Math.Max(minHeight, measured.Height + verticalPadding);
+        return new Size(width, height);
+    }
+
     private void UpdateButtonPositions()
     {
         // Place buttons at the TOP center of the form so they are always visible
-        // regardless of screen size or DPI scaling
-        int topY = 160;
-        int centerX = Width / 2;
-        _confirmButton.Location = new Point(centerX - 150, topY);
-        _cancelButton.Location = new Point(centerX + 10, topY);
+        // regardless of screen size or DPI scaling. Compute layout from measured
+        // sizes; if the two buttons do not fit horizontally, stack them vertically.
+        const int buttonSpacing = 12;
+        const int topMargin = 160;
+        const int sideMargin = 20;
+
+        int totalWidth = _confirmButton.Width + buttonSpacing + _cancelButton.Width;
+        int centerX = ClientSize.Width / 2;
+
+        if (totalWidth + sideMargin * 2 <= ClientSize.Width)
+        {
+            int startX = centerX - totalWidth / 2;
+            _confirmButton.Location = new Point(startX, topMargin);
+            _cancelButton.Location = new Point(startX + _confirmButton.Width + buttonSpacing, topMargin);
+        }
+        else
+        {
+            // Narrow client area: stack buttons vertically and center them.
+            int startX = Math.Max(sideMargin, centerX - _confirmButton.Width / 2);
+            _confirmButton.Location = new Point(startX, topMargin);
+            _cancelButton.Location = new Point(startX, topMargin + _confirmButton.Height + buttonSpacing);
+        }
+
         _confirmButton.BringToFront();
         _cancelButton.BringToFront();
 
-        // Place control panel at top-right, below buttons area but still top-right
-        _controlPanel.Location = new Point(Width - _controlPanel.Width - 20, 20);
+        // Place control panel at top-right, ensuring it stays inside the client area
+        // and does not overlap the centered buttons when space is tight.
+        int controlPanelX = ClientSize.Width - _controlPanel.Width - sideMargin;
+        int controlPanelY = sideMargin;
+        if (controlPanelX < _confirmButton.Right + sideMargin &&
+            controlPanelY < Math.Max(_confirmButton.Bottom, _cancelButton.Bottom))
+        {
+            // Shift below the buttons if it would horizontally overlap.
+            controlPanelY = Math.Max(_confirmButton.Bottom, _cancelButton.Bottom) + sideMargin;
+        }
+
+        _controlPanel.Location = new Point(Math.Max(sideMargin, controlPanelX), controlPanelY);
         _controlPanel.BringToFront();
     }
 
@@ -641,7 +687,7 @@ public sealed class RegionSelectionForm : Form
     {
         if (_selection.Width < MinSize || _selection.Height < MinSize)
         {
-            _infoLabel.Text = $"Selection too small. Minimum size is {MinSize}x{MinSize} pixels.";
+            _infoLabel.Text = _text.Format("RegionSelection_Info_TooSmall", MinSize);
             return;
         }
 
@@ -1118,8 +1164,8 @@ public sealed class RegionSelectionForm : Form
             // Convert client area coordinates to virtual screen coordinates for display
             int virtualX = Bounds.X + _selection.X;
             int virtualY = Bounds.Y + _selection.Y;
-            _infoLabel.Text = $"Virtual: X={virtualX}, Y={virtualY}, W={_selection.Width}, H={_selection.Height}  |  Enter to confirm, Esc to cancel";
-            _coordsLabel.Text = $"Form Bounds: ({Bounds.X}, {Bounds.Y}) -> ({Bounds.Right}, {Bounds.Bottom})";
+            _infoLabel.Text = _text.Format("RegionSelection_Info_Selected", virtualX, virtualY, _selection.Width, _selection.Height);
+            _coordsLabel.Text = _text.Format("RegionSelection_Coords_FormBounds", Bounds.X, Bounds.Y, Bounds.Right, Bounds.Bottom);
 
             UpdateDisplayLabel();
 
@@ -1132,9 +1178,9 @@ public sealed class RegionSelectionForm : Form
         }
         else
         {
-            _infoLabel.Text = "Click and drag to select a region. Press Enter to confirm, Esc to cancel.";
-            _coordsLabel.Text = $"Virtual Screen Bounds: ({Bounds.X}, {Bounds.Y}, {Bounds.Width}x{Bounds.Height})";
-            _displayLabel.Text = "Display: unknown";
+            _infoLabel.Text = _text.Get("RegionSelection_Info_Default");
+            _coordsLabel.Text = _text.Format("RegionSelection_Coords_VirtualScreen", Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height);
+            _displayLabel.Text = _text.Get("RegionSelection_Display_Unknown");
 
             _updatingInputs = true;
             _inputX.Value = Bounds.X;
@@ -1158,11 +1204,11 @@ public sealed class RegionSelectionForm : Form
             var displayId = RegionSelectionGeometry.FindDisplayId(virtualBounds, displays)
                          ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, displays)
                          ?? "unknown";
-            _displayLabel.Text = $"Display: {displayId}";
+            _displayLabel.Text = _text.Format("RegionSelection_Display", displayId);
         }
         catch
         {
-            _displayLabel.Text = $"Display: unknown | Virtual Screen: ({Bounds.X},{Bounds.Y},{Bounds.Width}x{Bounds.Height})";
+            _displayLabel.Text = _text.Format("RegionSelection_Display_UnknownWithVirtual", Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height);
         }
     }
 

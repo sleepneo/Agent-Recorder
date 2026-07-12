@@ -198,14 +198,23 @@ public class FfmpegPrewarmerTests
 /// </summary>
 public class CaptureAuditLogger : AuditLogger
 {
-    public List<(string evt, string json)> Events { get; } = new();
+    private readonly List<(string evt, string json)> _events = new();
+    private readonly object _lock = new();
+
+    public IReadOnlyList<(string evt, string json)> Events
+    {
+        get
+        {
+            lock (_lock) { return _events.ToList(); }
+        }
+    }
 
     public override void Log(string evt, object payload)
     {
         var json = System.Text.Json.JsonSerializer.Serialize(payload);
-        lock (Events)
+        lock (_lock)
         {
-            Events.Add((evt, json));
+            _events.Add((evt, json));
         }
     }
 }

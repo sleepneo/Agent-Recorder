@@ -152,6 +152,16 @@ Maps to:
 POST /api/v1/recordings/{recording_id}/stop
 ```
 
+Note: the local user can also stop recordings through the floating stop button,
+tray menu, or the global `Ctrl+Shift+F10` hotkey. The agent stop API remains
+available for programmatic control.
+
+The stop response includes `status` and `stop_reason`. User-initiated stops
+(`floating_button`, `tray_menu`, `global_hotkey`, `user_requested`) that produce
+a valid output result in `status=completed` even when the actual duration is
+shorter than planned. Only real output defects (zero duration, tiny file, or
+non-zero encoder exit code) result in `status=failed`.
+
 ## Recommended Agent Flow
 
 1. Run `AgentRecorder.Cli.exe ensure-running --json`.

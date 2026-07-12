@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Windows.Forms;
 using AgentRecorder.App;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 using Xunit;
 
@@ -113,6 +114,166 @@ public class RegionSelectionFormTests
             var acceptButton = form.AcceptButton as Button;
             Assert.NotNull(acceptButton);
             Assert.False(acceptButton!.Enabled);
+
+            form.Close();
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Bilingual UI and DPI-safe layout tests
+    // -------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(UiLanguage.ZhCn, "RegionSelection_Button_Confirm", "确认 (Enter)")]
+    [InlineData(UiLanguage.EnUs, "RegionSelection_Button_Confirm", "Confirm (Enter)")]
+    [InlineData(UiLanguage.ZhCn, "RegionSelection_Button_Cancel", "取消 (Esc)")]
+    [InlineData(UiLanguage.EnUs, "RegionSelection_Button_Cancel", "Cancel (Esc)")]
+    public void Constructor_Localized_ButtonTextMatchesProvider(UiLanguage language, string key, string expected)
+    {
+        RunOnSta(() =>
+        {
+            var text = new UiTextProvider(language);
+            using var form = new RegionSelectionForm(textProvider: text);
+            var button = key switch
+            {
+                "RegionSelection_Button_Confirm" => form.AcceptButton as Button,
+                "RegionSelection_Button_Cancel" => form.CancelButton as Button,
+                _ => null
+            };
+            Assert.NotNull(button);
+            Assert.Equal(expected, button!.Text);
+        });
+    }
+
+    [Theory]
+    [InlineData(UiLanguage.ZhCn)]
+    [InlineData(UiLanguage.EnUs)]
+    public void Constructor_Localized_ButtonWidthFitsText(UiLanguage language)
+    {
+        RunOnSta(() =>
+        {
+            var text = new UiTextProvider(language);
+            using var form = new RegionSelectionForm(textProvider: text);
+            form.Show();
+
+            var confirmButton = form.AcceptButton as Button;
+            var cancelButton = form.CancelButton as Button;
+            Assert.NotNull(confirmButton);
+            Assert.NotNull(cancelButton);
+
+            // The button must be at least as wide as the rendered text plus a small padding allowance.
+            var confirmMeasured = TextRenderer.MeasureText(confirmButton!.Text, confirmButton.Font).Width;
+            var cancelMeasured = TextRenderer.MeasureText(cancelButton!.Text, cancelButton.Font).Width;
+            Assert.True(confirmButton.Width >= confirmMeasured + 20,
+                $"Confirm button width {confirmButton.Width} too small for text '{confirmButton.Text}' (measured {confirmMeasured})");
+            Assert.True(cancelButton.Width >= cancelMeasured + 20,
+                $"Cancel button width {cancelButton.Width} too small for text '{cancelButton.Text}' (measured {cancelMeasured})");
+
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void Constructor_Bilingual_LongestTextStillFitsButton()
+    {
+        RunOnSta(() =>
+        {
+            using var zhForm = new RegionSelectionForm(textProvider: new UiTextProvider(UiLanguage.ZhCn));
+            using var enForm = new RegionSelectionForm(textProvider: new UiTextProvider(UiLanguage.EnUs));
+            zhForm.Show();
+            enForm.Show();
+
+            var zhConfirm = zhForm.AcceptButton as Button;
+            var enConfirm = enForm.AcceptButton as Button;
+            Assert.NotNull(zhConfirm);
+            Assert.NotNull(enConfirm);
+
+            var zhMeasured = TextRenderer.MeasureText(zhConfirm!.Text, zhConfirm.Font).Width;
+            var enMeasured = TextRenderer.MeasureText(enConfirm!.Text, enConfirm.Font).Width;
+
+            // Both languages' buttons must be wide enough for their own longest text.
+            Assert.True(zhConfirm.Width >= zhMeasured + 20);
+            Assert.True(enConfirm.Width >= enMeasured + 20);
+
+            zhForm.Close();
+            enForm.Close();
+        });
+    }
+
+    [Fact]
+    public void Constructor_ButtonsDoNotOverlapEachOther()
+    {
+        RunOnSta(() =>
+        {
+            var text = new UiTextProvider(UiLanguage.EnUs);
+            using var form = new RegionSelectionForm(textProvider: text);
+            form.Show();
+
+            var confirm = form.AcceptButton as Button;
+            var cancel = form.CancelButton as Button;
+            Assert.NotNull(confirm);
+            Assert.NotNull(cancel);
+
+            // Bounds are relative to the form (both buttons are direct children of the form).
+            Assert.False(confirm!.Bounds.IntersectsWith(cancel!.Bounds),
+                "Confirm and cancel buttons must not overlap");
+
+            form.Close();
+        });
+    }
+
+    [Theory]
+    [InlineData(UiLanguage.ZhCn)]
+    [InlineData(UiLanguage.EnUs)]
+    public void Constructor_ControlsAreInsideClientAreaAndDoNotOverlap(UiLanguage language)
+    {
+        RunOnSta(() =>
+        {
+            var text = new UiTextProvider(language);
+            using var form = new RegionSelectionForm(textProvider: text);
+            form.Show();
+
+            var client = new Rectangle(0, 0, form.ClientSize.Width, form.ClientSize.Height);
+            var confirm = form.AcceptButton as Button;
+            var cancel = form.CancelButton as Button;
+            var infoLabel = GetPrivateField<Label>(form, "_infoLabel");
+            var coordsLabel = GetPrivateField<Label>(form, "_coordsLabel");
+            var displayLabel = GetPrivateField<Label>(form, "_displayLabel");
+            var controlPanel = GetPrivateField<Panel>(form, "_controlPanel");
+
+            Assert.NotNull(confirm);
+            Assert.NotNull(cancel);
+            Assert.True(client.Contains(confirm!.Bounds));
+            Assert.True(client.Contains(cancel!.Bounds));
+            Assert.True(client.Contains(infoLabel.Bounds));
+            Assert.True(client.Contains(coordsLabel.Bounds));
+            Assert.True(client.Contains(displayLabel.Bounds));
+            Assert.True(client.Contains(controlPanel.Bounds));
+
+            Assert.False(confirm.Bounds.IntersectsWith(cancel.Bounds));
+            Assert.False(controlPanel.Bounds.IntersectsWith(confirm.Bounds));
+            Assert.False(controlPanel.Bounds.IntersectsWith(cancel.Bounds));
+
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void Constructor_ButtonsAreInsideClientArea()
+    {
+        RunOnSta(() =>
+        {
+            var text = new UiTextProvider(UiLanguage.ZhCn);
+            using var form = new RegionSelectionForm(textProvider: text);
+            form.Show();
+
+            var client = new Rectangle(0, 0, form.ClientSize.Width, form.ClientSize.Height);
+            var confirm = form.AcceptButton as Button;
+            var cancel = form.CancelButton as Button;
+            Assert.NotNull(confirm);
+            Assert.NotNull(cancel);
+            Assert.True(client.Contains(confirm!.Bounds));
+            Assert.True(client.Contains(cancel!.Bounds));
 
             form.Close();
         });
@@ -1166,7 +1327,8 @@ public class RegionSelectionFormTests
         {
             var auditEvents = new List<(string Name, JsonElement Payload)>();
             using var form = TrayContext.CreateRegionSelectionForm(null,
-                e => auditEvents.Add((e.EventName, JsonSerializer.SerializeToElement(e.Payload))));
+                e => auditEvents.Add((e.EventName, JsonSerializer.SerializeToElement(e.Payload))),
+                new UiTextProvider(UiLanguageStore.LoadOrDefault()));
 
             Assert.Single(auditEvents, e => e.Name == "region_selection.ui_created");
             Assert.Equal("handle_created", auditEvents[0].Payload.GetProperty("stage").GetString());

@@ -80,6 +80,31 @@ The response includes:
 - safety and auth policy
 - readiness data when available
 
+Stop controls are reported under `interaction.stop_controls`:
+
+```json
+{
+  "interaction": {
+    "stop_controls": {
+      "floating_button": true,
+      "tray_stop": true,
+      "global_hotkey": {
+        "supported": true,
+        "registered": true,
+        "gesture": "Ctrl+Shift+F10",
+        "behavior": "stop_all_active_recordings"
+      }
+    }
+  }
+}
+```
+
+- `floating_button`: whether a floating stop button is shown for each active recording.
+- `tray_stop`: whether the tray menu provides a stop entry.
+- `global_hotkey.supported`: whether the host supports a global stop hotkey.
+- `global_hotkey.registered`: whether the hotkey was successfully registered.
+- `global_hotkey.gesture`: the human-readable hotkey gesture.
+
 Quick recipe fields:
 
 ```json
@@ -516,6 +541,7 @@ Long-polling response includes additional fields:
 {
   "recording_id": "rec_xxx",
   "status": "completed",
+  "stop_reason": "duration_reached",
   "output": { "path": "...", "duration_seconds": 300.0 },
   "wait": {
     "requested_ms": 25000,
@@ -535,6 +561,7 @@ New fields:
 | `wait.elapsed_ms` | Actual wait duration in milliseconds |
 | `wait.timed_out` | Whether returned due to timeout (`false` = immediate or early return, `true` = timeout) |
 | `next_poll_hint_ms` | Suggested polling interval; `null` for terminal states, `500` for confirmation pending, `1000` for recording active |
+| `stop_reason` | Termination reason: `duration_reached` for natural completion, `floating_button`, `tray_menu`, `global_hotkey`, `user_requested`, etc. Meaningful in terminal states. |
 
 `since_status` comparison is case-insensitive.
 
@@ -557,6 +584,14 @@ Recording states:
 | `cancelled` | Recording cancelled |
 | `rejected` | User rejected the confirmation |
 | `expired` | Confirmation timed out |
+
+Terminal-state responses also include `stop_reason`:
+
+- `duration_reached`: natural completion when the planned duration elapses;
+- `floating_button`, `tray_menu`, `global_hotkey`: user stopped via local controls;
+- `user_requested`: API stop with no specific reason supplied.
+
+When the user initiates a stop and the output is basically valid (non-zero duration, reasonable size, encoder exit code 0), the recording ends in `completed` even if the actual duration is shorter than planned. Real output defects such as zero duration, tiny file size, or a non-zero encoder exit code still result in `failed`.
 
 HTTP confirmation approval is intentionally blocked:
 

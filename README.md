@@ -66,6 +66,12 @@ Agents should use the paths returned by `ensure-running` or
 - Before-confirmation and before-start preflight checks for output paths, free
   space, capture bounds, encoders, and source availability.
 - A click-through red recording border and timer around the captured region.
+- A floating stop button next to each active recording; clicking it stops only
+  that recording.
+- A global stop hotkey (`Ctrl+Shift+F10`) that stops all active recordings.
+- Tray menu stop entry that adapts to one or multiple active recordings.
+- Chinese and English local UI with DPI-aware confirmation, selection, recording
+  indicators, and stop controls.
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.

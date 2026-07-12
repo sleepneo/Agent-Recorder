@@ -361,8 +361,8 @@ public class SecurityRegressionTests
         // 不能使用普通的 Close()，否则会误触发用户 X 关闭语义（reject callback）。
         string trayContext = ReadSource(Path.Combine("AgentRecorder.App", "TrayContext.cs"));
 
-        // 必须包含 CloseWithoutResult 调用
-        Assert.Contains("CloseWithoutResult()", trayContext);
+        // 必须包含 CloseWithoutResult 调用（现在支持传入 close reason）
+        Assert.Contains("CloseWithoutResult", trayContext);
 
         // 不应包含普通的 _currentForm.Close() 调用
         Assert.DoesNotContain("_currentForm.Close()", trayContext);

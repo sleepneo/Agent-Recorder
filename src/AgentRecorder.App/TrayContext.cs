@@ -1,14 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using AgentRecorder.Infrastructure;
 using AgentRecorder.Core;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Windows;
 
@@ -18,27 +21,51 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 {
     public string HostMode => "tray";
     public bool SupportsRegionSelectionUi => true;
+    public bool SupportsFloatingStopButton => true;
+    public bool SupportsTrayStop => true;
+    public bool SupportsGlobalStopHotkey => true;
+    public bool IsGlobalStopHotkeyRegistered => _globalStopHotkey?.Registered ?? false;
+    public string? GlobalStopHotkeyGesture => "Ctrl+Shift+F10";
 
     private readonly NotifyIcon _icon;
     private readonly RecordingEngine _engine;
     private readonly AuditLogger _audit;
     private readonly Dictionary<string, Recording> _activeRecordings = new();
+    private readonly HashSet<string> _stoppingIds = new();
     private readonly RecordingIndicatorManager _indicatorManager;
+    private readonly TrayIconFactory _iconFactory;
+    private readonly IGlobalStopHotkey? _globalStopHotkey;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _stopItem;
     private readonly ToolStripMenuItem _approveItem;
     private readonly ToolStripMenuItem _rejectItem;
     private readonly ToolStripSeparator _confirmSep;
+    private readonly ToolStripMenuItem _languageItem;
+    private readonly ToolStripMenuItem _languageZhCnItem;
+    private readonly ToolStripMenuItem _languageEnUsItem;
+    private readonly ToolStripMenuItem _openOutputFolderItem;
+    private readonly ToolStripMenuItem _exitItem;
     private readonly Control _uiInvoker;
+    private readonly IWindowActivator _confirmationWindowActivator;
+    private IUiTextProvider _uiText;
 
     // Confirmation queue
     private readonly ConfirmationQueue _confirmationQueue = new();
     private ConfirmationForm? _currentForm;
+    private bool _disposed;
 
     public TrayContext(RecordingEngine engine, AuditLogger audit)
+        : this(engine, audit, hotkeyFactory: null)
+    {
+    }
+
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null)
     {
         _engine = engine; _audit = audit;
-        _indicatorManager = new RecordingIndicatorManager(audit);
+        _confirmationWindowActivator = confirmationWindowActivator ?? DefaultWindowActivator.Instance;
+        _uiText = uiTextProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
+        _iconFactory = new TrayIconFactory();
+        _indicatorManager = new RecordingIndicatorManager(audit, OnFloatingStopRequested, () => _uiText);
 
         // UI dispatcher control: a hidden, zero-size control created on the UI thread,
         // used for marshalling calls from HTTP worker threads back to the WinForms UI thread.
@@ -56,38 +83,110 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         var menu = new ContextMenuStrip();
 
         // Confirmation area (shown only when pending requests, only triggered by local user from tray menu)
-        _approveItem = new ToolStripMenuItem("✓ 确认录屏", null, (_, _) => ApproveFromMenu())
+        _approveItem = new ToolStripMenuItem("", null, (_, _) => ApproveFromMenu())
         {
             Visible = false,
             ForeColor = System.Drawing.Color.DarkGreen,
             Font = new System.Drawing.Font("Segoe UI", 9, System.Drawing.FontStyle.Bold)
         };
-        _rejectItem = new ToolStripMenuItem("✗ 拒绝录屏", null, (_, _) => RejectFromMenu())
+        _rejectItem = new ToolStripMenuItem("", null, (_, _) => RejectFromMenu())
         {
             Visible = false,
             ForeColor = System.Drawing.Color.DarkRed
         };
         _confirmSep = new ToolStripSeparator() { Visible = false };
 
-        _statusItem = new ToolStripMenuItem("状态：空闲") { Enabled = false };
-        _stopItem = new ToolStripMenuItem("停止当前录制", null, (_, _) => StopCurrent()) { Enabled = false };
+        _statusItem = new ToolStripMenuItem(_uiText.Get("Tray_Status_Idle")) { Enabled = false };
+        _stopItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Stop"), null, (_, _) => StopAll("tray_menu")) { Enabled = false };
+
+        _languageZhCnItem = new ToolStripMenuItem(_uiText.Get("Tray_Language_ZhCn"), null, (_, _) => SetLanguage(UiLanguage.ZhCn));
+        _languageEnUsItem = new ToolStripMenuItem(_uiText.Get("Tray_Language_EnUs"), null, (_, _) => SetLanguage(UiLanguage.EnUs));
+        _languageItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Language"));
+        _languageItem.DropDownItems.Add(_languageZhCnItem);
+        _languageItem.DropDownItems.Add(_languageEnUsItem);
+        UpdateLanguageMenuChecks();
 
         menu.Items.Add(_approveItem);
         menu.Items.Add(_rejectItem);
         menu.Items.Add(_confirmSep);
+        _openOutputFolderItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_OpenOutputDir"), null, (_, _) => OpenFolder());
+        _exitItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Exit"), null, (_, _) => ExitApp());
+
         menu.Items.Add(_statusItem);
-        menu.Items.Add(new ToolStripMenuItem("打开输出文件夹", null, (_, _) => OpenFolder()));
+        menu.Items.Add(_openOutputFolderItem);
         menu.Items.Add(_stopItem);
+        menu.Items.Add(_languageItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("退出", null, (_, _) => ExitApp()));
+        menu.Items.Add(_exitItem);
 
         _icon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = _iconFactory.IdleIcon,
             Visible = true,
-            Text = "Agent Recorder — 空闲",
+            Text = _uiText.Get("Tray_Idle"),
             ContextMenuStrip = menu
         };
+
+        // Register global stop hotkey on the UI thread. Failure is logged but non-fatal.
+        try
+        {
+            _globalStopHotkey = hotkeyFactory?.Invoke(OnGlobalHotkeyPressed)
+                ?? new GlobalStopHotkey(OnGlobalHotkeyPressed, onError: ex => _audit.Log("tray.global_hotkey_callback_error", new { error = ex.Message }));
+            var registered = _globalStopHotkey.Register();
+            _audit.Log("tray.global_hotkey_state", new
+            {
+                registered,
+                gesture = GlobalStopHotkeyGesture,
+                win32_error = registered ? 0 : Marshal.GetLastWin32Error()
+            });
+        }
+        catch (Exception ex)
+        {
+            _audit.Log("tray.global_hotkey_error", new { error = ex.Message, gesture = GlobalStopHotkeyGesture });
+        }
+    }
+
+    private void UpdateLanguageMenuChecks()
+    {
+        _languageZhCnItem.Checked = _uiText.Language == UiLanguage.ZhCn;
+        _languageEnUsItem.Checked = _uiText.Language == UiLanguage.EnUs;
+    }
+
+    private void SetLanguage(UiLanguage language)
+    {
+        if (_uiText.Language == language)
+            return;
+
+        UiLanguageStore.Save(language);
+        _audit.Log("tray.language_changed", new { language = language.ToCultureName() });
+
+        // Refresh the in-memory text provider for all future UI operations.
+        // Already-open RegionSelectionForm / ConfirmationForm instances keep their
+        // original language for stability; the next newly shown window will use
+        // the updated language. This avoids lifecycle risks (closing, approving,
+        // or rebuilding the current request) while still applying the change
+        // immediately to the tray chrome and any new interactive surfaces.
+        _uiText = new UiTextProvider(language);
+
+        UpdateLanguageMenuChecks();
+        RefreshTrayMenuText();
+        UpdateRecordingUi();
+    }
+
+    private void RefreshTrayMenuText()
+    {
+        _languageItem.Text = _uiText.Get("Tray_Menu_Language");
+        _languageZhCnItem.Text = _uiText.Get("Tray_Language_ZhCn");
+        _languageEnUsItem.Text = _uiText.Get("Tray_Language_EnUs");
+        _openOutputFolderItem.Text = _uiText.Get("Tray_Menu_OpenOutputDir");
+        _exitItem.Text = _uiText.Get("Tray_Menu_Exit");
+
+        UpdateConfirmationMenu();
+
+        if (_activeRecordings.Count > 0)
+            UpdateRecordingUi();
+        else
+            SetAllIdleUi();
     }
 
     /// <summary>
@@ -146,12 +245,22 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             HideConfirmationForm();
         }
 
+        var s = JsonNode.Parse(JsonSerializer.Serialize(current.Summary))!;
+        var captureBounds = ConfirmationPreviewBuilder.ParseBounds(s);
+        var workingAreas = Screen.AllScreens.Select(screen => screen.WorkingArea).ToList();
+        var fallbackWorkingArea = GetFallbackWorkingArea(captureBounds, workingAreas);
+
         _currentForm = new ConfirmationForm(current, position, items.Count,
             onResult: decision =>
             {
                 ResolveCurrentConfirmation(decision, decision.Approved ? "confirmation.ui_approved" : "confirmation.ui_rejected");
             },
-            defaultOutputDirectory: OutputSettingsStore.GetEffectiveDefaultOutputDir());
+            defaultOutputDirectory: OutputSettingsStore.GetEffectiveDefaultOutputDir(),
+            windowActivator: _confirmationWindowActivator,
+            auditLogger: (evt, payload) => _audit.Log(evt, payload),
+            workingAreas: workingAreas,
+            fallbackWorkingArea: fallbackWorkingArea,
+            textProvider: _uiText);
 
         try
         {
@@ -163,11 +272,32 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         }
     }
 
-    private void HideConfirmationForm()
+    private static Rectangle GetFallbackWorkingArea(CaptureBounds? captureBounds, IReadOnlyList<Rectangle> workingAreas)
+    {
+        if (captureBounds == null)
+        {
+            var foregroundHandle = Native.GetForegroundWindow();
+            if (foregroundHandle != IntPtr.Zero)
+            {
+                try
+                {
+                    var foregroundScreen = Screen.FromHandle(foregroundHandle);
+                    if (foregroundScreen != null)
+                        return foregroundScreen.WorkingArea;
+                }
+                catch { }
+            }
+        }
+
+        return Screen.PrimaryScreen?.WorkingArea
+            ?? (workingAreas.Count > 0 ? workingAreas[0] : Rectangle.Empty);
+    }
+
+    private void HideConfirmationForm(string? closeReason = null)
     {
         if (_currentForm != null)
         {
-            try { _currentForm.CloseWithoutResult(); } catch { }
+            try { _currentForm.CloseWithoutResult(closeReason); } catch { }
             _currentForm = null;
         }
     }
@@ -236,16 +366,16 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             _approveItem.Visible = true;
             _rejectItem.Visible = true;
             _confirmSep.Visible = true;
-            _approveItem.Text = $"✓ 确认录屏 (1/{count})";
-            _rejectItem.Text = $"✗ 拒绝录屏 (1/{count})";
+            _approveItem.Text = _uiText.Format("Tray_Menu_Confirm", 1, count);
+            _rejectItem.Text = _uiText.Format("Tray_Menu_Reject", 1, count);
 
             var current = _confirmationQueue.Current;
             if (current != null)
             {
-                _statusItem.Text = $"状态：● 等待确认（{current.TimeoutSeconds}s 内请操作）";
-                _icon.Text = $"Agent Recorder — 等待确认 ({count})";
-                _icon.ShowBalloonTip(5000, "✓ 请确认录屏请求",
-                    $"当前队列有 {count} 个待确认请求。\n右键单击托盘图标确认或拒绝。",
+                _statusItem.Text = _uiText.Format("Tray_Status_Waiting", current.TimeoutSeconds);
+                _icon.Text = _uiText.Format("Tray_WaitingConfirmation", count);
+                _icon.ShowBalloonTip(5000, _uiText.Get("Tray_Balloon_WaitingTitle"),
+                    _uiText.Format("Tray_Balloon_WaitingBody", count),
                     ToolTipIcon.Warning);
             }
         }
@@ -261,8 +391,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             }
             else
             {
-                _statusItem.Text = "状态：空闲";
-                _icon.Text = "Agent Recorder — 空闲";
+                _statusItem.Text = _uiText.Get("Tray_Status_Idle");
+                _icon.Text = _uiText.Get("Tray_Idle");
+                _icon.Icon = _iconFactory.IdleIcon;
+                _stopItem.Enabled = false;
             }
         }
     }
@@ -294,7 +426,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             UpdateRecordingUi();
             if (_activeRecordings.Count == 1)
             {
-                _icon.ShowBalloonTip(2000, "Agent Recorder", "开始录制", ToolTipIcon.Info);
+                _icon.ShowBalloonTip(2000, _uiText.Get("Tray_Balloon_RecordingTitle"), _uiText.Get("Tray_Balloon_RecordingBody"), ToolTipIcon.Info);
             }
         });
     }
@@ -307,6 +439,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             if (recording != null)
             {
                 _activeRecordings.Remove(recording.Id);
+                _stoppingIds.Remove(recording.Id);
                 _indicatorManager.CloseFor(recording.Id, "recording.set_idle");
             }
             if (_activeRecordings.Count == 0)
@@ -319,35 +452,147 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     public void SetAllIdle() => RunOnUi(() =>
     {
         _activeRecordings.Clear();
+        _stoppingIds.Clear();
         _indicatorManager.CloseAll("recording.set_all_idle");
         _confirmationQueue.Clear(invokeCallbacks: false); // Don't invoke callbacks, engine manages expiration
         HideConfirmationForm();
         SetAllIdleUi();
     });
 
+    private void OnFloatingStopRequested(string recordingId)
+    {
+        StopRecording(recordingId, "floating_button");
+    }
+
+    private void OnGlobalHotkeyPressed()
+    {
+        StopAll("global_hotkey");
+    }
+
+    private void StopAll(string trigger)
+    {
+        var ids = _activeRecordings.Keys.ToList();
+        if (ids.Count == 0)
+        {
+            _audit.Log("recording.stop_requested_local", new
+            {
+                trigger,
+                active_count = 0,
+                recording_ids = Array.Empty<string>()
+            });
+            return;
+        }
+
+        _audit.Log("recording.stop_requested_local", new
+        {
+            trigger,
+            active_count = ids.Count,
+            recording_ids = ids.ToArray()
+        });
+
+        foreach (var id in ids)
+        {
+            StopRecording(id, trigger);
+        }
+
+        UpdateRecordingUi();
+    }
+
+    private void StopRecording(string recordingId, string trigger)
+    {
+        if (!_activeRecordings.ContainsKey(recordingId))
+            return;
+
+        if (!_stoppingIds.Add(recordingId))
+            return; // already stopping
+
+        _audit.Log("recording_stop_control.stopping", new { recording_id = recordingId, trigger });
+        UpdateRecordingUi();
+
+        Task.Run(() =>
+        {
+            try
+            {
+                _engine.Stop(recordingId, trigger);
+            }
+            catch (Exception ex)
+            {
+                _audit.Log("recording.stop_error", new { recording_id = recordingId, trigger, error = ex.Message });
+                RunOnUi(() =>
+                {
+                    _stoppingIds.Remove(recordingId);
+                    _indicatorManager.ResetStopControlAfterFailure(recordingId);
+                    UpdateRecordingUi();
+                });
+            }
+        });
+    }
+
     private void UpdateRecordingUi()
     {
         int count = _activeRecordings.Count;
-        string label = count > 1 ? $"（{count}条并发）" : "";
-        _icon.Text = $"Agent Recorder — 正在录制{label}";
-        _icon.Icon = SystemIcons.Exclamation;
-        _statusItem.Text = $"状态：● 正在录制{label}";
-        _stopItem.Enabled = true;
+        int stoppingCount = _stoppingIds.Count;
+        bool allStopping = count > 0 && stoppingCount >= count;
+
+        // Keep text within NotifyIcon's typical 128-byte tooltip limit.
+        string text = count > 1
+            ? _uiText.Format("Tray_Recording_WithCount", count)
+            : _uiText.Get("Tray_Recording");
+        if (allStopping)
+            text = _uiText.Get("Tray_Stopping");
+        if (text.Length > 127)
+            text = text[..127];
+
+        _icon.Text = text;
+        _statusItem.Text = count > 1
+            ? _uiText.Format("Tray_Status_RecordingWithCount", count)
+            : _uiText.Get("Tray_Status_Recording");
+        if (allStopping)
+            _statusItem.Text = _uiText.Get("Tray_Status_Stopping");
+
+        if (allStopping)
+        {
+            _icon.Icon = _iconFactory.StoppingIcon;
+            _stopItem.Enabled = false;
+            _stopItem.Text = _uiText.Get("Tray_Status_Stopping");
+        }
+        else if (count > 0)
+        {
+            _icon.Icon = _iconFactory.RecordingIcon;
+            _stopItem.Enabled = true;
+            _stopItem.Text = count > 1
+                ? _uiText.Format("Tray_Menu_StopAll", count)
+                : _uiText.Get("Tray_Menu_Stop");
+        }
+        else
+        {
+            SetAllIdleUi();
+            return;
+        }
+
+        _audit.Log("tray.recording_state_changed", new
+        {
+            active_count = count,
+            stopping_count = stoppingCount,
+            state = allStopping ? "stopping" : "recording",
+            nested_roles = _activeRecordings.Values.Select(r => r.NestedRole ?? "none").ToArray()
+        });
     }
 
     private void SetAllIdleUi()
     {
-        _icon.Text = "Agent Recorder — 空闲";
-        _icon.Icon = SystemIcons.Application;
-        _statusItem.Text = "状态：空闲";
+        _icon.Text = _uiText.Get("Tray_Idle");
+        _icon.Icon = _iconFactory.IdleIcon;
+        _statusItem.Text = _uiText.Get("Tray_Status_Idle");
         _stopItem.Enabled = false;
+        _stopItem.Text = _uiText.Get("Tray_Menu_Stop");
         _approveItem.Visible = false;
         _rejectItem.Visible = false;
         _confirmSep.Visible = false;
     }
 
     public void ShowError(string text) =>
-        RunOnUi(() => _icon.ShowBalloonTip(4000, "录制失败", text, ToolTipIcon.Error));
+        RunOnUi(() => _icon.ShowBalloonTip(4000, _uiText.Get("Tray_Balloon_ErrorTitle"), text, ToolTipIcon.Error));
 
     /// <summary>
     /// Request local user to select a region. Shows full-screen selection window.
@@ -442,7 +687,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
                     initialBounds = new Rectangle(lastState.X, lastState.Y, lastState.Width, lastState.Height);
                 }
 
-                using var form = CreateRegionSelectionForm(initialBounds, e => _audit.Log(e.EventName, e.Payload));
+                using var form = CreateRegionSelectionForm(initialBounds, e => _audit.Log(e.EventName, e.Payload), _uiText);
                 callbackState.FormHandle = form.Handle;
 
                 _audit.Log("region_selection.ui_opened", new
@@ -549,9 +794,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// This is the only supported way for production code to create a region selection form.
     /// </summary>
     internal static RegionSelectionForm CreateRegionSelectionForm(Rectangle? initialBounds,
-        Action<RegionSelectionForm.RegionSelectionAuditEventArgs> auditCallback)
+        Action<RegionSelectionForm.RegionSelectionAuditEventArgs> auditCallback,
+        IUiTextProvider textProvider)
     {
-        return new RegionSelectionForm(initialBounds, onAuditEvent: auditCallback);
+        return new RegionSelectionForm(initialBounds, onAuditEvent: auditCallback,
+            textProvider: textProvider);
     }
 
     private class CallbackState
@@ -559,16 +806,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         public int AlreadyCalled = 0;
         public bool CloseRequestedFromTimeout = false;
         public IntPtr FormHandle = IntPtr.Zero;
-    }
-
-    private void StopCurrent()
-    {
-        var ids = _activeRecordings.Keys.ToList();
-        foreach (var id in ids)
-        {
-            try { _engine.Stop(id, "tray_stop"); } catch { }
-        }
-        SetAllIdle();
     }
 
     private void OpenFolder()
@@ -579,11 +816,37 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 
     private void ExitApp()
     {
-        _icon.Visible = false;
-        _confirmationQueue.Clear(invokeCallbacks: false);
-        HideConfirmationForm();
-        try { _uiInvoker.Dispose(); } catch { }
+        DisposeResources();
         Application.Exit();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            DisposeResources();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void DisposeResources()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        try { _globalStopHotkey?.Dispose(); } catch { }
+        _indicatorManager.CloseAll("recording.app_exit");
+        _confirmationQueue.Clear(invokeCallbacks: false);
+        HideConfirmationForm("app_exit");
+
+        // Hide the icon before disposing the NotifyIcon and the icons it may reference.
+        try { _icon.Visible = false; } catch { }
+        try { _icon.Dispose(); } catch { }
+        try { _icon.ContextMenuStrip?.Dispose(); } catch { }
+
+        try { _iconFactory?.Dispose(); } catch { }
+        try { _uiInvoker?.Dispose(); } catch { }
     }
 
     /// <summary>

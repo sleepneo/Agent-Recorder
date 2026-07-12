@@ -198,6 +198,31 @@ GET /capabilities
 
 `readiness` 不泄露 API key 内容，只提供文件路径。
 
+返回中还包含 `interaction.stop_controls` 字段，说明本地停止控制支持情况：
+
+```json
+{
+  "interaction": {
+    "stop_controls": {
+      "floating_button": true,
+      "tray_stop": true,
+      "global_hotkey": {
+        "supported": true,
+        "registered": true,
+        "gesture": "Ctrl+Shift+F10",
+        "behavior": "stop_all_active_recordings"
+      }
+    }
+  }
+}
+```
+
+- `floating_button`：是否为每条活动录制显示悬浮停止按钮。
+- `tray_stop`：托盘菜单是否提供停止入口。
+- `global_hotkey.supported`：是否支持全局停止热键。
+- `global_hotkey.registered`：热键是否实际注册成功（tray 模式通常为 true，冲突时可能为 false）。
+- `global_hotkey.gesture`：热键组合，如 `Ctrl+Shift+F10`。
+
 返回中还包含 `host.autostart` 字段，提供自启状态：
 
 ```json
@@ -873,6 +898,7 @@ X-Agent-Recorder-Key: <api-key>
 {
   "recording_id": "rec_xxx",
   "status": "completed",
+  "stop_reason": "duration_reached",
   "elapsed_seconds": 300,
   "output": {
     "path": "...\\recording-2026-07-02-120000.mp4",
@@ -910,6 +936,7 @@ X-Agent-Recorder-Key: <api-key>
 {
   "recording_id": "rec_xxx",
   "status": "completed",
+  "stop_reason": "duration_reached",
   "elapsed_seconds": 300,
   "output": {
     "path": "...\\recording-2026-07-02-120000.mp4",
@@ -934,6 +961,7 @@ X-Agent-Recorder-Key: <api-key>
 | `wait.elapsed_ms` | 实际等待的毫秒数 |
 | `wait.timed_out` | 是否因超时返回（`false`=立即返回或状态变化提前返回，`true`=超时） |
 | `next_poll_hint_ms` | 下次轮询建议毫秒数；`null` 表示已终止无需轮询，`1000` 表示仍在进行建议继续 |
+| `stop_reason` | 终态原因：`duration_reached`（自然达到计划时长）、`floating_button`、`tray_menu`、`global_hotkey`、`user_requested` 等；仅在 `completed`/`failed` 等终止状态有意义 |
 
 `since_status` 比较不区分大小写。
 
@@ -955,6 +983,14 @@ X-Agent-Recorder-Key: <api-key>
 | `rejected` | 用户拒绝 |
 | `expired` | 确认超时 |
 
+终态响应还会包含 `stop_reason`：
+
+- `duration_reached`：自然达到计划时长后完成；
+- `floating_button`、`tray_menu`、`global_hotkey`：用户通过本地控件主动停止；
+- `user_requested`：API 调用停止且未指定具体原因，或原因空白。
+
+用户主动停止且输出基本有效时，状态仍为 `completed`，不会仅因实际时长短于计划时长而判为 `failed`；但零时长、文件过小、FFmpeg 非零退出等真实产物错误仍会失败。
+
 ## 9. 停止手动录制
 
 ```http
@@ -964,6 +1000,21 @@ X-Agent-Recorder-Key: <api-key>
 
 {
   "reason": "user_requested"
+}
+```
+
+响应示例：
+
+```json
+{
+  "recording_id": "rec_xxx",
+  "status": "completed",
+  "stop_reason": "user_requested",
+  "output": {
+    "path": "...\\recording-2026-07-02-120000.mp4",
+    "size_bytes": 263781,
+    "duration_seconds": 4.4
+  }
 }
 ```
 

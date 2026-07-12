@@ -801,6 +801,18 @@ public sealed class ApiServer
                 region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi,
                 quick_recording_endpoint = "/api/v1/recordings/quick",
                 quick_recording_supported = true,
+                stop_controls = new
+                {
+                    floating_button = _tray.SupportsFloatingStopButton,
+                    tray_stop = _tray.SupportsTrayStop,
+                    global_hotkey = new
+                    {
+                        supported = _tray.SupportsGlobalStopHotkey,
+                        registered = _tray.IsGlobalStopHotkeyRegistered,
+                        gesture = _tray.GlobalStopHotkeyGesture,
+                        behavior = "stop_all_active_recordings"
+                    }
+                },
                 quick_recipes = new[]
                 {
                     new

@@ -14,6 +14,32 @@ public interface ITrayContext
     bool SupportsRegionSelectionUi { get; }
 
     /// <summary>
+    /// Whether a floating stop button is shown for each active recording.
+    /// Default false so test fakes do not need to implement it.
+    /// </summary>
+    bool SupportsFloatingStopButton => false;
+
+    /// <summary>
+    /// Whether the tray menu provides a stop entry.
+    /// </summary>
+    bool SupportsTrayStop => false;
+
+    /// <summary>
+    /// Whether a global stop hotkey is supported by this host.
+    /// </summary>
+    bool SupportsGlobalStopHotkey => false;
+
+    /// <summary>
+    /// Whether the global stop hotkey is currently registered.
+    /// </summary>
+    bool IsGlobalStopHotkeyRegistered => false;
+
+    /// <summary>
+    /// Human-readable gesture for the global stop hotkey, e.g. "Ctrl+Shift+F10".
+    /// </summary>
+    string? GlobalStopHotkeyGesture => null;
+
+    /// <summary>
     /// 弹出录屏确认交互（确认窗体 + 托盘菜单，仅限本地用户操作）。
     /// callback 参数：<see cref="ConfirmationDecision"/> 描述用户在本机 UI 的确认结果，
     /// 包括是否批准、本次保存目录覆盖以及是否记住为默认目录。

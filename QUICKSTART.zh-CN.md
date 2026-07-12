@@ -70,6 +70,28 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 - 每次录制都必须由本地用户确认。
 - HTTP 自批准接口被阻止，返回 405。
 
+## 停止录制
+
+录制进行中时，托盘图标会变为红色并显示录制状态。可以通过以下三种方式停止：
+
+1. **悬浮停止按钮**：每个录制区域右上角会出现红色小按钮，点击仅停止该条录制。
+2. **托盘菜单**：右键托盘图标，选择「停止录制」（单条）或「停止全部录制（N）」（多条）。
+3. **全局热键**：按 `Ctrl+Shift+F10` 停止全部活动录制。
+
+AI agent 也可以通过 API 停止指定录制：
+
+```http
+POST /api/v1/recordings/{recording_id}/stop
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "reason": "user_requested"
+}
+```
+
+托盘菜单提供中文/English 语言选择，设置保存在本机，并应用于后续打开的选区、确认和录制控制窗口。
+
 ## 发布包里有什么
 
 ```text

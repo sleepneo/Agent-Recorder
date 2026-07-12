@@ -79,3 +79,30 @@ without `AGENT_RECORDER_DATA_DIR`, the default data directory is
 Before showing confirmation and again before capture starts, Agent Recorder
 checks the output path, free space, encoder availability, capture bounds, and
 whether the selected source still exists.
+
+## Stopping Recordings
+
+While a recording is active, the tray icon turns red and shows the recording
+state. You can stop recordings in three ways:
+
+1. **Floating stop button**: a small red stop button appears near the top-right
+   corner of each recording region. Click it to stop only that recording.
+2. **Tray menu**: right-click the tray icon and choose "Stop recording" (one
+   active recording) or "Stop all recordings (N)" (multiple recordings).
+3. **Global hotkey**: press `Ctrl+Shift+F10` to stop all active recordings.
+
+The agent can also stop a specific recording through the API:
+
+```http
+POST /api/v1/recordings/{recording_id}/stop
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "reason": "user_requested"
+}
+```
+
+The tray menu provides a Chinese/English language selector. The choice is
+persisted locally and applies to newly opened selection, confirmation, and
+recording-control windows.

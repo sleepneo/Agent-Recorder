@@ -50,6 +50,17 @@ public sealed class RecordingEngine
         }
     }
 
+    private static string NormalizeStopReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            return "user_requested";
+        return reason.Trim();
+    }
+
+    private static bool IsTerminalState(RecState state) =>
+        state is RecState.completed or RecState.failed or RecState.cancelled
+            or RecState.rejected or RecState.expired;
+
     public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray)
     {
         // =====================================================================
@@ -480,7 +491,7 @@ public sealed class RecordingEngine
         // which will bump state recording -> completed/failed.
         rec.Backend.OnNaturalExit((exitCode, meta) =>
         {
-            FinalizeRecording(rec, meta, exitCode, natural: true, tray);
+            FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: null, tray);
         });
 
         // Set state to recording NOW, before Backend.Start() runs.
@@ -529,102 +540,141 @@ public sealed class RecordingEngine
         }
     }
 
-    private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, ITrayContext tray)
+    private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
-        rec.CompletedAtUtc = DateTime.UtcNow;
-        rec.ExitCode = exitCode;
-        rec.LastMeta = meta;
-
-        if (!string.IsNullOrEmpty(meta.StderrLog))
+        lock (rec)
         {
-            int start = Math.Max(0, meta.StderrLog.Length - 1000);
-            rec.StderrExcerpt = meta.StderrLog.Substring(start);
-        }
+            if (rec.IsFinalized)
+                return;
 
-        var expected = rec.DurationSeconds ?? 0;
-        long minSize = 512;
-        bool fileOk = meta.SizeBytes > minSize;
-        bool durationOk = meta.DurationSeconds > 0;
-        bool rangeOk = expected == 0 || (meta.DurationSeconds >= expected * 0.3 && meta.DurationSeconds <= expected * 1.5);
-        bool exitOk = exitCode == 0;
-
-        bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
-                               string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
-
-        bool success;
-        if (isWgcStillFrame && string.Equals(rec.BackendType, "wgc", StringComparison.OrdinalIgnoreCase))
-        {
-            // WGC still-frame: require valid PNG signature on disk in addition
-            // to exit==0, reasonable size, width/height > 0. This replaces the
-            // previous "warning-only" check so invalid-PNG captures end in
-            // state=failed instead of state=completed.
-            success = exitOk
-                && meta.OutputFileExists
-                && fileOk
-                && meta.Width > 0
-                && meta.Height > 0
-                && meta.IsValidPngSignature;
-            if (!success)
+            // If a user-initiated stop is already in flight (rec.StopReason set by Stop(...)),
+            // treat the backend's natural-exit callback as part of that explicit stop. This
+            // prevents a race where the natural-exit callback would otherwise mark a short,
+            // user-stopped output as failed due to the planned-duration range check.
+            bool treatAsUserStop = natural && !string.IsNullOrEmpty(rec.StopReason);
+            if (treatAsUserStop)
             {
-                if (!exitOk) rec.Warnings.Add($"wgc_non_zero_exit: helper exit_code={exitCode}");
-                if (!meta.OutputFileExists) rec.Warnings.Add("wgc_missing_output: helper reported success but output file is absent on disk");
-                if (!fileOk) rec.Warnings.Add($"wgc_empty_output: file size {meta.SizeBytes} bytes < {minSize}");
-                if (meta.Width == 0 || meta.Height == 0)
-                    rec.Warnings.Add($"wgc_zero_dimensions: width={meta.Width} height={meta.Height}");
-                if (meta.OutputFileExists && !meta.IsValidPngSignature)
-                    rec.Warnings.Add("wgc_invalid_png_signature: output file exists but does not start with the standard PNG 8-byte magic header");
+                natural = false;
+                stopReason = rec.StopReason;
             }
-        }
-        else
-        {
-            success = fileOk && durationOk && exitOk && rangeOk;
-            if (!success)
-            {
-                if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
-                if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
-                if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
-                if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
-            }
-        }
 
-        if (success)
-        {
-            rec.State = RecState.completed;
-            BumpStateVersion();
-            _audit.Log("recording.completed", new
+            rec.IsFinalized = true;
+
+            rec.CompletedAtUtc = DateTime.UtcNow;
+            rec.ExitCode = exitCode;
+            rec.LastMeta = meta;
+
+            if (!natural)
             {
-                recording_id = rec.Id,
-                backend = rec.BackendType,
-                duration_seconds = meta.DurationSeconds,
-                size_bytes = meta.SizeBytes,
-                container = meta.Container ?? "mp4",
-                codec = meta.Codec ?? "h264",
-                capture_method = meta.CaptureMethod ?? "",
-                width = meta.Width,
-                height = meta.Height,
-                ffmpeg_exit_code = exitCode
-            });
-        }
-        else
-        {
-            rec.State = RecState.failed;
-            BumpStateVersion();
-            rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
-            _audit.Log("recording.failed", new
+                rec.StopReason = NormalizeStopReason(stopReason);
+                _audit.Log("recording.stopped", new
+                {
+                    recording_id = rec.Id,
+                    reason = rec.StopReason
+                });
+            }
+            // For natural exits, delay setting StopReason until after success/failure is known:
+            // success -> duration_reached, failure -> unexpected_exit.
+
+            if (!string.IsNullOrEmpty(meta.StderrLog))
             {
-                recording_id = rec.Id,
-                backend = rec.BackendType,
-                error = rec.Error,
-                container = meta.Container ?? "mp4",
-                codec = meta.Codec ?? "h264",
-                capture_method = meta.CaptureMethod ?? "",
-                stage = meta.Stage ?? "",
-                hresult = meta.Hresult ?? "",
-                ffmpeg_exit_code = exitCode,
-                size_bytes = meta.SizeBytes,
-                duration_seconds = meta.DurationSeconds,
-                stderr_excerpt = rec.StderrExcerpt ?? ""
-            });
+                int start = Math.Max(0, meta.StderrLog.Length - 1000);
+                rec.StderrExcerpt = meta.StderrLog.Substring(start);
+            }
+
+            var expected = rec.DurationSeconds ?? 0;
+            long minSize = 512;
+            bool fileOk = meta.SizeBytes > minSize;
+            bool durationOk = meta.DurationSeconds > 0;
+            // Duration range check only applies to natural completions. Explicit user/agent
+            // stops may legitimately be much shorter than the planned duration.
+            bool rangeOk = !natural || expected == 0 || (meta.DurationSeconds >= expected * 0.3 && meta.DurationSeconds <= expected * 1.5);
+            bool exitOk = exitCode == 0;
+
+            bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
+                                   string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
+
+            bool success;
+            if (isWgcStillFrame && string.Equals(rec.BackendType, "wgc", StringComparison.OrdinalIgnoreCase))
+            {
+                // WGC still-frame: require valid PNG signature on disk in addition
+                // to exit==0, reasonable size, width/height > 0. This replaces the
+                // previous "warning-only" check so invalid-PNG captures end in
+                // state=failed instead of state=completed.
+                success = exitOk
+                    && meta.OutputFileExists
+                    && fileOk
+                    && meta.Width > 0
+                    && meta.Height > 0
+                    && meta.IsValidPngSignature;
+                if (!success)
+                {
+                    if (!exitOk) rec.Warnings.Add($"wgc_non_zero_exit: helper exit_code={exitCode}");
+                    if (!meta.OutputFileExists) rec.Warnings.Add("wgc_missing_output: helper reported success but output file is absent on disk");
+                    if (!fileOk) rec.Warnings.Add($"wgc_empty_output: file size {meta.SizeBytes} bytes < {minSize}");
+                    if (meta.Width == 0 || meta.Height == 0)
+                        rec.Warnings.Add($"wgc_zero_dimensions: width={meta.Width} height={meta.Height}");
+                    if (meta.OutputFileExists && !meta.IsValidPngSignature)
+                        rec.Warnings.Add("wgc_invalid_png_signature: output file exists but does not start with the standard PNG 8-byte magic header");
+                }
+            }
+            else
+            {
+                success = fileOk && durationOk && exitOk && rangeOk;
+                if (!success)
+                {
+                    if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
+                    if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
+                    if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
+                    if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
+                }
+            }
+
+            if (success)
+            {
+                if (natural)
+                    rec.StopReason = "duration_reached";
+                rec.State = RecState.completed;
+                BumpStateVersion();
+                _audit.Log("recording.completed", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    stop_reason = rec.StopReason,
+                    duration_seconds = meta.DurationSeconds,
+                    size_bytes = meta.SizeBytes,
+                    container = meta.Container ?? "mp4",
+                    codec = meta.Codec ?? "h264",
+                    capture_method = meta.CaptureMethod ?? "",
+                    width = meta.Width,
+                    height = meta.Height,
+                    ffmpeg_exit_code = exitCode
+                });
+            }
+            else
+            {
+                if (natural)
+                    rec.StopReason = "unexpected_exit";
+                rec.State = RecState.failed;
+                BumpStateVersion();
+                rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
+                _audit.Log("recording.failed", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    error = rec.Error,
+                    stop_reason = rec.StopReason,
+                    container = meta.Container ?? "mp4",
+                    codec = meta.Codec ?? "h264",
+                    capture_method = meta.CaptureMethod ?? "",
+                    stage = meta.Stage ?? "",
+                    hresult = meta.Hresult ?? "",
+                    ffmpeg_exit_code = exitCode,
+                    size_bytes = meta.SizeBytes,
+                    duration_seconds = meta.DurationSeconds,
+                    stderr_excerpt = rec.StderrExcerpt ?? ""
+                });
+            }
         }
 
         tray.SetIdle(rec);
@@ -633,24 +683,56 @@ public sealed class RecordingEngine
     public object Stop(string id, string reason)
     {
         var rec = Get(id);
-        if (rec.State is RecState.completed or RecState.failed or RecState.cancelled)
-            return StatusObj(rec);
 
-        rec.State = RecState.stopping;
-        BumpStateVersion();
-        _audit.Log("recording.stopping", new { recording_id = rec.Id, reason });
+        lock (rec)
+        {
+            // Terminal states are idempotent: do not touch state, error, warnings,
+            // stop reason, backend, or audit events.
+            if (IsTerminalState(rec.State))
+                return BuildStopResponse(rec);
+
+            // First explicit stop request becomes the owner. Subsequent concurrent
+            // requests see the stopping state and return immediately without calling
+            // backend.Stop() again or overwriting the first stop reason.
+            if (rec.State == RecState.stopping)
+                return BuildStoppingResponse(rec);
+
+            rec.State = RecState.stopping;
+            rec.StopReason = NormalizeStopReason(reason);
+            BumpStateVersion();
+        }
+
+        _audit.Log("recording.stopping", new { recording_id = rec.Id, reason = rec.StopReason });
 
         var meta = rec.Backend?.Stop() ?? new OutputMeta();
         int exitCode = rec.Backend?.ExitCode ?? -1;
 
-        FinalizeRecording(rec, meta, exitCode, natural: false, _tray!);
+        FinalizeRecording(rec, meta, exitCode, natural: false, stopReason: rec.StopReason, _tray!);
+        return BuildStopResponse(rec, meta);
+    }
+
+    private object BuildStopResponse(Recording rec, OutputMeta? meta = null)
+    {
+        var m = meta ?? rec.LastMeta;
+        if (m == null)
+            m = FfmpegCaptureBackend.Probe(rec.OutputPath);
+
         return new
         {
             recording_id = rec.Id,
             status = rec.State.ToString(),
-            output = OutputObj(rec, meta)
+            stop_reason = rec.StopReason ?? "",
+            output = OutputObj(rec, m)
         };
     }
+
+    private object BuildStoppingResponse(Recording rec) => new
+    {
+        recording_id = rec.Id,
+        status = rec.State.ToString(),
+        stop_reason = rec.StopReason ?? "",
+        output = (object?)null
+    };
 
     public object GetStatus(string id)
     {
@@ -689,6 +771,7 @@ public sealed class RecordingEngine
                 capture_method = meta?.CaptureMethod ?? "",
                 ffmpeg_exit_code = rec.ExitCode
             },
+            stop_reason = rec.StopReason ?? "",
             warnings = rec.Warnings.ToArray(),
             stderr_excerpt = rec.StderrExcerpt ?? "",
             nested = new
@@ -716,6 +799,7 @@ public sealed class RecordingEngine
         {
             recording_id = rec.Id,
             output = OutputObj(rec, meta, full: true),
+            stop_reason = rec.StopReason ?? "",
             warnings = rec.Warnings.ToArray(),
             stderr_excerpt = rec.StderrExcerpt ?? "",
             nested = new
@@ -841,6 +925,7 @@ public sealed class RecordingEngine
                 CaptureMethod = meta?.CaptureMethod ?? "",
                 FfmpegExitCode = rec.ExitCode
             },
+            stop_reason = rec.StopReason ?? "",
             Warnings = rec.Warnings.ToArray(),
             StderrExcerpt = rec.StderrExcerpt ?? "",
             Nested = new
@@ -904,7 +989,9 @@ public sealed class RecordingEngine
 
         // Duration warnings are only meaningful for video streams (FFmpeg).
         // WGC still-frame intentionally has DurationSeconds=0.
-        if (!isWgcStillFrame)
+        // Explicit user/agent stops may legitimately be shorter than planned; skip duration warnings then.
+        bool isUserInitiatedStop = !string.IsNullOrEmpty(rec.StopReason) && rec.StopReason != "duration_reached";
+        if (!isWgcStillFrame && !isUserInitiatedStop)
         {
             if (expectedSecs > 0 && m.DurationSeconds < expectedSecs * 0.5 && m.DurationSeconds > 0)
                 warnings.Add($"Actual duration ({m.DurationSeconds:F1}s) is less than expected ({expectedSecs}s). This may indicate a capture issue.");

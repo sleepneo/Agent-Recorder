@@ -9,7 +9,20 @@ namespace AgentRecorder.Windows;
 public static class SystemQuery
 {
     public record Bounds(int x, int y, int width, int height);
+
+    /// <summary>
+    /// Public display information returned by <see cref="EnumDisplays"/>. This is the
+    /// stable API contract for <c>GET /api/v1/displays</c>; it intentionally does not
+    /// contain Win32 handles or internal DPI values.
+    /// </summary>
     public record DisplayInfo(string id, string name, bool is_primary, Bounds bounds, double scale_factor);
+
+    /// <summary>
+    /// Internal display information used by the floating stop-control layout logic.
+    /// Contains the effective DPI and monitor handle needed for PerMonitorV2 sizing.
+    /// </summary>
+    internal record DisplayDetail(string id, string name, bool is_primary, Bounds bounds, double scale_factor, int dpiX, int dpiY, IntPtr handle);
+
     public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds);
     public record AudioDevice(string id, string name, bool is_default, string state);
 
@@ -20,10 +33,18 @@ public static class SystemQuery
     /// displays from this provider instead of the real Win32 API.
     /// </summary>
     private static Func<List<DisplayInfo>>? _displayProvider;
+
+    /// <summary>
+    /// Injectable detail provider for tests that need to control DPI/handle values
+    /// consumed by <see cref="DisplayDpiResolver"/>.
+    /// </summary>
+    private static Func<List<DisplayDetail>>? _displayDetailProvider;
+
     private static Func<WindowInfo?>? _activeWindowProvider;
     private static Func<bool, bool, List<WindowInfo>>? _windowProvider;
 
     public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider) => _displayProvider = provider;
+    internal static void SetDisplayDetailProvider(Func<List<DisplayDetail>>? provider) => _displayDetailProvider = provider;
     public static void SetActiveWindowProvider(Func<WindowInfo?>? provider) => _activeWindowProvider = provider;
     public static void SetWindowProvider(Func<bool, bool, List<WindowInfo>>? provider) => _windowProvider = provider;
 
@@ -32,7 +53,26 @@ public static class SystemQuery
         if (_displayProvider != null)
             return _displayProvider();
 
-        var list = new List<DisplayInfo>();
+        return EnumDisplayDetails().Select(d => new DisplayInfo(d.id, d.name, d.is_primary, d.bounds, d.scale_factor)).ToList();
+    }
+
+    /// <summary>
+    /// Internal display enumeration that includes effective DPI and monitor handle.
+    /// Tests can inject <see cref="DisplayDetail"/> values via <see cref="SetDisplayDetailProvider"/>.
+    /// </summary>
+    internal static List<DisplayDetail> EnumDisplayDetails()
+    {
+        if (_displayDetailProvider != null)
+            return _displayDetailProvider();
+
+        if (_displayProvider != null)
+        {
+            return _displayProvider()
+                .Select(d => new DisplayDetail(d.id, d.name, d.is_primary, d.bounds, d.scale_factor, 96, 96, IntPtr.Zero))
+                .ToList();
+        }
+
+        var list = new List<DisplayDetail>();
         int idx = 0;
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr _, ref RECT _, IntPtr _) =>
         {
@@ -42,9 +82,25 @@ public static class SystemQuery
                 idx++;
                 bool primary = (mi.dwFlags & 1) != 0;
                 var r = mi.rcMonitor;
-                list.Add(new DisplayInfo(
+                int w = r.right - r.left;
+                int h = r.bottom - r.top;
+                double scale = 1.0;
+                int dpiX = 96;
+                int dpiY = 96;
+                try
+                {
+                    if (GetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, out uint dx, out uint dy) == 0)
+                    {
+                        dpiX = (int)dx;
+                        dpiY = (int)dy;
+                        if (w > 0)
+                            scale = dpiX / 96.0;
+                    }
+                }
+                catch { }
+                list.Add(new DisplayDetail(
                     $"display_{idx}", $"Display {idx}", primary,
-                    new Bounds(r.left, r.top, r.right - r.left, r.bottom - r.top), 1.0));
+                    new Bounds(r.left, r.top, w, h), scale, dpiX, dpiY, hMon));
             }
             return true;
         }, IntPtr.Zero);
@@ -173,4 +229,5 @@ public static class SystemQuery
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+    [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 }

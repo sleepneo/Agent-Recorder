@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using AgentRecorder.App;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using Xunit;
 
@@ -543,6 +544,39 @@ public class RecordingIndicatorTests
     }
 
     [Fact]
+    public void Manager_TextProviderFactory_UsesCurrentProviderForEachNewStopControl()
+    {
+        RunOnSta(() =>
+        {
+            var audit = new CaptureAuditLogger();
+            IUiTextProvider currentProvider = new UiTextProvider(UiLanguage.ZhCn);
+            var mgr = new RecordingIndicatorManager(audit, _ => { }, () => currentProvider);
+
+            var rec1 = MakeRecording((100, 100, 800, 600), 30);
+            mgr.ShowFor(rec1);
+
+            var first = mgr.StopControlsForTests[rec1.Id];
+            Assert.Contains("停止", first.ButtonTextForTests);
+            Assert.Contains("停止本次录制", first.TooltipTextForTests);
+
+            // Simulate a language switch: the factory now returns the English provider.
+            currentProvider = new UiTextProvider(UiLanguage.EnUs);
+
+            var rec2 = MakeRecording((500, 500, 640, 480), 60);
+            mgr.ShowFor(rec2);
+
+            var second = mgr.StopControlsForTests[rec2.Id];
+            Assert.Contains("Stop", second.ButtonTextForTests);
+            Assert.Contains("Stop this recording", second.TooltipTextForTests);
+
+            // The first stop control must keep its original language.
+            Assert.Contains("停止", first.ButtonTextForTests);
+
+            mgr.CloseAll("test");
+        });
+    }
+
+    [Fact]
     public void Manager_ShowFor_FullyOutsideVirtualScreen_SkipsAndLogs()
     {
         RunOnSta(() =>
@@ -623,7 +657,7 @@ public class RecordingIndicatorTests
         {
             var audit = new CaptureAuditLogger();
             var engine = new RecordingEngine(audit);
-            using var ctx = new TrayContext(engine, audit);
+            using var ctx = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create());
 
             var invoker = GetPrivateField<Control>(ctx, "_uiInvoker");
             Assert.False(invoker.Visible);
@@ -639,7 +673,7 @@ public class RecordingIndicatorTests
         {
             var audit = new CaptureAuditLogger();
             var engine = new RecordingEngine(audit);
-            using var ctx = new TrayContext(engine, audit);
+            using var ctx = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create());
             var rec = MakeRecording((100, 100, 800, 600), 30);
 
             ctx.SetRecording(rec);
@@ -658,7 +692,7 @@ public class RecordingIndicatorTests
         {
             var audit = new CaptureAuditLogger();
             var engine = new RecordingEngine(audit);
-            using var ctx = new TrayContext(engine, audit);
+            using var ctx = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create());
             var r1 = MakeRecording((100, 100, 800, 600), 30);
             var r2 = MakeRecording((500, 500, 640, 480), 60);
 
@@ -714,5 +748,165 @@ public class RecordingIndicatorTests
             try { backend.Dispose(); } catch { }
             try { File.Delete(output); } catch { }
         }
+    }
+
+    // =====================================================================
+    // DPI-safe REC label sizing and placement
+    // =====================================================================
+
+    [Theory]
+    [InlineData(1.00, null, null, "REC 2:00:00")]
+    [InlineData(1.00, null, 30, "REC 00:30 / 00:30")]
+    [InlineData(1.00, "outer", 60, "REC OUTER 01:00 / 01:00")]
+    [InlineData(1.00, "inner", 30, "REC INNER 00:30 / 00:30")]
+    [InlineData(1.00, null, 3660, "REC 1:01:00 / 1:01:00")]
+    [InlineData(1.25, null, 30, "REC 00:30 / 00:30")]
+    [InlineData(1.50, "outer", 60, "REC OUTER 01:00 / 01:00")]
+    [InlineData(1.75, "inner", 30, "REC INNER 00:30 / 00:30")]
+    [InlineData(2.00, null, 3660, "REC 1:01:00 / 1:01:00")]
+    public void Label_MeasureLabelSize_DpiMatrix_FitsLongestText(double scale, string? role, int? duration, string expectedMaxText)
+    {
+        RunOnSta(() =>
+        {
+            var font = new Font("Segoe UI", (float)(9 * scale), FontStyle.Bold);
+            var padding = new Padding(4, 2, 4, 2);
+            var size = RecordingIndicatorForm.MeasureLabelSize(role, duration, font, padding);
+
+            var textSize = TextRenderer.MeasureText(expectedMaxText, font, Size.Empty, TextFormatFlags.SingleLine);
+            Assert.True(size.Width >= textSize.Width + padding.Horizontal,
+                $"Measured width {size.Width} does not fit text width {textSize.Width} at scale {scale}");
+            Assert.True(size.Height >= textSize.Height + padding.Vertical,
+                $"Measured height {size.Height} does not fit text height {textSize.Height} at scale {scale}");
+        });
+    }
+
+    [Fact]
+    public void Label_BoundsStable_AfterTimerUpdate()
+    {
+        RunOnSta(() =>
+        {
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow.AddSeconds(-5),
+                30);
+            form.Show();
+            Application.DoEvents();
+
+            var initialBounds = form.LabelBoundsForTests;
+            var measuredSize = form.LabelMeasuredSizeForTests;
+
+            Assert.True(initialBounds.Width >= measuredSize.Width,
+                $"Label width {initialBounds.Width} smaller than measured {measuredSize.Width}");
+            Assert.True(initialBounds.Height >= measuredSize.Height,
+                $"Label height {initialBounds.Height} smaller than measured {measuredSize.Height}");
+
+            // Wait for at least one timer tick.
+            Thread.Sleep(700);
+            Application.DoEvents();
+
+            var updatedBounds = form.LabelBoundsForTests;
+            Assert.Equal(initialBounds.Size, updatedBounds.Size);
+            Assert.Equal(initialBounds.Location, updatedBounds.Location);
+            Assert.NotEqual("REC 00:00 / 00:30", form.LabelTextForTests);
+
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void Label_NearVirtualScreenEdges_StaysInside()
+    {
+        RunOnSta(() =>
+        {
+            var vs = SystemInformation.VirtualScreen;
+
+            using var formRight = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(vs.Right - 200, vs.Y + 100, 200, 200),
+                DateTime.UtcNow,
+                30);
+            formRight.Show();
+            var labelRight = formRight.LabelBoundsForTests;
+            Assert.True(formRight.Bounds.X + labelRight.Right <= vs.Right,
+                $"Label overflows right edge: right={formRight.Bounds.X + labelRight.Right}, vs.Right={vs.Right}");
+            Assert.True(formRight.Bounds.Y + labelRight.Bottom <= vs.Bottom,
+                $"Label overflows bottom edge: bottom={formRight.Bounds.Y + labelRight.Bottom}, vs.Bottom={vs.Bottom}");
+            formRight.Close();
+
+            using var formBottom = new RecordingIndicatorForm(
+                "r2",
+                new RecordingIndicatorBounds(vs.X + 100, vs.Bottom - 200, 200, 200),
+                DateTime.UtcNow,
+                30);
+            formBottom.Show();
+            var labelBottom = formBottom.LabelBoundsForTests;
+            Assert.True(formBottom.Bounds.X + labelBottom.Right <= vs.Right);
+            Assert.True(formBottom.Bounds.Y + labelBottom.Bottom <= vs.Bottom);
+            formBottom.Close();
+        });
+    }
+
+    // =====================================================================
+    // Long timer formatting and measurement consistency
+    // =====================================================================
+
+    [Theory]
+    [InlineData(0, "00:00")]
+    [InlineData(3599, "59:59")]
+    [InlineData(3600, "1:00:00")]
+    [InlineData(3660, "1:01:00")]
+    [InlineData(7200, "2:00:00")]
+    public void FormatTime_MapsSecondsToExpectedString(int seconds, string expected)
+    {
+        Assert.Equal(expected, RecordingIndicatorForm.FormatTime(TimeSpan.FromSeconds(seconds)));
+    }
+
+    [Fact]
+    public void Form_LabelText_WithLongDuration_ShowsHours()
+    {
+        RunOnSta(() =>
+        {
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow,
+                3660);
+            Assert.Equal("REC 00:00 / 1:01:00", form.LabelTextForTests);
+        });
+    }
+
+    [Fact]
+    public void Label_BoundsStable_CrossingHourBoundary()
+    {
+        RunOnSta(() =>
+        {
+            // Start one second before the one-hour mark so the next timer tick crosses it.
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow.AddSeconds(-3599),
+                7200);
+            form.Show();
+            Application.DoEvents();
+            Thread.Sleep(50);
+
+            var before = form.LabelBoundsForTests;
+            var beforeText = form.LabelTextForTests;
+            Assert.Contains("59:59", beforeText);
+
+            // Wait long enough for the label to update past the 1:00:00 boundary.
+            Thread.Sleep(1200);
+            Application.DoEvents();
+            Thread.Sleep(50);
+            Application.DoEvents();
+
+            var after = form.LabelBoundsForTests;
+            var afterText = form.LabelTextForTests;
+            Assert.Contains("1:00:00", afterText);
+
+            Assert.Equal(before.Size, after.Size);
+            form.Close();
+        });
     }
 }

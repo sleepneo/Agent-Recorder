@@ -331,6 +331,30 @@ AgentRecorder.Cli.exe autostart disable --json
 
 复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、音频配置等）仍可使用原始 `POST /api/v1/recordings`。
 
+### 停止录制
+
+录制开始后，本地用户可通过以下方式停止：
+
+- 点击录制区域旁的红色悬浮停止按钮（仅停止该条录制）。
+- 右键托盘图标，选择「停止录制」或「停止全部录制（N）」。
+- 按全局热键 `Ctrl+Shift+F10` 停止全部活动录制。
+
+AI agent 也可以调用 API 停止指定录制：
+
+```http
+POST /api/v1/recordings/{recording_id}/stop
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "reason": "user_requested"
+}
+```
+
+无论哪种方式触发停止，都应继续轮询 `/recordings/{recording_id}` 直到状态变为 `completed`、`failed` 或 `cancelled`。
+
+终态响应会包含 `stop_reason`：`duration_reached`（自然达到计划时长）、`floating_button`/`tray_menu`/`global_hotkey`（本地控件停止）、`user_requested`（API 停止）等。用户主动停止且输出有效时，状态仍为 `completed`，不会仅因实际时长短于计划时长而判为 `failed`；但文件过小、零时长、FFmpeg 非零退出等真实产物错误仍会失败。
+
 ### 上下文快照（减少往返）
 
 服务启动后，优先调用 `/capabilities` 获取 `context` 快照，基于以下信息决策：

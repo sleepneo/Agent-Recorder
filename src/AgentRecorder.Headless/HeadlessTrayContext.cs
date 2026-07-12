@@ -12,6 +12,11 @@ public sealed class HeadlessTrayContext : ITrayContext
 {
     public string HostMode => "headless";
     public bool SupportsRegionSelectionUi => false;
+    public bool SupportsFloatingStopButton => false;
+    public bool SupportsTrayStop => false;
+    public bool SupportsGlobalStopHotkey => false;
+    public bool IsGlobalStopHotkeyRegistered => false;
+    public string? GlobalStopHotkeyGesture => null;
 
     private readonly AuditLogger _audit;
 
