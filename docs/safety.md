@@ -80,4 +80,4 @@ Typical event categories:
 - The portable package is not code-signed.
 - Some GPU-accelerated windows may not capture reliably through FFmpeg
   `gdigrab`.
-- Microphone/system audio support is not a completed product path yet.
+- Microphone/system audio support is not a completed product path yet. Requests that set `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` fail fast with `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.

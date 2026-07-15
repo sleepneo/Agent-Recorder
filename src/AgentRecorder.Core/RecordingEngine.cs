@@ -34,6 +34,13 @@ public sealed class RecordingEngine
     public Func<string, (ICaptureBackend Backend, string BackendType)> BackendFactory { get; set; }
         = CaptureBackendSelector.Select;
 
+    /// <summary>
+    /// Test seam: overrides the confirmation expiry delay. Production default is
+    /// 60 seconds; tests can set a short value to exercise the expiry path
+    /// without waiting for the real timeout.
+    /// </summary>
+    internal TimeSpan ConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
     public RecordingEngine(AuditLogger audit) => _audit = audit;
     public void SetTray(ITrayContext tray) => _tray = tray;
 
@@ -322,7 +329,7 @@ public sealed class RecordingEngine
                 }
             });
 
-            Task.Delay(TimeSpan.FromSeconds(conf.TimeoutSeconds)).ContinueWith(_ =>
+            Task.Delay(ConfirmationTimeout).ContinueWith(_ =>
             {
                 if (conf.Status != "pending") return;
                 conf.Status = "expired";

@@ -76,9 +76,12 @@ The response includes:
 - host mode and autostart status
 - FFmpeg resolution and prewarm status
 - recording source support: `display`, `window`, `region`
+- audio capability declaration (`recording.audio_capabilities`)
 - quick recording endpoint and recipes
 - safety and auth policy
 - readiness data when available
+
+Audio support (microphone and system audio) is currently **not implemented**. The legacy `recording.audio` array is preserved for backward compatibility and is always empty. Sending `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
 Stop controls are reported under `interaction.stop_controls`:
 
@@ -221,6 +224,44 @@ The response includes a `context` object that provides a snapshot of system stat
 - `last_selected_region` is persisted to `<data-dir>\state\last-selected-region.json` and survives service restarts
 - The API returns 200 even if context enumeration partially fails
 
+## Permissions
+
+```http
+GET /permissions
+```
+
+Returns the current permission status. Screen capture and output-directory selection are granted locally. Microphone and system audio are not implemented.
+
+```json
+{
+  "screen_capture": { "status": "granted" },
+  "microphone": { "supported": false, "status": "not_implemented" },
+  "system_audio": { "supported": false, "status": "not_implemented" },
+  "output_directory": {
+    "status": "granted",
+    "default_path": "C:\\...\\.local-data\\Videos",
+    "selection_ui": true
+  }
+}
+```
+
+## Audio Devices
+
+```http
+GET /audio/devices
+```
+
+Audio input enumeration is not implemented. The endpoint returns an empty `input_devices` array and explicitly reports the unimplemented status.
+
+```json
+{
+  "status": "not_implemented",
+  "microphone_supported": false,
+  "input_devices": [],
+  "system_audio_supported": false
+}
+```
+
 ## Quick Recording
 
 ```http
@@ -243,15 +284,14 @@ Use this endpoint first for common natural-language intents.
     "fps": 30,
     "quality": "medium"
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "output": {
     "directory": "default",
     "filename_template": "recording-{datetime}"
   }
 }
 ```
+
+`audio.microphone.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`. `audio.system_audio.enabled` is similarly reserved.
 
 Supported `target.type` values:
 
@@ -390,10 +430,11 @@ Display source:
 {
   "source": { "type": "display", "display_id": "display_1" },
   "stop_condition": { "type": "duration", "seconds": 60 },
-  "audio": { "microphone": { "enabled": false } },
   "video": { "fps": 30, "quality": "medium" }
 }
 ```
+
+Audio must be disabled or omitted. Setting `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
 Region source:
 

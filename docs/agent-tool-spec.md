@@ -21,7 +21,7 @@ requires local user confirmation before recording starts.
 | `selection_timeout_seconds` | integer | No | Timeout for `selected_region`, default `120` |
 | `fps` | integer | No | `15`, `24`, `30`, or `60`, default `30` |
 | `quality` | string | No | `low`, `medium`, or `high`, default `medium` |
-| `microphone_enabled` | boolean | No | Reserved for microphone capture; current builds default to false |
+| `microphone_enabled` | boolean | No | Must be `false` or omitted. Microphone capture is not implemented; `true` returns `CAPABILITY_NOT_IMPLEMENTED` |
 | `nested_role` | string | No | `outer` or `inner` for nested recording |
 | `parent_recording_id` | string | No | Required for nested inner recordings |
 | `session_id` | string | No | Optional nested recording session id |
@@ -62,7 +62,9 @@ requires local user confirmation before recording starts.
       },
       "microphone_enabled": {
         "type": "boolean",
-        "default": false
+        "enum": [false],
+        "default": false,
+        "description": "Must be false or omitted. Microphone capture is not implemented; true returns CAPABILITY_NOT_IMPLEMENTED."
       },
       "nested_role": {
         "type": "string",

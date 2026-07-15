@@ -205,10 +205,12 @@ public static class SystemQuery
         return EnumWindows(false, false).FirstOrDefault(w => w.id == $"window_{fg.ToInt64()}");
     }
 
-    public static List<AudioDevice> AudioInputs() => new()
-    {
-        new AudioDevice("mic_default", "Default Microphone", true, "active")
-    };
+    /// <summary>
+    /// Returns the list of available audio input devices.
+    /// Currently unimplemented: returns an empty list until real microphone
+    /// enumeration is integrated.
+    /// </summary>
+    public static List<AudioDevice> AudioInputs() => new();
 
     private delegate bool MonitorEnumProc(IntPtr h, IntPtr hdc, ref RECT r, IntPtr d);
     private delegate bool EnumWindowsProc(IntPtr h, IntPtr l);

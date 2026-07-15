@@ -276,10 +276,11 @@ AgentRecorder.Cli.exe autostart disable --json
 ```json
 {
   "target": { "type": "active_window" },
-  "duration_seconds": 180,
-  "audio": { "microphone": { "enabled": false } }
+  "duration_seconds": 180
 }
 ```
+
+当前版本不支持麦克风或系统声音录制，请勿在请求中启用音频（`audio.microphone.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`）。
 
 让用户选区并录制 1 分钟：
 
@@ -329,7 +330,7 @@ AgentRecorder.Cli.exe autostart disable --json
 - 状态 `rejected` -> 录制被拒绝，告知用户
 - 状态 `expired` -> 确认超时，建议重试
 
-复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、音频配置等）仍可使用原始 `POST /api/v1/recordings`。
+复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、精确来源与停止条件等）仍可使用原始 `POST /api/v1/recordings`。
 
 ### 停止录制
 
@@ -417,9 +418,6 @@ X-Agent-Name: <your-agent-name>
 {
   "target": { "type": "selected_region", "selection_timeout_seconds": 300 },
   "duration_seconds": 300,
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -483,9 +481,6 @@ GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording
 {
   "target": { "type": "primary_display" },
   "duration_seconds": 300,
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -511,9 +506,6 @@ GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording
 {
   "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
   "duration_seconds": 60,
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"

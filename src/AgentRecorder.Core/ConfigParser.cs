@@ -17,6 +17,7 @@ public static class ConfigParser
     public static Recording Build(JsonNode cfg, string agent, out object summary)
     {
         RejectUnsupportedContinuousFeatures(cfg);
+        RejectUnsupportedAudioFeatures(cfg);
 
         // =====================================================================
         // Step 0: nested.role validation MUST come before source enumeration.
@@ -238,6 +239,26 @@ public static class ConfigParser
 
     private static string? Str(JsonNode? n) => n?.GetValue<string>();
     private static ApiException Inv(string m) => new(400, "INVALID_ARGUMENT", m);
+
+    /// <summary>
+    /// Rejects explicit requests for audio capabilities that are not yet
+    /// implemented. Must run before any display/window enumeration or output
+    /// path construction so that the failure is fast and cheap.
+    /// </summary>
+    public static void RejectUnsupportedAudioFeatures(JsonNode cfg)
+    {
+        var mic = cfg["audio"]?["microphone"];
+        if (mic?["enabled"]?.GetValue<bool>() == true)
+            throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",
+                "Microphone recording is not implemented in this version.",
+                new { capability = "microphone", suggested_action = "retry_without_audio" });
+
+        var sys = cfg["audio"]?["system_audio"];
+        if (sys?["enabled"]?.GetValue<bool>() == true)
+            throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",
+                "System audio recording is not implemented in this version.",
+                new { capability = "system_audio", suggested_action = "retry_without_audio" });
+    }
 
     /// <summary>
     /// Task 64: reject explicit continuous-recording markers before any

@@ -266,6 +266,8 @@ public sealed class ApiServer
             case ("GET", "/audio/devices"):
                 return ApiResponse.Ok(new
                 {
+                    status = "not_implemented",
+                    microphone_supported = false,
                     input_devices = SystemQuery.AudioInputs(),
                     system_audio_supported = false
                 }, reqId);
@@ -434,6 +436,10 @@ public sealed class ApiServer
             throw new ApiException(400, "INVALID_ARGUMENT", "target.type is required");
 
         JsonObject cfg = BuildQuickRecordingConfig(body);
+
+        // Fail before target resolution so unsupported audio never causes
+        // display/window enumeration or opens the region-selection UI.
+        ConfigParser.RejectUnsupportedAudioFeatures(cfg);
 
         switch (targetType)
         {
@@ -778,7 +784,12 @@ public sealed class ApiServer
             recording = new
             {
                 sources = new[] { "display", "window", "region" },
-                audio = new[] { "microphone" },
+                audio = Array.Empty<string>(),
+                audio_capabilities = new
+                {
+                    microphone = new { supported = false, status = "not_implemented" },
+                    system_audio = new { supported = false, status = "not_implemented" }
+                },
                 containers = new[] { "mp4" },
                 codecs = new[] { "h264" },
                 fps = new[] { 15, 24, 30, 60 },
@@ -1051,7 +1062,8 @@ public sealed class ApiServer
     private static object Permissions() => new
     {
         screen_capture = new { status = "granted" },
-        microphone = new { status = "granted" },
+        microphone = new { supported = false, status = "not_implemented" },
+        system_audio = new { supported = false, status = "not_implemented" },
         output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
     };
 }

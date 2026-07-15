@@ -176,6 +176,8 @@ GET /capabilities
 
 该接口不需要 API key。
 
+**音频能力**：当前版本麦克风与系统声音均未实现。`recording.audio` 保留为空数组，`recording.audio_capabilities.microphone` 与 `system_audio` 均返回 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.microphone.enabled=true` 或 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
+
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
 ```json
@@ -363,6 +365,44 @@ GET /capabilities
 
 服务启动成功后还会写入 `<data-dir>\runtime\ready.json`，AI Agent 可以轮询该文件判断服务就绪，无需盲轮询 `/capabilities`。
 
+## 1.1 检查权限
+
+```http
+GET /permissions
+```
+
+不需要 API key。当前版本麦克风与系统声音均未实现，因此 `microphone` 与 `system_audio` 固定返回 `{ "supported": false, "status": "not_implemented" }`；`screen_capture` 与 `output_directory` 为本地授予。
+
+```json
+{
+  "screen_capture": { "status": "granted" },
+  "microphone": { "supported": false, "status": "not_implemented" },
+  "system_audio": { "supported": false, "status": "not_implemented" },
+  "output_directory": {
+    "status": "granted",
+    "default_path": "C:\\...\\.local-data\\Videos",
+    "selection_ui": true
+  }
+}
+```
+
+## 1.2 列出音频设备
+
+```http
+GET /audio/devices
+```
+
+不需要 API key。真实麦克风枚举尚未实现，返回空数组与明确状态：
+
+```json
+{
+  "status": "not_implemented",
+  "microphone_supported": false,
+  "input_devices": [],
+  "system_audio_supported": false
+}
+```
+
 ## 2. 列出显示器
 
 ```http
@@ -457,9 +497,6 @@ X-Agent-Name: <agent-name>
     "fps": 30,
     "quality": "medium"
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "output": {
     "directory": "default",
     "filename_template": "recording-{datetime}"
@@ -480,7 +517,7 @@ X-Agent-Name: <agent-name>
 | `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
 | `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
 | `video` | 否 | 透传到原始录制配置，默认值同原始 API |
-| `audio` | 否 | 透传到原始录制配置 |
+| `audio` | 否 | 透传到原始录制配置；`audio.microphone.enabled` 必须 `false` 或省略，`true` 返回 `CAPABILITY_NOT_IMPLEMENTED` |
 | `output` | 否 | 透传到原始录制配置 |
 | `nested` | 否 | 透传到原始录制配置，使用现有 nested 规则 |
 
@@ -650,9 +687,6 @@ X-Agent-Name: <agent-name>
     "coordinate_space": "virtual_screen",
     "bounds": { "x": 100, "y": 100, "width": 1200, "height": 800 }
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -679,9 +713,6 @@ X-Agent-Name: <agent-name>
     "type": "display",
     "display_id": "display_1"
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -704,9 +735,6 @@ X-Agent-Name: <agent-name>
     "type": "window",
     "window_id": "window_123"
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -720,6 +748,8 @@ X-Agent-Name: <agent-name>
   }
 }
 ```
+
+音频字段必须保持禁用或省略：`audio.microphone.enabled=true` 或 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`，因为当前版本尚未实现音频录制。
 
 创建录制通常返回：
 
@@ -1028,9 +1058,6 @@ X-Agent-Recorder-Key: <api-key>
     "type": "display",
     "display_id": "display_1"
   },
-  "audio": {
-    "microphone": { "enabled": false }
-  },
   "video": {
     "fps": 15,
     "quality": "medium"
@@ -1062,9 +1089,6 @@ X-Agent-Recorder-Key: <api-key>
     "display_id": "display_1",
     "coordinate_space": "virtual_screen",
     "bounds": { "x": 200, "y": 200, "width": 900, "height": 600 }
-  },
-  "audio": {
-    "microphone": { "enabled": false }
   },
   "video": {
     "fps": 15,
