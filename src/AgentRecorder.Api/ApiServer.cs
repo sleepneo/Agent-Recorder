@@ -29,6 +29,7 @@ public sealed class ApiServer
     private readonly RecordingEngine _engine;
     private readonly AuditLogger _audit;
     private readonly ITrayContext _tray;
+    private readonly IPerformanceTracer _tracer;
     private readonly RuntimeReadiness? _readiness;
     private readonly WindowsAutoStartManager? _autoStart;
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
@@ -40,9 +41,11 @@ public sealed class ApiServer
     public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
         RuntimeReadiness? readiness = null,
         WindowsAutoStartManager? autoStart = null,
-        FfmpegPrewarmer? ffmpegPrewarmer = null)
+        FfmpegPrewarmer? ffmpegPrewarmer = null,
+        IPerformanceTracer? tracer = null)
     {
         _engine = engine; _audit = audit; _tray = tray;
+        _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _readiness = readiness;
         _autoStart = autoStart;
         _ffmpegPrewarmer = ffmpegPrewarmer;
@@ -331,10 +334,39 @@ public sealed class ApiServer
     private string CreateRecording(HttpRequest req, string reqBody, string reqId)
     {
         var agent = req.Headers.GetValueOrDefault("X-Agent-Name") ?? "unknown";
-        JsonNode cfg = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
-                       ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+        var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
+        var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
+        const string endpoint = "recordings";
+        _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
 
-        var result = _engine.CreateRecording(cfg, agent, _tray);
+        JsonNode cfg;
+        try
+        {
+            cfg = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
+                  ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+        }
+        catch
+        {
+            // Entry-level failure: no recording was created. Record the intent-level
+            // validation failure and surface a stable 400 without leaking raw input.
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
+            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body");
+        }
+
+        object result;
+        try
+        {
+            result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+        }
+        catch (ApiException ex)
+        {
+            // Engine is the owner of validation events for failures that occur inside
+            // CreateRecording. Only record here if the engine did not already do so.
+            if (!_tracer.HasValidationResult(traceId))
+                _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
+        }
+
         return ApiResponse.Ok(result, reqId);
     }
 
@@ -424,195 +456,243 @@ public sealed class ApiServer
     private string CreateQuickRecording(HttpRequest req, string reqBody, string reqId)
     {
         var agent = req.Headers.GetValueOrDefault("X-Agent-Name") ?? "unknown";
-        JsonNode body = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
-                        ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+        var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
+        var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
+        const string endpoint = "recordings.quick";
+        _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
+
+        JsonNode body;
+        try
+        {
+            body = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
+                   ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+        }
+        catch
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
+            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body");
+        }
 
         var targetNode = body["target"];
         if (targetNode == null)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
             throw new ApiException(400, "INVALID_ARGUMENT", "target is required");
+        }
 
         var targetType = targetNode["type"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(targetType))
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
             throw new ApiException(400, "INVALID_ARGUMENT", "target.type is required");
+        }
 
         JsonObject cfg = BuildQuickRecordingConfig(body);
 
         // Fail before target resolution so unsupported audio never causes
         // display/window enumeration or opens the region-selection UI.
-        ConfigParser.RejectUnsupportedAudioFeatures(cfg);
-
-        switch (targetType)
+        try
         {
-            case "primary_display":
-                {
-                    var display = ResolvePrimaryDisplay();
-                    cfg["source"] = new JsonObject
-                    {
-                        ["type"] = "display",
-                        ["display_id"] = display.id
-                    };
-                    var result = _engine.CreateRecording(cfg, agent, _tray);
-                    var resolved = new JsonObject
-                    {
-                        ["type"] = "display",
-                        ["display_id"] = display.id
-                    };
-                    var data = AddQuickMetadataToObject(result, "primary_display", resolved, true);
-                    return ApiResponse.Ok(data, reqId);
-                }
+            ConfigParser.RejectUnsupportedAudioFeatures(cfg);
+        }
+        catch (ApiException ex)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
+        }
 
-            case "active_window":
-                {
-                    var window = ResolveActiveWindow();
-                    cfg["source"] = new JsonObject
+        try
+        {
+            switch (targetType)
+            {
+                case "primary_display":
                     {
-                        ["type"] = "window",
-                        ["window_id"] = window.id
-                    };
-                    // Pre-build to get the clamped capture bounds for the response
-                    var preBuilt = ConfigParser.Build(cfg, agent, out _);
-                    var capBounds = preBuilt.Config.Bounds;
-                    var result = _engine.CreateRecording(cfg, agent, _tray);
-                    var resolved = new JsonObject
-                    {
-                        ["type"] = "window",
-                        ["window_id"] = window.id,
-                        ["title"] = window.title,
-                        ["bounds"] = new JsonObject
+                        var display = ResolvePrimaryDisplay();
+                        cfg["source"] = new JsonObject
                         {
-                            ["x"] = window.bounds.x,
-                            ["y"] = window.bounds.y,
-                            ["width"] = window.bounds.width,
-                            ["height"] = window.bounds.height
-                        },
-                        ["capture_bounds"] = new JsonObject
+                            ["type"] = "display",
+                            ["display_id"] = display.id
+                        };
+                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var resolved = new JsonObject
                         {
-                            ["x"] = capBounds.x,
-                            ["y"] = capBounds.y,
-                            ["width"] = capBounds.w,
-                            ["height"] = capBounds.h
-                        }
-                    };
-                    var data = AddQuickMetadataToObject(result, "active_window", resolved, true);
-                    return ApiResponse.Ok(data, reqId);
-                }
+                            ["type"] = "display",
+                            ["display_id"] = display.id
+                        };
+                        var data = AddQuickMetadataToObject(result, "primary_display", resolved, true);
+                        return ApiResponse.Ok(data, reqId);
+                    }
 
-            case "selected_region":
-                {
-                    var timeoutSec = targetNode["selection_timeout_seconds"]?.GetValue<int?>() ?? 120;
-                    if (timeoutSec < 10 || timeoutSec > 600)
-                        throw new ApiException(400, "INVALID_ARGUMENT",
-                            "target.selection_timeout_seconds must be between 10 and 600");
-
-                    var sel = WaitForRegionSelection(timeoutSec);
-
-                    if (sel.status != "selected")
+                case "active_window":
                     {
-                        return ApiResponse.Ok(new
+                        var window = ResolveActiveWindow();
+                        cfg["source"] = new JsonObject
                         {
-                            status = sel.status,
-                            quick = new
+                            ["type"] = "window",
+                            ["window_id"] = window.id
+                        };
+                        // Pre-build to get the clamped capture bounds for the response
+                        var preBuilt = ConfigParser.Build(cfg, agent, out _);
+                        var capBounds = preBuilt.Config.Bounds;
+                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var resolved = new JsonObject
+                        {
+                            ["type"] = "window",
+                            ["window_id"] = window.id,
+                            ["title"] = window.title,
+                            ["bounds"] = new JsonObject
                             {
-                                target_type = "selected_region",
-                                recording_created = false
+                                ["x"] = window.bounds.x,
+                                ["y"] = window.bounds.y,
+                                ["width"] = window.bounds.width,
+                                ["height"] = window.bounds.height
+                            },
+                            ["capture_bounds"] = new JsonObject
+                            {
+                                ["x"] = capBounds.x,
+                                ["y"] = capBounds.y,
+                                ["width"] = capBounds.w,
+                                ["height"] = capBounds.h
                             }
-                        }, reqId);
+                        };
+                        var data = AddQuickMetadataToObject(result, "active_window", resolved, true);
+                        return ApiResponse.Ok(data, reqId);
                     }
 
-                    cfg["source"] = new JsonObject
+                case "selected_region":
                     {
-                        ["type"] = "region",
-                        ["display_id"] = sel.displayId,
-                        ["coordinate_space"] = sel.coordSpace,
-                        ["bounds"] = new JsonObject
+                        var timeoutSec = targetNode["selection_timeout_seconds"]?.GetValue<int?>() ?? 120;
+                        if (timeoutSec < 10 || timeoutSec > 600)
+                            throw new ApiException(400, "INVALID_ARGUMENT",
+                                "target.selection_timeout_seconds must be between 10 and 600");
+
+                        var sel = WaitForRegionSelection(timeoutSec);
+
+                        if (sel.status != "selected")
                         {
-                            ["x"] = sel.x,
-                            ["y"] = sel.y,
-                            ["width"] = sel.w,
-                            ["height"] = sel.h
+                            // No recording was created. Record an intent-level failure
+                            // with a stable, non-sensitive code describing the outcome.
+                            var noRecordingCode = sel.status switch
+                            {
+                                "selection_cancelled" => "selection_cancelled",
+                                "selection_timeout" => "selection_timeout",
+                                "display_unavailable" => "display_unavailable",
+                                _ => "selection_failed"
+                            };
+                            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: noRecordingCode);
+                            return ApiResponse.Ok(new
+                            {
+                                status = sel.status,
+                                quick = new
+                                {
+                                    target_type = "selected_region",
+                                    recording_created = false
+                                },
+                                performance_trace_id = traceId
+                            }, reqId);
                         }
-                    };
 
-                    var state = new SelectedRegionState(
-                        Available: true,
-                        DisplayId: sel.displayId,
-                        CoordinateSpace: sel.coordSpace,
-                        X: sel.x,
-                        Y: sel.y,
-                        Width: sel.w,
-                        Height: sel.h,
-                        UpdatedAt: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                        Source: "quick_selected_region");
-
-                    RegionSelectionStateStore.Save(state);
-                    lock (_regionLock) { _lastSelectedRegion = state; }
-
-                    var result = _engine.CreateRecording(cfg, agent, _tray);
-                    var resolved = new JsonObject
-                    {
-                        ["type"] = "region",
-                        ["display_id"] = sel.displayId,
-                        ["coordinate_space"] = sel.coordSpace,
-                        ["bounds"] = new JsonObject
+                        cfg["source"] = new JsonObject
                         {
-                            ["x"] = sel.x,
-                            ["y"] = sel.y,
-                            ["width"] = sel.w,
-                            ["height"] = sel.h
-                        }
-                    };
-                    var data = AddQuickMetadataToObject(result, "selected_region", resolved, true);
-                    return ApiResponse.Ok(data, reqId);
-                }
+                            ["type"] = "region",
+                            ["display_id"] = sel.displayId,
+                            ["coordinate_space"] = sel.coordSpace,
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = sel.x,
+                                ["y"] = sel.y,
+                                ["width"] = sel.w,
+                                ["height"] = sel.h
+                            }
+                        };
 
-            case "last_region":
-                {
-                    SelectedRegionState? last;
-                    lock (_regionLock) { last = _lastSelectedRegion; }
+                        var state = new SelectedRegionState(
+                            Available: true,
+                            DisplayId: sel.displayId,
+                            CoordinateSpace: sel.coordSpace,
+                            X: sel.x,
+                            Y: sel.y,
+                            Width: sel.w,
+                            Height: sel.h,
+                            UpdatedAt: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                            Source: "quick_selected_region");
 
-                    if (last == null)
-                    {
-                        throw new ApiException(404, "SOURCE_NOT_FOUND",
-                            "No last selected region is available.",
-                            new { suggested_action = "use_selected_region_first" });
+                        RegionSelectionStateStore.Save(state);
+                        lock (_regionLock) { _lastSelectedRegion = state; }
+
+                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var resolved = new JsonObject
+                        {
+                            ["type"] = "region",
+                            ["display_id"] = sel.displayId,
+                            ["coordinate_space"] = sel.coordSpace,
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = sel.x,
+                                ["y"] = sel.y,
+                                ["width"] = sel.w,
+                                ["height"] = sel.h
+                            }
+                        };
+                        var data = AddQuickMetadataToObject(result, "selected_region", resolved, true);
+                        return ApiResponse.Ok(data, reqId);
                     }
 
-                    cfg["source"] = new JsonObject
+                case "last_region":
                     {
-                        ["type"] = "region",
-                        ["display_id"] = last.DisplayId,
-                        ["coordinate_space"] = last.CoordinateSpace,
-                        ["bounds"] = new JsonObject
+                        SelectedRegionState? last;
+                        lock (_regionLock) { last = _lastSelectedRegion; }
+
+                        if (last == null)
                         {
-                            ["x"] = last.X,
-                            ["y"] = last.Y,
-                            ["width"] = last.Width,
-                            ["height"] = last.Height
+                            throw new ApiException(404, "SOURCE_NOT_FOUND",
+                                "No last selected region is available.",
+                                new { suggested_action = "use_selected_region_first" });
                         }
-                    };
 
-                    var result = _engine.CreateRecording(cfg, agent, _tray);
-                    var resolved = new JsonObject
-                    {
-                        ["type"] = "region",
-                        ["display_id"] = last.DisplayId,
-                        ["coordinate_space"] = last.CoordinateSpace,
-                        ["bounds"] = new JsonObject
+                        cfg["source"] = new JsonObject
                         {
-                            ["x"] = last.X,
-                            ["y"] = last.Y,
-                            ["width"] = last.Width,
-                            ["height"] = last.Height
-                        },
-                        ["source"] = "last_selected_region"
-                    };
-                    var data = AddQuickMetadataToObject(result, "last_region", resolved, true);
-                    return ApiResponse.Ok(data, reqId);
-                }
+                            ["type"] = "region",
+                            ["display_id"] = last.DisplayId,
+                            ["coordinate_space"] = last.CoordinateSpace,
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = last.X,
+                                ["y"] = last.Y,
+                                ["width"] = last.Width,
+                                ["height"] = last.Height
+                            }
+                        };
 
-            default:
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region, last_region");
+                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var resolved = new JsonObject
+                        {
+                            ["type"] = "region",
+                            ["display_id"] = last.DisplayId,
+                            ["coordinate_space"] = last.CoordinateSpace,
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = last.X,
+                                ["y"] = last.Y,
+                                ["width"] = last.Width,
+                                ["height"] = last.Height
+                            },
+                            ["source"] = "last_selected_region"
+                        };
+                        var data = AddQuickMetadataToObject(result, "last_region", resolved, true);
+                        return ApiResponse.Ok(data, reqId);
+                    }
+
+                default:
+                    throw new ApiException(400, "INVALID_ARGUMENT",
+                        $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region, last_region");
+            }
+        }
+        catch (ApiException ex)
+        {
+            if (!_tracer.HasValidationResult(traceId))
+                _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
         }
     }
 

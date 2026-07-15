@@ -47,6 +47,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private readonly ToolStripMenuItem _exitItem;
     private readonly Control _uiInvoker;
     private readonly IWindowActivator _confirmationWindowActivator;
+    private readonly IPerformanceTracer _tracer;
     private IUiTextProvider _uiText;
 
     // Confirmation queue
@@ -54,14 +55,15 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private ConfirmationForm? _currentForm;
     private bool _disposed;
 
-    public TrayContext(RecordingEngine engine, AuditLogger audit)
-        : this(engine, audit, hotkeyFactory: null)
+    public TrayContext(RecordingEngine engine, AuditLogger audit, IPerformanceTracer? tracer = null)
+        : this(engine, audit, hotkeyFactory: null, tracer: tracer)
     {
     }
 
-    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null)
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null)
     {
         _engine = engine; _audit = audit;
+        _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _confirmationWindowActivator = confirmationWindowActivator ?? DefaultWindowActivator.Instance;
         _uiText = uiTextProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
         _iconFactory = new TrayIconFactory();
@@ -260,7 +262,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             auditLogger: (evt, payload) => _audit.Log(evt, payload),
             workingAreas: workingAreas,
             fallbackWorkingArea: fallbackWorkingArea,
-            textProvider: _uiText);
+            textProvider: _uiText,
+            tracer: _tracer);
 
         try
         {

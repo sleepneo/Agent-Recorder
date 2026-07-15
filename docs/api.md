@@ -64,6 +64,31 @@ path.
 | `POST /recordings/{id}/stop` | Yes |
 | `GET /confirmations/{id}` | Yes |
 
+## Performance Tracing
+
+Recording intents can optionally carry a client-sent timestamp for local latency diagnostics:
+
+```http
+X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
+```
+
+This value is provided by the agent and is treated as an **untrusted hint**. It is validated for basic plausibility (within -60 seconds to +5 minutes of server time) and stored in a separate `client_hints` field. It does not affect request success or failure, and it is **not** included in server-side latency percentiles or SLO calculations.
+
+Successful recording responses include an optional `performance_trace_id`:
+
+```json
+{
+  "status": "requires_user_confirmation",
+  "confirmation_id": "conf_xxx",
+  "recording_id": "rec_xxx",
+  "performance_trace_id": "trace_xxx"
+}
+```
+
+This identifier is also written to the local performance trace file (`<data-dir>\perf\recording-traces.jsonl`) along with stage events such as `intent.accepted`, `confirmation.created`, `confirmation.shown`, `capture.start_requested`, and `capture.backend_start_returned`. Performance traces are local diagnostic data only; they are separate from the audit log and do not contain API keys, full output paths, window titles, or the raw `X-Agent-Sent-At` header value.
+
+`capture.backend_start_returned` only means the capture backend's `Start()` call returned; it is **not** evidence that the first frame has been encoded or written. The current trace events cover the request-to-backend-start path. Metrics for model thinking time, `ensure-running` cold/warm handshake, or first-frame delivery are **not** included yet.
+
 ## Capabilities
 
 ```http
@@ -314,6 +339,8 @@ Successful creation returns `requires_user_confirmation`:
 {
   "status": "requires_user_confirmation",
   "confirmation_id": "conf_xxx",
+  "recording_id": "rec_xxx",
+  "performance_trace_id": "trace_xxx",
   "summary": {},
   "quick": {
     "target_type": "selected_region",

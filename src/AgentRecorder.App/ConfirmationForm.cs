@@ -65,6 +65,7 @@ internal sealed class ConfirmationForm : Form
 
     private readonly IWindowActivator _windowActivator;
     private readonly Action<string, object>? _auditLogger;
+    private readonly IPerformanceTracer _tracer;
     private readonly IReadOnlyList<Rectangle> _workingAreas;
     private readonly Rectangle _fallbackWorkingArea;
     private CaptureBounds? _captureBounds;
@@ -228,7 +229,8 @@ internal sealed class ConfirmationForm : Form
         Action<string, object>? auditLogger = null,
         IReadOnlyList<Rectangle>? workingAreas = null,
         Rectangle? fallbackWorkingArea = null,
-        IUiTextProvider? textProvider = null)
+        IUiTextProvider? textProvider = null,
+        IPerformanceTracer? tracer = null)
     {
         _item = item;
         _queuePosition = queuePosition;
@@ -244,6 +246,7 @@ internal sealed class ConfirmationForm : Form
         _suppressCloseResult = false;
         _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
         _auditLogger = auditLogger;
+        _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _workingAreas = workingAreas ?? Array.Empty<Rectangle>();
         _fallbackWorkingArea = fallbackWorkingArea ?? Rectangle.Empty;
 
@@ -319,6 +322,10 @@ internal sealed class ConfirmationForm : Form
         base.OnShown(e);
 
         ApplyWindowLocation();
+
+        var traceId = GetTraceIdFromSummary();
+        if (!string.IsNullOrEmpty(traceId))
+            _tracer.ConfirmationShown(traceId, _item.RecordingId, _item.ConfirmationId);
 
         LogAudit("confirmation.form_shown", CreateLifecyclePayload("shown"));
 
@@ -857,6 +864,22 @@ internal sealed class ConfirmationForm : Form
             var output = s?["output"];
             if (output != null)
                 return output.GetValue<string?>();
+        }
+        catch { }
+        return null;
+    }
+
+    private string? GetTraceIdFromSummary()
+    {
+        try
+        {
+            var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+            }));
+            var traceId = s?["trace_id"];
+            if (traceId != null)
+                return traceId.GetValue<string?>();
         }
         catch { }
         return null;

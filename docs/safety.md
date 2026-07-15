@@ -66,6 +66,18 @@ Typical event categories:
 - region selection unavailable/cancelled/selected
 - FFmpeg prewarm status
 
+## Performance Diagnostics
+
+Local performance traces are written separately from audit logs:
+
+```text
+<data-dir>\perf\recording-traces.jsonl
+```
+
+These traces are local diagnostic data only. They record stage events such as `intent.accepted`, `confirmation.shown`, `capture.start_requested`, and `capture.backend_start_returned` to help diagnose latency between the agent's request and capture backend startup. They are **not** a recording audit, do not contain API keys, full output paths, or window titles, and do not affect the confirmation or recording state machines.
+
+The optional `X-Agent-Sent-At` header is treated as an untrusted client hint and is isolated from server-side latency percentiles.
+
 ## Agent Rules
 
 - Use `POST /api/v1/recordings/quick` for common natural-language requests.

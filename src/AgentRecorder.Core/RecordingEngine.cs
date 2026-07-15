@@ -18,6 +18,7 @@ public sealed class RecordingEngine
     internal readonly ConcurrentDictionary<string, Recording> _recs = new();
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
     private readonly AuditLogger _audit;
+    private readonly IPerformanceTracer _tracer;
     private readonly object _lock = new();
     private ITrayContext? _tray;
 
@@ -41,7 +42,12 @@ public sealed class RecordingEngine
     /// </summary>
     internal TimeSpan ConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
-    public RecordingEngine(AuditLogger audit) => _audit = audit;
+    public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null)
+    {
+        _audit = audit;
+        _tracer = tracer ?? NoOpPerformanceTracer.Instance;
+    }
+
     public void SetTray(ITrayContext tray) => _tray = tray;
 
     /// <summary>
@@ -57,6 +63,9 @@ public sealed class RecordingEngine
         }
     }
 
+    private string GetTraceIdForRecording(string recordingId)
+        => _tracer.ResolveTraceId(recordingId) ?? "trace_unknown";
+
     private static string NormalizeStopReason(string? reason)
     {
         if (string.IsNullOrWhiteSpace(reason))
@@ -64,12 +73,43 @@ public sealed class RecordingEngine
         return reason.Trim();
     }
 
+    /// <summary>
+    /// Computes a stable, finite, non-sensitive machine error code for a failed
+    /// terminal recording. Never returns free-text messages, paths, or ffmpeg args.
+    /// </summary>
+    private static string ResolveTerminalErrorCode(string? backendType, OutputMeta meta, int exitCode,
+        bool fileOk, bool durationOk, bool rangeOk, bool exitOk)
+    {
+        bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
+                               string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
+        bool isWgc = string.Equals(backendType, "wgc", StringComparison.OrdinalIgnoreCase);
+
+        if (isWgc && isWgcStillFrame)
+        {
+            if (!exitOk) return "wgc_non_zero_exit";
+            if (!meta.OutputFileExists) return "wgc_missing_output";
+            if (!fileOk) return "wgc_empty_output";
+            if (meta.Width == 0 || meta.Height == 0) return "wgc_zero_dimensions";
+            if (meta.OutputFileExists && !meta.IsValidPngSignature) return "wgc_invalid_png_signature";
+            return "wgc_output_validation_failed";
+        }
+
+        if (!exitOk) return "non_zero_exit";
+        if (!fileOk) return "empty_output";
+        if (!durationOk) return "zero_duration";
+        if (!rangeOk) return "duration_out_of_range";
+        return "output_validation_failed";
+    }
+
     private static bool IsTerminalState(RecState state) =>
         state is RecState.completed or RecState.failed or RecState.cancelled
             or RecState.rejected or RecState.expired;
 
-    public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray)
+    public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray, string? traceId = null, string? endpoint = null)
     {
+        traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
+        endpoint ??= "recordings";
+
         // =====================================================================
         // Phase 1: Extract nested metadata (outside lock, no expensive work)
         // =====================================================================
@@ -147,7 +187,19 @@ public sealed class RecordingEngine
         // validate nested.role in ConfigParser Step 0, etc. This is expensive
         // so it runs outside lock.)
         // =====================================================================
-        var rec = ConfigParser.Build(cfg, agent, out var summary);
+        Recording rec;
+        object summary;
+        try
+        {
+            rec = ConfigParser.Build(cfg, agent, out summary);
+        }
+        catch (ApiException ex)
+        {
+            // Config/validation failures are intent-level failures. No recording was
+            // created, so recording.terminal must not be emitted.
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
+        }
 
         // =====================================================================
         // Phase 3.5: Preflight dry-run before creating a pending confirmation.
@@ -167,6 +219,9 @@ public sealed class RecordingEngine
                 message = beforeConfirmationPreflight.Message,
                 suggested_action = beforeConfirmationPreflight.SuggestedAction
             });
+            // Recording object exists but was never registered; treat as an intent-level
+            // validation failure rather than a recording terminal event.
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: beforeConfirmationPreflight.ErrorCode);
             throw new ApiException(400, beforeConfirmationPreflight.ErrorCode!,
                 beforeConfirmationPreflight.Message!,
                 new
@@ -247,6 +302,12 @@ public sealed class RecordingEngine
             _recs[rec.Id] = rec;
         }
 
+        // Intent validation is complete: config parsed, preflight passed, and the
+        // recording is now registered. Establish correlation/source context first
+        // so that the validation event already carries recording_id and source_type.
+        _tracer.CorrelationSet(traceId, rec.Id, sourceType: rec.SourceType);
+        _tracer.IntentValidated(traceId, endpoint, success: true);
+
         _audit.Log("recording.requested", new
         {
             recording_id = rec.Id,
@@ -266,6 +327,7 @@ public sealed class RecordingEngine
             _confs[conf.Id] = conf;
             BumpStateVersion();
             _audit.Log("confirmation.created", new { recording_id = rec.Id, confirmation_id = conf.Id, nested_role = rec.NestedRole ?? "none" });
+            _tracer.ConfirmationCreated(traceId, rec.Id, conf.Id);
 
             // Add metadata to summary for tray UI
             var summaryWithMeta = new
@@ -281,6 +343,7 @@ public sealed class RecordingEngine
                 expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                 source_type = rec.SourceType,
                 source_title = rec.SourceTitle,
+                trace_id = traceId,
                 coordinate_space = "virtual_screen",
                 capture_bounds = (rec.Config.Bounds.w > 0 && rec.Config.Bounds.h > 0)
                     ? new { x = rec.Config.Bounds.x, y = rec.Config.Bounds.y, width = rec.Config.Bounds.w, height = rec.Config.Bounds.h }
@@ -289,12 +352,20 @@ public sealed class RecordingEngine
 
             tray.RequestConfirmation(summaryWithMeta, decision =>
             {
-                if (conf.Status != "pending") return;
                 if (decision.Approved)
                 {
+                    // Atomically claim the decision. If another callback or the
+                    // timeout has already claimed it, this call must not modify
+                    // recording state or emit events.
+                    if (!conf.TryDecide("approved"))
+                        return;
+
                     var applied = ApplyConfirmationOutputDirectory(rec, decision, conf.Id);
                     if (!applied)
                     {
+                        // This thread already won TryDecide("approved"); setting Status
+                        // here is an owned-state adjustment after the output-directory
+                        // override failed, not a bypass of the atomic decision gate.
                         conf.Status = "rejected";
                         rec.State = RecState.rejected;
                         BumpStateVersion();
@@ -305,45 +376,45 @@ public sealed class RecordingEngine
                             directory = decision.OutputDirectory,
                             reason = "directory_override_failed"
                         });
+                        _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
+                        _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected", errorCode: "directory_override_failed");
                         tray.ShowError("保存目录不可用，录制未开始。");
                         TrySetIdleOnAllDone(tray);
                         return;
                     }
 
-                    conf.Status = "approved";
                     BumpStateVersion();
                     _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                    _tracer.ConfirmationApproved(traceId, rec.Id, conf.Id);
 
                     if (!TryPreflightBeforeStart(rec, conf, tray))
                         return;
 
-                    StartCapture(rec, tray);
+                    StartCapture(rec, traceId, tray);
                 }
                 else
                 {
-                    conf.Status = "rejected";
+                    if (!conf.TryDecide("rejected"))
+                        return;
+
                     rec.State = RecState.rejected;
                     BumpStateVersion();
                     _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                    _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
+                    _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected");
                     TrySetIdleOnAllDone(tray);
                 }
             });
 
-            Task.Delay(ConfirmationTimeout).ContinueWith(_ =>
-            {
-                if (conf.Status != "pending") return;
-                conf.Status = "expired";
-                if (rec.State == RecState.pending_confirmation) rec.State = RecState.expired;
-                BumpStateVersion();
-                _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
-                TrySetIdleOnAllDone(tray);
-            });
+            Task.Delay(ConfirmationTimeout).ContinueWith(_ => ApplyConfirmationExpiry(conf, rec, traceId, tray));
 
             return new
             {
                 status = "requires_user_confirmation",
+                recording_id = rec.Id,
                 confirmation_id = conf.Id,
-                summary = summaryWithMeta
+                summary = summaryWithMeta,
+                performance_trace_id = traceId
             };
         }
 
@@ -354,15 +425,17 @@ public sealed class RecordingEngine
                 recording_id = rec.Id,
                 status = "failed",
                 error = rec.Error,
-                expected_output = rec.OutputPath
+                expected_output = rec.OutputPath,
+                performance_trace_id = traceId
             };
         }
 
-        StartCapture(rec, tray);
+        StartCapture(rec, traceId, tray);
         return new
         {
             recording_id = rec.Id, status = "recording",
-            started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath
+            started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
+            performance_trace_id = traceId
         };
     }
 
@@ -437,12 +510,11 @@ public sealed class RecordingEngine
         if (preflight.Passed)
             return true;
 
-        if (conf != null)
-            conf.Status = "approved";
         rec.State = RecState.failed;
         rec.Error = preflight.Message;
         rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
         BumpStateVersion();
+        _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", errorCode: preflight.ErrorCode);
         _audit.Log("recording.preflight_failed", new
         {
             recording_id = rec.Id,
@@ -474,10 +546,13 @@ public sealed class RecordingEngine
         // Mimic what CreateRecording does: register by id so GetStatus /
         // GetOutput / List can find it.
         _recs[rec.Id] = rec;
-        StartCapture(rec, tray);
+        var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
+        _tracer.IntentAccepted(traceId, "test_direct");
+        _tracer.CorrelationSet(traceId, rec.Id);
+        StartCapture(rec, traceId, tray);
     }
 
-    private void StartCapture(Recording rec, ITrayContext tray)
+    private void StartCapture(Recording rec, string? traceId, ITrayContext tray)
     {
         // Select backend FIRST, so WGC still-frame backends can signal
         // "I am synchronous and might complete during Start()".
@@ -514,7 +589,9 @@ public sealed class RecordingEngine
         // THEN record audit with the actual ffmpeg_args.
         try
         {
+            _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
             rec.Backend.Start(rec.Config);
+            _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
 
             _audit.Log("recording.started", new
             {
@@ -526,16 +603,33 @@ public sealed class RecordingEngine
         }
         catch (Exception ex)
         {
-            // Only overwrite the state if Backend.Start() failed to
-            // finalize itself. A backend that already called FinalizeRecording
-            // leaves state as completed/failed, which we must NOT undo.
-            if (rec.State == RecState.recording)
+            _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+                rec.BackendType ?? "unknown", "backend_start_exception", ex.GetType().Name);
+
+            // If the backend already finalized itself inside Start() (e.g. a
+            // synchronous WGC still-frame that called OnNaturalExit), do NOT
+            // overwrite its terminal state, error, stop reason, output metadata,
+            // or audit/tray state. Record a non-terminal diagnostic audit only.
+            if (rec.IsFinalized)
             {
-                rec.State = RecState.failed;
-                BumpStateVersion();
+                _audit.Log("recording.backend_start_exception_after_terminal", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    final_state = rec.State.ToString(),
+                    exception_type = ex.GetType().Name
+                });
+                return;
             }
+
+            // Backend.Start() threw before any terminal state was reached:
+            // transition to failed with a single terminal event and one user error.
+            rec.State = RecState.failed;
+            BumpStateVersion();
             rec.Error = ex.Message;
             rec.Warnings.Add("launch_error: " + ex.Message);
+            _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+                stopReason: "unexpected_exit", errorCode: "backend_start_exception");
             _audit.Log("recording.failed", new
             {
                 recording_id = rec.Id,
@@ -643,6 +737,7 @@ public sealed class RecordingEngine
                     rec.StopReason = "duration_reached";
                 rec.State = RecState.completed;
                 BumpStateVersion();
+                _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "completed", stopReason: rec.StopReason);
                 _audit.Log("recording.completed", new
                 {
                     recording_id = rec.Id,
@@ -665,6 +760,8 @@ public sealed class RecordingEngine
                 rec.State = RecState.failed;
                 BumpStateVersion();
                 rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
+                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
+                _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", stopReason: rec.StopReason, errorCode: stableErrorCode);
                 _audit.Log("recording.failed", new
                 {
                     recording_id = rec.Id,
@@ -843,6 +940,13 @@ public sealed class RecordingEngine
         bool changed = !string.Equals(c.Status, sinceStatus, StringComparison.OrdinalIgnoreCase);
         int? nextPollHintMs = string.Equals(c.Status, "pending", StringComparison.OrdinalIgnoreCase) ? 500 : null;
 
+        var traceId = _tracer.ResolveTraceId(c.RecordingId, c.Id);
+        if (traceId != null)
+        {
+            _tracer.LongPollCompleted(traceId, "confirmation", waitMs, (int)sw.ElapsedMilliseconds,
+                changed, recordingId: c.RecordingId, confirmationId: c.Id);
+        }
+
         return new
         {
             ConfirmationId = c.Id,
@@ -865,6 +969,14 @@ public sealed class RecordingEngine
         var sw = System.Diagnostics.Stopwatch.StartNew();
         bool timedOut = WaitForStateChange(() => !string.Equals(rec.State.ToString(), sinceStatus, StringComparison.OrdinalIgnoreCase), waitMs);
         sw.Stop();
+
+        bool changed = !string.Equals(rec.State.ToString(), sinceStatus, StringComparison.OrdinalIgnoreCase);
+        var traceId = _tracer.ResolveTraceId(rec.Id);
+        if (traceId != null)
+        {
+            _tracer.LongPollCompleted(traceId, "recording", waitMs, (int)sw.ElapsedMilliseconds,
+                changed, recordingId: rec.Id);
+        }
 
         return BuildStatusWaitResponse(rec, waitMs, (int)sw.ElapsedMilliseconds, timedOut);
     }
@@ -975,6 +1087,39 @@ public sealed class RecordingEngine
             try { Stop(r.Id, reason); } catch { }
     }
 
+    /// <summary>
+    /// Test-only helper: deterministically trigger confirmation expiry using the
+    /// same atomic decision path as the production timeout continuation. This
+    /// lets race tests release the user callback and expiry simultaneously
+    /// without waiting for Task.Delay.
+    /// </summary>
+    internal void TriggerConfirmationExpiryForTests(string confirmationId)
+    {
+        if (!_confs.TryGetValue(confirmationId, out var conf))
+            return;
+
+        if (!_recs.TryGetValue(conf.RecordingId, out var rec))
+            return;
+
+        ApplyConfirmationExpiry(conf, rec,
+            _tracer.ResolveTraceId(rec.Id, conf.Id) ?? "trace_unknown",
+            _tray ?? NullTrayContext.Instance);
+    }
+
+    private void ApplyConfirmationExpiry(Confirmation conf, Recording rec, string traceId, ITrayContext tray)
+    {
+        if (!conf.TryDecide("expired"))
+            return;
+
+        if (rec.State == RecState.pending_confirmation)
+            rec.State = RecState.expired;
+        BumpStateVersion();
+        _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
+        _tracer.ConfirmationExpired(traceId, rec.Id, conf.Id);
+        _tracer.RecordingTerminal(traceId, rec.Id, status: "expired");
+        TrySetIdleOnAllDone(tray);
+    }
+
     private Recording Get(string id) =>
         _recs.TryGetValue(id, out var r) ? r
         : throw new ApiException(404, "RECORDING_NOT_FOUND", $"Recording {id} not found");
@@ -1031,5 +1176,22 @@ public sealed class RecordingEngine
         if (prop == null) return "";
         var value = prop.GetValue(summary);
         return value?.ToString() ?? "";
+    }
+
+    /// <summary>
+    /// Null-object tray context used only by internal test seams that may run
+    /// without a real tray. All operations are no-ops.
+    /// </summary>
+    private sealed class NullTrayContext : ITrayContext
+    {
+        public static ITrayContext Instance { get; } = new NullTrayContext();
+        public string HostMode => "headless";
+        public bool SupportsRegionSelectionUi => false;
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
+        public void SetRecording(object rec) { }
+        public void SetIdle(object rec) { }
+        public void SetAllIdle() { }
+        public void ShowError(string text) { }
     }
 }

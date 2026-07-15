@@ -36,6 +36,31 @@
 }
 ```
 
+## 性能追踪（本地诊断）
+
+录制意图可附带一个客户端发送时间戳，用于本地延迟诊断：
+
+```http
+X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
+```
+
+该值完全由客户端提供，作为**不可信提示**处理。服务器仅做基本合理性校验（-60 秒到 +5 分钟），并写入独立的 `client_hints` 字段。它**不会**影响请求成败，也**不会**进入服务器端延迟分位数或 SLO。
+
+录制创建成功时，响应会新增可选字段 `performance_trace_id`：
+
+```json
+{
+  "status": "requires_user_confirmation",
+  "confirmation_id": "conf_xxx",
+  "recording_id": "rec_xxx",
+  "performance_trace_id": "trace_xxx"
+}
+```
+
+该标识会同时写入本地性能追踪文件 `<data-dir>\perf\recording-traces.jsonl`，记录 `intent.accepted`、`confirmation.created`、`confirmation.shown`、`capture.start_requested`、`capture.backend_start_returned` 等阶段事件。性能追踪只是本地诊断数据，与审计日志分离；**不包含** API key、完整输出路径、窗口标题或原始 `X-Agent-Sent-At` 头内容。
+
+`capture.backend_start_returned` 仅表示后端 `Start()` 调用已返回，**不是**首帧已编码或已写入的证据。当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回”路径。模型思考耗时、`ensure-running` 冷/热握手、首帧交付等数据**尚未实现**。
+
 ## CLI 工具（推荐启动方式）
 
 Agent Recorder 提供 `AgentRecorder.Cli` 命令行工具，用于可靠地启动或复用服务实例，并获取就绪信息。CLI 仅负责启动接管，不涉及录制流程。
@@ -611,6 +636,8 @@ X-Agent-Name: <agent-name>
   "data": {
     "status": "requires_user_confirmation",
     "confirmation_id": "conf_xxx",
+    "recording_id": "rec_xxx",
+    "performance_trace_id": "trace_xxx",
     "summary": {
       "source": "region: Display 1",
       "audio": "No audio",
@@ -757,6 +784,8 @@ X-Agent-Name: <agent-name>
 {
   "status": "requires_user_confirmation",
   "confirmation_id": "confirm_xxx",
+  "recording_id": "rec_xxx",
+  "performance_trace_id": "trace_xxx",
   "summary": {
     "source": "region:Display 1",
     "duration": "300s",

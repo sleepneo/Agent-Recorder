@@ -283,7 +283,7 @@ internal static class RecordingPreflightChecker
         }
     }
 
-    private static bool DefaultEncoderProvider(out string? ffmpegPath, out string? ffprobePath)
+    internal static bool DefaultEncoderProvider(out string? ffmpegPath, out string? ffprobePath)
     {
         ffmpegPath = null;
         ffprobePath = null;

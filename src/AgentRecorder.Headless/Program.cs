@@ -24,6 +24,7 @@ internal static class Program
     private static RuntimeReadiness? _readiness;
     private static SingleInstanceGuard? _instanceGuard;
     private static FfmpegPrewarmer? _ffmpegPrewarmer;
+    private static RecordingPerformanceTracer? _perfTracer;
     private const string DefaultShutdownEventName = "AgentRecorder.Headless.Shutdown";
 
     // Windows console APIs: optional signal handling and console detach.
@@ -248,7 +249,10 @@ internal static class Program
             mutex_name = SingleInstanceGuard.MutexName
         });
 
-        var engine = new RecordingEngine(audit);
+        var perfTracer = new RecordingPerformanceTracer(_dataDir);
+        _perfTracer = perfTracer;
+
+        var engine = new RecordingEngine(audit, perfTracer);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 
@@ -257,7 +261,7 @@ internal static class Program
         var ffmpegPrewarmer = new FfmpegPrewarmer();
         _ffmpegPrewarmer = ffmpegPrewarmer;
 
-        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer);
+        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer);
 
         _engine = engine;
         _server = server;
@@ -344,6 +348,7 @@ internal static class Program
             try { engine?.StopAllSync("service_exit"); } catch { }
             try { server?.Stop(); } catch { }
             try { _exitSignal.Set(); } catch { }
+            try { _perfTracer?.Dispose(); } catch { }
 
             // Cleanup readiness: delete ready.json, release named event.
             if (readiness != null && audit != null)

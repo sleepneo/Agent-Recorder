@@ -98,15 +98,18 @@ internal static class Program
             catch { }
         };
 
-        var engine = new RecordingEngine(audit);
-        var tray = new TrayContext(engine, audit);
+        var dataDir = DataDirResolver.Resolve();
+        var perfTracer = new RecordingPerformanceTracer(dataDir);
+
+        var engine = new RecordingEngine(audit, perfTracer);
+        var tray = new TrayContext(engine, audit, perfTracer);
         engine.SetTray(tray);
 
         var appExePath = Application.ExecutablePath;
         var autoStart = new WindowsAutoStartManager(appExePath);
         var ffmpegPrewarmer = new FfmpegPrewarmer();
 
-        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer);
+        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -146,6 +149,7 @@ internal static class Program
                 CleanupReadiness(readiness, audit);
                 audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
                 instanceGuard.Dispose();
+                perfTracer.Dispose();
             }
             catch { }
         };
@@ -158,6 +162,7 @@ internal static class Program
             CleanupReadiness(readiness, audit);
             audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
             instanceGuard.Dispose();
+            perfTracer.Dispose();
         };
         Application.Run(tray);
     }
