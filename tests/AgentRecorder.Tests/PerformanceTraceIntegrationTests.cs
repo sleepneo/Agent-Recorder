@@ -1052,6 +1052,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
         public void CaptureStartRequested(string traceId, string recordingId, string backendType) => _events.Add((traceId, "capture.start_requested"));
         public void CaptureBackendStartReturned(string traceId, string recordingId, string backendType) => _events.Add((traceId, "capture.backend_start_returned"));
         public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) => _events.Add((traceId, "capture.backend_start_failed"));
+        public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) => _events.Add((traceId, "capture.first_frame_observed"));
         public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) => _events.Add((traceId, "recording.terminal"));
         public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) => _events.Add((traceId, "long_poll.completed"));
         public void Flush() { }

@@ -47,6 +47,13 @@ public interface IPerformanceTracer
     /// <summary>Record that capture backend Start() threw.</summary>
     void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType);
 
+    /// <summary>
+    /// Record that the backend observed evidence of the first processed video
+    /// frame with positive output bytes. Must be exactly-once per trace and must
+    /// be ignored if the recording has already reached a terminal state.
+    /// </summary>
+    void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence);
+
     /// <summary>Record that a recording reached a terminal state.</summary>
     void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null);
 

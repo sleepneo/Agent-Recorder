@@ -33,8 +33,10 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
     private long _operationCount;
 
     // Short per-trace lifecycle gate: protects tombstone checks, context
-    // get-or-add, atomic claim of validation/terminal flags, and reverse
-    // index cleanup. JSON serialization and queue enqueue always run outside.
+    // get-or-add, atomic claim of validation/terminal/first-frame flags, and
+    // reverse index cleanup. For first-frame/terminal, JSON serialization and
+    // queue enqueue run inside the same short critical section to guarantee
+    // strict ordering; a TryEnqueue wrapper isolates any failure.
     private readonly object _lifecycleLock = new();
 
     public RecordingPerformanceTracer(string dataDir)
@@ -156,6 +158,12 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
 
     public void CaptureStartRequested(string traceId, string recordingId, string backendType)
     {
+        lock (_lifecycleLock)
+        {
+            var ctx = _traceContexts.GetOrAdd(traceId, _ => new TraceContext { TraceId = traceId, CreatedAt = _utcNow() });
+            ctx.Backend = backendType;
+        }
+
         Write(traceId, "capture.start_requested", recordingId: recordingId, backend: backendType);
     }
 
@@ -168,6 +176,62 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
     {
         Write(traceId, "capture.backend_start_failed", recordingId: recordingId, backend: backendType,
             data: new Dictionary<string, object?> { ["error_code"] = errorCode, ["error_type"] = errorType });
+    }
+
+    // Test-only gate: default null, production never invokes. Allows deterministic
+    // concurrency tests to pause first-frame enqueue after claim and before write.
+    internal Action? BeforeFirstFrameEnqueueGateForTests { get; set; }
+
+    // Test-only gate: default null, production never invokes. Allows deterministic
+    // concurrency tests to pause terminal enqueue after claim and before write.
+    internal Action? BeforeTerminalEnqueueGateForTests { get; set; }
+
+    public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence)
+    {
+        if (evidence is null)
+            return;
+
+        // Tracer is the privacy and semantic trust boundary. Validate the numeric
+        // evidence before claiming the exactly-once slot; invalid evidence must
+        // not consume it, so a later valid observation can still be recorded.
+        if (evidence.FrameNumber < 1 || evidence.TotalSizeBytes <= 0)
+            return;
+
+        long? outTimeUs = evidence.OutTimeUs.HasValue && evidence.OutTimeUs.Value >= 0
+            ? evidence.OutTimeUs.Value
+            : null;
+
+        lock (_lifecycleLock)
+        {
+            // If the trace already reached a terminal state, do not resurrect it.
+            if (_lifecycleTombstones.TryGetValue(traceId, out var tombstone) && tombstone.TerminalRecorded)
+                return;
+
+            var ctx = _traceContexts.GetOrAdd(traceId, _ => new TraceContext { TraceId = traceId, CreatedAt = _utcNow() });
+
+            // Exactly-once per trace, even if the backend or recording engine retries.
+            if (Interlocked.CompareExchange(ref ctx._firstFrameObserved, 1, 0) != 0)
+                return;
+
+            // The evidence kind is hardcoded here; never persist a backend-supplied
+            // arbitrary string that could contain paths, progress text, or API keys.
+            // Enqueue inside the lifecycle lock so terminal cannot claim and write
+            // between first-frame claim and first-frame enqueue. Any construction,
+            // serialization, writer, or test-gate failure is isolated inside
+            // TryEnqueueLifecycleEvent and must not propagate to the recording flow.
+            if (TryEnqueueLifecycleEvent(traceId, "capture.first_frame_observed", ctx, BeforeFirstFrameEnqueueGateForTests,
+                recordingId: recordingId, backend: ctx.Backend,
+                data: new Dictionary<string, object?>
+                {
+                    ["evidence_kind"] = "ffmpeg_progress_frame_and_output_bytes",
+                    ["frame_number"] = evidence.FrameNumber,
+                    ["total_size_bytes"] = evidence.TotalSizeBytes,
+                    ["out_time_us"] = outTimeUs
+                }))
+            {
+                Interlocked.Increment(ref _operationCount);
+            }
+        }
     }
 
     public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null)
@@ -192,15 +256,24 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
                 CreatedAt = _utcNow()
             });
             tombstone.TerminalRecorded = true;
-        }
 
-        Write(traceId, "recording.terminal", recordingId: recordingId,
-            data: new Dictionary<string, object?>
+            // Enqueue terminal inside the lifecycle lock so first-frame cannot
+            // claim and write between terminal claim and terminal enqueue. Any
+            // failure during construction, serialization, writer enqueue, or the
+            // test gate is isolated and the tombstone/claim already established
+            // above remains authoritative.
+            if (TryEnqueueLifecycleEvent(traceId, "recording.terminal", ctx, BeforeTerminalEnqueueGateForTests,
+                recordingId: recordingId,
+                data: new Dictionary<string, object?>
+                {
+                    ["status"] = status,
+                    ["stop_reason"] = stopReason,
+                    ["error_code"] = errorCode
+                }))
             {
-                ["status"] = status,
-                ["stop_reason"] = stopReason,
-                ["error_code"] = errorCode
-            });
+                Interlocked.Increment(ref _operationCount);
+            }
+        }
 
         MaybeCleanup();
     }
@@ -250,34 +323,69 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
     {
         try
         {
-            var ctx = _traceContexts.TryGetValue(traceId, out var found) ? found : null;
-            var elapsedMs = ComputeElapsedMs(traceId);
-            var resolvedRecordingId = recordingId ?? ctx?.RecordingId;
-            var resolvedConfirmationId = confirmationId ?? ctx?.ConfirmationId;
-
-            var evt = new PerformanceTraceEvent
-            {
-                TraceId = traceId,
-                Event = eventName,
-                TimestampUtc = _utcNow(),
-                ElapsedFromIntentMs = elapsedMs,
-                RecordingId = resolvedRecordingId,
-                ConfirmationId = resolvedConfirmationId,
-                Endpoint = ctx?.Endpoint,
-                SourceType = ctx?.SourceType,
-                Backend = backend,
-                ClientHints = clientHints,
-                Data = data
-            };
-
-            var line = JsonSerializer.Serialize(evt);
-            _writer.Enqueue(line);
+            EnqueueEvent(traceId, eventName, ctx: null, recordingId, confirmationId, backend, data, clientHints);
             Interlocked.Increment(ref _operationCount);
             MaybeCleanup();
         }
         catch
         {
             // All tracing failures must be isolated from the recording flow.
+        }
+    }
+
+    private void EnqueueEvent(string traceId, string eventName, TraceContext? ctx,
+        string? recordingId = null, string? confirmationId = null,
+        string? backend = null,
+        Dictionary<string, object?>? data = null,
+        Dictionary<string, object?>? clientHints = null)
+    {
+        ctx ??= _traceContexts.TryGetValue(traceId, out var found) ? found : null;
+        var elapsedMs = ComputeElapsedMs(traceId);
+        var resolvedRecordingId = recordingId ?? ctx?.RecordingId;
+        var resolvedConfirmationId = confirmationId ?? ctx?.ConfirmationId;
+
+        var evt = new PerformanceTraceEvent
+        {
+            TraceId = traceId,
+            Event = eventName,
+            TimestampUtc = _utcNow(),
+            ElapsedFromIntentMs = elapsedMs,
+            RecordingId = resolvedRecordingId,
+            ConfirmationId = resolvedConfirmationId,
+            Endpoint = ctx?.Endpoint,
+            SourceType = ctx?.SourceType,
+            Backend = backend,
+            ClientHints = clientHints,
+            Data = data
+        };
+
+        var line = JsonSerializer.Serialize(evt);
+        _writer.Enqueue(line);
+    }
+
+    /// <summary>
+    /// Enqueue a first-frame or terminal lifecycle event while isolating all
+    /// failures (event construction, JSON serialization, writer enqueue, and
+    /// test-only gates) from the caller. Must be called inside <see cref="_lifecycleLock"/>.
+    /// </summary>
+    private bool TryEnqueueLifecycleEvent(string traceId, string eventName, TraceContext ctx, Action? beforeEnqueueGate,
+        string? recordingId = null, string? confirmationId = null,
+        string? backend = null,
+        Dictionary<string, object?>? data = null,
+        Dictionary<string, object?>? clientHints = null)
+    {
+        try
+        {
+            beforeEnqueueGate?.Invoke();
+            EnqueueEvent(traceId, eventName, ctx, recordingId, confirmationId, backend, data, clientHints);
+            return true;
+        }
+        catch
+        {
+            // All lifecycle tracing failures must be isolated from the recording flow.
+            // The caller has already claimed the exactly-once slot and/or tombstone,
+            // so a retry cannot create duplicate or reordered events.
+            return false;
         }
     }
 
@@ -446,12 +554,14 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
         public string? SourceType { get; set; }
         public string? RecordingId { get; set; }
         public string? ConfirmationId { get; set; }
+        public string? Backend { get; set; }
         public DateTime? TerminalAt { get; set; }
         public DateTime CreatedAt { get; init; }
 
         // Atomic flags: 0 = not yet recorded, 1 = recorded.
         internal int _validationRecorded;
         internal int _terminalRecorded;
+        internal int _firstFrameObserved;
 
         public bool ValidationRecorded => Interlocked.CompareExchange(ref _validationRecorded, 1, 1) == 1;
         public bool TerminalRecorded => Interlocked.CompareExchange(ref _terminalRecorded, 1, 1) == 1;

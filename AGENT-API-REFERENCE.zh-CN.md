@@ -57,9 +57,13 @@ X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
 }
 ```
 
-该标识会同时写入本地性能追踪文件 `<data-dir>\perf\recording-traces.jsonl`，记录 `intent.accepted`、`confirmation.created`、`confirmation.shown`、`capture.start_requested`、`capture.backend_start_returned` 等阶段事件。性能追踪只是本地诊断数据，与审计日志分离；**不包含** API key、完整输出路径、窗口标题或原始 `X-Agent-Sent-At` 头内容。
+该标识会同时写入本地性能追踪文件 `<data-dir>\perf\recording-traces.jsonl`，记录 `intent.accepted`、`confirmation.created`、`confirmation.shown`、`capture.start_requested`、`capture.backend_start_returned`、`capture.first_frame_observed` 等阶段事件。性能追踪只是本地诊断数据，与审计日志分离；**不包含** API key、完整输出路径、窗口标题、FFmpeg 完整参数、progress 原始文本或原始 `X-Agent-Sent-At` 头内容。
 
-`capture.backend_start_returned` 仅表示后端 `Start()` 调用已返回，**不是**首帧已编码或已写入的证据。当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回”路径。模型思考耗时、`ensure-running` 冷/热握手、首帧交付等数据**尚未实现**。
+`capture.backend_start_returned` 仅表示后端 `Start()` 调用已返回，**不是**首帧已编码或已写入的证据。
+
+`capture.first_frame_observed` 仅覆盖默认 FFmpeg 视频链路（`display`/`window`/`region`）。它会在 FFmpeg `-nostats -progress pipe:1` 输出报告 `frame >= 1`、`total_size > 0` 且进度组正常结束（`progress=continue` 或 `progress=end`）时产生一次。该事件证明“FFmpeg 已报告至少处理一个视频帧且输出流已有正字节数”，是“本地用户批准 → 首个可观测编码/复用进度”的时延上界，**不是**屏幕采集精确交付第一帧的时间、不是物理磁盘首帧写入时间、也不是 MP4 可播放或输出校验通过的证据。如果 FFmpeg 没有产生满足条件的 progress 组，该事件可能缺失。
+
+当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时、`ensure-running` 冷/热握手等数据**尚未实现**。
 
 ## CLI 工具（推荐启动方式）
 
@@ -1011,10 +1015,19 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
+`elapsed_seconds` 说明：
+
+- 表示从捕获开始到当前时刻或捕获结束的墙钟秒数，向下取整为非负整数。
+- 录制尚未真正开始（`created`、`pending_confirmation`、`rejected`、`expired` 等）时返回 `0`。
+- 活动录制（`recording`、`stopping`）计算到当前时刻，会随查询增长。
+- 已结束录制计算到 `completed_at`；终态后重复查询结果稳定，不会继续增长。
+- `output.duration_seconds` 是媒体产物时长（由 ffprobe 探测），两者允许因编码、取整和后端行为存在小幅差异，不要把它直接当作 `elapsed_seconds`。
+
 新增字段说明：
 
 | 字段 | 说明 |
 |------|------|
+| `elapsed_seconds` | 捕获开始到当前时刻（活动）或到 `completed_at`（终态）的墙钟秒数，向下取整；未开始捕获时返回 `0`。不等于 `output.duration_seconds`。 |
 | `wait` | 等待信息对象 |
 | `wait.requested_ms` | 请求的等待毫秒数 |
 | `wait.elapsed_ms` | 实际等待的毫秒数 |

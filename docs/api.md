@@ -85,9 +85,13 @@ Successful recording responses include an optional `performance_trace_id`:
 }
 ```
 
-This identifier is also written to the local performance trace file (`<data-dir>\perf\recording-traces.jsonl`) along with stage events such as `intent.accepted`, `confirmation.created`, `confirmation.shown`, `capture.start_requested`, and `capture.backend_start_returned`. Performance traces are local diagnostic data only; they are separate from the audit log and do not contain API keys, full output paths, window titles, or the raw `X-Agent-Sent-At` header value.
+This identifier is also written to the local performance trace file (`<data-dir>\perf\recording-traces.jsonl`) along with stage events such as `intent.accepted`, `confirmation.created`, `confirmation.shown`, `capture.start_requested`, `capture.backend_start_returned`, and `capture.first_frame_observed`. Performance traces are local diagnostic data only; they are separate from the audit log and do not contain API keys, full output paths, window titles, the full FFmpeg command line, raw progress text, or the raw `X-Agent-Sent-At` header value.
 
-`capture.backend_start_returned` only means the capture backend's `Start()` call returned; it is **not** evidence that the first frame has been encoded or written. The current trace events cover the request-to-backend-start path. Metrics for model thinking time, `ensure-running` cold/warm handshake, or first-frame delivery are **not** included yet.
+`capture.backend_start_returned` only means the capture backend's `Start()` call returned; it is **not** evidence that the first frame has been encoded or written.
+
+`capture.first_frame_observed` is only emitted for the default FFmpeg video path (`display`/`window`/`region`). It is produced exactly once when FFmpeg's `-nostats -progress pipe:1` output reports `frame >= 1`, `total_size > 0`, and the progress group ends normally (`progress=continue` or `progress=end`). It proves that FFmpeg has reported processing at least one video frame and that the output stream has positive bytes, giving an upper-bound latency from local user approval to first observable encoding/muxing progress. It is **not** the exact screen-capture first-frame delivery time, not a physical disk-flush guarantee, and not evidence that the MP4 is playable or has passed output validation. If FFmpeg never emits a qualifying progress group, this event may be absent.
+
+The current trace events cover the request-to-backend-start and first-frame-progress path. Metrics for model thinking time or `ensure-running` cold/warm handshake are **not** included yet.
 
 ## Capabilities
 
@@ -610,6 +614,7 @@ Long-polling response includes additional fields:
   "recording_id": "rec_xxx",
   "status": "completed",
   "stop_reason": "duration_reached",
+  "elapsed_seconds": 300,
   "output": { "path": "...", "duration_seconds": 300.0 },
   "wait": {
     "requested_ms": 25000,
@@ -620,10 +625,19 @@ Long-polling response includes additional fields:
 }
 ```
 
+`elapsed_seconds` semantics:
+
+- Wall-clock seconds from capture start to now (for active recordings) or to capture end (for terminal recordings), truncated to a non-negative integer.
+- Returns `0` if capture has not actually started (e.g. `created`, `pending_confirmation`, `rejected`, `expired`).
+- For active recordings (`recording`, `stopping`) it grows with each query.
+- For terminal recordings it is computed from `completed_at` and remains stable across repeated queries.
+- `output.duration_seconds` is the media file duration from ffprobe; the two may differ slightly due to encoding, rounding, and backend behavior. Do not use `duration_seconds` as a substitute for `elapsed_seconds`.
+
 New fields:
 
 | Field | Description |
 |-------|-------------|
+| `elapsed_seconds` | Wall-clock seconds from capture start to now (active) or to `completed_at` (terminal). `0` before capture starts. Not equal to `output.duration_seconds`. |
 | `wait` | Wait info object |
 | `wait.requested_ms` | Requested wait duration in milliseconds |
 | `wait.elapsed_ms` | Actual wait duration in milliseconds |

@@ -7,10 +7,26 @@ using System.Text.Json;
 namespace AgentRecorder.Logging;
 public class AuditLogger
 {
-    private readonly string _path = Paths.AuditLogPath;
+    private readonly string _path;
     private readonly object _lock = new();
 
-    public AuditLogger() => Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+    public AuditLogger()
+        : this(Paths.AuditLogPath)
+    {
+    }
+
+    internal AuditLogger(string path)
+    {
+        if (path is null)
+            throw new ArgumentNullException(nameof(path));
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("Audit log path cannot be empty or whitespace.", nameof(path));
+
+        _path = path;
+        var dir = Path.GetDirectoryName(_path);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+    }
 
     public virtual void Log(string evt, object payload)
     {

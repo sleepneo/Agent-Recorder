@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -13,7 +14,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Capture;
 
-public sealed class FfmpegCaptureBackend : ICaptureBackend
+public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend
 {
     private Process? _proc;
     private string _output = "";
@@ -21,9 +22,15 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
     private readonly StringBuilder _stderrLog = new();
     private readonly object _lock = new();
     private Task? _watcher;
+    private Task? _stdoutReader;
     private OutputMeta? _completionMeta;
     private bool _hasExited = false;
     private bool _manualStopped = false;
+    private int _firstFrameObserved;
+
+    private static readonly TimeSpan StdoutDrainTimeout = TimeSpan.FromSeconds(2);
+
+    public event Action<FirstFrameObservation>? FirstFrameObserved;
 
     public void Start(CaptureConfig cfg)
     {
@@ -36,6 +43,31 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
         var args = BuildArgs(cfg);
         cfg.CommandArgs = args;
 
+        var parser = new FFmpegProgressParser();
+        parser.GroupCompleted += g =>
+        {
+            if (!g.HasFirstFrameEvidence)
+                return;
+
+            // Ensure exactly-once notification even if multiple progress groups qualify.
+            if (Interlocked.Exchange(ref _firstFrameObserved, 1) != 0)
+                return;
+
+            try
+            {
+                FirstFrameObserved?.Invoke(new FirstFrameObservation
+                {
+                    FrameNumber = g.Frame,
+                    TotalSizeBytes = g.TotalSize,
+                    OutTimeUs = g.OutTimeUs
+                });
+            }
+            catch
+            {
+                // Observers must not affect the recording flow.
+            }
+        };
+
         _proc = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -47,7 +79,9 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
                 WindowStyle = ProcessWindowStyle.Hidden,
                 ErrorDialog = false,
                 RedirectStandardInput = true,
-                RedirectStandardError = true
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8
             },
             EnableRaisingEvents = true
         };
@@ -63,6 +97,9 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
             throw new ApiException(500, "ENCODER_ERROR", "Failed to launch ffmpeg: " + ex.Message);
         }
         _proc.BeginErrorReadLine();
+
+        // Continuously consume stdout so the -progress pipe does not block FFmpeg.
+        _stdoutReader = RunStdoutReader(_proc.StandardOutput, parser);
 
         int timeoutMs;
         if (cfg.DurationSeconds.HasValue && cfg.DurationSeconds > 0)
@@ -82,17 +119,8 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
                 try { _proc.Kill(true); } catch { }
             }
 
-            var meta = Probe(_output);
-            string stderr;
-            lock (_lock) stderr = _stderrLog.ToString();
-            meta.StderrLog = stderr;
-            _completionMeta = meta;
-
-            lock (_lock)
-            {
-                if (_manualStopped) return;
-            }
-            _onNaturalExit?.Invoke(exitCode, meta);
+            RunNaturalExitLifecycle(_stdoutReader!, exitCode, _output, _stderrLog, StdoutDrainTimeout,
+                (code, meta) => _onNaturalExit?.Invoke(code, meta));
         });
     }
 
@@ -105,10 +133,111 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
         lock (_lock) return _stderrLog.ToString();
     }
 
+    /// <summary>
+    /// Reads FFmpeg -progress output from <paramref name="reader"/> until EOF,
+    /// feeding each line to <paramref name="parser"/>. The parser is flushed
+    /// exactly once by this reader, in its <c>finally</c> block, so no other
+    /// thread should flush concurrently. This reader owns the single flush;
+    /// it only ends when <see cref="TextReader.ReadLine"/> returns null.
+    /// </summary>
+    internal Task RunStdoutReader(TextReader reader, FFmpegProgressParser parser)
+    {
+        return Task.Run(() =>
+        {
+            try
+            {
+                string? line;
+                while ((line = reader.ReadLine()) != null)
+                    parser.FeedLine(line);
+            }
+            catch
+            {
+                // Stdout reader failures must not stop the recording.
+            }
+            finally
+            {
+                try { parser.Flush(); }
+                catch { }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Waits for the stdout reader to reach EOF or <paramref name="timeout"/>.
+    /// Does not flush the parser; the reader owns the single flush on completion.
+    /// </summary>
+    private void DrainStdoutReader(TimeSpan timeout)
+    {
+        if (_stdoutReader is null) return;
+        DrainTask(_stdoutReader, timeout);
+    }
+
+    /// <summary>
+    /// Test seam: wait for an arbitrary reader task with the same timeout/exception
+    /// isolation policy used in production.
+    /// </summary>
+    internal void DrainReaderTask(Task readerTask, TimeSpan timeout)
+    {
+        DrainTask(readerTask, timeout);
+    }
+
+    private static void DrainTask(Task task, TimeSpan timeout)
+    {
+        if (task is null) return;
+        try
+        {
+            if (task.IsCompleted) return;
+            task.Wait(timeout);
+        }
+        catch
+        {
+            // Drain failures must not stop the recording or affect Stop()/watcher.
+        }
+    }
+
+    /// <summary>
+    /// Production natural-exit orchestration: wait for the stdout reader to drain,
+    /// probe the output, attach stderr, and invoke the natural-exit callback.
+    /// Exposed internally so tests can regress the real call order without
+    /// launching FFmpeg.
+    /// </summary>
+    internal void RunNaturalExitLifecycle(Task stdoutReader, int exitCode, string output,
+        StringBuilder stderrLog, TimeSpan drainTimeout, Action<int, OutputMeta> onNaturalExit)
+    {
+        DrainTask(stdoutReader, drainTimeout);
+
+        var meta = Probe(output);
+        string stderr;
+        lock (_lock) stderr = stderrLog.ToString();
+        meta.StderrLog = stderr;
+        _completionMeta = meta;
+
+        lock (_lock)
+        {
+            if (_manualStopped) return;
+        }
+        onNaturalExit(exitCode, meta);
+    }
+
+    /// <summary>
+    /// Production stop orchestration: wait for the stdout reader to drain and
+    /// return the output meta. Exposed internally so tests can regress the real
+    /// call order without launching FFmpeg.
+    /// </summary>
+    internal OutputMeta RunStopLifecycle(Task stdoutReader, string output, string stderr, TimeSpan drainTimeout)
+    {
+        DrainTask(stdoutReader, drainTimeout);
+
+        var meta = Probe(output);
+        meta.StderrLog = stderr;
+        _completionMeta = meta;
+        _hasExited = true;
+        return meta;
+    }
+
     public OutputMeta Stop()
     {
         string stderr;
-        int exitCode = -1;
 
         lock (_lock)
         {
@@ -129,13 +258,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
             }
             catch { try { _proc?.Kill(true); } catch { } }
         }
-        try { if (_proc != null && _proc.HasExited) exitCode = _proc.ExitCode; } catch { }
 
-        var meta = Probe(_output);
-        meta.StderrLog = stderr;
-        _completionMeta = meta;
-        _hasExited = true;
-        return meta;
+        // Wait for any remaining -progress lines to be processed before the
+        // caller finalizes the recording. This keeps first-frame observations
+        // ordered before recording.terminal in the performance trace.
+        return RunStopLifecycle(_stdoutReader!, _output, stderr, StdoutDrainTimeout);
     }
 
     public bool HasExited => _proc?.HasExited ?? _hasExited;
@@ -149,10 +276,16 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend
         }
     }
 
-    private static string BuildArgs(CaptureConfig cfg)
+    internal static string BuildArgs(CaptureConfig cfg)
     {
         var crf = cfg.Quality switch { "high" => 18, "low" => 28, _ => 23 };
-        var sb = new StringBuilder("-y ");
+        // -nostats suppresses the default periodic stderr stats so we only
+        // receive structured progress groups on stdout.
+        // -progress pipe:1 writes key=value progress groups to stdout, which
+        // the stdout reader parses to detect the first encoded/muxed frame.
+        // Note: -stats_period is intentionally omitted because the bundled
+        // FFmpeg (git-2019-10-22) does not recognize this option.
+        var sb = new StringBuilder("-y -nostats -progress pipe:1 ");
 
         if (cfg.SourceKind == "window")
         {

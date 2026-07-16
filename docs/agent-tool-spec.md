@@ -139,6 +139,12 @@ Maps to:
 GET /api/v1/recordings/{recording_id}
 ```
 
+The response includes `elapsed_seconds`: wall-clock seconds from capture start
+to now for an active recording, or to `completed_at` for a terminal recording.
+It is `0` before capture starts and remains stable after termination. Agents
+must not substitute `output.duration_seconds`, which is media duration reported
+by ffprobe and can differ slightly from wall-clock elapsed time.
+
 ## Tool: stop_recording
 
 ### Parameters

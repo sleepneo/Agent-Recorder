@@ -74,7 +74,9 @@ Local performance traces are written separately from audit logs:
 <data-dir>\perf\recording-traces.jsonl
 ```
 
-These traces are local diagnostic data only. They record stage events such as `intent.accepted`, `confirmation.shown`, `capture.start_requested`, and `capture.backend_start_returned` to help diagnose latency between the agent's request and capture backend startup. They are **not** a recording audit, do not contain API keys, full output paths, or window titles, and do not affect the confirmation or recording state machines.
+These traces are local diagnostic data only. They record stage events such as `intent.accepted`, `confirmation.shown`, `capture.start_requested`, `capture.backend_start_returned`, and `capture.first_frame_observed` to help diagnose latency between the agent's request and capture backend startup. They are **not** a recording audit, do not contain API keys, full output paths, window titles, the full FFmpeg command line, or raw progress text, and do not affect the confirmation or recording state machines.
+
+`capture.first_frame_observed` is only emitted for the default FFmpeg video capture path. It reports non-sensitive numeric progress evidence (`frame_number`, `total_size_bytes`, optional `out_time_us`) and is produced at most once per trace. It is not evidence of physical disk flush, screen-capture exact delivery, or output-file validity.
 
 The optional `X-Agent-Sent-At` header is treated as an untrusted client hint and is isolated from server-side latency percentiles.
 

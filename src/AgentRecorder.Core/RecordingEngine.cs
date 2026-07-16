@@ -66,6 +66,46 @@ public sealed class RecordingEngine
     private string GetTraceIdForRecording(string recordingId)
         => _tracer.ResolveTraceId(recordingId) ?? "trace_unknown";
 
+    /// <summary>
+    /// Computes the wall-clock elapsed seconds for a recording.
+    /// - 0 if capture has not started.
+    /// - CompletedAtUtc - StartedAtUtc when a completion timestamp exists.
+    /// - UtcNow - StartedAtUtc only for active recordings (recording, stopping).
+    /// - 0 for terminal recordings missing CompletedAtUtc, to keep elapsed stable.
+    /// - 0 for invalid, negative, or extreme deltas.
+    /// </summary>
+    private static int ComputeElapsedSeconds(Recording rec)
+    {
+        if (rec.StartedAtUtc == default)
+            return 0;
+
+        DateTime end;
+        if (rec.CompletedAtUtc.HasValue)
+        {
+            end = rec.CompletedAtUtc.Value;
+        }
+        else if (rec.State is RecState.recording or RecState.stopping)
+        {
+            end = DateTime.UtcNow;
+        }
+        else
+        {
+            // Terminal or non-active state without a completion timestamp:
+            // do not let elapsed grow by falling back to UtcNow.
+            return 0;
+        }
+
+        var delta = end - rec.StartedAtUtc;
+        if (delta < TimeSpan.Zero)
+            return 0;
+
+        double seconds = delta.TotalSeconds;
+        if (seconds > int.MaxValue || double.IsNaN(seconds) || double.IsInfinity(seconds))
+            return 0;
+
+        return (int)seconds;
+    }
+
     private static string NormalizeStopReason(string? reason)
     {
         if (string.IsNullOrWhiteSpace(reason))
@@ -540,15 +580,15 @@ public sealed class RecordingEngine
     /// has already been populated (SourceType, Config, Backend, etc.).
     /// Bypasses CreateRecording and its window / display enum lookups.
     /// </summary>
-    public void StartCaptureForTests(Recording rec, ITrayContext tray)
+    public void StartCaptureForTests(Recording rec, ITrayContext tray, string? traceId = null)
     {
         if (rec == null) throw new ArgumentNullException(nameof(rec));
         // Mimic what CreateRecording does: register by id so GetStatus /
         // GetOutput / List can find it.
         _recs[rec.Id] = rec;
-        var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
+        traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
         _tracer.IntentAccepted(traceId, "test_direct");
-        _tracer.CorrelationSet(traceId, rec.Id);
+        _tracer.CorrelationSet(traceId, rec.Id, rec.ConfirmationId, rec.SourceType);
         StartCapture(rec, traceId, tray);
     }
 
@@ -575,6 +615,30 @@ public sealed class RecordingEngine
         {
             FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: null, tray);
         });
+
+        // Subscribe to first-frame progress evidence BEFORE calling Start().
+        // This catches synchronous observations that happen inside Start().
+        if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
+        {
+            observable.FirstFrameObserved += obs =>
+            {
+                try
+                {
+                    _tracer.CaptureFirstFrameObserved(traceId ?? "trace_unknown", rec.Id,
+                        new FirstFrameEvidence
+                        {
+                            EvidenceKind = obs.EvidenceKind,
+                            FrameNumber = obs.FrameNumber,
+                            TotalSizeBytes = obs.TotalSizeBytes,
+                            OutTimeUs = obs.OutTimeUs
+                        });
+                }
+                catch
+                {
+                    // First-frame diagnostics must never change recording state.
+                }
+            };
+        }
 
         // Set state to recording NOW, before Backend.Start() runs.
         // If Backend.Start() runs synchronously and completes (WGC),
@@ -625,6 +689,7 @@ public sealed class RecordingEngine
             // Backend.Start() threw before any terminal state was reached:
             // transition to failed with a single terminal event and one user error.
             rec.State = RecState.failed;
+            rec.CompletedAtUtc = DateTime.UtcNow;
             BumpStateVersion();
             rec.Error = ex.Message;
             rec.Warnings.Add("launch_error: " + ex.Message);
@@ -841,8 +906,7 @@ public sealed class RecordingEngine
     public object GetStatus(string id)
     {
         var rec = Get(id);
-        var elapsed = rec.State == RecState.recording
-            ? (int)(DateTime.UtcNow - rec.StartedAtUtc).TotalSeconds : 0;
+        var elapsed = ComputeElapsedSeconds(rec);
 
         // For WGC still-frame the actual file lives in meta.OutputPath rather
         // than rec.OutputPath (which is the FFmpeg output path). Pick the
@@ -1012,8 +1076,7 @@ public sealed class RecordingEngine
 
     private object BuildStatusWaitResponse(Recording rec, int requestedMs, int elapsedMs, bool timedOut)
     {
-        var elapsed = rec.State == RecState.recording
-            ? (int)(DateTime.UtcNow - rec.StartedAtUtc).TotalSeconds : 0;
+        var elapsed = ComputeElapsedSeconds(rec);
         var meta = rec.LastMeta;
         string actualPath = meta?.OutputPath ?? rec.OutputPath;
 

@@ -83,6 +83,9 @@ public class PerformanceTracerTests : IDisposable
         public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) =>
             Events.Add((traceId, "capture.backend_start_failed"));
 
+        public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) =>
+            Events.Add((traceId, "capture.first_frame_observed"));
+
         public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) =>
             Events.Add((traceId, "recording.terminal"));
 
