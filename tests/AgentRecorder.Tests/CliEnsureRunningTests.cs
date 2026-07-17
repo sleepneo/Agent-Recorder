@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using AgentRecorder.Cli;
 using AgentRecorder.Infrastructure;
@@ -674,5 +675,368 @@ public class CliEnsureRunningTests : IDisposable
 
         Assert.Contains("\"code\":\"STALE_READY_FILE_DELETE_FAILED\"", json);
         Assert.Contains("\"suggested_action\"", json);
+    }
+
+    [Theory]
+    [InlineData("started", "cold")]
+    [InlineData("existing", "warm")]
+    public void BuildSuccessResult_MapsSourceToStartupKindAndCreatesContext(string source, string expectedKind)
+    {
+        var dataDir = Path.Combine(_testDir, $"build-success-{source}");
+        Directory.CreateDirectory(dataDir);
+        var readyPath = Path.Combine(dataDir, "runtime", "ready.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(readyPath)!);
+
+        var snap = new ReadySnapshot
+        {
+            Ready = true,
+            Pid = 12345,
+            Port = 37891,
+            ApiVersion = "v1",
+            Mode = "tray",
+            StartedAt = "2024-01-01T00:00:00Z",
+            ReadyAt = "2024-01-01T00:00:01Z",
+            StartupElapsedMs = 150,
+            DataDir = dataDir,
+            ApiKeyFile = Path.Combine(dataDir, "config", "api-key.txt"),
+            AuditLogPath = Path.Combine(dataDir, "logs", "audit.jsonl"),
+            ReadyFile = readyPath,
+            NamedEvent = "Local\\AgentRecorderReady"
+        };
+        File.WriteAllText(readyPath, JsonSerializer.Serialize(snap, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        }));
+
+        var sw = Stopwatch.StartNew();
+        sw.Stop();
+
+        var result = Program.BuildSuccessResult(snap, source, "v1", sw, dataDir);
+
+        Assert.True(result.Ok);
+        Assert.Equal(expectedKind, result.StartupKind);
+        Assert.True(result.EnsureElapsedMs >= 0);
+        Assert.NotNull(result.EnsureContextId);
+        Assert.True(EnsureContextStore.IsValidContextId(result.EnsureContextId));
+        Assert.Equal(EnsureContextStore.HeaderName, result.EnsureContextHeader);
+        Assert.True(result.EnsureContextAvailable);
+
+        var contextPath = Path.Combine(dataDir, "runtime", "ensure-contexts", $"{result.EnsureContextId}.json");
+        Assert.True(File.Exists(contextPath));
+
+        // The stored context must be consumable against the same ready.json.
+        var store = new EnsureContextStore(dataDir);
+        var consumed = store.TryConsume(result.EnsureContextId!);
+        Assert.Equal(EnsureContextStatus.Consumed, consumed.Status);
+        Assert.Equal(expectedKind, consumed.StartupKind);
+        Assert.True(consumed.EnsureElapsedMs >= 0);
+        Assert.Equal(150L, consumed.ServiceStartupElapsedMs);
+    }
+
+    [Fact]
+    public void BuildSuccessResult_ContextCreationFailure_ReturnsSuccessWithoutFakeId()
+    {
+        var dataDir = Path.Combine(_testDir, "build-success-invalid");
+        Directory.CreateDirectory(dataDir);
+        var snap = new ReadySnapshot
+        {
+            Ready = true,
+            Pid = 12345,
+            Port = 37891,
+            ApiVersion = "v1",
+            Mode = "tray",
+            StartedAt = "2024-01-01T00:00:00Z",
+            ReadyAt = "2024-01-01T00:00:01Z",
+            StartupElapsedMs = 150,
+            DataDir = dataDir,
+            ApiKeyFile = "",
+            AuditLogPath = "",
+            ReadyFile = "",
+            NamedEvent = ""
+        };
+
+        var invalidDataDir = Path.Combine(dataDir, "invalid?<>|");
+        var sw = Stopwatch.StartNew();
+        sw.Stop();
+
+        var result = Program.BuildSuccessResult(snap, "existing", "v1", sw, invalidDataDir);
+
+        Assert.True(result.Ok);
+        Assert.Equal("warm", result.StartupKind);
+        Assert.True(result.EnsureElapsedMs >= 0);
+        Assert.Null(result.EnsureContextId);
+        Assert.False(result.EnsureContextAvailable);
+    }
+
+    [Fact]
+    public void EnsureRunningResult_Json_Success_AdditiveEnsureFields()
+    {
+        var result = new EnsureRunningResult
+        {
+            Ok = true,
+            Status = "ready",
+            Started = true,
+            Source = "started",
+            Mode = "tray",
+            Pid = 12345,
+            Port = 37891,
+            ApiVersion = "v1",
+            StartupElapsedMs = 150,
+            StartupKind = "cold",
+            EnsureElapsedMs = 842,
+            EnsureContextId = "ensure_00000000000000000000000000000000",
+            EnsureContextHeader = EnsureContextStore.HeaderName,
+            EnsureContextAvailable = true
+        };
+
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        });
+
+        Assert.Contains("\"startup_kind\":\"cold\"", json);
+        Assert.Contains("\"ensure_elapsed_ms\":842", json);
+        Assert.Contains("\"ensure_context_id\":\"ensure_00000000000000000000000000000000\"", json);
+        Assert.Contains("\"ensure_context_header\":\"X-Agent-Recorder-Ensure-Context\"", json);
+        Assert.Contains("\"ensure_context_available\":true", json);
+    }
+
+    [Fact]
+    public void EnsureRunningResult_Json_ContextUnavailable_OmitsContextIdAndHeader()
+    {
+        // When context creation fails, the test object itself must not set a fake
+        // header; the serializer should omit both id and header.
+        var result = new EnsureRunningResult
+        {
+            Ok = true,
+            Status = "ready",
+            Started = false,
+            Source = "existing",
+            Mode = "tray",
+            Pid = 12345,
+            Port = 37891,
+            ApiVersion = "v1",
+            StartupElapsedMs = 150,
+            StartupKind = "warm",
+            EnsureElapsedMs = 120,
+            EnsureContextId = null,
+            EnsureContextHeader = null,
+            EnsureContextAvailable = false
+        };
+
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        });
+
+        Assert.Contains("\"startup_kind\":\"warm\"", json);
+        Assert.Contains("\"ensure_elapsed_ms\":120", json);
+        Assert.Contains("\"ensure_context_available\":false", json);
+        Assert.DoesNotContain("\"ensure_context_id\"", json);
+        Assert.DoesNotContain("\"ensure_context_header\"", json);
+    }
+
+    [Fact]
+    public void EnsureRunningResult_Json_Error_OmitsAllEnsureFields()
+    {
+        // Real error results leave ensure-running association fields at their
+        // default null values. Serializing with WhenWritingNull must omit them
+        // entirely; no fake 0/false/empty values should leak out.
+        var result = new EnsureRunningResult
+        {
+            Ok = false,
+            Status = "error",
+            Code = "READY_TIMEOUT",
+            Message = "Timed out",
+            SuggestedAction = "Try again"
+            // StartupKind, EnsureElapsedMs, EnsureContextId, EnsureContextHeader,
+            // EnsureContextAvailable intentionally left null.
+        };
+
+        var json = JsonSerializer.Serialize(result, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        });
+
+        Assert.Contains("\"ok\":false", json);
+        Assert.DoesNotContain("\"startup_kind\"", json);
+        Assert.DoesNotContain("\"ensure_elapsed_ms\"", json);
+        Assert.DoesNotContain("\"ensure_context_id\"", json);
+        Assert.DoesNotContain("\"ensure_context_header\"", json);
+        Assert.DoesNotContain("\"ensure_context_available\"", json);
+    }
+
+    [Fact]
+    public void BuildSuccessResult_ConcurrentCalls_ProduceUniqueContextIdsAndNoTempFiles()
+    {
+        var dataDir = Path.Combine(_testDir, "concurrent-build-success");
+        Directory.CreateDirectory(dataDir);
+        var readyPath = Path.Combine(dataDir, "runtime", "ready.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(readyPath)!);
+
+        var snap = new ReadySnapshot
+        {
+            Ready = true,
+            Pid = 12345,
+            Port = 37891,
+            ApiVersion = "v1",
+            Mode = "tray",
+            StartedAt = "2024-01-01T00:00:00Z",
+            ReadyAt = "2024-01-01T00:00:01Z",
+            StartupElapsedMs = 150,
+            DataDir = dataDir,
+            ApiKeyFile = Path.Combine(dataDir, "config", "api-key.txt"),
+            AuditLogPath = Path.Combine(dataDir, "logs", "audit.jsonl"),
+            ReadyFile = readyPath,
+            NamedEvent = "Local\\AgentRecorderReady"
+        };
+        File.WriteAllText(readyPath, JsonSerializer.Serialize(snap, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        }));
+
+        var results = new System.Collections.Concurrent.ConcurrentBag<EnsureRunningResult>();
+        Parallel.For(0, 20, _ =>
+        {
+            var sw = Stopwatch.StartNew();
+            sw.Stop();
+            var result = Program.BuildSuccessResult(snap, "started", "v1", sw, dataDir);
+            results.Add(result);
+        });
+
+        var ids = results.Select(r => r.EnsureContextId).ToList();
+        Assert.Equal(20, ids.Distinct().Count());
+        Assert.All(ids, id => Assert.True(EnsureContextStore.IsValidContextId(id)));
+
+        var contextDir = Path.Combine(dataDir, "runtime", "ensure-contexts");
+        Assert.True(Directory.Exists(contextDir));
+        Assert.Equal(20, Directory.GetFiles(contextDir, "*.json").Length);
+        Assert.Empty(Directory.GetFiles(contextDir, ".tmp-*"));
+    }
+
+    [Fact]
+    public void EnsureRunningCore_ServiceNotFound_DoesNotCreateEnsureContext()
+    {
+        var dataDir = Path.Combine(_testDir, "error-no-context");
+        Directory.CreateDirectory(dataDir);
+
+        var opts = new CliOptions
+        {
+            DataDir = dataDir,
+            TimeoutMs = 1000,
+            PackageRoot = dataDir,
+            AppPath = Path.Combine(dataDir, "nonexistent.exe")
+        };
+
+        var result = Program.EnsureRunningCore(opts);
+
+        Assert.False(result.Ok);
+        var contextDir = Path.Combine(dataDir, "runtime", "ensure-contexts");
+        Assert.True(!Directory.Exists(contextDir) || Directory.GetFiles(contextDir, "*.json").Length == 0);
+    }
+
+    [Fact]
+    public void EnsureRunningCore_ReadyTimeout_DoesNotCreateEnsureContext()
+    {
+        var dataDir = Path.Combine(_testDir, "error-timeout-no-context");
+        Directory.CreateDirectory(dataDir);
+
+        // Point AppPath at cmd.exe with an immediate exit so the process starts
+        // but never writes a ready file, forcing READY_TIMEOUT. This avoids
+        // launching the real AgentRecorder App/Headless/UI.
+        var opts = new CliOptions
+        {
+            DataDir = dataDir,
+            TimeoutMs = 100,
+            PackageRoot = dataDir,
+            AppPath = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            PreferHeadless = true
+        };
+
+        var result = Program.EnsureRunningCore(opts);
+
+        Assert.False(result.Ok);
+        Assert.True(result.Code is "READY_TIMEOUT" or "SERVICE_EXITED" or "SERVICE_NOT_FOUND", $"Unexpected code: {result.Code}");
+        var contextDir = Path.Combine(dataDir, "runtime", "ensure-contexts");
+        Assert.True(!Directory.Exists(contextDir) || Directory.GetFiles(contextDir, "*.json").Length == 0);
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_StaleIdentity_ReturnsErrorAndWouldNotCreateContext()
+    {
+        var dataDir = Path.Combine(_testDir, "stale-identity");
+        Directory.CreateDirectory(dataDir);
+
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 99999,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = Path.Combine(dataDir, "runtime", "ready.json"),
+            ApiKeyFile = Path.Combine(dataDir, "config", "api-key.txt"),
+            DataDir = dataDir,
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => true,
+            IsAgentRecorderProcess = pid => false
+        };
+
+        var decision = Program.EvaluateStaleReadyDecision(snapshot.ReadyFile, context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.ReturnError, decision.Action);
+        Assert.Equal("STALE_READY_FILE", decision.ErrorCode);
+
+        var contextDir = Path.Combine(dataDir, "runtime", "ensure-contexts");
+        Assert.False(Directory.Exists(contextDir));
+    }
+
+    [Fact]
+    public void EvaluateStaleReadyDecision_DeleteFailed_ReturnsErrorAndWouldNotCreateContext()
+    {
+        var dataDir = Path.Combine(_testDir, "delete-failed");
+        Directory.CreateDirectory(dataDir);
+
+        var snapshot = new ReadySnapshot
+        {
+            Pid = 99999,
+            Port = 37891,
+            Mode = "tray",
+            ReadyFile = Path.Combine(dataDir, "runtime", "ready.json"),
+            ApiKeyFile = Path.Combine(dataDir, "config", "api-key.txt"),
+            DataDir = dataDir,
+            StartedAt = DateTime.UtcNow.ToString("O"),
+            ReadyAt = DateTime.UtcNow.ToString("O"),
+            StartupElapsedMs = 500,
+            ApiVersion = "v1"
+        };
+
+        var context = new Program.StaleReadyDecisionContext
+        {
+            ReadReadySnapshot = _ => snapshot,
+            IsMutexHeld = () => false,
+            IsAgentRecorderProcess = pid => false,
+            DeleteReadyFile = path => (false, "Access denied")
+        };
+
+        var decision = Program.EvaluateStaleReadyDecision(snapshot.ReadyFile, context);
+
+        Assert.Equal(Program.StaleReadyDecisionAction.DeleteFailed, decision.Action);
+        Assert.Equal("Access denied", decision.Message);
+
+        var contextDir = Path.Combine(dataDir, "runtime", "ensure-contexts");
+        Assert.False(Directory.Exists(contextDir));
     }
 }

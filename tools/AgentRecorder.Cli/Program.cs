@@ -540,6 +540,7 @@ internal static class Program
 
     internal static EnsureRunningResult EnsureRunningCore(CliOptions opts)
     {
+        var ensureStopwatch = Stopwatch.StartNew();
         var packageRoot = ResolvePackageRoot(opts);
         var dataDir = ResolveDataDir(opts, packageRoot);
         var readyPath = Path.Combine(dataDir, "runtime", "ready.json");
@@ -549,7 +550,7 @@ internal static class Program
         switch (decision.Action)
         {
             case StaleReadyDecisionAction.ReuseExisting:
-                return BuildSuccessResult(decision.Existing!, "existing", decision.ApiVersion!);
+                return BuildSuccessResult(decision.Existing!, "existing", decision.ApiVersion!, ensureStopwatch, dataDir);
 
             case StaleReadyDecisionAction.ReturnError:
                 return new EnsureRunningResult
@@ -618,7 +619,7 @@ internal static class Program
             var validation = ValidateReadySnapshot(final);
             if (validation.Valid)
             {
-                return BuildSuccessResult(final, "started", validation.ApiVersion);
+                return BuildSuccessResult(final, "started", validation.ApiVersion, ensureStopwatch, dataDir);
             }
 
             if (validation.ErrorCode == "STALE_READY_FILE")
@@ -1131,9 +1132,13 @@ internal static class Program
         }
     }
 
-    private static EnsureRunningResult BuildSuccessResult(ReadySnapshot snap, string source, string apiVersion)
+    internal static EnsureRunningResult BuildSuccessResult(ReadySnapshot snap, string source, string apiVersion, Stopwatch ensureStopwatch, string dataDir)
     {
-        return new EnsureRunningResult
+        var ensureElapsedMs = Math.Max(0, ensureStopwatch.ElapsedMilliseconds);
+        var startupKind = source == "started" ? "cold" : "warm";
+        var contextId = TryCreateEnsureContext(dataDir, snap, startupKind, ensureElapsedMs);
+
+        var result = new EnsureRunningResult
         {
             Ok = true,
             Status = "ready",
@@ -1150,8 +1155,54 @@ internal static class Program
             ApiKeyFile = snap.ApiKeyFile,
             DataDir = snap.DataDir,
             AuditLogPath = snap.AuditLogPath,
-            NamedEvent = snap.NamedEvent
+            NamedEvent = snap.NamedEvent,
+            StartupKind = startupKind,
+            EnsureElapsedMs = ensureElapsedMs
         };
+
+        if (contextId != null)
+        {
+            result.EnsureContextId = contextId;
+            result.EnsureContextHeader = EnsureContextStore.HeaderName;
+            result.EnsureContextAvailable = true;
+        }
+        else
+        {
+            // Context creation failed but ensure-running itself succeeded.
+            // Provide the diagnostic elapsed/kind, but omit ID/header and
+            // explicitly state that no context is available.
+            result.EnsureContextAvailable = false;
+        }
+
+        return result;
+    }
+
+    private static string? TryCreateEnsureContext(string dataDir, ReadySnapshot snap, string startupKind, long ensureElapsedMs)
+    {
+        try
+        {
+            var contextId = EnsureContextStore.GenerateContextId();
+            var context = new EnsureContext
+            {
+                SchemaVersion = 1,
+                EnsureContextId = contextId,
+                ServicePid = snap.Pid,
+                ServiceStartedAt = snap.StartedAt ?? "",
+                ServiceReadyAt = snap.ReadyAt ?? "",
+                StartupKind = startupKind,
+                EnsureElapsedMs = ensureElapsedMs,
+                ServiceStartupElapsedMs = snap.StartupElapsedMs,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+
+            var store = new EnsureContextStore(dataDir);
+            return store.TryCreate(context);
+        }
+        catch
+        {
+            // Context creation is diagnostic; failures must not break ensure-running.
+            return null;
+        }
     }
 
     private static int RunHelp()
@@ -1236,6 +1287,15 @@ internal sealed class EnsureRunningResult
     public string DataDir { get; set; } = "";
     public string? AuditLogPath { get; set; }
     public string? NamedEvent { get; set; }
+
+    // Ensure-running cold/warm association fields (additive, diagnostic).
+    // These are nullable so that WhenWritingNull omits them on error results
+    // and when no context was created.
+    public string? StartupKind { get; set; }
+    public long? EnsureElapsedMs { get; set; }
+    public string? EnsureContextId { get; set; }
+    public string? EnsureContextHeader { get; set; }
+    public bool? EnsureContextAvailable { get; set; }
 
     // Error fields
     public string? Code { get; set; }

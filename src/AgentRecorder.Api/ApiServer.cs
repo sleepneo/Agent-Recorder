@@ -30,6 +30,7 @@ public sealed class ApiServer
     private readonly AuditLogger _audit;
     private readonly ITrayContext _tray;
     private readonly IPerformanceTracer _tracer;
+    private readonly IEnsureContextStore? _ensureContextStore;
     private readonly RuntimeReadiness? _readiness;
     private readonly WindowsAutoStartManager? _autoStart;
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
@@ -38,14 +39,18 @@ public sealed class ApiServer
     private SelectedRegionState? _lastSelectedRegion;
     private readonly object _regionLock = new();
 
+    public const string EnsureContextHeaderName = EnsureContextStore.HeaderName;
+
     public ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
         RuntimeReadiness? readiness = null,
         WindowsAutoStartManager? autoStart = null,
         FfmpegPrewarmer? ffmpegPrewarmer = null,
-        IPerformanceTracer? tracer = null)
+        IPerformanceTracer? tracer = null,
+        IEnsureContextStore? ensureContextStore = null)
     {
         _engine = engine; _audit = audit; _tray = tray;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
+        _ensureContextStore = ensureContextStore;
         _readiness = readiness;
         _autoStart = autoStart;
         _ffmpegPrewarmer = ffmpegPrewarmer;
@@ -337,6 +342,7 @@ public sealed class ApiServer
         var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
         var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
         const string endpoint = "recordings";
+        ConsumeEnsureContextAndAssociate(req, traceId);
         _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
 
         JsonNode cfg;
@@ -459,6 +465,7 @@ public sealed class ApiServer
         var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
         var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
         const string endpoint = "recordings.quick";
+        ConsumeEnsureContextAndAssociate(req, traceId);
         _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
 
         JsonNode body;
@@ -693,6 +700,24 @@ public sealed class ApiServer
             if (!_tracer.HasValidationResult(traceId))
                 _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
             throw;
+        }
+    }
+
+    private void ConsumeEnsureContextAndAssociate(HttpRequest req, string traceId)
+    {
+        try
+        {
+            var contextId = req.Headers.GetValueOrDefault(EnsureContextHeaderName);
+            if (string.IsNullOrWhiteSpace(contextId) || _ensureContextStore == null)
+                return;
+
+            var result = _ensureContextStore.TryConsume(contextId);
+            _tracer.SetEnsureContextAssociation(traceId, EnsureContextAssociation.FromResult(result));
+        }
+        catch
+        {
+            // Context consumption is diagnostic only and must never change
+            // recording state, confirmation, or API response status.
         }
     }
 

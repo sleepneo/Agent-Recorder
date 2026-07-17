@@ -174,15 +174,33 @@ non-zero encoder exit code) result in `status=failed`.
 
 1. Run `AgentRecorder.Cli.exe ensure-running --json`.
 2. Read the API key from `api_key_file`.
-3. Call `GET /api/v1/capabilities`.
-4. For common requests, call `record_screen`, which maps to
-   `/recordings/quick`.
-5. If `status=requires_user_confirmation`, tell the user recording will start
+3. If `ensure_context_available=true`, keep the `ensure_context_id` and
+   `ensure_context_header` for the next recording request.
+4. Call `GET /api/v1/capabilities`.
+5. For common requests, call `record_screen`, which maps to
+   `/recordings/quick`. Include the `X-Agent-Recorder-Ensure-Context` header
+   with the one-time context ID from step 3, if available.
+6. If `status=requires_user_confirmation`, tell the user recording will start
    only after local confirmation.
-6. Poll `/confirmations/{id}`.
-7. Poll `/recordings/{id}` until `completed`, `failed`, `rejected`, or
+7. Poll `/confirmations/{id}`.
+8. Poll `/recordings/{id}` until `completed`, `failed`, `rejected`, or
    `expired`.
-8. Report the MP4 path and relevant metadata.
+9. Report the MP4 path and relevant metadata.
+
+The `X-Agent-Recorder-Ensure-Context` header is optional and one-time: the
+server consumes the local context file when the recording intent is
+authenticated and associates trusted `cold`/`warm` labels with the performance
+trace. A missing, expired, malformed, identity-mismatched, or already-consumed
+context does not block the recording. For concurrent or duplicate consumption
+of the same ID, only one trace receives the trusted fields; the others receive
+`reused` or `missing`.
+
+`ensure-running` returns `ensure_context_id` and `ensure_context_header` only
+when `ensure_context_available=true`. On error (`ok=false`), the JSON result
+omits `startup_kind`, `ensure_elapsed_ms`, `ensure_context_id`,
+`ensure_context_header`, and `ensure_context_available`. Context files and
+in-memory consumption tombstones have a 5-minute TTL and a count limit so they
+do not grow without bound.
 
 For `active_window`, agents may surface `resolved_source.capture_bounds` when
 diagnosing what area was actually recorded. This field is produced by Agent

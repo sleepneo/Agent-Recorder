@@ -11,6 +11,7 @@ public sealed class NoOpPerformanceTracer : IPerformanceTracer
     private NoOpPerformanceTracer() { }
 
     public void IntentAccepted(string traceId, string endpoint, string? clientSentAtUtc = null) { }
+    public void SetEnsureContextAssociation(string traceId, EnsureContextAssociation association) { }
     public void IntentValidated(string traceId, string endpoint, bool success, string? errorCode = null) { }
     public void CorrelationSet(string traceId, string recordingId, string? confirmationId = null, string? sourceType = null) { }
     public bool HasValidationResult(string traceId) => false;

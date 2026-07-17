@@ -71,6 +71,15 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
         Write(traceId, "intent.accepted", clientHints: hints);
     }
 
+    public void SetEnsureContextAssociation(string traceId, EnsureContextAssociation association)
+    {
+        if (association == null)
+            return;
+
+        var ctx = _traceContexts.GetOrAdd(traceId, _ => new TraceContext { TraceId = traceId, CreatedAt = _utcNow() });
+        ctx.EnsureAssociation = association;
+    }
+
     public void IntentValidated(string traceId, string endpoint, bool success, string? errorCode = null)
     {
         lock (_lifecycleLock)
@@ -315,6 +324,29 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
 
     public void Dispose() => _writer.Dispose();
 
+    private static string ToSnakeCaseLower(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        var sb = new System.Text.StringBuilder(value.Length + 4);
+        for (int i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            if (char.IsUpper(c))
+            {
+                if (i > 0)
+                    sb.Append('_');
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
     private void Write(string traceId, string eventName,
         string? recordingId = null, string? confirmationId = null,
         string? backend = null,
@@ -356,6 +388,12 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
             SourceType = ctx?.SourceType,
             Backend = backend,
             ClientHints = clientHints,
+            StartupKind = ctx?.EnsureAssociation?.StartupKind,
+            EnsureElapsedMs = ctx?.EnsureAssociation?.EnsureElapsedMs,
+            ServiceStartupElapsedMs = ctx?.EnsureAssociation?.ServiceStartupElapsedMs,
+            EnsureContextStatus = ctx?.EnsureAssociation != null
+                ? ToSnakeCaseLower(ctx.EnsureAssociation.Status.ToString())
+                : null,
             Data = data
         };
 
@@ -557,6 +595,7 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
         public string? Backend { get; set; }
         public DateTime? TerminalAt { get; set; }
         public DateTime CreatedAt { get; init; }
+        public EnsureContextAssociation? EnsureAssociation { get; set; }
 
         // Atomic flags: 0 = not yet recorded, 1 = recorded.
         internal int _validationRecorded;

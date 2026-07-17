@@ -109,7 +109,8 @@ internal static class Program
         var autoStart = new WindowsAutoStartManager(appExePath);
         var ffmpegPrewarmer = new FfmpegPrewarmer();
 
-        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer);
+        var ensureContextStore = new EnsureContextStore(dataDir);
+        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try

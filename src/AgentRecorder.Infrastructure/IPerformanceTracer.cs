@@ -10,6 +10,14 @@ public interface IPerformanceTracer
     /// <summary>Record that a recording intent HTTP request was accepted.</summary>
     void IntentAccepted(string traceId, string endpoint, string? clientSentAtUtc = null);
 
+    /// <summary>
+    /// Associate a one-time ensure-running context with this trace. Must be
+    /// called after the server has authenticated the request and successfully
+    /// consumed the context. The association is privacy-safe and contains no
+    /// raw context ID, file path, or header text.
+    /// </summary>
+    void SetEnsureContextAssociation(string traceId, EnsureContextAssociation association);
+
     /// <summary>Record that intent validation succeeded or failed.</summary>
     void IntentValidated(string traceId, string endpoint, bool success, string? errorCode = null);
 

@@ -91,7 +91,41 @@ This identifier is also written to the local performance trace file (`<data-dir>
 
 `capture.first_frame_observed` is only emitted for the default FFmpeg video path (`display`/`window`/`region`). It is produced exactly once when FFmpeg's `-nostats -progress pipe:1` output reports `frame >= 1`, `total_size > 0`, and the progress group ends normally (`progress=continue` or `progress=end`). It proves that FFmpeg has reported processing at least one video frame and that the output stream has positive bytes, giving an upper-bound latency from local user approval to first observable encoding/muxing progress. It is **not** the exact screen-capture first-frame delivery time, not a physical disk-flush guarantee, and not evidence that the MP4 is playable or has passed output validation. If FFmpeg never emits a qualifying progress group, this event may be absent.
 
-The current trace events cover the request-to-backend-start and first-frame-progress path. Metrics for model thinking time or `ensure-running` cold/warm handshake are **not** included yet.
+The current trace events cover the request-to-backend-start and first-frame-progress path. Metrics for model thinking time, P50/P95 aggregation, and `/capabilities.perf_summary` are **not** included yet.
+
+The `ensure-running` cold/warm handshake can now be reliably correlated with a recording trace through a one-time context. After a successful `ensure-running`, the CLI atomically creates a short-lived context file under `<data-dir>\runtime\ensure-contexts` and returns the following in its JSON output:
+
+- `startup_kind`: `cold` (service was started this time) or `warm` (an existing service was reused)
+- `ensure_elapsed_ms`: total wall-clock time of this `ensure-running` handshake in milliseconds
+- `ensure_context_id`: a one-time context ID such as `ensure_<32 hex chars>`; only present when `ensure_context_available=true`
+- `ensure_context_header`: always `X-Agent-Recorder-Ensure-Context`; only present when `ensure_context_available=true`
+- `ensure_context_available`: `true` if the context file was created, `false` if creation failed but ensure-running still succeeded
+
+The agent should forward this header on the very next recording creation request:
+
+```http
+X-Agent-Recorder-Ensure-Context: ensure_<32 hex chars>
+```
+
+Both `POST /api/v1/recordings` and `POST /api/v1/recordings/quick` accept this optional header. The server uses only the ID from the header to read and one-time-consume the local context; the header is never interpreted as a file path. The trusted `cold`/`warm` label, this handshake's `ensure_elapsed_ms`, and the service startup time `service_startup_elapsed_ms` all come from the server-side consumption of the local context, not from any client-supplied header.
+
+Difference between `startup_elapsed_ms` and `ensure_elapsed_ms`:
+
+- `startup_elapsed_ms` is the service process startup-to-ready time; for `warm` it is the original startup time of the reused service, not the current handshake time.
+- `ensure_elapsed_ms` is the full wall-clock time of this `ensure-running` call from entry until service identity is verified and the result is ready to return, covering both `cold` and `warm`.
+
+If the context is missing, expired, malformed, fails the service-instance identity check (PID + `ready_at`), fails deletion/claim, or has already been consumed, the server does not write trusted cold/warm fields and does not affect the API status code, confirmation, Consent Invariant, or recording outcome; the recording intent still proceeds through the normal confirmation path. On consumption failure, the trace may contain only `ensure_context_status` (one of `missing`, `invalid`, `expired`, `instance_mismatch`, `reused`, or `unavailable`) without sensitive paths or exception text. For concurrent or duplicate consumption of the same ID, only one trace receives `consumed` and trusted startup fields; the others receive `reused` or `missing`.
+
+The context file is written using a random temp file in the same directory and atomically moved into place; temp files are cleaned up on failure paths. Both the context files and the in-memory consumption tombstones have a default TTL of 5 minutes and are bounded by a count limit so they do not grow without bound. Error results from `ensure-running` omit `startup_kind`, `ensure_elapsed_ms`, `ensure_context_id`, `ensure_context_header`, and `ensure_context_available`.
+
+Trusted context fields appear as optional top-level fields on subsequent events of the same trace:
+
+- `startup_kind`: `cold|warm`
+- `ensure_elapsed_ms`: this ensure-running handshake time in milliseconds
+- `service_startup_elapsed_ms`: service startup time in milliseconds (for warm, the original startup time)
+- `ensure_context_status`: `consumed` or a failure-reason enum
+
+These fields do not appear inside `client_hints`. The raw `ensure_context_id`, context file path, ready file content, and header literal are never written to the performance JSONL or audit log.
 
 ## Capabilities
 

@@ -51,6 +51,9 @@ public class PerformanceTracerTests : IDisposable
         public void IntentAccepted(string traceId, string endpoint, string? clientSentAtUtc = null) =>
             Events.Add((traceId, "intent.accepted"));
 
+        public void SetEnsureContextAssociation(string traceId, EnsureContextAssociation association) =>
+            Events.Add((traceId, "ensure_context.associated"));
+
         public void IntentValidated(string traceId, string endpoint, bool success, string? errorCode = null) =>
             Events.Add((traceId, success ? "intent.validated" : "intent.failed"));
 
@@ -510,6 +513,43 @@ public class PerformanceTracerTests : IDisposable
         var lines = ReadAllLines(samplePath);
         Assert.True(lines.Count >= 6);
         Assert.All(lines, l => JsonNode.Parse(l));
+    }
+
+    [Fact]
+    public void SetEnsureContextAssociation_PersistsAcrossSubsequentEvents()
+    {
+        var writer = new RollingJsonlWriter(Path.Combine(_tmp.Path, "perf", "ensure-assoc.jsonl"));
+        using var tracer = CreateTracer(writer);
+
+        tracer.SetEnsureContextAssociation("trace_assoc", new EnsureContextAssociation
+        {
+            StartupKind = "cold",
+            EnsureElapsedMs = 842,
+            ServiceStartupElapsedMs = 164,
+            Status = EnsureContextStatus.Consumed
+        });
+        tracer.IntentAccepted("trace_assoc", "recordings");
+        tracer.IntentValidated("trace_assoc", "recordings", success: true);
+        tracer.CorrelationSet("trace_assoc", "rec_assoc");
+        tracer.RecordingTerminal("trace_assoc", "rec_assoc", "completed");
+        writer.Flush();
+
+        var lines = ReadAllLines(writer.BasePath);
+        Assert.True(lines.Count >= 3);
+        var all = lines.Select(line => JsonNode.Parse(line)).ToList();
+
+        Assert.All(all, e =>
+        {
+            Assert.Equal("cold", e!["startup_kind"]?.GetValue<string>());
+            Assert.Equal(842L, e["ensure_elapsed_ms"]?.GetValue<long>());
+            Assert.Equal(164L, e["service_startup_elapsed_ms"]?.GetValue<long>());
+            Assert.Equal("consumed", e["ensure_context_status"]?.GetValue<string>());
+        });
+
+        var text = string.Join("\n", lines);
+        Assert.DoesNotContain("ensure_context_id", text);
+        Assert.DoesNotMatch(new System.Text.RegularExpressions.Regex("ensure_[0-9a-f]{32}"), text);
+        Assert.DoesNotContain("X-Agent-Recorder-Ensure-Context", text);
     }
 
     private static List<string> ReadAllLines(string path)

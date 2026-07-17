@@ -56,6 +56,12 @@ AgentRecorder.Cli.exe ensure-running --json
 | `api_version` | API 版本，如 `v1` |
 | `ready_file` | ready.json 路径 |
 | `data_dir` | 数据目录路径 |
+| `startup_elapsed_ms` | 服务进程启动到 ready 的耗时（毫秒；warm 时为复用服务当初的启动耗时） |
+| `ensure_elapsed_ms` | 本次 `ensure-running` 握手的总墙钟耗时（毫秒；同时覆盖 cold/warm） |
+| `startup_kind` | `cold`（新启动）或 `warm`（复用已有服务） |
+| `ensure_context_id` | 一次性上下文 ID，例如 `ensure_<32 位十六进制>`；若 `ensure_context_available=false` 则省略 |
+| `ensure_context_header` | 固定为 `X-Agent-Recorder-Ensure-Context`；若上下文不可用则省略 |
+| `ensure_context_available` | `true` 表示上下文文件已创建，agent 应在下一次录制请求中透传 header；`false` 表示创建失败但 ensure 仍成功，此时省略 `ensure_context_id` 与 `ensure_context_header` |
 
 **失败时（ok=false）：**
 
@@ -65,6 +71,8 @@ AgentRecorder.Cli.exe ensure-running --json
 | `code` | 稳定错误码（见下方列表） |
 | `message` | 人类可读错误信息 |
 | `suggested_action` | 建议的下一步操作 |
+
+失败结果不会输出 `startup_kind`、`ensure_elapsed_ms`、`ensure_context_id`、`ensure_context_header`、`ensure_context_available` 等诊断字段。
 
 成功输出示例：
 
@@ -80,7 +88,12 @@ AgentRecorder.Cli.exe ensure-running --json
   "data_dir": "C:\\...\\.local-data",
   "ready_file": "C:\\...\\runtime\\ready.json",
   "api_key_file": "C:\\...\\config\\api-key.txt",
-  "startup_elapsed_ms": 850
+  "startup_elapsed_ms": 850,
+  "startup_kind": "warm",
+  "ensure_elapsed_ms": 120,
+  "ensure_context_id": "ensure_0123456789abcdef0123456789abcdef",
+  "ensure_context_header": "X-Agent-Recorder-Ensure-Context",
+  "ensure_context_available": true
 }
 ```
 
@@ -130,6 +143,16 @@ CLI 会自动：
 | `--help` | 显示帮助 | - |
 
 **注意：** 默认启动 Tray App 模式，它提供本地选区和确认 UI，是主产品路径。仅在确无 GUI 需求时使用 `--headless`。
+
+**透传 ensure-running 上下文：** 当 `ensure_context_available=true` 时，agent 应在紧接着的下一次录制创建请求中附加 header：
+
+```http
+X-Agent-Recorder-Ensure-Context: <ensure_context_id>
+```
+
+该 header 对 `POST /api/v1/recordings` 与 `POST /api/v1/recordings/quick` 均可选。服务端会一次性消费该上下文，并将可信的 `cold`/`warm` 标签、本次握手耗时 `ensure_elapsed_ms` 与服务启动耗时 `service_startup_elapsed_ms` 关联到录制 performance trace。上下文缺失、过期、身份不匹配或已消费不会阻止录制，也不会影响 API 状态码。同一 ID 并发或重复消费时，只有一个 trace 能获得可信 cold/warm 字段；其余 trace 的 `ensure_context_status` 会表现为 `reused` 或 `missing`，且不会携带可信 startup 字段。
+
+上下文文件存储在 `<data-dir>\runtime\ensure-contexts` 下，写入时使用同目录随机临时文件并原子落位；异常路径会清理临时文件。上下文文件与进程内消费 tombstone 的默认 TTL 均为 5 分钟，且受数量上限约束，不会无限增长。原始 context ID、header 名、上下文目录不会进入 performance JSONL 或审计日志。
 
 ### 方式二：直接启动（备选）
 

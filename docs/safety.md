@@ -80,6 +80,10 @@ These traces are local diagnostic data only. They record stage events such as `i
 
 The optional `X-Agent-Sent-At` header is treated as an untrusted client hint and is isolated from server-side latency percentiles.
 
+When the agent forwards an `X-Agent-Recorder-Ensure-Context` header from a successful `ensure-running` result, the server reads and one-time-consumes a short-lived local context file (`<data-dir>\runtime\ensure-contexts\<id>.json`) and may add `startup_kind`, `ensure_elapsed_ms`, `service_startup_elapsed_ms`, and `ensure_context_status` to the performance trace. The raw context ID, context file path, ready file content, and header literal are never written to the performance trace or audit log. A missing, expired, malformed, identity-mismatched, deletion/claim-failed, or already-consumed context does not affect the confirmation or recording state machines. For concurrent or duplicate consumption of the same context ID, only one trace receives `consumed` and the trusted startup fields; the others receive `reused` or `missing`.
+
+Context files are written using a random temp file in the same directory and atomically moved into place; temp files are cleaned up on failure paths. Both context files and the in-memory consumption tombstones have a 5-minute TTL and a count limit so they do not grow without bound. `ensure-running` error results omit `startup_kind`, `ensure_elapsed_ms`, `ensure_context_id`, `ensure_context_header`, and `ensure_context_available`.
+
 ## Agent Rules
 
 - Use `POST /api/v1/recordings/quick` for common natural-language requests.

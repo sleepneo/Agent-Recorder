@@ -43,6 +43,22 @@ public sealed class PerformanceTraceEvent
     [JsonPropertyName("client_hints")]
     public Dictionary<string, object?>? ClientHints { get; set; }
 
+    /// <summary>
+    /// Ensure-running startup association. Only present when the server
+    /// successfully consumed a one-time ensure context for this trace.
+    /// </summary>
+    [JsonPropertyName("startup_kind")]
+    public string? StartupKind { get; set; }
+
+    [JsonPropertyName("ensure_elapsed_ms")]
+    public long? EnsureElapsedMs { get; set; }
+
+    [JsonPropertyName("service_startup_elapsed_ms")]
+    public long? ServiceStartupElapsedMs { get; set; }
+
+    [JsonPropertyName("ensure_context_status")]
+    public string? EnsureContextStatus { get; set; }
+
     [JsonPropertyName("data")]
     public Dictionary<string, object?>? Data { get; set; }
 }

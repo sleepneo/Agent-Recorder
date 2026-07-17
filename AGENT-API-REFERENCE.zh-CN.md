@@ -63,7 +63,41 @@ X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
 
 `capture.first_frame_observed` 仅覆盖默认 FFmpeg 视频链路（`display`/`window`/`region`）。它会在 FFmpeg `-nostats -progress pipe:1` 输出报告 `frame >= 1`、`total_size > 0` 且进度组正常结束（`progress=continue` 或 `progress=end`）时产生一次。该事件证明“FFmpeg 已报告至少处理一个视频帧且输出流已有正字节数”，是“本地用户批准 → 首个可观测编码/复用进度”的时延上界，**不是**屏幕采集精确交付第一帧的时间、不是物理磁盘首帧写入时间、也不是 MP4 可播放或输出校验通过的证据。如果 FFmpeg 没有产生满足条件的 progress 组，该事件可能缺失。
 
-当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时、`ensure-running` 冷/热握手等数据**尚未实现**。
+当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时、P50/P95 聚合以及 `/capabilities.perf_summary` **尚未实现**。
+
+`ensure-running` 的冷/热握手现在可以通过一次性上下文关联到录制 trace。CLI 成功完成 `ensure-running` 后，会在 `<data-dir>\runtime\ensure-contexts` 下原子创建一个短期上下文文件，并在 JSON 输出中返回：
+
+- `startup_kind`: `cold`（本次新启动服务）或 `warm`（复用已有服务）
+- `ensure_elapsed_ms`: 本次 `ensure-running` 握手的总墙钟耗时（毫秒）
+- `ensure_context_id`: 一次性上下文 ID，例如 `ensure_<32 位十六进制>`；仅在 `ensure_context_available=true` 时出现
+- `ensure_context_header`: 固定为 `X-Agent-Recorder-Ensure-Context`；仅在 `ensure_context_available=true` 时出现
+- `ensure_context_available`: `true` 表示上下文文件已创建，`false` 表示创建失败但 ensure 仍成功
+
+AI agent 应在紧接着的下一次录制创建请求中透传该 header：
+
+```http
+X-Agent-Recorder-Ensure-Context: ensure_<32 位十六进制>
+```
+
+`POST /api/v1/recordings` 与 `POST /api/v1/recordings/quick` 均支持该可选 header。服务端只使用 header 中的 ID 从本地上下文目录读取并一次性消费；header 绝不会被解释为文件路径。可信的 `cold`/`warm` 标签、本次握手耗时 `ensure_elapsed_ms` 以及服务启动耗时 `service_startup_elapsed_ms` 均来自服务端消费的本地上下文，不是任意客户端 header 自报。
+
+`startup_elapsed_ms` 与 `ensure_elapsed_ms` 的区别：
+
+- `startup_elapsed_ms` 是服务进程从启动到 ready 的耗时；`warm` 时它是当前复用服务当初启动的耗时，不是本次握手耗时。
+- `ensure_elapsed_ms` 是本次 `ensure-running` 从入口到服务身份验证成功并准备返回结果的完整墙钟耗时，同时覆盖 `cold` 与 `warm`。
+
+如果上下文缺失、过期、格式非法、服务实例身份（PID + `ready_at`）不匹配、删除/claim 失败或已被消费，服务端不会写入可信 cold/warm 字段，也不会影响 API 状态码、confirmation、Consent Invariant 或录制结果；录制 intent 仍会正常进入原有确认路径。消费失败时，trace 中可能仅出现 `ensure_context_status`（值为 `missing`、`invalid`、`expired`、`instance_mismatch`、`reused` 或 `unavailable` 之一），且不含敏感路径或异常全文。同一 ID 并发或重复消费时，只有一个 trace 能获得 `consumed` 与可信 startup 字段，其余 trace 的 `ensure_context_status` 会表现为 `reused` 或 `missing`。
+
+上下文文件写入采用同目录随机临时文件 + 原子落位，异常路径会清理临时文件；文件与进程内消费 tombstone 的默认 TTL 均为 5 分钟，并受数量上限约束，不会随历史消费次数无限增长。`ensure-running` 失败结果不会输出 `startup_kind`、`ensure_elapsed_ms`、`ensure_context_id`、`ensure_context_header`、`ensure_context_available` 等字段。
+
+可信上下文字段会以顶层可选字段形式出现在该 trace 的后续事件中：
+
+- `startup_kind`: `cold|warm`
+- `ensure_elapsed_ms`: 本次 ensure-running 握手耗时（毫秒）
+- `service_startup_elapsed_ms`: 服务启动耗时（毫秒；warm 时为当初启动耗时）
+- `ensure_context_status`: `consumed` 或失败原因枚举
+
+这些字段不会出现在 `client_hints` 中；原始 `ensure_context_id`、上下文文件路径、ready 文件内容和 header 原文均不会进入 performance JSONL 或审计日志。
 
 ## CLI 工具（推荐启动方式）
 
@@ -104,7 +138,12 @@ AgentRecorder.Cli.exe ensure-running [options]
   "data_dir": "C:\\...\\.local-data",
   "ready_file": "C:\\...\\runtime\\ready.json",
   "api_key_file": "C:\\...\\config\\api-key.txt",
-  "startup_elapsed_ms": 850
+  "startup_elapsed_ms": 850,
+  "startup_kind": "warm",
+  "ensure_elapsed_ms": 120,
+  "ensure_context_id": "ensure_0123456789abcdef0123456789abcdef",
+  "ensure_context_header": "X-Agent-Recorder-Ensure-Context",
+  "ensure_context_available": true
 }
 ```
 
