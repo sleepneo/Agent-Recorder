@@ -101,7 +101,8 @@ internal static class Program
         var dataDir = DataDirResolver.Resolve();
         var perfTracer = new RecordingPerformanceTracer(dataDir);
 
-        var engine = new RecordingEngine(audit, perfTracer);
+        var bundleGenerator = new FfmpegRecordingBundleGenerator();
+        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator);
         var tray = new TrayContext(engine, audit, perfTracer);
         engine.SetTray(tray);
 

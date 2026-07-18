@@ -84,6 +84,7 @@ POST /api/v1/recordings/quick
 | 自启管理 | 已实现 | CLI 支持当前用户级 autostart |
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
+| 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 音频录制 | 未实现 | 当前版本暂不包含音频 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 

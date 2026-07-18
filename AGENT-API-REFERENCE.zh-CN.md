@@ -1234,7 +1234,123 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
-## 10. 嵌套录制
+## 10. 结构化录制产物（Recording Bundle）
+
+成功的 FFmpeg MP4 录制完成后，会在视频文件旁自动生成结构化产物包。例如 `D:\Videos\demo.mp4` 对应：
+
+```text
+D:\Videos\demo.bundle\
+  metadata.json
+  thumbnail.jpg
+  first_frame.png
+  last_frame.png
+  marks.json
+```
+
+bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `completed`，原始 MP4 仍是主产物。
+
+所有录制资源响应现在都包含顶层 `bundle` 对象：
+
+```json
+{
+  "recording_id": "rec_xxx",
+  "status": "completed",
+  "bundle": {
+    "bundle_version": 1,
+    "status": "ready",
+    "path": "D:\\Videos\\demo.bundle",
+    "contents": [
+      { "name": "metadata.json", "media_type": "application/json", "size_bytes": 1234 },
+      { "name": "thumbnail.jpg", "media_type": "image/jpeg", "size_bytes": 4567 },
+      { "name": "first_frame.png", "media_type": "image/png", "size_bytes": 8901 },
+      { "name": "last_frame.png", "media_type": "image/png", "size_bytes": 9012 },
+      { "name": "marks.json", "media_type": "application/json", "size_bytes": 120 }
+    ],
+    "error_code": null
+  }
+}
+```
+
+`bundle.status` 取值：
+
+| 状态 | 说明 |
+| --- | --- |
+| `pending` | 录制尚未成功完成。`path` 为 `null`，`contents` 为空。 |
+| `generating` | 主视频已通过校验，正在生成五件套。 |
+| `ready` | 五件套已生成并原子发布。`path` 指向 bundle 目录。 |
+| `failed` | 录制成功后 bundle 生成失败。`error_code` 为稳定错误码。 |
+| `not_applicable` | 录制失败、是 WGC still-frame PNG，或未启用 bundle generator。 |
+
+稳定错误码：
+
+| 错误码 | 说明 |
+| --- | --- |
+| `bundle_already_exists` | 目标 bundle 目录已存在。 |
+| `bundle_hash_failed` | 主视频 SHA-256 计算失败。 |
+| `bundle_frame_extract_failed` | FFmpeg 抽帧失败或超时。 |
+| `bundle_frame_output_invalid` | 抽出的图片缺失或签名无效。 |
+| `bundle_metadata_write_failed` | 无法写入 `metadata.json`。 |
+| `bundle_marks_write_failed` | 无法写入 `marks.json`。 |
+| `bundle_publish_failed` | 从临时目录原子发布失败。 |
+| `bundle_generation_failed` | 其他意外生成失败。 |
+
+### `metadata.json`
+
+```json
+{
+  "bundle_version": 1,
+  "recording_id": "rec_xxx",
+  "confirmation_id": "conf_xxx",
+  "generated_at": "2026-07-18T12:34:56.789Z",
+  "source": {
+    "type": "region",
+    "title": "region:Display 1",
+    "coordinate_space": "virtual_screen",
+    "bounds": { "x": 100, "y": 200, "width": 1280, "height": 720 }
+  },
+  "recording": {
+    "started_at": "2026-07-18T12:34:00.000Z",
+    "completed_at": "2026-07-18T12:34:30.100Z",
+    "requested_duration_seconds": 30,
+    "actual_duration_seconds": 30.1,
+    "fps": 30,
+    "backend": "ffmpeg-region",
+    "stop_reason": "duration_reached",
+    "audio_microphone": false,
+    "nested_role": "none",
+    "nested_session_id": null,
+    "parent_recording_id": null
+  },
+  "media": {
+    "path": "D:\\Videos\\demo.mp4",
+    "file_name": "demo.mp4",
+    "container": "mp4",
+    "codec": "h264",
+    "width": 1280,
+    "height": 720,
+    "size_bytes": 1234567,
+    "sha256": "64-character-lowercase-hex"
+  },
+  "audit_correlation": {
+    "recording_id": "rec_xxx",
+    "confirmation_id": "conf_xxx"
+  }
+}
+```
+
+### `marks.json`
+
+当前仅定义版本化空结构，`marks` 数组为空，待后续实现鼠标/键盘标记后填充。
+
+```json
+{
+  "bundle_version": 1,
+  "recording_id": "rec_xxx",
+  "marks": []
+}
+```
+
+## 11. 嵌套录制
 
 外层录制：
 
@@ -1301,7 +1417,7 @@ X-Agent-Recorder-Key: <api-key>
 
 限制：当前 MVP 最多 2 个并发录制，即 1 个 outer + 1 个 inner。
 
-## 11. AI agent 推荐轮询策略
+## 12. AI agent 推荐轮询策略
 
 ### 长轮询优先（推荐）
 
@@ -1320,7 +1436,7 @@ X-Agent-Recorder-Key: <api-key>
 - `/confirmations/{id}`：每 500ms 轮询，最多 120 秒。
 - `/recordings/{id}`：每 1 秒轮询，直到完成或超时。
 
-## 12. 最小使用闭环
+## 13. 最小使用闭环
 
 1. AI agent 启动 `AgentRecorder.App.exe`。
 2. AI agent 等待 `/capabilities` 可用。

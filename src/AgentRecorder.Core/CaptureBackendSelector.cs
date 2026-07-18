@@ -64,4 +64,15 @@ public static class CaptureBackendSelector
 
         return "ffmpeg";
     }
+
+    /// <summary>
+    /// Returns true if the given backend type is one of the known FFmpeg MP4
+    /// capture backends that should produce a recording bundle.
+    /// </summary>
+    public static bool IsFfmpegMp4Backend(string backendType)
+    {
+        return string.Equals(backendType, "ffmpeg", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(backendType, "ffmpeg-region", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(backendType, "ffmpeg-window-region", StringComparison.OrdinalIgnoreCase);
+    }
 }

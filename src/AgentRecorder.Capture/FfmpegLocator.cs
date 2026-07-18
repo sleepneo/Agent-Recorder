@@ -6,8 +6,14 @@ namespace AgentRecorder.Capture;
 public static class FfmpegLocator
 {
     private const string FfmpegDirEnvVar = "AGENT_RECORDER_FFMPEG_DIR";
-    private static readonly Lazy<(string? ffmpeg, string? ffprobe, string? source)> _resolved =
+    private static Lazy<(string? ffmpeg, string? ffprobe, string? source)> _resolved =
         new(Resolve);
+
+    /// <summary>
+    /// Resets the cached resolution. Used by tests that modify the environment
+    /// variable or need deterministic locator behavior.
+    /// </summary>
+    internal static void Reset() => _resolved = new Lazy<(string?, string?, string?)>(Resolve);
 
     public static string FfmpegPath => _resolved.Value.ffmpeg ??
         throw new ApiException(500, "ENCODER_ERROR", "ffmpeg not found in any search path");

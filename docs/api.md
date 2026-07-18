@@ -823,6 +823,126 @@ POST /confirmations/{id}/approve
 
 returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
 
+## Recording Bundle
+
+Successful FFmpeg MP4 recordings automatically produce a structured bundle next
+to the video file. For `D:\Videos\demo.mp4` the bundle is:
+
+```text
+D:\Videos\demo.bundle\
+  metadata.json
+  thumbnail.jpg
+  first_frame.png
+  last_frame.png
+  marks.json
+```
+
+Bundle generation is best-effort: a failure does **not** change the recording
+state from `completed` to `failed`, and the original MP4 remains the primary
+output.
+
+All recording resource responses now include a top-level `bundle` object:
+
+```json
+{
+  "recording_id": "rec_xxx",
+  "status": "completed",
+  "bundle": {
+    "bundle_version": 1,
+    "status": "ready",
+    "path": "D:\\Videos\\demo.bundle",
+    "contents": [
+      { "name": "metadata.json", "media_type": "application/json", "size_bytes": 1234 },
+      { "name": "thumbnail.jpg", "media_type": "image/jpeg", "size_bytes": 4567 },
+      { "name": "first_frame.png", "media_type": "image/png", "size_bytes": 8901 },
+      { "name": "last_frame.png", "media_type": "image/png", "size_bytes": 9012 },
+      { "name": "marks.json", "media_type": "application/json", "size_bytes": 120 }
+    ],
+    "error_code": null
+  }
+}
+```
+
+Bundle status values:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Recording has not completed successfully yet. `path` is `null` and `contents` is empty. |
+| `generating` | Main video passed validation; the five files are being produced. |
+| `ready` | All five files were generated and atomically published. `path` points to the bundle directory. |
+| `failed` | Bundle generation failed after the recording succeeded. `error_code` contains a stable code. |
+| `not_applicable` | Recording failed, is a WGC still-frame PNG, or no bundle generator is enabled. |
+
+Stable bundle error codes:
+
+| Code | Meaning |
+| --- | --- |
+| `bundle_already_exists` | Target bundle directory already exists. |
+| `bundle_hash_failed` | SHA-256 hash of the main video could not be computed. |
+| `bundle_frame_extract_failed` | FFmpeg frame extraction failed or timed out. |
+| `bundle_frame_output_invalid` | Extracted image file is missing or has no valid signature. |
+| `bundle_metadata_write_failed` | Could not write `metadata.json`. |
+| `bundle_marks_write_failed` | Could not write `marks.json`. |
+| `bundle_publish_failed` | Atomic publish from the temp directory failed. |
+| `bundle_generation_failed` | Catch-all for unexpected generation failures. |
+
+### `metadata.json`
+
+```json
+{
+  "bundle_version": 1,
+  "recording_id": "rec_xxx",
+  "confirmation_id": "conf_xxx",
+  "generated_at": "2026-07-18T12:34:56.789Z",
+  "source": {
+    "type": "region",
+    "title": "region:Display 1",
+    "coordinate_space": "virtual_screen",
+    "bounds": { "x": 100, "y": 200, "width": 1280, "height": 720 }
+  },
+  "recording": {
+    "started_at": "2026-07-18T12:34:00.000Z",
+    "completed_at": "2026-07-18T12:34:30.100Z",
+    "requested_duration_seconds": 30,
+    "actual_duration_seconds": 30.1,
+    "fps": 30,
+    "backend": "ffmpeg-region",
+    "stop_reason": "duration_reached",
+    "audio_microphone": false,
+    "nested_role": "none",
+    "nested_session_id": null,
+    "parent_recording_id": null
+  },
+  "media": {
+    "path": "D:\\Videos\\demo.mp4",
+    "file_name": "demo.mp4",
+    "container": "mp4",
+    "codec": "h264",
+    "width": 1280,
+    "height": 720,
+    "size_bytes": 1234567,
+    "sha256": "64-character-lowercase-hex"
+  },
+  "audit_correlation": {
+    "recording_id": "rec_xxx",
+    "confirmation_id": "conf_xxx"
+  }
+}
+```
+
+### `marks.json`
+
+The marks file currently defines the versioned schema only; the `marks` array
+is empty until mouse/keyboard mark support is implemented.
+
+```json
+{
+  "bundle_version": 1,
+  "recording_id": "rec_xxx",
+  "marks": []
+}
+```
+
 ## Common Error Codes
 
 | Code | Meaning |

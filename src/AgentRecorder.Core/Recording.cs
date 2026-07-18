@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using AgentRecorder.Capture;
 namespace AgentRecorder.Core;
 public sealed class Recording
@@ -41,4 +42,16 @@ public sealed class Recording
     public string? NestedSessionId { get; set; }
     public string? ParentRecordingId { get; set; }
     public bool IsNestedParent { get; set; }
+
+    /// <summary>
+    /// Current bundle snapshot exposed to the API. Starts as pending and is
+    /// atomically replaced as the bundle moves through generating/ready/failed.
+    /// </summary>
+    public RecordingBundleSnapshot BundleSnapshot { get; set; } = RecordingBundleSnapshot.Pending();
+
+    /// <summary>
+    /// Ensures bundle generation is started at most once, even if
+    /// Stop/natural-exit races occur.
+    /// </summary>
+    internal int BundleGenerationStarted;
 }

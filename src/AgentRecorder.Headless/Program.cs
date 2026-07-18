@@ -252,7 +252,8 @@ internal static class Program
         var perfTracer = new RecordingPerformanceTracer(_dataDir);
         _perfTracer = perfTracer;
 
-        var engine = new RecordingEngine(audit, perfTracer);
+        var bundleGenerator = new FfmpegRecordingBundleGenerator();
+        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 

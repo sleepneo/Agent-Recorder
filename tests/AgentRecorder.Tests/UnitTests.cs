@@ -11,8 +11,22 @@ using ApiException = AgentRecorder.Infrastructure.ApiException;
 
 namespace AgentRecorder.Tests;
 
-public class FfmpegLocatorTests
+public class FfmpegLocatorTests : IDisposable
 {
+    private readonly string? _originalEnvDir;
+
+    public FfmpegLocatorTests()
+    {
+        _originalEnvDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR");
+        FfmpegLocator.Reset();
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR", _originalEnvDir);
+        FfmpegLocator.Reset();
+    }
+
     [Fact]
     public void FfmpegPath_WhenEnvVarSet_PointsToEnvPath()
     {
@@ -21,24 +35,19 @@ public class FfmpegLocatorTests
         if (!File.Exists(Path.Combine(envDir, "ffmpeg.exe"))) return; // skip if not present
 
         Environment.SetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR", envDir);
-        try
-        {
-            // Act: FfmpegLocator resolves from env var
-            var path = FfmpegLocator.FfmpegPath;
-            var probe = FfmpegLocator.FfprobePath;
-            var source = FfmpegLocator.Source;
+        FfmpegLocator.Reset();
 
-            // Assert: paths are non-null and from env var
-            Assert.NotNull(path);
-            Assert.NotNull(probe);
-            Assert.Contains("env", source ?? "");
-            Assert.EndsWith("ffmpeg.exe", path);
-            Assert.EndsWith("ffprobe.exe", probe);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR", null);
-        }
+        // Act: FfmpegLocator resolves from env var
+        var path = FfmpegLocator.FfmpegPath;
+        var probe = FfmpegLocator.FfprobePath;
+        var source = FfmpegLocator.Source;
+
+        // Assert: paths are non-null and from env var
+        Assert.NotNull(path);
+        Assert.NotNull(probe);
+        Assert.Contains("env", source ?? "");
+        Assert.EndsWith("ffmpeg.exe", path);
+        Assert.EndsWith("ffprobe.exe", probe);
     }
 
     [Fact]
@@ -49,7 +58,8 @@ public class FfmpegLocatorTests
         if (!File.Exists(Path.Combine(toolsBin, "ffmpeg.exe"))) return; // skip if not present
 
         // Clear env var to force fallback
-        Environment.SetEnvironmentVariable("AGENT_RECOLDER_FFMPEG_DIR", null);
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR", null);
+        FfmpegLocator.Reset();
 
         // Act: resolve
         var path = FfmpegLocator.FfmpegPath;

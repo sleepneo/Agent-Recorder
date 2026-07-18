@@ -81,6 +81,7 @@ Agents should use the paths returned by `ensure-running` or
   remains best-effort across Windows and DWM variants.
 - User-level autostart controls and FFmpeg prewarm support.
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
+- Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
 - Local audit log and MP4 output.
 
 ## Documentation

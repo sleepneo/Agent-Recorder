@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
@@ -19,6 +20,7 @@ public sealed class RecordingEngine
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
     private readonly AuditLogger _audit;
     private readonly IPerformanceTracer _tracer;
+    private readonly IRecordingBundleGenerator? _bundleGenerator;
     private readonly object _lock = new();
     private ITrayContext? _tray;
 
@@ -42,10 +44,11 @@ public sealed class RecordingEngine
     /// </summary>
     internal TimeSpan ConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
-    public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null)
+    public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null, IRecordingBundleGenerator? bundleGenerator = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
+        _bundleGenerator = bundleGenerator;
     }
 
     public void SetTray(ITrayContext tray) => _tray = tray;
@@ -144,6 +147,17 @@ public sealed class RecordingEngine
     private static bool IsTerminalState(RecState state) =>
         state is RecState.completed or RecState.failed or RecState.cancelled
             or RecState.rejected or RecState.expired;
+
+    /// <summary>
+    /// Sets the bundle snapshot to not_applicable for recordings that did not
+    /// successfully complete with a bundle-eligible FFmpeg MP4. Called on every
+    /// non-success terminal transition so a recording can never end with
+    /// bundle.status=pending.
+    /// </summary>
+    private static void MarkBundleNotApplicable(Recording rec)
+    {
+        rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
+    }
 
     public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray, string? traceId = null, string? endpoint = null)
     {
@@ -408,6 +422,7 @@ public sealed class RecordingEngine
                         // override failed, not a bypass of the atomic decision gate.
                         conf.Status = "rejected";
                         rec.State = RecState.rejected;
+                        MarkBundleNotApplicable(rec);
                         BumpStateVersion();
                         _audit.Log("confirmation.output_directory_rejected", new
                         {
@@ -438,6 +453,7 @@ public sealed class RecordingEngine
                         return;
 
                     rec.State = RecState.rejected;
+                    MarkBundleNotApplicable(rec);
                     BumpStateVersion();
                     _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
                     _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
@@ -454,6 +470,7 @@ public sealed class RecordingEngine
                 recording_id = rec.Id,
                 confirmation_id = conf.Id,
                 summary = summaryWithMeta,
+                bundle = BundleObj(rec),
                 performance_trace_id = traceId
             };
         }
@@ -466,6 +483,7 @@ public sealed class RecordingEngine
                 status = "failed",
                 error = rec.Error,
                 expected_output = rec.OutputPath,
+                bundle = BundleObj(rec),
                 performance_trace_id = traceId
             };
         }
@@ -475,6 +493,7 @@ public sealed class RecordingEngine
         {
             recording_id = rec.Id, status = "recording",
             started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
+            bundle = BundleObj(rec),
             performance_trace_id = traceId
         };
     }
@@ -551,6 +570,7 @@ public sealed class RecordingEngine
             return true;
 
         rec.State = RecState.failed;
+        MarkBundleNotApplicable(rec);
         rec.Error = preflight.Message;
         rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
         BumpStateVersion();
@@ -689,6 +709,7 @@ public sealed class RecordingEngine
             // Backend.Start() threw before any terminal state was reached:
             // transition to failed with a single terminal event and one user error.
             rec.State = RecState.failed;
+            MarkBundleNotApplicable(rec);
             rec.CompletedAtUtc = DateTime.UtcNow;
             BumpStateVersion();
             rec.Error = ex.Message;
@@ -708,6 +729,7 @@ public sealed class RecordingEngine
 
     private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
+        RecordingBundleRequest? bundleRequest = null;
         lock (rec)
         {
             if (rec.IsFinalized)
@@ -800,6 +822,15 @@ public sealed class RecordingEngine
             {
                 if (natural)
                     rec.StopReason = "duration_reached";
+
+                // Decide bundle eligibility and snapshot BEFORE publishing the completed
+                // state. Long-polling waiters must never observe completed + pending.
+                bool bundleEligible = TryPrepareBundleGeneration(rec, meta, out var req);
+                bundleRequest = req;
+                rec.BundleSnapshot = bundleEligible
+                    ? RecordingBundleSnapshot.Generating(DeriveBundlePath(req!.MediaPath))
+                    : RecordingBundleSnapshot.NotApplicable();
+
                 rec.State = RecState.completed;
                 BumpStateVersion();
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "completed", stopReason: rec.StopReason);
@@ -823,6 +854,7 @@ public sealed class RecordingEngine
                 if (natural)
                     rec.StopReason = "unexpected_exit";
                 rec.State = RecState.failed;
+                rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 BumpStateVersion();
                 rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
                 var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
@@ -846,7 +878,130 @@ public sealed class RecordingEngine
             }
         }
 
+        if (bundleRequest != null)
+        {
+            _ = Task.Run(() => RunBundleGenerationAsync(rec, bundleRequest));
+        }
+
         tray.SetIdle(rec);
+    }
+
+    private static string DeriveBundlePath(string mediaPath)
+    {
+        string dir = Path.GetDirectoryName(mediaPath) ?? "";
+        string stem = Path.GetFileNameWithoutExtension(mediaPath);
+        return Path.Combine(dir, stem + ".bundle");
+    }
+
+    private bool TryPrepareBundleGeneration(Recording rec, OutputMeta meta, out RecordingBundleRequest request)
+    {
+        request = null!;
+
+        // Bundle is only for successful FFmpeg MP4 recordings.
+        bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
+                               string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
+        bool isFfmpegMp4 = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) &&
+                           string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
+
+        if (_bundleGenerator == null || isWgcStillFrame || !isFfmpegMp4)
+            return false;
+
+        // Exactly-once guard: natural exit and Stop() may both reach here.
+        if (Interlocked.CompareExchange(ref rec.BundleGenerationStarted, 1, 0) != 0)
+            return false;
+
+        request = new RecordingBundleRequest(
+            recordingId: rec.Id,
+            confirmationId: rec.ConfirmationId,
+            sourceType: rec.SourceType,
+            sourceTitle: rec.SourceTitle,
+            sourceBounds: rec.Config.Bounds,
+            coordinateSpace: "virtual_screen",
+            startedAtUtc: rec.StartedAtUtc,
+            completedAtUtc: rec.CompletedAtUtc ?? DateTime.UtcNow,
+            requestedDurationSeconds: rec.DurationSeconds,
+            actualDurationSeconds: meta.DurationSeconds,
+            fps: meta.Fps == 0 ? rec.Config.Fps : meta.Fps,
+            backend: rec.BackendType,
+            stopReason: rec.StopReason ?? "duration_reached",
+            audioMicrophone: rec.Microphone,
+            nestedRole: rec.NestedRole,
+            nestedSessionId: rec.NestedSessionId,
+            parentRecordingId: rec.ParentRecordingId,
+            mediaPath: meta.OutputPath ?? rec.OutputPath,
+            container: meta.Container ?? "mp4",
+            codec: meta.Codec ?? "h264",
+            width: meta.Width,
+            height: meta.Height);
+        return true;
+    }
+
+    private async Task RunBundleGenerationAsync(Recording rec, RecordingBundleRequest request)
+    {
+        RecordingBundleGenerationResult result;
+        try
+        {
+            result = await _bundleGenerator!.GenerateAsync(request);
+        }
+        catch (OperationCanceledException)
+        {
+            result = RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.GenerationFailed, "cancelled");
+        }
+        catch (Exception ex)
+        {
+            result = RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.GenerationFailed, ex.Message);
+        }
+
+        lock (rec)
+        {
+            rec.BundleSnapshot = result.Success
+                ? RecordingBundleSnapshot.Ready(result.BundlePath!, BuildBundleContents(result.BundlePath!))
+                : RecordingBundleSnapshot.Failed(DeriveBundlePath(request.MediaPath), result.ErrorCode!);
+        }
+        BumpStateVersion();
+
+        if (result.Success)
+        {
+            LogBundleReady(rec, result.BundlePath!);
+        }
+        else
+        {
+            LogBundleFailed(rec, result.ErrorCode!);
+        }
+    }
+
+    private static IReadOnlyList<RecordingBundleContentItem> BuildBundleContents(string bundlePath)
+    {
+        var contents = new List<RecordingBundleContentItem>
+        {
+            new("metadata.json", "application/json", SafeSize(Path.Combine(bundlePath, "metadata.json"))),
+            new("thumbnail.jpg", "image/jpeg", SafeSize(Path.Combine(bundlePath, "thumbnail.jpg"))),
+            new("first_frame.png", "image/png", SafeSize(Path.Combine(bundlePath, "first_frame.png"))),
+            new("last_frame.png", "image/png", SafeSize(Path.Combine(bundlePath, "last_frame.png"))),
+            new("marks.json", "application/json", SafeSize(Path.Combine(bundlePath, "marks.json")))
+        };
+        return contents;
+    }
+
+    private void LogBundleReady(Recording rec, string bundlePath)
+    {
+        _audit.Log("recording.bundle_ready", new
+        {
+            recording_id = rec.Id,
+            confirmation_id = rec.ConfirmationId ?? "",
+            bundle_path = bundlePath
+        });
+    }
+
+    private void LogBundleFailed(Recording rec, string errorCode)
+    {
+        DiagnosticLog.Write("recording.bundle_failed", rec.Id, errorCode);
+        _audit.Log("recording.bundle_failed", new
+        {
+            recording_id = rec.Id,
+            confirmation_id = rec.ConfirmationId ?? "",
+            error_code = errorCode
+        });
     }
 
     public object Stop(string id, string reason)
@@ -891,7 +1046,8 @@ public sealed class RecordingEngine
             recording_id = rec.Id,
             status = rec.State.ToString(),
             stop_reason = rec.StopReason ?? "",
-            output = OutputObj(rec, m)
+            output = OutputObj(rec, m),
+            bundle = BundleObj(rec)
         };
     }
 
@@ -900,7 +1056,8 @@ public sealed class RecordingEngine
         recording_id = rec.Id,
         status = rec.State.ToString(),
         stop_reason = rec.StopReason ?? "",
-        output = (object?)null
+        output = (object?)null,
+        bundle = BundleObj(rec)
     };
 
     public object GetStatus(string id)
@@ -948,7 +1105,8 @@ public sealed class RecordingEngine
                 session_id = rec.NestedSessionId ?? "",
                 parent_recording_id = rec.ParentRecordingId ?? "",
                 is_parent = rec.IsNestedParent
-            }
+            },
+            bundle = BundleObj(rec)
         };
     }
 
@@ -976,7 +1134,8 @@ public sealed class RecordingEngine
                 session_id = rec.NestedSessionId ?? "",
                 parent_recording_id = rec.ParentRecordingId ?? "",
                 is_parent = rec.IsNestedParent
-            }
+            },
+            bundle = BundleObj(rec)
         };
     }
 
@@ -1118,7 +1277,8 @@ public sealed class RecordingEngine
                 IsParent = rec.IsNestedParent
             },
             Wait = new { RequestedMs = requestedMs, ElapsedMs = elapsedMs, TimedOut = timedOut },
-            NextPollHintMs = nextPollHintMs
+            NextPollHintMs = nextPollHintMs,
+            Bundle = BundleObj(rec)
         };
     }
 
@@ -1130,7 +1290,8 @@ public sealed class RecordingEngine
         output_path = r.OutputPath,
         nested_role = r.NestedRole ?? "none",
         parent_recording_id = r.ParentRecordingId ?? "",
-        nested_session_id = r.NestedSessionId ?? ""
+        nested_session_id = r.NestedSessionId ?? "",
+        bundle = BundleObj(r)
     });
 
     private void TrySetIdleOnAllDone(ITrayContext tray)
@@ -1175,7 +1336,10 @@ public sealed class RecordingEngine
             return;
 
         if (rec.State == RecState.pending_confirmation)
+        {
             rec.State = RecState.expired;
+            MarkBundleNotApplicable(rec);
+        }
         BumpStateVersion();
         _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
         _tracer.ConfirmationExpired(traceId, rec.Id, conf.Id);
@@ -1226,6 +1390,24 @@ public sealed class RecordingEngine
             backend = rec.BackendType,
             source_type = rec.SourceType,
             warnings
+        };
+    }
+
+    private static object BundleObj(Recording rec)
+    {
+        var snapshot = rec.BundleSnapshot;
+        return new
+        {
+            bundle_version = RecordingBundleSnapshot.BundleVersion,
+            status = snapshot.Status,
+            path = snapshot.Path,
+            contents = snapshot.Contents.Select(c => new
+            {
+                name = c.Name,
+                media_type = c.MediaType,
+                size_bytes = c.SizeBytes
+            }).ToArray(),
+            error_code = (object?)snapshot.ErrorCode ?? null
         };
     }
 
