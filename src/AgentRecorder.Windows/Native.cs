@@ -52,6 +52,16 @@ public static class Native
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int GetDpiForWindow(IntPtr hwnd);
 
+    public const uint WDA_NONE = 0x00000000;
+    public const uint WDA_MONITOR = 0x00000001;
+    public const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint dwAffinity);
+
     /// <summary>
     /// Get the current process session ID.
     /// </summary>

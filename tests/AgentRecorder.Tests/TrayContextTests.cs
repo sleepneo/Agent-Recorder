@@ -50,13 +50,49 @@ public class TrayContextTests : IDisposable
         return (T)field!.GetValue(obj)!;
     }
 
-    private static TrayContext CreateContext(UiLanguage language, AuditLogger? audit = null)
+    private static TrayContext CreateContext(UiLanguage language, AuditLogger? audit = null, IIndicatorPresenter? indicatorPresenter = null)
     {
         var a = audit ?? new CaptureAuditLogger();
         var engine = new RecordingEngine(a);
-        var ctx = new TrayContext(engine, a, FakeGlobalStopHotkeyFactory.Create(), uiTextProvider: new UiTextProvider(language));
+        var ctx = new TrayContext(engine, a, FakeGlobalStopHotkeyFactory.Create(), uiTextProvider: new UiTextProvider(language), indicatorPresenter: indicatorPresenter);
         engine.SetTray(ctx);
         return ctx;
+    }
+
+    private static Recording MakeRecording(
+        (int x, int y, int w, int h) bounds,
+        string? nestedRole = null,
+        string? parentRecordingId = null,
+        string? nestedSessionId = null)
+    {
+        return new Recording
+        {
+            SourceType = "region",
+            StartedAtUtc = DateTime.UtcNow,
+            NestedRole = nestedRole,
+            ParentRecordingId = parentRecordingId,
+            NestedSessionId = nestedSessionId,
+            Config = new CaptureConfig
+            {
+                SourceKind = "region",
+                Bounds = bounds,
+                OutputPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"test-tray-{Guid.NewGuid():N}.mp4")
+            }
+        };
+    }
+
+    private sealed class FakeIndicatorPresenter : IIndicatorPresenter
+    {
+        public Recording? LastRecording { get; private set; }
+        public Recording? LastParent { get; private set; }
+        public string? LastFallbackReason { get; private set; }
+
+        public void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null)
+        {
+            LastRecording = recording;
+            LastParent = parent;
+            LastFallbackReason = parentFallbackReason;
+        }
     }
 
     private static void SetLanguage(TrayContext ctx, UiLanguage language)
@@ -242,6 +278,103 @@ public class TrayContextTests : IDisposable
             Assert.NotNull(cancelButton);
             Assert.Equal("Confirm (Enter)", confirmButton!.Text);
             Assert.Equal("Cancel (Esc)", cancelButton!.Text);
+        });
+    }
+
+    [Fact]
+    public void SetRecording_InnerWithActiveOuter_PassesParentToPresenter()
+    {
+        RunOnSta(() =>
+        {
+            var presenter = new FakeIndicatorPresenter();
+            using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
+
+            var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, "session-a");
+
+            ctx.SetRecording(outer);
+            ctx.SetRecording(inner);
+
+            Assert.Same(inner, presenter.LastRecording);
+            Assert.Same(outer, presenter.LastParent);
+            Assert.Null(presenter.LastFallbackReason);
+        });
+    }
+
+    [Fact]
+    public void SetRecording_RegularRecording_PassesNullParentAndNullReason()
+    {
+        RunOnSta(() =>
+        {
+            var presenter = new FakeIndicatorPresenter();
+            using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
+
+            var rec = MakeRecording((100, 100, 800, 600));
+            ctx.SetRecording(rec);
+
+            Assert.Same(rec, presenter.LastRecording);
+            Assert.Null(presenter.LastParent);
+            Assert.Null(presenter.LastFallbackReason);
+        });
+    }
+
+    [Fact]
+    public void SetRecording_InnerMissingParent_PassesNullAndParentMissingReason()
+    {
+        RunOnSta(() =>
+        {
+            var presenter = new FakeIndicatorPresenter();
+            using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
+
+            var inner = MakeRecording((200, 200, 400, 300), "inner", "missing-id", "session-a");
+            ctx.SetRecording(inner);
+
+            Assert.Same(inner, presenter.LastRecording);
+            Assert.Null(presenter.LastParent);
+            Assert.Equal("parent_missing", presenter.LastFallbackReason);
+        });
+    }
+
+    [Fact]
+    public void SetRecording_InnerParentNotOuter_PassesNullAndParentNotOuterReason()
+    {
+        RunOnSta(() =>
+        {
+            var presenter = new FakeIndicatorPresenter();
+            using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
+
+            var notOuter = MakeRecording((0, 0, 1000, 800), "inner", nestedSessionId: "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", notOuter.Id, "session-a");
+
+            ctx.SetRecording(notOuter);
+            ctx.SetRecording(inner);
+
+            Assert.Same(inner, presenter.LastRecording);
+            Assert.Null(presenter.LastParent);
+            Assert.Equal("parent_not_outer", presenter.LastFallbackReason);
+        });
+    }
+
+    [Theory]
+    [InlineData("session-a", "session-b")]
+    [InlineData("session-a", null)]
+    [InlineData(null, "session-a")]
+    public void SetRecording_InnerSessionMismatch_PassesNullAndSessionMismatchReason(string? innerSession, string? outerSession)
+    {
+        RunOnSta(() =>
+        {
+            var presenter = new FakeIndicatorPresenter();
+            using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
+
+            var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: outerSession);
+            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, innerSession);
+
+            ctx.SetRecording(outer);
+            ctx.SetRecording(inner);
+
+            Assert.Same(inner, presenter.LastRecording);
+            Assert.Null(presenter.LastParent);
+            Assert.Equal("session_mismatch", presenter.LastFallbackReason);
         });
     }
 }

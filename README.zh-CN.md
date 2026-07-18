@@ -15,6 +15,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 - 常见录屏意图优先使用 `POST /api/v1/recordings/quick`，减少 agent 往返。
 - Agent Recorder 保留本地安全边界：每次录制都需要用户在本机确认，AI agent 不能静默录屏。
 - 支持嵌套录制，外层视频可以记录 AI agent 发起内层录制的过程。
+- 录制控件采用角色感知的捕获可见性：默认 FFmpeg 路径下普通录制画面保持干净，嵌套外层可记录内层录制控件和操作过程；跨 Windows/DWM 环境的捕获排除属于 best-effort 行为。
 
 ## 人类用户如何使用
 
@@ -75,12 +76,14 @@ POST /api/v1/recordings/quick
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示红色边框和计时标签，支持 outer/inner |
 | 本地停止控制 | 已实现 | 每条录制有独立悬浮停止按钮；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |
+| 自有 UI 隔离 | 已实现 | 默认 FFmpeg 路径已通过真实桌面验收；普通控件尽力排除，安全的 inner 控件可由 outer 记录 |
 | 双语与高 DPI | 已实现 | 本地选区、确认、REC、停止控件支持中文/英文，并适配 100%-200% DPI |
 | 阻止 HTTP 自批准 | 已实现 | `/confirmations/{id}/approve` 返回 405 |
 | API Key | 已实现 | 状态变更接口需要 `X-Agent-Recorder-Key` |
 | 审计日志 | 已实现 | 录制生命周期写入本地 JSONL 日志 |
 | 自启管理 | 已实现 | CLI 支持当前用户级 autostart |
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
+| 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 音频录制 | 未实现 | 当前版本暂不包含音频 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 

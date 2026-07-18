@@ -57,12 +57,11 @@ internal static class RecordingStopControlLayout
         var stopText = text.Get("StopControl_Button_Stop");
         var stoppingText = text.Get("StopControl_Button_Stopping");
 
-        using var bitmap = new Bitmap(1, 1);
-        bitmap.SetResolution(testDpi, testDpi);
-        using var g = Graphics.FromImage(bitmap);
-
-        var stopSize = TextRenderer.MeasureText(g, stopText, font, Size.Empty, TextFormatFlags.SingleLine);
-        var stoppingSize = TextRenderer.MeasureText(g, stoppingText, font, Size.Empty, TextFormatFlags.SingleLine);
+        // Measure at the current process DPI so we can scale the entire result to the
+        // requested test DPI. This avoids relying on a Graphics object's DPI being honoured
+        // by TextRenderer and keeps the matrix deterministic across test machines.
+        var stopSize = TextRenderer.MeasureText(stopText, font, Size.Empty, TextFormatFlags.SingleLine);
+        var stoppingSize = TextRenderer.MeasureText(stoppingText, font, Size.Empty, TextFormatFlags.SingleLine);
 
         int width = Math.Max(stopSize.Width, stoppingSize.Width);
         int height = Math.Max(stopSize.Height, stoppingSize.Height);
@@ -70,8 +69,11 @@ internal static class RecordingStopControlLayout
         int horizontalInset = (int)Math.Ceiling(HorizontalSafetyInsetLogical * scale);
         int verticalInset = (int)Math.Ceiling(VerticalSafetyInsetLogical * scale);
 
-        width += ButtonPadding.Horizontal + horizontalInset * 2;
-        height += ButtonPadding.Vertical + verticalInset * 2;
+        width = (int)Math.Ceiling(width * scale);
+        height = (int)Math.Ceiling(height * scale);
+
+        width += (int)Math.Ceiling(ButtonPadding.Horizontal * scale) + horizontalInset * 2;
+        height += (int)Math.Ceiling(ButtonPadding.Vertical * scale) + verticalInset * 2;
 
         return new Size(
             Math.Max(RecordingStopControlGeometry.DefaultButtonWidth, width),
@@ -274,14 +276,66 @@ internal static class RecordingStopControlGeometry
         string? nestedRole,
         Rectangle virtualScreen)
     {
+        return ComputeBounds(recordingBounds, controlSize, nestedRole, virtualScreen, parentBounds: null, mode: CaptureVisibilityMode.ExcludeFromCapture);
+    }
+
+    /// <summary>
+    /// Computes stop-control bounds with explicit parent bounds and capture-visibility mode.
+    /// In parent-visible mode the button must be placed strictly outside the inner capture
+    /// rectangle and strictly inside the parent capture rectangle.
+    /// </summary>
+    public static RecordingStopControlBounds ComputeBounds(
+        RecordingIndicatorBounds recordingBounds,
+        Size controlSize,
+        string? nestedRole,
+        Rectangle virtualScreen,
+        RecordingIndicatorBounds? parentBounds,
+        CaptureVisibilityMode mode)
+    {
+        if (mode == CaptureVisibilityMode.ParentVisible && parentBounds != null &&
+            string.Equals(nestedRole, "inner", StringComparison.OrdinalIgnoreCase))
+        {
+            var preferred = ComputeParentVisiblePreferredBounds(recordingBounds, parentBounds, controlSize);
+            if (preferred != null)
+            {
+                return preferred;
+            }
+        }
+
         var outer = ComputeBaseBounds(recordingBounds, controlSize, virtualScreen);
 
-        if (string.Equals(nestedRole, "inner", System.StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(nestedRole, "inner", StringComparison.OrdinalIgnoreCase))
         {
             return ComputeInnerBounds(outer, controlSize, virtualScreen);
         }
 
         return outer;
+    }
+
+    private static RecordingStopControlBounds? ComputeParentVisiblePreferredBounds(
+        RecordingIndicatorBounds inner,
+        RecordingIndicatorBounds parent,
+        Size controlSize)
+    {
+        // Candidate margins: top, right, bottom, left of the inner rectangle, inside the parent.
+        // Prefer right, then bottom, then left, then top for consistency with the non-parent-visible path.
+        var candidates = new (int x, int y, int availableWidth, int availableHeight, string side)[]
+        {
+            (inner.X + inner.Width + OutsideMargin, inner.Y, parent.X + parent.Width - (inner.X + inner.Width) - OutsideMargin, inner.Height, "right"),
+            (inner.X, inner.Y + inner.Height + OutsideMargin, inner.Width, parent.Y + parent.Height - (inner.Y + inner.Height) - OutsideMargin, "bottom"),
+            (parent.X, inner.Y, inner.X - parent.X - OutsideMargin, inner.Height, "left"),
+            (inner.X, parent.Y, inner.Width, inner.Y - parent.Y - OutsideMargin, "top")
+        };
+
+        foreach (var (x, y, availableWidth, availableHeight, side) in candidates)
+        {
+            if (availableWidth >= controlSize.Width && availableHeight >= controlSize.Height)
+            {
+                return new RecordingStopControlBounds(x, y, controlSize.Width, controlSize.Height);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -310,6 +364,8 @@ internal static class RecordingStopControlGeometry
     /// If <paramref name="preferred"/> does not intersect any occupied bounds and lies inside the virtual
     /// screen, it is returned unchanged. Otherwise a stable ring search is performed around preferred
     /// using <c>width + OutsideMargin</c> and <c>height + OutsideMargin</c> as grid steps.
+    /// This overload permits a last-resort clamped position when no valid slot exists, keeping the
+    /// ordinary exclude-mode path robust on tiny or crowded screens.
     /// </summary>
     public static RecordingStopControlBounds ResolveCollision(
         RecordingStopControlBounds preferred,
@@ -319,11 +375,84 @@ internal static class RecordingStopControlGeometry
     {
         var occupied = occupiedBounds.ToList();
 
-        if (IsInside(preferred, virtualScreen) && !occupied.Any(o => Intersects(preferred, o)))
+        if (IsValid(preferred, virtualScreen, occupied, null, null))
         {
             return preferred;
         }
 
+        if (TryFindValidCandidate(preferred, controlSize, virtualScreen, occupied, null, null, out var candidate) && candidate != null)
+        {
+            return candidate;
+        }
+
+        // Last-resort deterministic return: clamp preferred to the virtual screen.
+        int clampedX = Math.Max(virtualScreen.X, Math.Min(preferred.X, virtualScreen.Right - controlSize.Width));
+        int clampedY = Math.Max(virtualScreen.Y, Math.Min(preferred.Y, virtualScreen.Bottom - controlSize.Height));
+        return new RecordingStopControlBounds(clampedX, clampedY, controlSize.Width, controlSize.Height);
+    }
+
+    /// <summary>
+    /// Resolves overlap while honoring optional geometric constraints. <paramref name="forbiddenZone"/>
+    /// defines a region the stop control must not intersect (e.g. the inner capture rectangle in
+    /// parent-visible mode). <paramref name="allowedZone"/> defines a region the stop control must be
+    /// fully contained within (e.g. the parent outer capture rectangle).
+    /// </summary>
+    /// <returns>
+    /// A valid position when one exists; <c>null</c> when no position satisfies all constraints.
+    /// Callers that need a guaranteed non-null result should use the unconstrained overload or handle
+    /// the failure by falling back to a different visibility mode.
+    /// </returns>
+    public static RecordingStopControlBounds? ResolveCollision(
+        RecordingStopControlBounds preferred,
+        Size controlSize,
+        Rectangle virtualScreen,
+        IEnumerable<RecordingStopControlBounds> occupiedBounds,
+        Rectangle? forbiddenZone,
+        Rectangle? allowedZone)
+    {
+        TryResolveCollision(preferred, controlSize, virtualScreen, occupiedBounds, forbiddenZone, allowedZone, out var bounds);
+        return bounds;
+    }
+
+    /// <summary>
+    /// Attempts to resolve overlap while honoring optional geometric constraints.
+    /// </summary>
+    /// <returns><c>true</c> if a position satisfying all constraints was found.</returns>
+    public static bool TryResolveCollision(
+        RecordingStopControlBounds preferred,
+        Size controlSize,
+        Rectangle virtualScreen,
+        IEnumerable<RecordingStopControlBounds> occupiedBounds,
+        Rectangle? forbiddenZone,
+        Rectangle? allowedZone,
+        out RecordingStopControlBounds? bounds)
+    {
+        var occupied = occupiedBounds.ToList();
+
+        if (IsValid(preferred, virtualScreen, occupied, forbiddenZone, allowedZone))
+        {
+            bounds = preferred;
+            return true;
+        }
+
+        if (TryFindValidCandidate(preferred, controlSize, virtualScreen, occupied, forbiddenZone, allowedZone, out bounds) && bounds != null)
+        {
+            return true;
+        }
+
+        bounds = null;
+        return false;
+    }
+
+    private static bool TryFindValidCandidate(
+        RecordingStopControlBounds preferred,
+        Size controlSize,
+        Rectangle virtualScreen,
+        List<RecordingStopControlBounds> occupied,
+        Rectangle? forbiddenZone,
+        Rectangle? allowedZone,
+        out RecordingStopControlBounds? candidate)
+    {
         int stepX = controlSize.Width + OutsideMargin;
         int stepY = controlSize.Height + OutsideMargin;
 
@@ -335,35 +464,58 @@ internal static class RecordingStopControlGeometry
         {
             foreach (var (dx, dy) in CollisionSearchDirections)
             {
-                var candidate = new RecordingStopControlBounds(
+                var ringCandidate = new RecordingStopControlBounds(
                     preferred.X + dx * ring * stepX,
                     preferred.Y + dy * ring * stepY,
                     controlSize.Width,
                     controlSize.Height);
 
-                if (IsInside(candidate, virtualScreen) && !occupied.Any(o => Intersects(candidate, o)))
+                if (IsValid(ringCandidate, virtualScreen, occupied, forbiddenZone, allowedZone))
                 {
-                    return candidate;
+                    candidate = ringCandidate;
+                    return true;
                 }
             }
         }
 
-        // Degenerate fallback: the virtual screen is too small for the number of buttons.
-        // Scan the top row left-to-right for any non-overlapping slot.
-        for (int x = virtualScreen.X; x + controlSize.Width <= virtualScreen.Right; x += stepX)
+        // Scan the allowed zone or virtual screen for any valid slot.
+        var scanArea = allowedZone ?? virtualScreen;
+        for (int y = scanArea.Y; y + controlSize.Height <= scanArea.Bottom; y += stepY)
         {
-            var fallback = new RecordingStopControlBounds(x, virtualScreen.Y, controlSize.Width, controlSize.Height);
-            if (IsInside(fallback, virtualScreen) && !occupied.Any(o => Intersects(fallback, o)))
+            for (int x = scanArea.X; x + controlSize.Width <= scanArea.Right; x += stepX)
             {
-                return fallback;
+                var fallback = new RecordingStopControlBounds(x, y, controlSize.Width, controlSize.Height);
+                if (IsValid(fallback, virtualScreen, occupied, forbiddenZone, allowedZone))
+                {
+                    candidate = fallback;
+                    return true;
+                }
             }
         }
 
-        // Last-resort deterministic return: clamp preferred to the screen. This may still overlap
-        // on artificially tiny screens, but it keeps the application running.
-        int clampedX = Math.Max(virtualScreen.X, Math.Min(preferred.X, virtualScreen.Right - controlSize.Width));
-        int clampedY = Math.Max(virtualScreen.Y, Math.Min(preferred.Y, virtualScreen.Bottom - controlSize.Height));
-        return new RecordingStopControlBounds(clampedX, clampedY, controlSize.Width, controlSize.Height);
+        candidate = null;
+        return false;
+    }
+
+    private static bool IsValid(
+        RecordingStopControlBounds candidate,
+        Rectangle virtualScreen,
+        List<RecordingStopControlBounds> occupied,
+        Rectangle? forbiddenZone,
+        Rectangle? allowedZone)
+    {
+        if (!IsInside(candidate, virtualScreen))
+            return false;
+        if (forbiddenZone.HasValue && candidate.ToRectangle().IntersectsWith(forbiddenZone.Value))
+            return false;
+        if (allowedZone.HasValue && !allowedZone.Value.Contains(candidate.ToRectangle()))
+            return false;
+        return !occupied.Any(o => Intersects(candidate, o));
+    }
+
+    private static Rectangle ToRectangle(this RecordingStopControlBounds b)
+    {
+        return new Rectangle(b.X, b.Y, b.Width, b.Height);
     }
 
     private static RecordingStopControlBounds ComputeBaseBounds(

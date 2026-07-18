@@ -63,7 +63,7 @@ X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
 
 `capture.first_frame_observed` 仅覆盖默认 FFmpeg 视频链路（`display`/`window`/`region`）。它会在 FFmpeg `-nostats -progress pipe:1` 输出报告 `frame >= 1`、`total_size > 0` 且进度组正常结束（`progress=continue` 或 `progress=end`）时产生一次。该事件证明“FFmpeg 已报告至少处理一个视频帧且输出流已有正字节数”，是“本地用户批准 → 首个可观测编码/复用进度”的时延上界，**不是**屏幕采集精确交付第一帧的时间、不是物理磁盘首帧写入时间、也不是 MP4 可播放或输出校验通过的证据。如果 FFmpeg 没有产生满足条件的 progress 组，该事件可能缺失。
 
-当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时、P50/P95 聚合以及 `/capabilities.perf_summary` **尚未实现**。
+当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时不在服务端测量；cold/warm 分组的 P50/P95 聚合已通过 `/capabilities.perf_summary` 暴露（详见下文“检查能力”一节）。
 
 `ensure-running` 的冷/热握手现在可以通过一次性上下文关联到录制 trace。CLI 成功完成 `ensure-running` 后，会在 `<data-dir>\runtime\ensure-contexts` 下原子创建一个短期上下文文件，并在 JSON 输出中返回：
 
@@ -324,6 +324,111 @@ GET /capabilities
 ```
 
 预热状态值：`not_started` | `running` | `completed` | `failed` | `skipped`
+
+### 性能摘要
+
+`/capabilities` 返回 `perf_summary` 字段，提供有界、只读的历史性能统计摘要。该数据属于诊断数据，不是审计日志，**不包含** trace ID、recording ID、confirmation ID、输出路径、API key、context ID 或 header 原文。
+
+只有消费了可信 `ensure-running` 上下文、且 `startup_kind` 为 `cold`/`warm`、`ensure_context_status=consumed`、`ensure_elapsed_ms` 非负的 trace 才会被分组统计；其余 trace 计入 `unclassified_trace_count`。
+
+```json
+{
+  "perf_summary": {
+    "schema_version": 1,
+    "status": "available",
+    "generated_at": "2026-07-18T00:00:00.000Z",
+    "window": {
+      "max_traces_per_group": 50,
+      "source": "local_rolling_jsonl"
+    },
+    "quality": {
+      "malformed_line_count": 0,
+      "unsupported_schema_count": 0,
+      "discarded_sample_count": 0,
+      "unclassified_trace_count": 3,
+      "reason_code": null
+    },
+    "groups": {
+      "cold": {
+        "trace_count": 4,
+        "quality": "preliminary",
+        "metrics": {
+          "ensure_running_ms": { "sample_count": 4, "p50": 730.0, "p95": 820.0 },
+          "service_startup_ms": { "sample_count": 4, "p50": 165.0, "p95": 180.0 },
+          "request_to_confirmation_shown_ms": { "sample_count": 4, "p50": 120.0, "p95": 150.0 },
+          "confirmation_shown_to_approved_ms": { "sample_count": 3, "p50": 250.0, "p95": 310.0 },
+          "approved_to_first_frame_progress_ms": { "sample_count": 4, "p50": 740.0, "p95": 810.0 },
+          "request_to_first_frame_progress_ms": { "sample_count": 4, "p50": 1120.0, "p95": 1280.0 }
+        }
+      },
+      "warm": {
+        "trace_count": 12,
+        "quality": "representative",
+        "metrics": {}
+      }
+    }
+  }
+}
+```
+
+状态值：
+
+- `available`：存在至少一条有效的 `cold` 或 `warm` trace，且本次刷新未发生读取边界、解析故障或数据丢弃。
+- `no_data`：perf 文件缺失/为空，或没有合格 trace，且本次刷新未发生故障。完整结构和零计数仍然返回。
+- `degraded`：读取/解析出现局部故障，或部分有效样本被丢弃，但仍返回已累积的部分统计。`reason_code` 为稳定枚举，不暴露异常文本、文件路径或任何 ID。
+
+状态优先级（从低到高）：`no_data` < `available` < `degraded`。只要本次刷新出现数据损失（读取边界、malformed line、unsupported schema、被丢弃的 context/event 样本），即使仍有有效 trace，也返回 `degraded`。
+
+读取边界与隐私：provider 以只读方式扫描 `<data-dir>\perf\recording-traces.jsonl` 及其滚动历史 `.1.jsonl`、`.2.jsonl`、`.3.jsonl`，并实施以下多维边界以防止单点大文件/畸形数据影响服务：
+
+| 边界 | 默认值 | 说明 |
+| --- | --- | --- |
+| 文件数量 | 4 | 当前 base 文件 + 最多 3 份历史滚动文件 |
+| 单文件字节 | 5 MiB | 按 UTF-8 字节计数，含换行符 |
+| 总字节 | 20 MiB | 跨文件累计 UTF-8 字节 |
+| distinct trace 数 | 10 000 | 按唯一 `trace_id` 计数，不是 event line 数 |
+| event line 数 | 100 000 | 跨文件累计原始行数 |
+| 单行长度 | 1 MiB | 按 UTF-8 字节限制单行，限制包含行正文及其终止符（LF、CRLF 或 CR）；末尾无换行的最后一行仅计算正文。文件起始的 UTF-8 BOM 不计入单行长度，但会计入单文件与总字节限制。超长行触发 `read_boundary_reached` 并停止扫描。无效 UTF-8 序列被安全处理。 |
+| 每组 trace | 50 | 每组 cold/warm 只保留最近 50 条 trace |
+
+到达任一读取边界后，扫描停止，但已经处理的有效 trace 和指标仍然保留并返回，`status` 为 `degraded`，`reason_code` 通常为 `read_boundary_reached`。边界值只通过 `window.max_traces_per_group` 等公开字段暴露，不返回绝对路径。
+
+重复事件选择：同一 trace 的同一事件在多个滚动文件中重复出现时，provider 选择 `elapsed_from_intent_ms` 最早的合法值，不依赖文件枚举顺序。若先读到无效值（NaN/Infinity/负数/超 2 小时），后读到合法值，则用合法值替换。`elapsed` 相同时以更早的 `timestamp_utc` 作为 tie-breaker。
+
+Context 指标校验与冲突检测：`ensure_elapsed_ms` 和 `service_startup_elapsed_ms` 均要求非负、有限且不超过 2 小时（7 200 000 ms）数据损坏防护上界。非法 `ensure_elapsed_ms` 会导致该 trace 无法进入 cold/warm 分组；非法 `service_startup_ms` 仅跳过该指标样本但保留 trace 分组。两者均计入 `discarded_sample_count`。
+
+此外，provider 对 `startup_kind`、`ensure_context_status`、`ensure_elapsed_ms`、`service_startup_elapsed_ms` 执行顺序无关的一致性检查：同一非空值重复出现合法；同一 trace 出现两个不同非空值即判定为 context conflict。冲突 trace 不计入 cold/warm 分组，计入 `unclassified_trace_count` 并增加 `discarded_sample_count`；若仍有其他有效 trace，summary 为 `degraded`/`partial_data`。字段在部分事件缺失、在另一些事件存在单一值不算冲突，只有多个不同实际值才算冲突。
+
+缓存与故障策略：结果缓存 10 秒，并发刷新单线程执行。正常的边界 partial 结果会按原样返回并可能更新缓存，**不会**触发 stale-cache 回退。只有真正的文件打开/读取失败（例如打开文件时发生 `IOException`）才会让 provider 返回最近一次缓存快照的深拷贝，标记为 `status=degraded`、`reason_code=stale_snapshot`；stale 响应的 `generated_at` 为本次请求时间，统计值来自缓存快照。无缓存时发生读取失败，返回全零的 `degraded` 摘要，`reason_code=read_error`（内部故障时为 `unexpected_provider_error`）。`ApiServer` 在 `GET /capabilities` 中还会再捕获 provider 异常，返回 `reason_code=provider_error` 的 `degraded` 摘要，确保 `/capabilities` 始终 200。
+
+常见 `reason_code`：
+
+| reason_code | 含义 |
+| --- | --- |
+| `read_boundary_reached` | 读取到单文件/总字节/trace/event line/单行长度边界 |
+| `read_error` | 文件打开/读取失败（如路径指向目录） |
+| `partial_data` | 存在 malformed line 或 unsupported schema，但无明确边界 |
+| `stale_snapshot` | 刷新失败，返回缓存快照 |
+| `unexpected_provider_error` | provider 内部未预期错误且无缓存 |
+| `provider_error` | ApiServer 捕获到 provider 抛异常（仅出现在 HTTP 响应） |
+
+分组 `quality` 是数据质量标签，不是性能达标结论：
+
+- `preliminary`：该组少于 20 条 trace。
+- `representative`：该组达到或超过 20 条 trace。
+
+指标仅在存在有效配对样本时出现，每个指标有独立的 `sample_count`。百分位采用 nearest-rank 算法（`rank = ceil(P/100 * N)`，1-indexed），毫秒值保留一位小数。
+
+指标语义：
+
+- `ensure_running_ms`：可信的 `ensure_elapsed_ms`。
+- `service_startup_ms`：可信的 `service_startup_elapsed_ms`；`warm` 组表示被复用服务**最初**的启动耗时，不是本次 warm ensure 的额外耗时。
+- `request_to_confirmation_shown_ms`：`confirmation.shown - intent.accepted`。
+- `confirmation_shown_to_approved_ms`：`confirmation.approved - confirmation.shown`，仅统计实际批准链路。
+- `approved_to_first_frame_progress_ms`：`capture.first_frame_observed - confirmation.approved`。字段名中的 `progress` 是刻意的：它只表示 FFmpeg 报告首个可观测编码/复用进度的保守上界，不是物理采集首帧、不是磁盘刷写完成、也不是 MP4 可播放的证据。
+- `request_to_first_frame_progress_ms`：`capture.first_frame_observed - intent.accepted`，反映服务端受理请求后的完整本地链路，不含 agent 思考时间和 `ensure-running` 之前的时间。
+
+`client_hints.agent_to_server_hint_ms` 等客户端提供的时长**永远不会**进入服务端百分位。
 
 ### 上下文快照（推荐）
 

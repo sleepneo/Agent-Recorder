@@ -91,7 +91,7 @@ This identifier is also written to the local performance trace file (`<data-dir>
 
 `capture.first_frame_observed` is only emitted for the default FFmpeg video path (`display`/`window`/`region`). It is produced exactly once when FFmpeg's `-nostats -progress pipe:1` output reports `frame >= 1`, `total_size > 0`, and the progress group ends normally (`progress=continue` or `progress=end`). It proves that FFmpeg has reported processing at least one video frame and that the output stream has positive bytes, giving an upper-bound latency from local user approval to first observable encoding/muxing progress. It is **not** the exact screen-capture first-frame delivery time, not a physical disk-flush guarantee, and not evidence that the MP4 is playable or has passed output validation. If FFmpeg never emits a qualifying progress group, this event may be absent.
 
-The current trace events cover the request-to-backend-start and first-frame-progress path. Metrics for model thinking time, P50/P95 aggregation, and `/capabilities.perf_summary` are **not** included yet.
+The current trace events cover the request-to-backend-start and first-frame-progress path. Model thinking time is not measured by the server. Cold/warm grouped P50/P95 summaries are exposed via `/capabilities.perf_summary` (see the Capabilities section below).
 
 The `ensure-running` cold/warm handshake can now be reliably correlated with a recording trace through a one-time context. After a successful `ensure-running`, the CLI atomically creates a short-lived context file under `<data-dir>\runtime\ensure-contexts` and returns the following in its JSON output:
 
@@ -143,6 +143,7 @@ The response includes:
 - quick recording endpoint and recipes
 - safety and auth policy
 - readiness data when available
+- performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 
 Audio support (microphone and system audio) is currently **not implemented**. The legacy `recording.audio` array is preserved for backward compatibility and is always empty. Sending `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
@@ -219,6 +220,111 @@ Quick recipe fields:
   }
 }
 ```
+
+### Performance summary
+
+The response includes `perf_summary`, a bounded, read-only statistical summary of recent recording traces. It is diagnostic data, not an audit log, and never contains trace IDs, recording IDs, confirmation IDs, output paths, API keys, or context headers.
+
+Only traces that consumed a trusted `ensure-running` context (`startup_kind` of `cold` or `warm`, `ensure_context_status=consumed`, non-negative `ensure_elapsed_ms`) are grouped. All other traces are counted as `unclassified_trace_count`.
+
+```json
+{
+  "perf_summary": {
+    "schema_version": 1,
+    "status": "available",
+    "generated_at": "2026-07-18T00:00:00.000Z",
+    "window": {
+      "max_traces_per_group": 50,
+      "source": "local_rolling_jsonl"
+    },
+    "quality": {
+      "malformed_line_count": 0,
+      "unsupported_schema_count": 0,
+      "discarded_sample_count": 0,
+      "unclassified_trace_count": 3,
+      "reason_code": null
+    },
+    "groups": {
+      "cold": {
+        "trace_count": 4,
+        "quality": "preliminary",
+        "metrics": {
+          "ensure_running_ms": { "sample_count": 4, "p50": 730.0, "p95": 820.0 },
+          "service_startup_ms": { "sample_count": 4, "p50": 165.0, "p95": 180.0 },
+          "request_to_confirmation_shown_ms": { "sample_count": 4, "p50": 120.0, "p95": 150.0 },
+          "confirmation_shown_to_approved_ms": { "sample_count": 3, "p50": 250.0, "p95": 310.0 },
+          "approved_to_first_frame_progress_ms": { "sample_count": 4, "p50": 740.0, "p95": 810.0 },
+          "request_to_first_frame_progress_ms": { "sample_count": 4, "p50": 1120.0, "p95": 1280.0 }
+        }
+      },
+      "warm": {
+        "trace_count": 12,
+        "quality": "representative",
+        "metrics": {}
+      }
+    }
+  }
+}
+```
+
+Status values:
+
+- `available`: at least one qualifying `cold` or `warm` trace exists, and the current refresh did not hit any read boundary, parse fault, or data loss.
+- `no_data`: the perf files are missing/empty, or no qualifying trace exists, and the current refresh did not encounter any fault. The full structure and zero counts are still returned.
+- `degraded`: a read/parse failure occurred or some valid samples were discarded; partial statistics that were already accumulated are still returned. A stable `reason_code` is provided. No exception text, file paths, or IDs are leaked.
+
+Status precedence (lowest to highest): `no_data` < `available` < `degraded`. Any data loss during the current refresh (boundary, malformed line, unsupported schema, or discarded context/event sample) forces `degraded`, even when valid traces remain.
+
+Read boundaries and privacy: the provider scans `<data-dir>\perf\recording-traces.jsonl` and its rolled history files `.1.jsonl`, `.2.jsonl`, `.3.jsonl` read-only, with the following multi-dimensional boundaries to prevent a single large or malformed file from impacting the service:
+
+| Boundary | Default | Note |
+| --- | --- | --- |
+| File count | 4 | Current base file + up to 3 rolled history files |
+| Bytes per file | 5 MiB | Counted as UTF-8 bytes, including the newline |
+| Total bytes | 20 MiB | Cumulative UTF-8 bytes across files |
+| Distinct traces | 10 000 | Counted by unique `trace_id`, not event lines |
+| Event lines | 100 000 | Cumulative raw lines across files |
+| Line length | 1 MiB | UTF-8 byte limit per line. The limit applies to the line body plus its terminator (LF, CRLF, or CR); a final line without a terminator counts only its body bytes. A leading UTF-8 BOM is not counted toward the line length but is counted toward the per-file and total byte limits. Over-long lines trigger `read_boundary_reached` and stop scanning. Invalid UTF-8 sequences are handled safely. |
+| Traces per group | 50 | Each cold/warm group keeps only the 50 most recent traces |
+
+When any boundary is reached, scanning stops, but valid traces and metrics already processed are retained and returned with `status=degraded` and `reason_code` typically `read_boundary_reached`. Boundary values are exposed only through public fields such as `window.max_traces_per_group`; absolute paths are never returned.
+
+Duplicate-event selection: when the same event for the same trace appears in multiple rolled files, the provider selects the earliest legal `elapsed_from_intent_ms`, independent of file enumeration order. If an invalid value (NaN, Infinity, negative, or above the 2-hour sanity bound) is read first and a legal value is read later, the legal value replaces it. When `elapsed` is equal, the earlier `timestamp_utc` is used as a deterministic tie-breaker.
+
+Context-metric validation and conflict detection: both `ensure_elapsed_ms` and `service_startup_elapsed_ms` must be finite, non-negative, and not exceed the 2-hour (7,200,000 ms) data-corruption guard bound. An invalid `ensure_elapsed_ms` prevents the trace from entering the cold/warm groups; an invalid `service_startup_elapsed_ms` skips only that metric sample while keeping the trace grouped. Both are counted in `discarded_sample_count`.
+
+In addition, the provider enforces order-independent consistency for the context fields `startup_kind`, `ensure_context_status`, `ensure_elapsed_ms`, and `service_startup_elapsed_ms`. Repeating the same non-empty value is allowed, but seeing two different non-empty values for the same trace marks a context conflict. Conflicted traces are excluded from the cold/warm groups, counted in `unclassified_trace_count`, and increment `discarded_sample_count`; the summary becomes `degraded`/`partial_data` when other valid traces remain. Missing a value in some events and present in others is not a conflict; only multiple distinct actual values conflict.
+
+Caching and fault policy: results are cached for 10 seconds with single-threaded concurrent refresh. A normal boundary partial result is returned as-is and may replace the cache; it does **not** trigger stale-cache fallback. Only a true file open/read failure (for example, an `IOException` while opening the file) causes the provider to return the most recent cached snapshot as a deep-copied stale snapshot with `status=degraded` and `reason_code=stale_snapshot`. The stale response's `generated_at` reflects the current request time, while the statistics come from the cached snapshot. If no cache exists when a read failure occurs, the provider returns an all-zero `degraded` summary with `reason_code=read_error` (or `unexpected_provider_error` for an internal fault). `ApiServer` also wraps `GET /capabilities` in a final try/catch that returns a `degraded` summary with `reason_code=provider_error`, ensuring `/capabilities` always returns HTTP 200.
+
+Common `reason_code` values:
+
+| reason_code | Meaning |
+| --- | --- |
+| `read_boundary_reached` | A per-file/total-byte/trace/event-line/line-length boundary was reached |
+| `read_error` | File open/read failed (for example, the path points to a directory) |
+| `partial_data` | Malformed lines or unsupported schema versions were present, without a specific boundary |
+| `stale_snapshot` | Refresh failed and a cached snapshot was returned |
+| `unexpected_provider_error` | An unexpected internal provider error occurred with no cache |
+| `provider_error` | `ApiServer` caught a provider exception (appears only in the HTTP response) |
+
+Group `quality` is a data-quality label, not a performance SLO:
+
+- `preliminary`: fewer than 20 traces in the group.
+- `representative`: 20 or more traces in the group.
+
+Metrics are only present when at least one valid paired sample exists. Each metric has its own `sample_count`. Latencies are computed with the nearest-rank percentile method (`rank = ceil(P/100 * N)`, 1-indexed). Values are rounded to one decimal place.
+
+Metric semantics:
+
+- `ensure_running_ms`: trusted `ensure_elapsed_ms` from the consumed context.
+- `service_startup_ms`: trusted `service_startup_elapsed_ms` from the consumed context. For `warm`, this is the original startup time of the reused service, not the current handshake.
+- `request_to_confirmation_shown_ms`: `confirmation.shown - intent.accepted`.
+- `confirmation_shown_to_approved_ms`: `confirmation.approved - confirmation.shown`; only approved paths contribute.
+- `approved_to_first_frame_progress_ms`: `capture.first_frame_observed - confirmation.approved`. The name intentionally includes "progress": it is an upper-bound latency to the first observable encoding/muxing progress reported by FFmpeg, not the physical screen-capture first frame or a disk-flush guarantee.
+- `request_to_first_frame_progress_ms`: `capture.first_frame_observed - intent.accepted`; covers the local software path after the request is accepted, excluding agent thinking time and any time before `ensure-running`.
+
+`client_hints.agent_to_server_hint_ms` and other agent-supplied timings are never included in server-side percentiles.
 
 ### Context Snapshot
 

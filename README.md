@@ -75,7 +75,12 @@ Agents should use the paths returned by `ensure-running` or
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.
+- On the validated default FFmpeg path, role-aware capture visibility keeps
+  ordinary recording controls out of the video while allowing a safe inner
+  recording UI to remain visible to its outer recording. Capture exclusion
+  remains best-effort across Windows and DWM variants.
 - User-level autostart controls and FFmpeg prewarm support.
+- A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Local audit log and MP4 output.
 
 ## Documentation

@@ -58,6 +58,13 @@ public class RecordingStopControlTests : IDisposable
         return (T)field!.GetValue(obj)!;
     }
 
+    private static void SetPrivateField(object obj, string fieldName, object? value)
+    {
+        var field = obj.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        field!.SetValue(obj, value);
+    }
+
     private static Recording MakeRecording(
         (int x, int y, int w, int h) bounds,
         string? nestedRole = null)
@@ -565,12 +572,12 @@ public class RecordingStopControlTests : IDisposable
     }
 
     [Fact]
-    public void Manager_StopControlShowFailure_DoesNotRemoveIndicator()
+    public void Manager_StopControlFactoryReturnsDisposedForm_LogsErrorAndCleansUp()
     {
         RunOnSta(() =>
         {
             var audit = new CaptureAuditLogger();
-            RecordingStopControlForm ThrowingStopFactory(string id, RecordingStopControlBounds bounds, Size size, DisplayDpiInfo dpi)
+            RecordingStopControlForm DisposedStopFactory(string id, RecordingStopControlBounds bounds, Size size, DisplayDpiInfo dpi)
             {
                 var form = new RecordingStopControlForm(id, bounds, size, dpi);
                 form.Dispose();
@@ -581,26 +588,27 @@ public class RecordingStopControlTests : IDisposable
                 audit,
                 _ => { },
                 (id, b, s, d, r) => new RecordingIndicatorForm(id, b, s, d, r),
-                ThrowingStopFactory);
+                DisposedStopFactory);
             var rec = MakeRecording((100, 100, 800, 600));
 
             mgr.ShowFor(rec);
 
-            Assert.Single(mgr.IndicatorsForTests);
+            // VerifyAndBuildForms creates both windows hidden before any window is shown.
+            // A disposed stop control makes verification fail atomically so no partial
+            // state remains.
+            Assert.Empty(mgr.IndicatorsForTests);
             Assert.Empty(mgr.StopControlsForTests);
-            Assert.Contains(audit.Events, e => e.evt == "recording_stop_control.show_error");
+            Assert.Contains(audit.Events, e => e.evt == "recording_indicator.show_error");
 
-            var indicator = mgr.IndicatorsForTests[rec.Id];
             mgr.CloseAll("test");
 
             Assert.Empty(mgr.IndicatorsForTests);
             Assert.Empty(mgr.StopControlsForTests);
-            Assert.True(indicator.IsDisposed);
         });
     }
 
     [Fact]
-    public void Manager_IndicatorFactoryThrow_LogsErrorAndStillCreatesStopControl()
+    public void Manager_IndicatorFactoryThrow_LogsErrorAndCleansUp()
     {
         RunOnSta(() =>
         {
@@ -618,21 +626,20 @@ public class RecordingStopControlTests : IDisposable
             mgr.ShowFor(rec);
 
             Assert.Empty(mgr.IndicatorsForTests);
-            Assert.Single(mgr.StopControlsForTests);
+            Assert.Empty(mgr.StopControlsForTests);
             var error = Assert.Single(audit.Events, e => e.evt == "recording_indicator.show_error");
             Assert.Contains("indicator factory boom", error.json);
-            Assert.Contains("\"stage\":\"factory\"", error.json);
+            Assert.Contains("\"stage\":\"verify_and_build\"", error.json);
 
-            var stopControl = mgr.StopControlsForTests[rec.Id];
             mgr.CloseAll("test");
 
+            Assert.Empty(mgr.IndicatorsForTests);
             Assert.Empty(mgr.StopControlsForTests);
-            Assert.True(stopControl.IsDisposed);
         });
     }
 
     [Fact]
-    public void Manager_StopControlFactoryThrow_LogsErrorAndStillCreatesIndicator()
+    public void Manager_StopControlFactoryThrow_LogsErrorAndCleansUp()
     {
         RunOnSta(() =>
         {
@@ -649,44 +656,36 @@ public class RecordingStopControlTests : IDisposable
 
             mgr.ShowFor(rec);
 
-            Assert.Single(mgr.IndicatorsForTests);
+            Assert.Empty(mgr.IndicatorsForTests);
             Assert.Empty(mgr.StopControlsForTests);
-            var error = Assert.Single(audit.Events, e => e.evt == "recording_stop_control.show_error");
+            var error = Assert.Single(audit.Events, e => e.evt == "recording_indicator.show_error");
             Assert.Contains("stop control factory boom", error.json);
-            Assert.Contains("\"stage\":\"factory\"", error.json);
+            Assert.Contains("\"stage\":\"verify_and_build\"", error.json);
 
-            var indicator = mgr.IndicatorsForTests[rec.Id];
             mgr.CloseAll("test");
 
             Assert.Empty(mgr.IndicatorsForTests);
-            Assert.True(indicator.IsDisposed);
+            Assert.Empty(mgr.StopControlsForTests);
         });
     }
 
     [Fact]
-    public void Manager_CloseAll_AfterPartialSuccess_CleansBothDictionaries()
+    public void Manager_CloseAll_AfterSuccessfulShow_CleansBothDictionaries()
     {
         RunOnSta(() =>
         {
             var audit = new CaptureAuditLogger();
-            RecordingStopControlForm FailingStopFactory(string id, RecordingStopControlBounds bounds, Size size, DisplayDpiInfo dpi)
-            {
-                var form = new RecordingStopControlForm(id, bounds, size, dpi);
-                form.Dispose();
-                return form;
-            }
-
             var mgr = new RecordingIndicatorManager(
                 audit,
                 _ => { },
                 (id, b, s, d, r) => new RecordingIndicatorForm(id, b, s, d, r),
-                FailingStopFactory);
+                (id, b, size, dpi) => new RecordingStopControlForm(id, b, size, dpi));
             var rec = MakeRecording((100, 100, 800, 600));
 
             mgr.ShowFor(rec);
 
             Assert.Single(mgr.IndicatorsForTests);
-            Assert.Empty(mgr.StopControlsForTests);
+            Assert.Single(mgr.StopControlsForTests);
 
             mgr.CloseAll("test");
 
@@ -1483,6 +1482,94 @@ public class RecordingStopControlTests : IDisposable
             Assert.True(doc.RootElement.TryGetProperty("actual_window_dpi", out _));
 
             mgr.CloseAll("test");
+        });
+    }
+
+    // =====================================================================
+    // Display affinity tests
+    // =====================================================================
+
+    [Fact]
+    public void Form_DisplayAffinity_Success_Applied()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => true, hWnd => (true, Native.WDA_EXCLUDEFROMCAPTURE));
+            using var form = new RecordingStopControlForm("r1",
+                new RecordingStopControlBounds(100, 100, 76, 28),
+                displayAffinity: adapter);
+
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.True(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_Failure_DoesNotThrowAndKeepsWindowUsable()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => false, null);
+            using var form = new RecordingStopControlForm("r1",
+                new RecordingStopControlBounds(100, 100, 76, 28),
+                displayAffinity: adapter);
+
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+            Assert.True(form.ButtonEnabledForTests);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_Exception_DoesNotThrowAndRecordsError()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => throw new InvalidOperationException("affinity boom"), null);
+            using var form = new RecordingStopControlForm("r1",
+                new RecordingStopControlBounds(100, 100, 76, 28),
+                displayAffinity: adapter);
+
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.NotNull(form.DisplayAffinityErrorForTests);
+            Assert.IsType<InvalidOperationException>(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+            Assert.True(form.ButtonEnabledForTests);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_StateReset_AfterFailureThenSuccess()
+    {
+        RunOnSta(() =>
+        {
+            var failingAdapter = new WindowDisplayAffinity((hWnd, mode) => throw new InvalidOperationException("affinity boom"), null);
+            using var form = new RecordingStopControlForm("r1",
+                new RecordingStopControlBounds(100, 100, 76, 28),
+                displayAffinity: failingAdapter);
+
+            form.ApplyDisplayAffinity(IntPtr.Zero);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.NotNull(form.DisplayAffinityErrorForTests);
+
+            // Simulate a recreated handle with a now-successful adapter.
+            var successAdapter = new WindowDisplayAffinity((hWnd, mode) => true, hWnd => (true, Native.WDA_EXCLUDEFROMCAPTURE));
+            SetPrivateField(form, "_displayAffinity", successAdapter);
+            form.ApplyDisplayAffinity(IntPtr.Zero);
+
+            Assert.True(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
         });
     }
 }

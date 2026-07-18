@@ -10,6 +10,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
+using AgentRecorder.Windows;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -73,6 +74,13 @@ public class RecordingIndicatorTests
         var field = obj.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.NotNull(field);
         return (T)field!.GetValue(obj)!;
+    }
+
+    private static void SetPrivateField(object obj, string fieldName, object? value)
+    {
+        var field = obj.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        field!.SetValue(obj, value);
     }
 
     private static Recording MakeRecording(
@@ -881,32 +889,126 @@ public class RecordingIndicatorTests
     {
         RunOnSta(() =>
         {
-            // Start one second before the one-hour mark so the next timer tick crosses it.
+            // Deterministic test: use an explicit elapsed-time seam so we do not depend
+            // on the system timer, Application.DoEvents(), or Form.Show().
             using var form = new RecordingIndicatorForm(
                 "r1",
                 new RecordingIndicatorBounds(100, 100, 800, 600),
-                DateTime.UtcNow.AddSeconds(-3599),
+                DateTime.UtcNow,
                 7200);
-            form.Show();
-            Application.DoEvents();
-            Thread.Sleep(50);
 
             var before = form.LabelBoundsForTests;
             var beforeText = form.LabelTextForTests;
-            Assert.Contains("59:59", beforeText);
+            Assert.Equal("REC 00:00 / 2:00:00", beforeText);
 
-            // Wait long enough for the label to update past the 1:00:00 boundary.
-            Thread.Sleep(1200);
-            Application.DoEvents();
-            Thread.Sleep(50);
-            Application.DoEvents();
+            // Just before the hour boundary.
+            form.UpdateLabelForTests(TimeSpan.FromSeconds(3599));
+            var boundary59Text = form.LabelTextForTests;
+            Assert.Equal("REC 59:59 / 2:00:00", boundary59Text);
+            Assert.Equal(before.Size, form.LabelBoundsForTests.Size);
 
-            var after = form.LabelBoundsForTests;
-            var afterText = form.LabelTextForTests;
-            Assert.Contains("1:00:00", afterText);
+            // At and after the hour boundary the text grows from "59:59" to "1:00:00".
+            form.UpdateLabelForTests(TimeSpan.FromSeconds(3600));
+            var boundaryHourText = form.LabelTextForTests;
+            Assert.Equal("REC 1:00:00 / 2:00:00", boundaryHourText);
+            Assert.Equal(before.Size, form.LabelBoundsForTests.Size);
+        });
+    }
 
-            Assert.Equal(before.Size, after.Size);
-            form.Close();
+    // =====================================================================
+    // Display affinity tests
+    // =====================================================================
+
+    [Fact]
+    public void Form_DisplayAffinity_Success_Applied()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => true, hWnd => (true, Native.WDA_EXCLUDEFROMCAPTURE));
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow,
+                displayAffinity: adapter);
+
+            // Accessing Handle triggers OnHandleCreated without showing the window.
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.True(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_Failure_DoesNotThrowAndKeepsWindowUsable()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => false, null);
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow,
+                displayAffinity: adapter);
+
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+            Assert.Equal("REC 00:00", form.LabelTextForTests);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_Exception_DoesNotThrowAndRecordsError()
+    {
+        RunOnSta(() =>
+        {
+            var adapter = new WindowDisplayAffinity((hWnd, mode) => throw new InvalidOperationException("affinity boom"), null);
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow,
+                displayAffinity: adapter);
+
+            var handle = form.Handle;
+
+            Assert.NotEqual(IntPtr.Zero, handle);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.NotNull(form.DisplayAffinityErrorForTests);
+            Assert.IsType<InvalidOperationException>(form.DisplayAffinityErrorForTests);
+            Assert.False(form.IsDisposed);
+            Assert.Equal("REC 00:00", form.LabelTextForTests);
+        });
+    }
+
+    [Fact]
+    public void Form_DisplayAffinity_StateReset_AfterFailureThenSuccess()
+    {
+        RunOnSta(() =>
+        {
+            var failingAdapter = new WindowDisplayAffinity((hWnd, mode) => throw new InvalidOperationException("affinity boom"), null);
+            using var form = new RecordingIndicatorForm(
+                "r1",
+                new RecordingIndicatorBounds(100, 100, 800, 600),
+                DateTime.UtcNow,
+                displayAffinity: failingAdapter);
+
+            form.ApplyDisplayAffinity(IntPtr.Zero);
+            Assert.False(form.DisplayAffinityAppliedForTests);
+            Assert.NotNull(form.DisplayAffinityErrorForTests);
+
+            // Simulate a recreated handle with a now-successful adapter.
+            var successAdapter = new WindowDisplayAffinity((hWnd, mode) => true, hWnd => (true, Native.WDA_EXCLUDEFROMCAPTURE));
+            SetPrivateField(form, "_displayAffinity", successAdapter);
+            form.ApplyDisplayAffinity(IntPtr.Zero);
+
+            Assert.True(form.DisplayAffinityAppliedForTests);
+            Assert.Null(form.DisplayAffinityErrorForTests);
         });
     }
 }

@@ -262,7 +262,8 @@ internal static class Program
         _ffmpegPrewarmer = ffmpegPrewarmer;
 
         var ensureContextStore = new EnsureContextStore(_dataDir);
-        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore);
+        var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(_dataDir);
+        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider);
 
         _engine = engine;
         _server = server;

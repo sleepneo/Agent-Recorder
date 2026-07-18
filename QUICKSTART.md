@@ -91,6 +91,11 @@ state. You can stop recordings in three ways:
    active recording) or "Stop all recordings (N)" (multiple recordings).
 3. **Global hotkey**: press `Ctrl+Shift+F10` to stop all active recordings.
 
+For ordinary recordings, the REC border and floating stop button remain visible
+to the user while being excluded from the captured video on a best-effort basis.
+During nested recording, a geometrically safe inner control can remain visible
+in the outer video so the outer recording captures the complete inner workflow.
+
 The agent can also stop a specific recording through the API:
 
 ```http

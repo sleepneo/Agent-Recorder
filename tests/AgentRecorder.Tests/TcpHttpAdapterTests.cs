@@ -27,6 +27,11 @@ public class TcpHttpAdapterTests
     {
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
+        public bool SupportsFloatingStopButton => false;
+        public bool SupportsTrayStop => false;
+        public bool SupportsGlobalStopHotkey => false;
+        public bool IsGlobalStopHotkeyRegistered => false;
+        public string? GlobalStopHotkeyGesture => null;
 
         public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Approve());
         public void RequestRegionSelection(int timeoutSeconds,
@@ -36,6 +41,11 @@ public class TcpHttpAdapterTests
         public void SetIdle(object rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
+    }
+
+    private sealed class ThrowingProvider : IPerformanceSummaryProvider
+    {
+        public PerformanceSummary GetSummary() => throw new InvalidOperationException("provider failure");
     }
 
     private static ApiServer CreateServer(out string dataDir)
@@ -50,6 +60,20 @@ public class TcpHttpAdapterTests
         var tray = new FakeTray();
         engine.SetTray(tray);
         return new ApiServer(engine, audit, tray);
+    }
+
+    private static ApiServer CreateServerWithProvider(out string dataDir, IPerformanceSummaryProvider provider)
+    {
+        dataDir = Path.Combine(Path.GetTempPath(), $"tcp-adapter-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDir);
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", dataDir, EnvironmentVariableTarget.Process);
+        ApiKeyAuth.InitializeForTesting(dataDir);
+
+        var audit = new AuditLogger();
+        var engine = new RecordingEngine(audit);
+        var tray = new FakeTray();
+        engine.SetTray(tray);
+        return new ApiServer(engine, audit, tray, performanceSummaryProvider: provider);
     }
 
     private static void Cleanup(string dataDir)
@@ -201,6 +225,29 @@ public class TcpHttpAdapterTests
             Assert.Equal(405, (int)response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
             Assert.Contains("METHOD_NOT_ALLOWED", body);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task TcpHttpAdapter_GetCapabilities_ThrowingProvider_ReturnsDegraded()
+    {
+        var server = CreateServerWithProvider(out var dataDir, new ThrowingProvider());
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("\"ok\":true", body);
+            Assert.Contains("\"perf_summary\"", body);
+            Assert.Contains("\"status\":\"degraded\"", body);
+            Assert.Contains("\"reason_code\":\"provider_error\"", body);
         }
         finally
         {

@@ -20,8 +20,8 @@ internal sealed class RecordingIndicatorManager
     private readonly AuditLogger _audit;
     private readonly Action<string> _onStopRequested;
     private readonly IDisplayDpiResolver _dpiResolver;
-    private readonly Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> _formFactory;
-    private readonly Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, RecordingStopControlForm> _stopControlFactory;
+    private readonly Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> _formFactory;
+    private readonly Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> _stopControlFactory;
     private readonly Func<IUiTextProvider, Font, DisplayDpiInfo, Size> _stopControlSizeProvider;
     private Func<IUiTextProvider> _textProviderFactory = null!;
 
@@ -42,24 +42,50 @@ internal sealed class RecordingIndicatorManager
     /// This avoids capturing a stale <see cref="IUiTextProvider"/> when the UI language changes.
     /// </summary>
     public RecordingIndicatorManager(AuditLogger audit, Action<string> onStopRequested, Func<IUiTextProvider> textProviderFactory)
-        : this(audit, onStopRequested, DefaultFormFactory, (id, bounds, size, dpi) => new RecordingStopControlForm(id, bounds, size, dpi, textProviderFactory()), new DisplayDpiResolver())
+        : this(audit, onStopRequested, DefaultFormFactory, (id, bounds, size, dpi, mode) => new RecordingStopControlForm(id, bounds, size, dpi, mode, textProviderFactory()), new DisplayDpiResolver())
     {
         _textProviderFactory = textProviderFactory;
     }
 
     internal RecordingIndicatorManager(
         AuditLogger audit,
-        Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> formFactory)
+        Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> formFactory)
         : this(audit, _ => { }, formFactory, DefaultStopControlFactory, new DisplayDpiResolver())
     {
         _textProviderFactory = () => new UiTextProvider(UiLanguageStore.LoadOrDefault());
     }
 
+    /// <summary>
+    /// Legacy constructor for tests that create forms directly from bounds and size without
+    /// needing to construct a <see cref="RecordingIndicatorPresentation"/>.
+    /// </summary>
+    internal RecordingIndicatorManager(
+        AuditLogger audit,
+        Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> formFactory)
+        : this(audit, _ => { }, WrapLegacyFormFactory(formFactory), DefaultStopControlFactory, new DisplayDpiResolver())
+    {
+    }
+
+    /// <summary>
+    /// Legacy constructor for tests that create forms directly from bounds and size without
+    /// needing to construct a <see cref="RecordingIndicatorPresentation"/> or visibility mode.
+    /// </summary>
     internal RecordingIndicatorManager(
         AuditLogger audit,
         Action<string> onStopRequested,
         Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> formFactory,
         Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, RecordingStopControlForm> stopControlFactory,
+        IDisplayDpiResolver? dpiResolver = null,
+        Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
+        : this(audit, onStopRequested, WrapLegacyFormFactory(formFactory), (id, bounds, size, dpi, _) => stopControlFactory(id, bounds, size, dpi), dpiResolver, stopControlSizeProvider)
+    {
+    }
+
+    internal RecordingIndicatorManager(
+        AuditLogger audit,
+        Action<string> onStopRequested,
+        Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> formFactory,
+        Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> stopControlFactory,
         IDisplayDpiResolver? dpiResolver = null,
         Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
     {
@@ -74,32 +100,60 @@ internal sealed class RecordingIndicatorManager
 
     private static RecordingIndicatorForm DefaultFormFactory(
         string recordingId,
-        RecordingIndicatorBounds bounds,
+        RecordingIndicatorPresentation presentation,
         DateTime startedAtUtc,
         int? durationSeconds,
         string? nestedRole)
     {
-        return new RecordingIndicatorForm(recordingId, bounds, startedAtUtc, durationSeconds, nestedRole);
+        return new RecordingIndicatorForm(recordingId, presentation, startedAtUtc, durationSeconds, nestedRole);
     }
 
     private static RecordingStopControlForm DefaultStopControlFactory(
         string recordingId,
         RecordingStopControlBounds bounds,
         Size controlSize,
-        DisplayDpiInfo dpiInfo)
+        DisplayDpiInfo dpiInfo,
+        CaptureVisibilityMode mode)
     {
-        return new RecordingStopControlForm(recordingId, bounds, controlSize, dpiInfo);
+        return new RecordingStopControlForm(recordingId, bounds, controlSize, dpiInfo, mode);
+    }
+
+    private static Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> WrapLegacyFormFactory(
+        Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> legacy)
+    {
+        return (id, presentation, started, duration, role) =>
+            legacy(id, presentation.WindowBounds, started, duration, role);
     }
 
     private static Size DefaultStopControlSizeProvider(IUiTextProvider text, Font font, DisplayDpiInfo dpi)
     {
-        var measureBounds = dpi.MonitorBounds.IsEmpty ? SystemInformation.VirtualScreen : dpi.MonitorBounds;
-        return RecordingStopControlLayout.MeasurePreferredSize(text, font, measureBounds);
+        // Measure at the current process DPI, then scale to the target monitor DPI so that
+        // forced DisplayDpiInfo values are respected in tests and the combined plan uses the
+        // same physical pixel semantics for both label and stop control.
+        var screenSize = RecordingStopControlLayout.MeasurePreferredSize(text, font);
+        int screenDpi = GetSystemDpi();
+        if (screenDpi <= 0)
+            screenDpi = 96;
+
+        int effectiveDpi = Math.Max(dpi.DpiX, dpi.DpiY);
+        if (effectiveDpi <= 0)
+            effectiveDpi = 96;
+
+        float scale = effectiveDpi / (float)screenDpi;
+        return new Size(
+            (int)Math.Ceiling(screenSize.Width * scale),
+            (int)Math.Ceiling(screenSize.Height * scale));
     }
 
-    private static Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, RecordingStopControlForm> CreateStopControlFactory(IUiTextProvider? textProvider)
+    private static int GetSystemDpi()
     {
-        return (recordingId, bounds, size, dpi) => new RecordingStopControlForm(recordingId, bounds, size, dpi, textProvider);
+        using var temp = new Control();
+        return temp.DeviceDpi;
+    }
+
+    private static Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> CreateStopControlFactory(IUiTextProvider? textProvider)
+    {
+        return (recordingId, bounds, size, dpi, mode) => new RecordingStopControlForm(recordingId, bounds, size, dpi, mode, textProvider);
     }
 
     /// <summary>
@@ -113,11 +167,127 @@ internal sealed class RecordingIndicatorManager
     internal IReadOnlyDictionary<string, RecordingStopControlForm> StopControlsForTests => new Dictionary<string, RecordingStopControlForm>(_stopControls);
 
     /// <summary>
-    /// Shows or replaces the indicator and stop control for the given recording.
-    /// Each creation step is guarded so that a failure in one does not prevent the other
-    /// or bubble up to the recording engine.
+    /// Computes the combined presentation plan for the indicator and stop control before any UI
+    /// is created. If the indicator can safely enter parent-visible mode but the stop control
+    /// cannot be placed safely, the whole plan falls back to exclude-from-capture mode so that
+    /// indicator, label and stop control are decided jointly.
     /// </summary>
-    public void ShowFor(Recording recording)
+    internal RecordingControlPlan? ComputeControlPlan(
+        Recording recording,
+        Recording? parentRecording,
+        Rectangle virtualScreen,
+        DisplayDpiInfo? forcedDpi = null,
+        string? parentFallbackReason = null)
+    {
+        var bounds = recording.Config.Bounds;
+        var indicatorBounds = new RecordingIndicatorBounds(bounds.x, bounds.y, bounds.w, bounds.h);
+        var clamped = RecordingIndicatorGeometry.TryClampToVirtualScreen(indicatorBounds);
+        if (clamped == null)
+            return null;
+
+        var targetArea = new Rectangle(clamped.X, clamped.Y, clamped.Width, clamped.Height);
+        var dpiInfo = forcedDpi ?? _dpiResolver.Resolve(targetArea);
+
+        using var labelFont = new Font("Segoe UI", 9, FontStyle.Bold);
+        var labelSize = RecordingIndicatorForm.MeasureLabelSize(
+            recording.NestedRole,
+            recording.DurationSeconds,
+            labelFont,
+            new Padding(4, 2, 4, 2),
+            dpiInfo);
+
+        using var stopControlFont = new Font("Segoe UI", 8, FontStyle.Bold);
+        var stopControlTextProvider = _textProviderFactory();
+        var controlSize = _stopControlSizeProvider(stopControlTextProvider, stopControlFont, dpiInfo);
+
+        var indicatorPlan = RecordingIndicatorGeometry.ComputePresentationPlan(
+            recording,
+            clamped,
+            parentRecording,
+            labelSize,
+            virtualScreen,
+            parentFallbackReason);
+
+        // For parent-visible mode, the stop control must also fit safely outside the inner
+        // capture rectangle and inside the parent capture rectangle, without overlapping any
+        // already-active stop controls. If any of these constraints cannot be satisfied, the
+        // entire recording falls back to exclude-from-capture mode.
+        if (indicatorPlan.Mode == CaptureVisibilityMode.ParentVisible)
+        {
+            RecordingIndicatorBounds? parentBounds = indicatorPlan.ParentCaptureBounds;
+            var preferredStopBounds = RecordingStopControlGeometry.ComputeBounds(
+                clamped,
+                controlSize,
+                recording.NestedRole,
+                virtualScreen,
+                parentBounds,
+                CaptureVisibilityMode.ParentVisible);
+
+            var occupied = _stopControls.Values.Select(s => s.PlacementBounds).ToList();
+            var forbiddenZone = new Rectangle(clamped.X, clamped.Y, clamped.Width, clamped.Height);
+            Rectangle? allowedZone = parentBounds != null
+                ? new Rectangle(parentBounds.X, parentBounds.Y, parentBounds.Width, parentBounds.Height)
+                : null;
+
+            bool hasSafeStop = RecordingStopControlGeometry.TryResolveCollision(
+                preferredStopBounds,
+                controlSize,
+                virtualScreen,
+                occupied,
+                forbiddenZone,
+                allowedZone,
+                out var safeStopBounds);
+
+            if (hasSafeStop && safeStopBounds != null)
+            {
+                return new RecordingControlPlan(indicatorPlan, safeStopBounds, controlSize, dpiInfo, null);
+            }
+
+            // Joint fallback: recompute the indicator in exclude mode and place an ordinary stop control.
+            var excludeIndicatorPlan = RecordingIndicatorGeometry.ComputeExcludedPlan(
+                clamped,
+                parentRecording,
+                labelSize,
+                virtualScreen,
+                "no_safe_stop_position");
+
+            var excludeStopBounds = RecordingStopControlGeometry.ComputeBounds(
+                clamped,
+                controlSize,
+                recording.NestedRole,
+                virtualScreen);
+            var excludeOccupied = _stopControls.Values.Select(s => s.PlacementBounds).ToList();
+            var resolvedExcludeStop = RecordingStopControlGeometry.ResolveCollision(
+                excludeStopBounds,
+                controlSize,
+                virtualScreen,
+                excludeOccupied);
+
+            return new RecordingControlPlan(excludeIndicatorPlan, resolvedExcludeStop, controlSize, dpiInfo, "no_safe_stop_position");
+        }
+
+        // Exclude mode: ordinary stop placement with last-resort fallback permitted.
+        var ordinaryStopBounds = RecordingStopControlGeometry.ComputeBounds(
+            clamped,
+            controlSize,
+            recording.NestedRole,
+            virtualScreen);
+        var ordinaryOccupied = _stopControls.Values.Select(s => s.PlacementBounds).ToList();
+        var resolvedOrdinaryStop = RecordingStopControlGeometry.ResolveCollision(
+            ordinaryStopBounds,
+            controlSize,
+            virtualScreen,
+            ordinaryOccupied);
+
+        return new RecordingControlPlan(indicatorPlan, resolvedOrdinaryStop, controlSize, dpiInfo, indicatorPlan.FallbackReason);
+    }
+
+    /// <summary>
+    /// Shows or replaces the indicator and stop control for the given recording.
+    /// A single combined plan is computed before any UI is created so that failures in any part
+    /// cause a joint fallback to exclude-from-capture mode.
+    /// </summary>
+    public void ShowFor(Recording recording, Recording? parentRecording = null, string? parentFallbackReason = null)
     {
         if (recording == null) throw new ArgumentNullException(nameof(recording));
 
@@ -137,162 +307,222 @@ internal sealed class RecordingIndicatorManager
                 source_type = recording.SourceType,
                 bounds = new { x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h }
             });
+            return;
         }
-        else
+
+        var plan = ComputeControlPlan(recording, parentRecording, SystemInformation.VirtualScreen, parentFallbackReason: parentFallbackReason);
+        if (plan == null)
         {
-            RecordingIndicatorForm? form = null;
-            try
+            // Should not happen because clamped != null was checked above, but guard anyway.
+            _audit.Log("recording_indicator.skipped", new
             {
-                form = _formFactory(
-                    recording.Id,
-                    clamped,
-                    recording.StartedAtUtc,
-                    recording.DurationSeconds,
-                    recording.NestedRole);
-
-                _indicators[recording.Id] = form;
-
-                _audit.Log("recording_indicator.shown", new
-                {
-                    recording_id = recording.Id,
-                    source_type = recording.SourceType,
-                    bounds = new { x = clamped.X, y = clamped.Y, w = clamped.Width, h = clamped.Height },
-                    duration_seconds = recording.DurationSeconds,
-                    nested_role = recording.NestedRole
-                });
-
-                try
-                {
-                    form.Show();
-                }
-                catch (Exception ex)
-                {
-                    _indicators.Remove(recording.Id);
-                    try { form.Dispose(); } catch { }
-                    form = null;
-                    _audit.Log("recording_indicator.show_error", new
-                    {
-                        recording_id = recording.Id,
-                        error = ex.Message
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                try { form?.Dispose(); } catch { }
-                _audit.Log("recording_indicator.show_error", new
-                {
-                    recording_id = recording.Id,
-                    error = ex.Message,
-                    stage = "factory"
-                });
-            }
+                recording_id = recording.Id,
+                reason = "plan_unavailable",
+                source_type = recording.SourceType,
+                bounds = new { x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h }
+            });
+            return;
         }
 
-        // Show the floating stop button independently. A failure here must not remove the border indicator.
-        ShowStopControl(recording, clamped ?? indicatorBounds, isRetry: false);
+        var verified = VerifyAndBuildForms(recording, plan, parentRecording);
+        if (verified == null)
+            return;
+
+        ShowFinalForms(recording, verified.Indicator, verified.StopControl, verified.FinalPlan, verified.Retried);
     }
 
-    private void ShowStopControl(Recording recording, RecordingIndicatorBounds placementSource, bool isRetry, DisplayDpiInfo? forcedDpi = null)
+
+    /// <summary>
+    /// Creates the indicator and stop-control windows while they are still hidden, reads the
+    /// actual HWND DPI, and recomputes the combined plan if the real DPI differs from the
+    /// planned DPI. The returned forms are the final forms and must be shown by the caller.
+    /// </summary>
+    internal sealed record VerificationResult(
+        RecordingIndicatorForm Indicator,
+        RecordingStopControlForm StopControl,
+        RecordingControlPlan FinalPlan,
+        bool Retried);
+
+    internal VerificationResult? VerifyAndBuildForms(Recording recording, RecordingControlPlan plan, Recording? parentRecording)
     {
-        var stopControlTextProvider = _textProviderFactory();
-        using var stopControlFont = new Font("Segoe UI", 8, FontStyle.Bold);
-
-        var targetArea = new Rectangle(placementSource.X, placementSource.Y, placementSource.Width, placementSource.Height);
-        var dpiInfo = forcedDpi ?? _dpiResolver.Resolve(targetArea);
-
-        var controlSize = _stopControlSizeProvider(stopControlTextProvider, stopControlFont, dpiInfo);
-
-        var preferredStopBounds = RecordingStopControlGeometry.ComputeBounds(
-            placementSource,
-            controlSize,
-            recording.NestedRole);
-
-        // Resolve overlap with any already-active stop controls from other recordings.
-        var occupied = _stopControls.Values.Select(s => s.PlacementBounds).ToList();
-        var stopBounds = RecordingStopControlGeometry.ResolveCollision(
-            preferredStopBounds,
-            controlSize,
-            SystemInformation.VirtualScreen,
-            occupied);
-
+        RecordingIndicatorForm? indicator = null;
         RecordingStopControlForm? stopControl = null;
         try
         {
-            stopControl = _stopControlFactory(recording.Id, stopBounds, controlSize, dpiInfo);
-            stopControl.StopClicked += OnStopControlClicked;
-            _stopControls[recording.Id] = stopControl;
+            indicator = _formFactory(
+                recording.Id,
+                plan.IndicatorPresentation,
+                recording.StartedAtUtc,
+                recording.DurationSeconds,
+                recording.NestedRole);
+            stopControl = _stopControlFactory(
+                recording.Id,
+                plan.StopBounds,
+                plan.StopControlSize,
+                plan.DpiInfo,
+                plan.IndicatorPresentation.Mode);
 
-            try
+            // Create hidden HWNDs so we can read the actual DPI before any window becomes visible.
+            _ = indicator.Handle;
+            _ = stopControl.Handle;
+
+            int plannedDpi = (int)Math.Round(plan.DpiInfo.Scale * 96);
+            int actualDpi = stopControl.ActualWindowDpiForTests > 0
+                ? stopControl.ActualWindowDpiForTests
+                : indicator.ActualWindowDpiForTests;
+
+            if (actualDpi > 0 && actualDpi != plannedDpi)
             {
-                stopControl.Show();
-            }
-            catch (Exception ex)
-            {
-                stopControl.StopClicked -= OnStopControlClicked;
-                _stopControls.Remove(recording.Id);
-                try { stopControl.Dispose(); } catch { }
+                DisposeCandidate(indicator);
+                DisposeCandidate(stopControl);
+                indicator = null;
                 stopControl = null;
-                _audit.Log("recording_stop_control.show_error", new
+
+                var actualDpiInfo = plan.DpiInfo with
                 {
-                    recording_id = recording.Id,
-                    error = ex.Message
-                });
-                return;
-            }
+                    DpiX = actualDpi,
+                    DpiY = actualDpi,
+                    Scale = actualDpi / 96f
+                };
 
-            _audit.Log("recording_stop_control.shown", new
-            {
-                recording_id = recording.Id,
-                source_type = recording.SourceType,
-                target_monitor = dpiInfo.MonitorId,
-                target_dpi_x = dpiInfo.DpiX,
-                target_dpi_y = dpiInfo.DpiY,
-                dpi_scale = dpiInfo.Scale,
-                dpi_fallback = dpiInfo.IsFallback,
-                dpi_fallback_reason = dpiInfo.FallbackReason,
-                planned_bounds = new { x = stopBounds.X, y = stopBounds.Y, w = stopBounds.Width, h = stopBounds.Height },
-                bounds = new { x = stopControl.Bounds.X, y = stopControl.Bounds.Y, w = stopControl.Bounds.Width, h = stopControl.Bounds.Height },
-                actual_window_dpi = stopControl.ActualWindowDpiForTests,
-                dpi_retry = isRetry,
-                nested_role = recording.NestedRole
-            });
-
-            // If the HWND landed on a monitor with a different DPI, recompute once with the actual DPI.
-            if (!isRetry && stopControl.DpiMismatchForTests)
-            {
-                var actualDpi = stopControl.ActualWindowDpiForTests;
-                if (actualDpi > 0)
+                var retryPlan = ComputeControlPlan(
+                    recording,
+                    parentRecording,
+                    SystemInformation.VirtualScreen,
+                    actualDpiInfo,
+                    parentFallbackReason: plan.IndicatorPresentation.FallbackReason);
+                if (retryPlan == null)
                 {
-                    stopControl.StopClicked -= OnStopControlClicked;
-                    _stopControls.Remove(recording.Id);
-                    try { stopControl.CloseWithoutResult(); } catch { }
-                    try { stopControl.Dispose(); } catch { }
-
-                    var actualScale = actualDpi / 96f;
-                    var actualDpiInfo = new DisplayDpiInfo(
-                        dpiInfo.MonitorId,
-                        new Rectangle(stopControl.Bounds.X, stopControl.Bounds.Y, stopControl.Bounds.Width, stopControl.Bounds.Height),
-                        actualDpi, actualDpi, actualScale, dpiInfo.IsFallback, dpiInfo.FallbackReason);
-
-                    ShowStopControl(recording, placementSource, isRetry: true, forcedDpi: actualDpiInfo);
+                    _audit.Log("recording_indicator.skipped", new
+                    {
+                        recording_id = recording.Id,
+                        reason = "retry_plan_unavailable",
+                        source_type = recording.SourceType,
+                        bounds = new { x = recording.Config.Bounds.x, y = recording.Config.Bounds.y, w = recording.Config.Bounds.w, h = recording.Config.Bounds.h }
+                    });
+                    return null;
                 }
+
+                indicator = _formFactory(
+                    recording.Id,
+                    retryPlan.IndicatorPresentation,
+                    recording.StartedAtUtc,
+                    recording.DurationSeconds,
+                    recording.NestedRole);
+                stopControl = _stopControlFactory(
+                    recording.Id,
+                    retryPlan.StopBounds,
+                    retryPlan.StopControlSize,
+                    retryPlan.DpiInfo,
+                    retryPlan.IndicatorPresentation.Mode);
+
+                return new VerificationResult(indicator, stopControl, retryPlan, true);
             }
+
+            return new VerificationResult(indicator, stopControl, plan, false);
         }
         catch (Exception ex)
         {
-            if (stopControl != null)
-            {
-                stopControl.StopClicked -= OnStopControlClicked;
-                try { stopControl.Dispose(); } catch { }
-            }
-            _audit.Log("recording_stop_control.show_error", new
+            DisposeCandidate(indicator);
+            DisposeCandidate(stopControl);
+            _audit.Log("recording_indicator.show_error", new
             {
                 recording_id = recording.Id,
                 error = ex.Message,
-                stage = "factory"
+                stage = "verify_and_build"
             });
+            return null;
         }
+    }
+
+    private void ShowFinalForms(
+        Recording recording,
+        RecordingIndicatorForm indicator,
+        RecordingStopControlForm stopControl,
+        RecordingControlPlan plan,
+        bool retried)
+    {
+        _indicators[recording.Id] = indicator;
+
+        _audit.Log("recording_indicator.shown", new
+        {
+            recording_id = recording.Id,
+            source_type = recording.SourceType,
+            bounds = new { x = plan.IndicatorPresentation.WindowBounds.X, y = plan.IndicatorPresentation.WindowBounds.Y, w = plan.IndicatorPresentation.WindowBounds.Width, h = plan.IndicatorPresentation.WindowBounds.Height },
+            duration_seconds = recording.DurationSeconds,
+            nested_role = recording.NestedRole,
+            capture_visibility_mode = plan.IndicatorPresentation.Mode.ToString().ToLowerInvariant(),
+            display_affinity_requested = plan.IndicatorPresentation.DisplayAffinityRequested,
+            parent_recording_id = recording.ParentRecordingId,
+            fallback_reason = plan.IndicatorPresentation.FallbackReason
+        });
+
+        try
+        {
+            indicator.Show();
+        }
+        catch (Exception ex)
+        {
+            _indicators.Remove(recording.Id);
+            try { indicator.Dispose(); } catch { }
+            _audit.Log("recording_indicator.show_error", new
+            {
+                recording_id = recording.Id,
+                error = ex.Message
+            });
+            try { stopControl.Dispose(); } catch { }
+            return;
+        }
+
+        stopControl.StopClicked += OnStopControlClicked;
+        _stopControls[recording.Id] = stopControl;
+
+        try
+        {
+            stopControl.Show();
+        }
+        catch (Exception ex)
+        {
+            stopControl.StopClicked -= OnStopControlClicked;
+            _stopControls.Remove(recording.Id);
+            try { stopControl.Dispose(); } catch { }
+            _audit.Log("recording_stop_control.show_error", new
+            {
+                recording_id = recording.Id,
+                error = ex.Message
+            });
+            return;
+        }
+
+        var stopBounds = plan.StopBounds;
+        _audit.Log("recording_stop_control.shown", new
+        {
+            recording_id = recording.Id,
+            source_type = recording.SourceType,
+            target_monitor = plan.DpiInfo.MonitorId,
+            target_dpi_x = plan.DpiInfo.DpiX,
+            target_dpi_y = plan.DpiInfo.DpiY,
+            dpi_scale = plan.DpiInfo.Scale,
+            dpi_fallback = plan.DpiInfo.IsFallback,
+            dpi_fallback_reason = plan.DpiInfo.FallbackReason,
+            planned_bounds = new { x = stopBounds.X, y = stopBounds.Y, w = stopBounds.Width, h = stopBounds.Height },
+            bounds = new { x = stopControl.Bounds.X, y = stopControl.Bounds.Y, w = stopControl.Bounds.Width, h = stopControl.Bounds.Height },
+            actual_window_dpi = stopControl.ActualWindowDpiForTests,
+            dpi_retry = retried,
+            nested_role = recording.NestedRole,
+            capture_visibility_mode = plan.IndicatorPresentation.Mode.ToString().ToLowerInvariant(),
+            display_affinity_requested = plan.IndicatorPresentation.DisplayAffinityRequested,
+            parent_recording_id = recording.ParentRecordingId,
+            fallback_reason = plan.FallbackReason
+        });
+    }
+
+    private static void DisposeCandidate(Form? form)
+    {
+        if (form == null)
+            return;
+        try { form.Close(); } catch { }
+        try { form.Dispose(); } catch { }
     }
 
     private void OnStopControlClicked(string recordingId)

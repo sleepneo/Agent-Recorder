@@ -48,6 +48,9 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private readonly Control _uiInvoker;
     private readonly IWindowActivator _confirmationWindowActivator;
     private readonly IPerformanceTracer _tracer;
+    private readonly ITrayBubblePolicy _bubblePolicy;
+    private readonly ITrayBalloonTip _balloonTip;
+    private readonly IIndicatorPresenter _indicatorPresenter;
     private IUiTextProvider _uiText;
 
     // Confirmation queue
@@ -60,7 +63,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     {
     }
 
-    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null)
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null)
     {
         _engine = engine; _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -128,6 +131,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             Text = _uiText.Get("Tray_Idle"),
             ContextMenuStrip = menu
         };
+
+        _bubblePolicy = bubblePolicy ?? new TrayBubblePolicy();
+        _balloonTip = balloonTip ?? new NotifyIconBalloonTip(_icon);
+        _indicatorPresenter = indicatorPresenter ?? new DefaultIndicatorPresenter(_indicatorManager);
 
         // Register global stop hotkey on the UI thread. Failure is logged but non-fatal.
         try
@@ -377,9 +384,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             {
                 _statusItem.Text = _uiText.Format("Tray_Status_Waiting", current.TimeoutSeconds);
                 _icon.Text = _uiText.Format("Tray_WaitingConfirmation", count);
-                _icon.ShowBalloonTip(5000, _uiText.Get("Tray_Balloon_WaitingTitle"),
-                    _uiText.Format("Tray_Balloon_WaitingBody", count),
-                    ToolTipIcon.Warning);
+                // Confirmation-waiting shell balloons are permanently disabled:
+                // the balloon is created before the recording becomes active and cannot be
+                // reliably retracted once the user approves, so it would appear in the video.
+                // Confirmation state is conveyed by the front-most form, tray menu and API.
             }
         }
         else
@@ -425,13 +433,54 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         RunOnUi(() =>
         {
             _activeRecordings[recording.Id] = recording;
-            _indicatorManager.ShowFor(recording);
+            var resolution = TryResolveActiveParentForUi(recording, _activeRecordings);
+            _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
-            if (_activeRecordings.Count == 1)
-            {
-                _icon.ShowBalloonTip(2000, _uiText.Get("Tray_Balloon_RecordingTitle"), _uiText.Get("Tray_Balloon_RecordingBody"), ToolTipIcon.Info);
-            }
+            // "Recording started" tray balloons are intentionally never shown;
+            // recording state is communicated by the indicator border, REC label,
+            // floating stop button and dynamic tray icon/text.
         });
+    }
+
+    /// <summary>
+    /// Resolves the active parent recording for a nested inner recording.
+    /// Returns the parent only when the recording is an inner, its ParentRecordingId
+    /// matches an active recording, that recording is an outer, and both share the
+    /// same NestedSessionId (including the case where both are null).
+    /// </summary>
+    internal static Recording? ResolveActiveParentForUi(
+        Recording recording,
+        IDictionary<string, Recording> activeRecordings)
+    {
+        return TryResolveActiveParentForUi(recording, activeRecordings).Parent;
+    }
+
+    /// <summary>
+    /// Resolves the active parent recording for a nested inner recording and preserves
+    /// the exact reason when no valid parent can be returned. The fallback reason is
+    /// forwarded to the indicator planner so production audit events do not fold
+    /// distinct failures into a generic <c>parent_missing</c> value.
+    /// </summary>
+    internal static ParentResolutionResult TryResolveActiveParentForUi(
+        Recording recording,
+        IDictionary<string, Recording> activeRecordings)
+    {
+        if (!string.Equals(recording.NestedRole, "inner", StringComparison.OrdinalIgnoreCase))
+            return new ParentResolutionResult(null, null);
+
+        if (string.IsNullOrEmpty(recording.ParentRecordingId))
+            return new ParentResolutionResult(null, "parent_missing");
+
+        if (!activeRecordings.TryGetValue(recording.ParentRecordingId, out var candidate))
+            return new ParentResolutionResult(null, "parent_missing");
+
+        if (!string.Equals(candidate.NestedRole, "outer", StringComparison.OrdinalIgnoreCase))
+            return new ParentResolutionResult(null, "parent_not_outer");
+
+        if (!string.Equals(recording.NestedSessionId, candidate.NestedSessionId, StringComparison.Ordinal))
+            return new ParentResolutionResult(null, "session_mismatch");
+
+        return new ParentResolutionResult(candidate, null);
     }
 
     public void SetIdle(object rec)
@@ -594,8 +643,17 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         _confirmSep.Visible = false;
     }
 
+    private void ShowBalloonTipIfAllowed(BubbleType type, int timeout, string title, string body, ToolTipIcon icon)
+    {
+        if (_bubblePolicy.AllowShowBubble(type, _activeRecordings.Count))
+        {
+            _balloonTip.ShowBalloonTip(timeout, title, body, icon);
+        }
+    }
+
     public void ShowError(string text) =>
-        RunOnUi(() => _icon.ShowBalloonTip(4000, _uiText.Get("Tray_Balloon_ErrorTitle"), text, ToolTipIcon.Error));
+        RunOnUi(() => ShowBalloonTipIfAllowed(BubbleType.Error, 4000,
+            _uiText.Get("Tray_Balloon_ErrorTitle"), text, ToolTipIcon.Error));
 
     /// <summary>
     /// Request local user to select a region. Shows full-screen selection window.
@@ -878,5 +936,43 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         var val = node[key];
         if (val == null) return null;
         return (int?)val;
+    }
+}
+
+/// <summary>
+/// Result of resolving the active parent for a nested inner recording.
+/// <see cref="Parent"/> is non-null only for a fully valid parent; otherwise
+/// <see cref="FallbackReason"/> carries the exact failure classification.
+/// </summary>
+internal sealed record ParentResolutionResult(Recording? Parent, string? FallbackReason);
+
+/// <summary>
+/// Minimal seam that decides how a recording is presented by the tray UI.
+/// Production uses the default implementation that forwards to
+/// <see cref="RecordingIndicatorManager"/>; tests inject a fake implementation
+/// to verify the <see cref="TrayContext.SetRecording"/> wiring without showing
+/// real windows.
+/// </summary>
+internal interface IIndicatorPresenter
+{
+    void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null);
+}
+
+/// <summary>
+/// Default presenter that forwards to the real <see cref="RecordingIndicatorManager"/>
+/// while preserving the parent fallback reason for accurate audit logging.
+/// </summary>
+internal sealed class DefaultIndicatorPresenter : IIndicatorPresenter
+{
+    private readonly RecordingIndicatorManager _manager;
+
+    public DefaultIndicatorPresenter(RecordingIndicatorManager manager)
+    {
+        _manager = manager;
+    }
+
+    public void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null)
+    {
+        _manager.ShowFor(recording, parent, parentFallbackReason);
     }
 }

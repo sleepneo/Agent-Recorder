@@ -34,6 +34,7 @@ public sealed class ApiServer
     private readonly RuntimeReadiness? _readiness;
     private readonly WindowsAutoStartManager? _autoStart;
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
+    private readonly IPerformanceSummaryProvider _performanceSummaryProvider;
     private CancellationTokenSource _cts = new();
 
     private SelectedRegionState? _lastSelectedRegion;
@@ -46,7 +47,8 @@ public sealed class ApiServer
         WindowsAutoStartManager? autoStart = null,
         FfmpegPrewarmer? ffmpegPrewarmer = null,
         IPerformanceTracer? tracer = null,
-        IEnsureContextStore? ensureContextStore = null)
+        IEnsureContextStore? ensureContextStore = null,
+        IPerformanceSummaryProvider? performanceSummaryProvider = null)
     {
         _engine = engine; _audit = audit; _tray = tray;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -54,6 +56,7 @@ public sealed class ApiServer
         _readiness = readiness;
         _autoStart = autoStart;
         _ffmpegPrewarmer = ffmpegPrewarmer;
+        _performanceSummaryProvider = performanceSummaryProvider ?? NoDataPerformanceSummaryProvider.Instance;
         _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
 
@@ -1002,8 +1005,28 @@ public sealed class ApiServer
                     error = windowsContext.Error
                 },
                 last_selected_region = lastRegion == null ? null : LastRegionToCapabilitiesObject(lastRegion)
-            }
+            },
+            perf_summary = GetPerfSummarySafe()
         };
+    }
+
+    private object GetPerfSummarySafe()
+    {
+        try
+        {
+            return _performanceSummaryProvider.GetSummary();
+        }
+        catch
+        {
+            // Final reliability boundary: even a misbehaving provider must not
+            // break /capabilities. Return a complete, privacy-safe degraded
+            // summary without exception text, types, paths, or IDs.
+            var degraded = PerformanceSummary.NoData(DateTime.UtcNow,
+                RollingJsonlPerformanceSummaryProviderConstants.DefaultMaxTracesPerGroup,
+                new PerformanceSummaryQuality { ReasonCode = "provider_error" });
+            degraded.Status = PerformanceSummaryStatus.Degraded;
+            return degraded;
+        }
     }
 
     private static string ResolveProductVersion()

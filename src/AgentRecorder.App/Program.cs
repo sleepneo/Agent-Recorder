@@ -110,7 +110,8 @@ internal static class Program
         var ffmpegPrewarmer = new FfmpegPrewarmer();
 
         var ensureContextStore = new EnsureContextStore(dataDir);
-        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore);
+        var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(dataDir);
+        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try

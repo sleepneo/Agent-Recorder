@@ -18,6 +18,7 @@ internal sealed class RecordingStopControlForm : Form
     private readonly IUiTextProvider _text;
     private readonly DisplayDpiInfo? _dpiInfo;
     private readonly Size? _explicitControlSize;
+    private readonly CaptureVisibilityMode _captureVisibilityMode;
     private Button _button = null!;
     private ToolTip _tooltip = null!;
     private int _clicked;
@@ -25,6 +26,9 @@ internal sealed class RecordingStopControlForm : Form
     private int _stoppingPaintCount;
     private int _actualWindowDpi;
     private bool _dpiMismatch;
+    private readonly IWindowDisplayAffinity _displayAffinity;
+    private bool _displayAffinityApplied;
+    private Exception? _displayAffinityError;
 
     /// <summary>
     /// Raised once when the user clicks the stop button.
@@ -43,12 +47,27 @@ internal sealed class RecordingStopControlForm : Form
     internal int PlannedDpiForTests => _dpiInfo != null ? (int)Math.Round(_dpiInfo.Scale * 96) : 0;
     internal int ActualWindowDpiForTests => _actualWindowDpi;
     internal bool DpiMismatchForTests => _dpiMismatch;
+    internal bool DisplayAffinityAppliedForTests => _displayAffinityApplied;
+    internal Exception? DisplayAffinityErrorForTests => _displayAffinityError;
+    internal CaptureVisibilityMode CaptureVisibilityModeForTests => _captureVisibilityMode;
 
-    public RecordingStopControlForm(string recordingId, RecordingStopControlBounds bounds, IUiTextProvider? textProvider = null)
+    public RecordingStopControlForm(string recordingId, RecordingStopControlBounds bounds, IUiTextProvider? textProvider = null, IWindowDisplayAffinity? displayAffinity = null)
+        : this(recordingId, bounds, CaptureVisibilityMode.ExcludeFromCapture, textProvider, displayAffinity)
+    {
+    }
+
+    internal RecordingStopControlForm(
+        string recordingId,
+        RecordingStopControlBounds bounds,
+        CaptureVisibilityMode captureVisibilityMode,
+        IUiTextProvider? textProvider = null,
+        IWindowDisplayAffinity? displayAffinity = null)
     {
         _recordingId = recordingId;
         _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
         PlacementBounds = bounds;
+        _captureVisibilityMode = captureVisibilityMode;
+        _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
         InitializeComponent();
         StartPosition = FormStartPosition.Manual;
         Bounds = new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height);
@@ -64,13 +83,28 @@ internal sealed class RecordingStopControlForm : Form
         RecordingStopControlBounds bounds,
         Size controlSize,
         DisplayDpiInfo dpiInfo,
-        IUiTextProvider? textProvider = null)
+        IUiTextProvider? textProvider = null,
+        IWindowDisplayAffinity? displayAffinity = null)
+        : this(recordingId, bounds, controlSize, dpiInfo, CaptureVisibilityMode.ExcludeFromCapture, textProvider, displayAffinity)
+    {
+    }
+
+    internal RecordingStopControlForm(
+        string recordingId,
+        RecordingStopControlBounds bounds,
+        Size controlSize,
+        DisplayDpiInfo dpiInfo,
+        CaptureVisibilityMode captureVisibilityMode,
+        IUiTextProvider? textProvider = null,
+        IWindowDisplayAffinity? displayAffinity = null)
     {
         _recordingId = recordingId;
         _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
         _explicitControlSize = controlSize;
         _dpiInfo = dpiInfo;
         PlacementBounds = bounds;
+        _captureVisibilityMode = captureVisibilityMode;
+        _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
         InitializeComponent();
         StartPosition = FormStartPosition.Manual;
         Bounds = new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height);
@@ -170,6 +204,38 @@ internal sealed class RecordingStopControlForm : Form
         {
             int plannedDpi = (int)Math.Round(_dpiInfo.Scale * 96);
             _dpiMismatch = _actualWindowDpi != plannedDpi;
+        }
+
+        ApplyDisplayAffinity(Handle);
+    }
+
+    /// <summary>
+    /// Applies the display-affinity setting and records the diagnostic outcome.
+    /// Internal for unit-testing only; production code calls this from <see cref="OnHandleCreated"/>.
+    /// </summary>
+    internal void ApplyDisplayAffinity(IntPtr hWnd)
+    {
+        // Reset per-handle state so a recreated handle does not keep a stale error
+        // from a previous attempt.
+        _displayAffinityApplied = false;
+        _displayAffinityError = null;
+
+        if (_captureVisibilityMode == CaptureVisibilityMode.ParentVisible)
+        {
+            // Parent-visible stop controls must be capturable by the parent outer recording.
+            return;
+        }
+
+        try
+        {
+            _displayAffinityApplied = _displayAffinity.SetExcludeFromCapture(hWnd);
+        }
+        catch (Exception ex)
+        {
+            // Display-affinity is a best-effort optimization. Failure must not break
+            // the stop button, stop recording, or disturb the UI message loop.
+            _displayAffinityError = ex;
+            _displayAffinityApplied = false;
         }
     }
 

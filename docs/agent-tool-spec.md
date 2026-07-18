@@ -195,6 +195,11 @@ context does not block the recording. For concurrent or duplicate consumption
 of the same ID, only one trace receives the trusted fields; the others receive
 `reused` or `missing`.
 
+`GET /api/v1/capabilities` also returns a bounded `perf_summary` with cold/warm
+P50/P95 diagnostics. This summary is optional operational context for the agent;
+it is not required to start a recording and never contains recording IDs, trace
+IDs, output paths, API keys, or context headers.
+
 `ensure-running` returns `ensure_context_id` and `ensure_context_header` only
 when `ensure_context_available=true`. On error (`ok=false`), the JSON result
 omits `startup_kind`, `ensure_elapsed_ms`, `ensure_context_id`,
