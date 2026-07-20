@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,6 +18,10 @@ public interface IExternalProcessRunner
     /// <param name="argumentList">Arguments passed via ArgumentList.</param>
     /// <param name="timeout">Maximum time to wait for the process.</param>
     /// <param name="captureStderr">Whether to capture a limited stderr excerpt.</param>
+    /// <param name="stderrEncoding">
+    /// Optional encoding used to decode captured stderr. When omitted the
+    /// process uses the system default code page.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
     /// Exit code, stderr excerpt (if captured), and whether the process timed out.
@@ -26,6 +31,7 @@ public interface IExternalProcessRunner
         IReadOnlyList<string> argumentList,
         System.TimeSpan timeout,
         bool captureStderr = true,
+        Encoding? stderrEncoding = null,
         CancellationToken cancellationToken = default);
 }
 

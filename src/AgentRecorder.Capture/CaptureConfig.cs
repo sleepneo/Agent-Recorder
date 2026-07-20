@@ -7,6 +7,7 @@ public sealed class CaptureConfig
     public nint WindowHandle;
     public bool Microphone;
     public string? MicDevice;
+    public string? MicDeviceName;
     public int Fps = 30;
     public string Quality = "medium";
     public string OutputPath = "";

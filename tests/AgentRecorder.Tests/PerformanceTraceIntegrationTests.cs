@@ -1006,7 +1006,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_AudioRejected_RecordsIntentFailedAndNoTerminal()
+    public async Task QuickRecording_SystemAudioRejected_RecordsIntentFailedAndNoTerminal()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Approve };
         var server = CreateServer(tray);
@@ -1023,7 +1023,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
 
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
-                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
+                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"duration_seconds\":60}"));
             Assert.Equal(400, (int)response.StatusCode);
 
             await Task.Delay(100);

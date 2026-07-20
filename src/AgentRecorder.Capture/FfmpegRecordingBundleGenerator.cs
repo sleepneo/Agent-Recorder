@@ -105,7 +105,9 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                     Directory.Delete(tempDir, recursive: true);
                     return RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.AlreadyExists);
                 }
-                Directory.Move(tempDir, bundlePath);
+                // Retry transient Windows access-denied errors caused by file-system
+                // indexing, antivirus, or lingering handles from child processes.
+                MoveDirectoryWithRetry(tempDir, bundlePath, maxRetries: 5, delayMs: 100);
             }
             catch (Exception ex)
             {
@@ -130,6 +132,26 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         string dir = Path.GetDirectoryName(mediaPath) ?? "";
         string stem = Path.GetFileNameWithoutExtension(mediaPath);
         return Path.Combine(dir, stem + ".bundle");
+    }
+
+    private static void MoveDirectoryWithRetry(string sourceDir, string destDir, int maxRetries, int delayMs)
+    {
+        for (int attempt = 0; attempt < maxRetries; attempt++)
+        {
+            try
+            {
+                Directory.Move(sourceDir, destDir);
+                return;
+            }
+            catch (IOException) when (attempt < maxRetries - 1)
+            {
+                // Transient lock from indexer/antivirus/child process; wait and retry.
+                Thread.Sleep(delayMs);
+            }
+        }
+
+        // Final attempt: let any exception propagate.
+        Directory.Move(sourceDir, destDir);
     }
 
     private static string DeriveTempDir(string mediaPath)
@@ -160,28 +182,56 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             "-update", "1",
             outputPath
         };
-        return await RunFfmpegFrameExtractAsync(args, ct);
+        var result = await RunFfmpegFrameExtractAsync(args, ct);
+        if (!result.Success)
+            return result;
+
+        if (!ValidateImageFile(outputPath, "png"))
+            return StepResult.Fail(RecordingBundleErrorCodes.FrameOutputInvalid, "first_frame_signature_invalid");
+
+        return StepResult.Ok();
     }
 
     private async Task<StepResult> ExtractLastFrameAsync(string mediaPath, double durationSeconds, string outputPath, CancellationToken ct)
     {
-        // Seek near the end, but stay within the file. For very short clips,
-        // fall back to the midpoint to avoid decoding issues.
-        double seekFromEnd = Math.Min(0.5, Math.Max(0.05, durationSeconds * 0.1));
-        string seekArg = durationSeconds > seekFromEnd
-            ? $"-{seekFromEnd:F3}"
-            : $"-{Math.Max(0.0, durationSeconds - 0.05):F3}";
+        // Fallback offsets from the end of the file. Older bundled FFmpeg may
+        // return exit 0 with no output for seeks very close to EOF; try
+        // progressively earlier positions until a valid PNG is produced.
+        var offsets = new[] { -0.5, -2.0, -5.0, -10.0 };
+        var attemptDetails = new List<string>(offsets.Length);
 
-        var args = new List<string>
+        foreach (var offset in offsets)
         {
-            "-y", "-nostats",
-            "-sseof", seekArg,
-            "-i", mediaPath,
-            "-frames:v", "1",
-            "-update", "1",
-            outputPath
-        };
-        return await RunFfmpegFrameExtractAsync(args, ct);
+            SafeDeleteFile(outputPath);
+
+            var args = new List<string>
+            {
+                "-y", "-nostats",
+                "-sseof", offset.ToString("F3", CultureInfo.InvariantCulture),
+                "-i", mediaPath,
+                "-frames:v", "1",
+                "-update", "1",
+                outputPath
+            };
+
+            var result = await RunFfmpegFrameExtractAsync(args, ct);
+            if (!result.Success)
+            {
+                attemptDetails.Add($"offset={offset}: {result.ErrorDetail ?? "failed"}");
+                continue;
+            }
+
+            if (!ValidateImageFile(outputPath, "png"))
+            {
+                attemptDetails.Add($"offset={offset}: exit_0_no_valid_png");
+                continue;
+            }
+
+            return StepResult.Ok();
+        }
+
+        return StepResult.Fail(RecordingBundleErrorCodes.FrameOutputInvalid,
+            "last_frame_fallback_exhausted; " + string.Join("; ", attemptDetails));
     }
 
     private async Task<StepResult> ExtractThumbnailAsync(string mediaPath, double durationSeconds, int width, int height, string outputPath, CancellationToken ct)
@@ -204,7 +254,14 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             "-update", "1",
             outputPath
         };
-        return await RunFfmpegFrameExtractAsync(args, ct);
+        var result = await RunFfmpegFrameExtractAsync(args, ct);
+        if (!result.Success)
+            return result;
+
+        if (!ValidateImageFile(outputPath, "jpeg"))
+            return StepResult.Fail(RecordingBundleErrorCodes.FrameOutputInvalid, "thumbnail_signature_invalid");
+
+        return StepResult.Ok();
     }
 
     private async Task<StepResult> RunFfmpegFrameExtractAsync(List<string> args, CancellationToken ct)
@@ -212,7 +269,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         try
         {
             var ffmpegPath = _ffmpegPathProvider();
-            var result = await _runner.RunAsync(ffmpegPath, args, _frameExtractTimeout, captureStderr: true, ct);
+            var result = await _runner.RunAsync(ffmpegPath, args, _frameExtractTimeout, captureStderr: true, cancellationToken: ct);
             if (result.TimedOut)
                 return StepResult.Fail(RecordingBundleErrorCodes.FrameExtractFailed, "timeout");
             if (result.ExitCode != 0)
@@ -288,6 +345,9 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                 backend = r.Backend,
                 stop_reason = r.StopReason,
                 audio_microphone = r.AudioMicrophone,
+                audio_status = r.AudioStatus,
+                audio_device_id = (object?)(r.AudioDeviceId ?? null),
+                audio_lost_at_ms = (object?)(r.AudioLostAtMs ?? null),
                 nested_role = (object?)(r.NestedRole ?? "none"),
                 nested_session_id = (object?)r.NestedSessionId ?? null,
                 parent_recording_id = (object?)r.ParentRecordingId ?? null
@@ -344,6 +404,16 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         {
             if (Directory.Exists(path))
                 Directory.Delete(path, recursive: true);
+        }
+        catch { }
+    }
+
+    private static void SafeDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
         }
         catch { }
     }

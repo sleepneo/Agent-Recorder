@@ -24,7 +24,6 @@ public static class SystemQuery
     internal record DisplayDetail(string id, string name, bool is_primary, Bounds bounds, double scale_factor, int dpiX, int dpiY, IntPtr handle);
 
     public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds);
-    public record AudioDevice(string id, string name, bool is_default, string state);
 
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
@@ -204,13 +203,6 @@ public static class SystemQuery
         var fg = GetForegroundWindow();
         return EnumWindows(false, false).FirstOrDefault(w => w.id == $"window_{fg.ToInt64()}");
     }
-
-    /// <summary>
-    /// Returns the list of available audio input devices.
-    /// Currently unimplemented: returns an empty list until real microphone
-    /// enumeration is integrated.
-    /// </summary>
-    public static List<AudioDevice> AudioInputs() => new();
 
     private delegate bool MonitorEnumProc(IntPtr h, IntPtr hdc, ref RECT r, IntPtr d);
     private delegate bool EnumWindowsProc(IntPtr h, IntPtr l);

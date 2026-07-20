@@ -13,14 +13,33 @@ namespace AgentRecorder.Core;
 public static class ConfigParser
 {
     private static readonly int[] AllowedFps = { 15, 24, 30, 60 };
+    private static readonly TimeSpan DeviceEnumerationTimeout = TimeSpan.FromSeconds(10);
 
-    public static Recording Build(JsonNode cfg, string agent, out object summary)
+    /// <summary>
+    /// Safe fallback provider used when no provider is explicitly supplied.
+    /// It is immutable and returns no devices, keeping tests without audio
+    /// fixtures deterministic and preventing accidental shared mutable state.
+    /// </summary>
+    private static readonly IMicrophoneDeviceProvider EmptyProvider = new EmptyMicrophoneProvider();
+    private static readonly IMicrophoneStatusProvider NullStatusProvider = NullMicrophoneStatusProvider.Instance;
+
+    public static Recording Build(JsonNode cfg, string agent, out object summary,
+        IMicrophoneDeviceProvider? microphoneProvider = null,
+        IMicrophoneStatusProvider? microphoneStatusProvider = null)
     {
         RejectUnsupportedContinuousFeatures(cfg);
-        RejectUnsupportedAudioFeatures(cfg);
 
         // =====================================================================
-        // Step 0: nested.role validation MUST come before source enumeration.
+        // Step 0: audio intent and device selection MUST come before source
+        // enumeration, region-selection UI, or output path construction.
+        // This ensures microphone failures (unknown device, no devices,
+        // enumeration unavailable, system audio requested, muted device) fail
+        // fast and cheap.
+        // =====================================================================
+        var resolvedMic = ResolveAudioIntent(cfg, microphoneProvider, microphoneStatusProvider);
+
+        // =====================================================================
+        // Step 1: nested.role validation MUST come before source enumeration.
         // This ensures invalid role is rejected even when displays/windows
         // are unavailable or source is malformed.
         // =====================================================================
@@ -179,10 +198,21 @@ public static class ConfigParser
         else throw new ApiException(400, "UNSUPPORTED_FEATURE",
             $"source.type '{type}' not supported in MVP");
 
-        var mic = cfg["audio"]?["microphone"];
-        rec.Microphone = mic?["enabled"]?.GetValue<bool>() ?? false;
+        var micNode = cfg["audio"]?["microphone"];
+        rec.Microphone = micNode?["enabled"]?.GetValue<bool>() ?? false;
         cap.Microphone = rec.Microphone;
-        cap.MicDevice = Str(mic?["device_id"]);
+
+        if (rec.Microphone)
+        {
+            if (resolvedMic == null)
+                throw new ApiException(503, "AUDIO_DEVICE_NOT_AVAILABLE",
+                    "No microphone input device is available.",
+                    new { suggested_action = "list_audio_devices" });
+            rec.MicrophoneDeviceId = resolvedMic.Id;
+            rec.MicrophoneDeviceName = resolvedMic.Name;
+            cap.MicDevice = resolvedMic.Id;
+            cap.MicDeviceName = resolvedMic.Name;
+        }
 
         var v = cfg["video"];
         int fps = v?["fps"]?.GetValue<int>() ?? 30;
@@ -229,7 +259,9 @@ public static class ConfigParser
         summary = new
         {
             source = $"{rec.SourceType}: {rec.SourceTitle}",
-            audio = rec.Microphone ? "Microphone enabled" : "No audio",
+            audio = rec.Microphone ? $"Microphone: {rec.MicrophoneDeviceName}" : "No audio",
+            audio_device = rec.Microphone ? rec.MicrophoneDeviceName : null,
+            audio_volume_percent = rec.Microphone ? resolvedMic?.VolumePercent : null,
             duration = rec.DurationSeconds is int s ? $"{s}s" : "Manual stop",
             output = rec.OutputPath,
             nested_role = rec.NestedRole ?? "none"
@@ -241,18 +273,165 @@ public static class ConfigParser
     private static ApiException Inv(string m) => new(400, "INVALID_ARGUMENT", m);
 
     /// <summary>
+    /// Resolves the requested microphone device from an already-enriched device
+    /// list. <paramref name="deviceId"/> selects explicitly; omitted device_id
+    /// first prefers the single fresh CoreAudio multimedia default, then a single
+    /// active device, otherwise requires an explicit choice. No audio stream is
+    /// opened; only device enumeration is performed.
+    /// </summary>
+    private static MicrophoneDeviceInfo ResolveMicrophoneDevice(JsonNode? micNode, IReadOnlyList<MicrophoneDeviceInfo> devices)
+    {
+        var requestedId = Str(micNode?["device_id"]);
+        if (!string.IsNullOrEmpty(requestedId))
+        {
+            var match = devices.FirstOrDefault(d => string.Equals(d.Id, requestedId, StringComparison.Ordinal));
+            if (match == null)
+                throw new ApiException(404, "AUDIO_DEVICE_NOT_FOUND",
+                    "The requested microphone device was not found.",
+                    new { suggested_action = "list_audio_devices" });
+            return match;
+        }
+
+        // A device is viable unless it is known to be inactive. Unknown state
+        // is treated as viable so transient COM failures do not block recording.
+        var viable = devices.Where(d => !string.Equals(d.State, "inactive", StringComparison.OrdinalIgnoreCase)).ToList();
+        var defaultViable = viable.Where(d => d.IsDefault == true).ToList();
+
+        // Prefer the single reliably-identified CoreAudio multimedia default.
+        if (defaultViable.Count == 1)
+            return defaultViable[0];
+
+        if (viable.Count == 1)
+            return viable[0];
+
+        if (viable.Count == 0)
+            throw new ApiException(503, "AUDIO_DEVICE_NOT_AVAILABLE",
+                "No microphone input device is available.",
+                new { suggested_action = "list_audio_devices" });
+
+        throw new ApiException(400, "AUDIO_DEVICE_REQUIRED",
+            "Multiple microphone devices are available. Specify audio.microphone.device_id from GET /api/v1/audio/devices.",
+            new { suggested_action = "list_audio_devices" });
+    }
+
+    /// <summary>
+    /// Validates audio intent and resolves the microphone device before any
+    /// display/window/region enumeration. Returns the resolved device when
+    /// microphone is enabled, or <c>null</c> when it is disabled/absent.
+    /// Throws <see cref="ApiException"/> for system audio or microphone failures,
+    /// including <c>AUDIO_DEVICE_MUTED</c> when the selected device is muted.
+    /// </summary>
+    public static MicrophoneDeviceInfo? ResolveAudioIntent(JsonNode cfg,
+        IMicrophoneDeviceProvider? provider = null,
+        IMicrophoneStatusProvider? statusProvider = null)
+    {
+        RejectUnsupportedAudioFeatures(cfg);
+
+        var micNode = cfg["audio"]?["microphone"];
+        bool enabled = micNode?["enabled"]?.GetValue<bool>() ?? false;
+        if (!enabled)
+            return null;
+
+        var actualProvider = provider ?? EmptyProvider;
+        var actualStatusProvider = statusProvider ?? NullStatusProvider;
+
+        // Enumerate once, then attach fresh CoreAudio status to every device.
+        // Fresh status drives default selection and active-state checks; it is
+        // never read from the 10-second dshow enumeration cache.
+        var devices = EnumerateMicrophoneDevices(actualProvider);
+        var enriched = EnrichWithFreshStatus(devices, actualStatusProvider);
+
+        var device = ResolveMicrophoneDevice(micNode, enriched);
+
+        // If the selected endpoint is known to be non-active, fail before UI.
+        // Unknown state is treated as active so a transient COM failure does not
+        // block recording.
+        if (string.Equals(device.State, "inactive", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException(503, "AUDIO_DEVICE_NOT_AVAILABLE",
+                "The selected microphone is currently unavailable. Please check the device and try again.",
+                new { suggested_action = "check_audio_device", device_id = device.Id });
+        }
+
+        if (device.IsMuted == true)
+        {
+            throw new ApiException(409, "AUDIO_DEVICE_MUTED",
+                "The selected microphone is muted. Please unmute it in Windows sound settings and try again.",
+                new { suggested_action = "unmute_microphone_in_windows_settings", device_id = device.Id });
+        }
+
+        return device;
+    }
+
+    private static IReadOnlyList<MicrophoneDeviceInfo> EnumerateMicrophoneDevices(IMicrophoneDeviceProvider provider)
+    {
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(DeviceEnumerationTimeout);
+            return provider.GetDevicesAsync(cts.Token)
+                .WaitAsync(DeviceEnumerationTimeout).GetAwaiter().GetResult();
+        }
+        catch (MicrophoneEnumerationException ex)
+        {
+            throw new ApiException(503, ex.ErrorCode, "Microphone device enumeration is currently unavailable.",
+                new { suggested_action = "retry_or_check_audio_devices" });
+        }
+        catch (System.OperationCanceledException)
+        {
+            throw new ApiException(503, "device_enumeration_timeout", "Microphone device enumeration timed out.",
+                new { suggested_action = "retry_or_check_audio_devices" });
+        }
+        catch (Exception)
+        {
+            throw new ApiException(503, "device_enumeration_unavailable", "Microphone device enumeration is currently unavailable.",
+                new { suggested_action = "retry_or_check_audio_devices" });
+        }
+    }
+
+    private static IReadOnlyList<MicrophoneDeviceInfo> EnrichWithFreshStatus(IReadOnlyList<MicrophoneDeviceInfo> devices, IMicrophoneStatusProvider statusProvider)
+    {
+        if (devices.Count == 0)
+            return devices;
+
+        var enriched = new MicrophoneDeviceInfo[devices.Count];
+        for (int i = 0; i < devices.Count; i++)
+        {
+            var d = devices[i];
+            var status = QueryMicrophoneStatus(d.Id, statusProvider);
+            enriched[i] = d with
+            {
+                IsMuted = status.IsMuted,
+                VolumePercent = status.VolumePercent,
+                IsDefault = status.IsDefault ?? d.IsDefault,
+                State = status.State ?? d.State
+            };
+        }
+        return enriched;
+    }
+
+    private static MicrophoneStatus QueryMicrophoneStatus(string deviceId, IMicrophoneStatusProvider provider)
+    {
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(DeviceEnumerationTimeout);
+            return provider.GetStatusAsync(deviceId, cts.Token)
+                .WaitAsync(DeviceEnumerationTimeout).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            return new MicrophoneStatus(null, null, null, null);
+        }
+    }
+
+
+    /// <summary>
     /// Rejects explicit requests for audio capabilities that are not yet
     /// implemented. Must run before any display/window enumeration or output
     /// path construction so that the failure is fast and cheap.
+    /// Microphone is implemented; system audio remains blocked.
     /// </summary>
     public static void RejectUnsupportedAudioFeatures(JsonNode cfg)
     {
-        var mic = cfg["audio"]?["microphone"];
-        if (mic?["enabled"]?.GetValue<bool>() == true)
-            throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",
-                "Microphone recording is not implemented in this version.",
-                new { capability = "microphone", suggested_action = "retry_without_audio" });
-
         var sys = cfg["audio"]?["system_audio"];
         if (sys?["enabled"]?.GetValue<bool>() == true)
             throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",

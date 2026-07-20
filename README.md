@@ -82,6 +82,7 @@ Agents should use the paths returned by `ensure-running` or
 - User-level autostart controls and FFmpeg prewarm support.
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
+- Real microphone audio recording via FFmpeg dshow (AAC), with device enumeration and start/lost failure reporting.
 - Local audit log and MP4 output.
 
 ## Documentation

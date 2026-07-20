@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Windows.Forms;
 using AgentRecorder.Api;
@@ -7,6 +8,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Logging;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
 
@@ -101,8 +103,15 @@ internal static class Program
         var dataDir = DataDirResolver.Resolve();
         var perfTracer = new RecordingPerformanceTracer(dataDir);
 
+        // Production microphone device provider: owned by the engine and shared
+        // with /audio/devices, /permissions, and /capabilities via the engine
+        // reference. Keeps a short TTL cache so multiple API calls within a few
+        // seconds do not repeatedly spawn FFmpeg device-enumeration processes.
+        var micProvider = new CachingMicrophoneDeviceProvider(new FfmpegDshowMicrophoneProvider());
+        var micStatusProvider = new CoreAudioCaptureStatusProvider();
+
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
-        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator);
+        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator, micProvider, micStatusProvider);
         var tray = new TrayContext(engine, audit, perfTracer);
         engine.SetTray(tray);
 

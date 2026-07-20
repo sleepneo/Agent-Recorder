@@ -58,6 +58,8 @@ public class RecordingBundleTests : IDisposable
         int width = 1280,
         int height = 720,
         string? backend = null,
+        bool audioMicrophone = false,
+        string audioStatus = "not_requested",
         string? nestedRole = null,
         string? nestedSessionId = null,
         string? parentRecordingId = null)
@@ -76,7 +78,10 @@ public class RecordingBundleTests : IDisposable
             fps: fps,
             backend: backend ?? DefaultBackendFor(sourceType),
             stopReason: "duration_reached",
-            audioMicrophone: false,
+            audioMicrophone: audioMicrophone,
+            audioStatus: audioStatus,
+            audioDeviceId: audioMicrophone ? "mic_test" : null,
+            audioLostAtMs: null,
             nestedRole: nestedRole,
             nestedSessionId: nestedSessionId,
             parentRecordingId: parentRecordingId,
@@ -211,7 +216,8 @@ public class RecordingBundleTests : IDisposable
             nestedRole: "outer",
             nestedSessionId: "session_xyz");
 
-        await generator.GenerateAsync(request);
+        var result = await generator.GenerateAsync(request);
+        Assert.True(result.Success, $"Bundle generation failed: {result.ErrorCode} {result.ErrorDetail}");
 
         using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_tmpDir, "metadata.bundle", "metadata.json")));
         var root = doc.RootElement;
@@ -254,6 +260,24 @@ public class RecordingBundleTests : IDisposable
 
         Assert.Equal("rec_test", root.GetProperty("audit_correlation").GetProperty("recording_id").GetString());
         Assert.Equal("conf_abc", root.GetProperty("audit_correlation").GetProperty("confirmation_id").GetString());
+    }
+
+    [Fact]
+    public async Task GenerateAsync_MicrophoneEnabled_MetadataRecordsAudioStatus()
+    {
+        var mediaPath = MediaPath("mic-enabled");
+        File.WriteAllBytes(mediaPath, new byte[] { 0, 1, 2, 3 });
+
+        var generator = new FfmpegRecordingBundleGenerator(new FakeExternalProcessRunner().WithSuccess(), ffmpegPathProvider: FakeFfmpegPathProvider);
+        var request = BuildRequest(mediaPath, audioMicrophone: true, audioStatus: "recorded");
+
+        var result = await generator.GenerateAsync(request);
+        Assert.True(result.Success, $"Bundle generation failed: {result.ErrorCode} {result.ErrorDetail}");
+
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(_tmpDir, "mic-enabled.bundle", "metadata.json")));
+        var recording = doc.RootElement.GetProperty("recording");
+        Assert.True(recording.GetProperty("audio_microphone").GetBoolean());
+        Assert.Equal("recorded", recording.GetProperty("audio_status").GetString());
     }
 
     [Fact]
@@ -853,6 +877,129 @@ public class RecordingBundleTests : IDisposable
     }
 
     [Fact]
+    public void RecordingEngine_MicrophoneMissingAudioTrack_MergesWarningIntoRecording()
+    {
+        var audit = new CaptureAuditLogger();
+        var engine = new RecordingEngine(audit, bundleGenerator: new CountingBundleGenerator());
+        engine.SetTray(new NoOpTray());
+
+        var backend = new FakeCaptureBackend();
+        engine.BackendFactory = _ => (backend, "ffmpeg");
+
+        var rec = new Recording
+        {
+            SourceType = "region",
+            BackendType = "ffmpeg",
+            Microphone = true,
+            OutputPath = MediaPath("mic-warning"),
+            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("mic-warning"), Microphone = true }
+        };
+        engine.StartCaptureForTests(rec, new NoOpTray());
+
+        backend.FireNaturalExit(0, new OutputMeta
+        {
+            Container = "mp4",
+            Codec = "h264",
+            DurationSeconds = 1.0,
+            SizeBytes = 1024,
+            Width = 100,
+            Height = 100,
+            AudioStatus = "missing_audio_track",
+            Warnings = new[] { "microphone_missing_audio_track: the output does not contain an AAC audio stream" }
+        });
+
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Contains(rec.Warnings, w => w.Contains("microphone_missing_audio_track"));
+    }
+
+    [Fact]
+    public void RecordingEngine_MicrophoneLostStderrButNoAudioTrack_FailsWithMissingAudioTrack()
+    {
+        var audit = new CaptureAuditLogger();
+        var generator = new CapturingBundleGenerator();
+        var engine = new RecordingEngine(audit, bundleGenerator: generator);
+        engine.SetTray(new NoOpTray());
+
+        var backend = new FakeCaptureBackend();
+        engine.BackendFactory = _ => (backend, "ffmpeg");
+
+        var rec = new Recording
+        {
+            SourceType = "region",
+            BackendType = "ffmpeg",
+            Microphone = true,
+            OutputPath = MediaPath("mic-lost-no-track"),
+            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("mic-lost-no-track"), Microphone = true }
+        };
+        engine.StartCaptureForTests(rec, new NoOpTray());
+
+        // Simulate runtime-loss stderr but no actual audio stream evidence.
+        backend.FireNaturalExit(0, new OutputMeta
+        {
+            Container = "mp4",
+            Codec = "h264",
+            DurationSeconds = 1.0,
+            SizeBytes = 1024,
+            Width = 100,
+            Height = 100,
+            AudioStatus = "missing_audio_track",
+            Warnings = new[] { "microphone_missing_audio_track: the output does not contain an AAC audio stream" }
+        });
+
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
+        Assert.Equal(0, generator.CallCount);
+        Assert.Contains(rec.Warnings, w => w.Contains("microphone_missing_audio_track"));
+    }
+
+    [Fact]
+    public void RecordingEngine_MicrophoneAacTrackWithLostStderr_CompletesWithBundleAudioStatusLost()
+    {
+        var audit = new CaptureAuditLogger();
+        var generator = new CapturingBundleGenerator();
+        var engine = new RecordingEngine(audit, bundleGenerator: generator);
+        engine.SetTray(new NoOpTray());
+
+        var backend = new FakeCaptureBackend();
+        engine.BackendFactory = _ => (backend, "ffmpeg");
+
+        var rec = new Recording
+        {
+            SourceType = "region",
+            BackendType = "ffmpeg",
+            Microphone = true,
+            MicrophoneDeviceId = "mic_1",
+            OutputPath = MediaPath("mic-lost-with-track"),
+            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("mic-lost-with-track"), Microphone = true }
+        };
+        engine.StartCaptureForTests(rec, new NoOpTray());
+
+        backend.FireNaturalExit(0, new OutputMeta
+        {
+            Container = "mp4",
+            Codec = "h264",
+            DurationSeconds = 1.0,
+            SizeBytes = 1024,
+            Width = 100,
+            Height = 100,
+            HasAudioStream = true,
+            AudioCodec = "aac",
+            AudioStatus = "lost",
+            Warnings = new[] { "microphone_lost: audio input was lost during recording" }
+        });
+
+        Assert.Equal(RecState.completed, rec.State);
+        SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2));
+        Assert.Equal(1, generator.CallCount);
+        Assert.NotNull(generator.LastRequest);
+        Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
+        Assert.True(generator.LastRequest!.AudioMicrophone);
+        Assert.Equal("lost", generator.LastRequest.AudioStatus);
+        Assert.Equal("mic_1", generator.LastRequest.AudioDeviceId);
+        Assert.Contains(rec.Warnings, w => w.Contains("microphone_lost"));
+    }
+
+    [Fact]
     public async Task RecordingEngine_StopResponse_StoppingState_IncludesBundleSchema()
     {
         var audit = new CaptureAuditLogger();
@@ -1327,6 +1474,45 @@ public class RecordingBundleTests : IDisposable
         return (0, 0);
     }
 
+    [Fact]
+    public async Task GenerateAsync_LastFrameExit0NoFile_FallbackSucceeds()
+    {
+        var mediaPath = MediaPath("fallback-success");
+        File.WriteAllText(mediaPath, "fake video");
+
+        var runner = new FallbackSimulatingRunner(failCountBeforeSuccess: 2);
+        var generator = new FfmpegRecordingBundleGenerator(runner, ffmpegPathProvider: FakeFfmpegPathProvider);
+        var request = BuildRequest(mediaPath, actualDuration: 30.0);
+
+        var result = await generator.GenerateAsync(request);
+
+        Assert.True(result.Success);
+        Assert.True(Directory.Exists(result.BundlePath));
+        Assert.True(File.Exists(Path.Combine(result.BundlePath, "last_frame.png")));
+        Assert.True(runner.LastFrameCalls >= 2);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_LastFrameAllFallbacksFail_ReturnsFrameOutputInvalidAndCleansTemp()
+    {
+        var mediaPath = MediaPath("fallback-fail");
+        File.WriteAllText(mediaPath, "fake video");
+
+        var runner = new FallbackSimulatingRunner(failCountBeforeSuccess: int.MaxValue);
+        var generator = new FfmpegRecordingBundleGenerator(runner, ffmpegPathProvider: FakeFfmpegPathProvider);
+        var request = BuildRequest(mediaPath, actualDuration: 30.0);
+
+        var result = await generator.GenerateAsync(request);
+
+        Assert.False(result.Success);
+        Assert.Equal(RecordingBundleErrorCodes.FrameOutputInvalid, result.ErrorCode);
+        Assert.Contains("last_frame_fallback_exhausted", result.ErrorDetail);
+
+        // Temp directory must be cleaned up.
+        var leftoverTempDirs = Directory.GetDirectories(_tmpDir, ".*.bundle.tmp-*");
+        Assert.Empty(leftoverTempDirs);
+    }
+
     // Helpers
 
     private sealed class NoOpTray : ITrayContext
@@ -1386,7 +1572,7 @@ public class RecordingBundleTests : IDisposable
             return this;
         }
 
-        public async Task<ExternalProcessResult> RunAsync(string fileName, IReadOnlyList<string> argumentList, TimeSpan timeout, bool captureStderr = true, CancellationToken cancellationToken = default)
+        public async Task<ExternalProcessResult> RunAsync(string fileName, IReadOnlyList<string> argumentList, TimeSpan timeout, bool captureStderr = true, Encoding? stderrEncoding = null, CancellationToken cancellationToken = default)
         {
             Calls.Add((argumentList, argumentList.Last()));
             await Task.Yield();
@@ -1407,6 +1593,58 @@ public class RecordingBundleTests : IDisposable
             }
 
             return _result;
+        }
+    }
+
+    /// <summary>
+    /// Simulates FFmpeg frame extraction: first N calls succeed with exit 0 but
+    /// do not create a valid output file, then writes a valid PNG on subsequent
+    /// last-frame calls. Used to exercise the -sseof fallback path.
+    /// </summary>
+    private sealed class FallbackSimulatingRunner : IExternalProcessRunner
+    {
+        private readonly int _failCountBeforeSuccess;
+        private int _lastFrameCalls;
+        private int _successfulLastFrameCalls;
+
+        public FallbackSimulatingRunner(int failCountBeforeSuccess)
+        {
+            _failCountBeforeSuccess = failCountBeforeSuccess;
+        }
+
+        public int LastFrameCalls => _lastFrameCalls;
+
+        public Task<ExternalProcessResult> RunAsync(string fileName, IReadOnlyList<string> argumentList, TimeSpan timeout, bool captureStderr = true, Encoding? stderrEncoding = null, CancellationToken cancellationToken = default)
+        {
+            var outputPath = argumentList.Last();
+            var ext = Path.GetExtension(outputPath).ToLowerInvariant();
+            bool isLastFrame = argumentList.Contains("-sseof");
+
+            if (isLastFrame)
+            {
+                _lastFrameCalls++;
+                if (_successfulLastFrameCalls < _failCountBeforeSuccess)
+                {
+                    _successfulLastFrameCalls++;
+                    // Exit 0 but do not create the file, mimicking the real bug.
+                    try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+                    return Task.FromResult(new ExternalProcessResult(0, false, ""));
+                }
+
+                WriteValidFile(outputPath, ext);
+                return Task.FromResult(new ExternalProcessResult(0, false, ""));
+            }
+
+            WriteValidFile(outputPath, ext);
+            return Task.FromResult(new ExternalProcessResult(0, false, ""));
+        }
+
+        private static void WriteValidFile(string outputPath, string ext)
+        {
+            if (ext == ".png")
+                File.WriteAllBytes(outputPath, PngHeader().Concat(new byte[100]).ToArray());
+            else if (ext == ".jpg")
+                File.WriteAllBytes(outputPath, JpegHeader().Concat(new byte[100]).ToArray());
         }
     }
 

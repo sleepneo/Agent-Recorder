@@ -85,7 +85,7 @@ POST /api/v1/recordings/quick
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
-| 音频录制 | 未实现 | 当前版本暂不包含音频 |
+| 麦克风录制 | 已实现 | 通过 FFmpeg dshow 捕获真实麦克风输入，生成含 AAC 音频的 MP4；系统声音暂未实现 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 ## 项目结构

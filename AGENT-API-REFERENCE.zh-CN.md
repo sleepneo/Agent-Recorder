@@ -244,7 +244,7 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**音频能力**：当前版本麦克风与系统声音均未实现。`recording.audio` 保留为空数组，`recording.audio_capabilities.microphone` 与 `system_audio` 均返回 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.microphone.enabled=true` 或 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
+**音频能力**：麦克风录制已通过 FFmpeg dshow 实现，编码为 AAC；`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -544,12 +544,12 @@ Context 指标校验与冲突检测：`ensure_elapsed_ms` 和 `service_startup_e
 GET /permissions
 ```
 
-不需要 API key。当前版本麦克风与系统声音均未实现，因此 `microphone` 与 `system_audio` 固定返回 `{ "supported": false, "status": "not_implemented" }`；`screen_capture` 与 `output_directory` 为本地授予。
+不需要 API key。`screen_capture` 与 `output_directory` 为本地授予。麦克风已支持，其 `status` 诚实反映设备可用性：`available`（存在可用设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。本版本不探测真实 Windows 麦克风 ACL，因此不报告 `granted`。`system_audio` 仍为未实现。
 
 ```json
 {
   "screen_capture": { "status": "granted" },
-  "microphone": { "supported": false, "status": "not_implemented" },
+  "microphone": { "supported": true, "status": "available" },
   "system_audio": { "supported": false, "status": "not_implemented" },
   "output_directory": {
     "status": "granted",
@@ -565,16 +565,46 @@ GET /permissions
 GET /audio/devices
 ```
 
-不需要 API key。真实麦克风枚举尚未实现，返回空数组与明确状态：
+不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并为每个设备附加新鲜的 CoreAudio 只读状态。`status` 为 `ready`（存在设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。`microphone_supported` 为 `true`；`system_audio_supported` 为 `false`。
+
+当前已验证的设备枚举路径是 portable 包内捆绑的 FFmpeg。开发环境也可能通过 `AGENT_RECORDER_FFMPEG_DIR` 或 `PATH` 解析外部 FFmpeg；在 FFmpeg 8.x 新版 listing 格式兼容修复完成前，部分较新的外部构建即使 Windows 存在麦克风，也可能返回 `status: "unavailable"`。该限制只影响经此外部二进制进行的设备发现，不影响已验证的 portable 捆绑路径。
+
+`id` 是 FFmpeg dshow 返回的 alternative name（示例展示的是不带 `audio=` 前缀的 alternative-name ID），调用者在后续请求中必须**原样传递**，不得自行添加 `audio=` 前缀；Agent Recorder 在构造 FFmpeg 参数时会负责添加该前缀。
 
 ```json
 {
-  "status": "not_implemented",
-  "microphone_supported": false,
-  "input_devices": [],
+  "status": "ready",
+  "microphone_supported": true,
+  "input_devices": [
+    {
+      "id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
+      "name": "Microphone (Realtek(R) Audio)",
+      "is_default": true,
+      "state": "active",
+      "is_muted": false,
+      "volume_percent": 75
+    }
+  ],
   "system_audio_supported": false
 }
 ```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | FFmpeg dshow alternative name，需原样回传。 |
+| `name` | string | 人类可读设备名。 |
+| `is_default` | boolean \| null | 当前 CoreAudio 多媒体默认捕获端点为 `true`；CoreAudio 不可查时回退到 dshow 提供的默认值；`null` 表示未知。 |
+| `state` | string \| null | CoreAudio 端点 active 时为 `"active"`，否则为 `"inactive"`；`null` 表示未知。 |
+| `is_muted` | boolean \| null | 端点被软件静音时为 `true`；`null` 表示未知。 |
+| `volume_percent` | integer \| null | 主音量标量，四舍五入到 `0..100`；`null` 表示未知。 |
+
+`is_default`、`state`、`is_muted`、`volume_percent` 每次请求都重新读取，**不**进入 10 秒的 dshow 枚举缓存。用户取消静音、切换默认设备后会立即反映到下一次调用。
+
+`state` 为 `null` 或 `"active"` 不会阻断录制；`state` 为 `"inactive"` 会在弹出选区/确认 UI 之前直接失败。
+
+当 `is_muted` 为 `false` 且 `volume_percent` 低于 `10` 时，确认 UI 会显示低音量警告。该警告不阻断录制，Agent Recorder 也不会自动修改系统音量。
 
 ## 2. 列出显示器
 
@@ -670,6 +700,12 @@ X-Agent-Name: <agent-name>
     "fps": 30,
     "quality": "medium"
   },
+  "audio": {
+    "microphone": {
+      "enabled": true,
+      "device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}"
+    }
+  },
   "output": {
     "directory": "default",
     "filename_template": "recording-{datetime}"
@@ -690,7 +726,7 @@ X-Agent-Name: <agent-name>
 | `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
 | `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
 | `video` | 否 | 透传到原始录制配置，默认值同原始 API |
-| `audio` | 否 | 透传到原始录制配置；`audio.microphone.enabled` 必须 `false` 或省略，`true` 返回 `CAPABILITY_NOT_IMPLEMENTED` |
+| `audio` | 否 | 透传到原始录制配置；`audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择：仅有一个 active 设备、或仅有一个 CoreAudio 多媒体默认设备时选中该设备；否则必须提供 `audio.microphone.device_id`（来自 `GET /audio/devices`）。`audio.system_audio.enabled` 必须 `false` 或省略。若选中设备被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`）；若选中设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`。应用不会自动取消系统静音；状态未知时不阻断 |
 | `output` | 否 | 透传到原始录制配置 |
 | `nested` | 否 | 透传到原始录制配置，使用现有 nested 规则 |
 
@@ -870,6 +906,12 @@ X-Agent-Name: <agent-name>
     "directory": "default",
     "filename_template": "recording-{datetime}"
   },
+  "audio": {
+    "microphone": {
+      "enabled": true,
+      "device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}"
+    }
+  },
   "stop_condition": {
     "type": "duration",
     "seconds": 300
@@ -879,6 +921,10 @@ X-Agent-Name: <agent-name>
   }
 }
 ```
+
+`audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择单一 active 设备或单一 CoreAudio 多媒体默认设备；存在多个 active 设备且无法唯一确定默认设备时必须提供 `audio.microphone.device_id`（来自 `GET /audio/devices`）。`audio.system_audio.enabled` 必须为 `false` 或省略，`true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
+
+若选中设备被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`），应用不会自动取消系统静音；若选中设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`。CoreAudio 状态未知时不阻断录制。
 
 ### 显示器录制请求体
 
@@ -923,8 +969,6 @@ X-Agent-Name: <agent-name>
   }
 }
 ```
-
-音频字段必须保持禁用或省略：`audio.microphone.enabled=true` 或 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`，因为当前版本尚未实现音频录制。
 
 创建录制通常返回：
 
@@ -1316,7 +1360,10 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
     "fps": 30,
     "backend": "ffmpeg-region",
     "stop_reason": "duration_reached",
-    "audio_microphone": false,
+    "audio_microphone": true,
+    "audio_status": "recorded",
+    "audio_device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
+    "audio_lost_at_ms": null,
     "nested_role": "none",
     "nested_session_id": null,
     "parent_recording_id": null
@@ -1337,6 +1384,16 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
   }
 }
 ```
+
+`recording.audio_status` 取值：
+
+| 值 | 说明 |
+| --- | --- |
+| `not_requested` | 未请求麦克风音频。 |
+| `recorded` | 麦克风音频已成功写入输出，且输出中存在 AAC 音轨。 |
+| `start_failed` | 请求了麦克风，但 FFmpeg 无法打开该设备（设备被占用、已禁用或不存在）。 |
+| `lost` | 录制过程中麦克风设备丢失或断开，但输出中仍存在 AAC 音轨。 |
+| `missing_audio_track` | 请求了麦克风且 FFmpeg 正常退出，但输出中不存在 AAC 音轨。 |
 
 ### `marks.json`
 
@@ -1446,3 +1503,18 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
 6. 人类用户框选区域。
 7. 人类用户确认录制。
 8. AI agent 轮询完成并报告 MP4 路径。
+
+## 14. 常见错误码
+
+| 错误码 | HTTP 状态 | 说明 |
+|--------|-----------|------|
+| `INVALID_ARGUMENT` | 400 | 请求体或参数非法。 |
+| `SOURCE_NOT_FOUND` | 404 | 目标显示器/窗口/来源不存在。 |
+| `CAPABILITY_NOT_IMPLEMENTED` | 400 | 请求的能力尚未实现，例如 `audio.system_audio.enabled=true`。 |
+| `AUDIO_DEVICE_MUTED` | 409 | 选中的麦克风已被静音。应用不会自动取消静音；用户需在 Windows 声音设置中取消静音后重试。 |
+| `AUDIO_DEVICE_NOT_AVAILABLE` | 503 | 选中的麦克风当前 inactive，或没有可用麦克风。建议检查设备后重试。 |
+| `AUDIO_DEVICE_NOT_FOUND` | 404 | 请求中 `audio.microphone.device_id` 不存在；请重新调用 `GET /audio/devices` 获取设备列表。 |
+| `AUDIO_DEVICE_REQUIRED` | 400 | 存在多个可用麦克风且无法唯一确定默认设备，必须显式提供 `audio.microphone.device_id`。 |
+| `METHOD_NOT_ALLOWED` | 405 | 禁止通过 HTTP 批准/拒绝本地确认。 |
+
+`AUDIO_DEVICE_MUTED` 与 `AUDIO_DEVICE_NOT_AVAILABLE` 都在弹出选区/确认 UI 之前返回，不会创建 recording 或 confirmation。当 CoreAudio 状态因临时故障无法读取时，状态按 unknown 处理，不会误报为静音或 inactive，也不会阻断录制。

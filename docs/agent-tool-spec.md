@@ -21,7 +21,8 @@ requires local user confirmation before recording starts.
 | `selection_timeout_seconds` | integer | No | Timeout for `selected_region`, default `120` |
 | `fps` | integer | No | `15`, `24`, `30`, or `60`, default `30` |
 | `quality` | string | No | `low`, `medium`, or `high`, default `medium` |
-| `microphone_enabled` | boolean | No | Must be `false` or omitted. Microphone capture is not implemented; `true` returns `CAPABILITY_NOT_IMPLEMENTED` |
+| `microphone_enabled` | boolean | No | Set to `true` to include microphone audio (AAC). Defaults to `false`. Maps to `audio.microphone.enabled`. System audio is not implemented. |
+| `microphone_device_id` | string | No | Required when multiple active microphones are available and `microphone_enabled=true`, or when the default/active device cannot be uniquely determined. Must be the `id` returned by `GET /api/v1/audio/devices`. Maps to `audio.microphone.device_id`. If the selected device is muted or known inactive, the request fails before any UI is shown with `AUDIO_DEVICE_MUTED` or `AUDIO_DEVICE_NOT_AVAILABLE`. A low-volume warning is shown when the device is unmuted but `volume_percent < 10`; this does not block recording. |
 | `nested_role` | string | No | `outer` or `inner` for nested recording |
 | `parent_recording_id` | string | No | Required for nested inner recordings |
 | `session_id` | string | No | Optional nested recording session id |
@@ -62,9 +63,12 @@ requires local user confirmation before recording starts.
       },
       "microphone_enabled": {
         "type": "boolean",
-        "enum": [false],
         "default": false,
-        "description": "Must be false or omitted. Microphone capture is not implemented; true returns CAPABILITY_NOT_IMPLEMENTED."
+        "description": "Set to true to include microphone audio (AAC). Maps to audio.microphone.enabled."
+      },
+      "microphone_device_id": {
+        "type": "string",
+        "description": "Required when multiple active microphones are available and microphone_enabled is true, or when the default/active device cannot be uniquely determined. Must be the id from GET /api/v1/audio/devices. Maps to audio.microphone.device_id."
       },
       "nested_role": {
         "type": "string",
@@ -92,7 +96,9 @@ Tool input:
   "duration_seconds": 60,
   "selection_timeout_seconds": 120,
   "fps": 30,
-  "quality": "medium"
+  "quality": "medium",
+  "microphone_enabled": true,
+  "microphone_device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}"
 }
 ```
 
@@ -111,7 +117,8 @@ API request:
   },
   "audio": {
     "microphone": {
-      "enabled": false
+      "enabled": true,
+      "device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}"
     }
   }
 }

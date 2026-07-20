@@ -35,4 +35,16 @@ public sealed class OutputMeta
     /// <summary>True when the first 8 bytes match the PNG signature
     /// (89 50 4E 47 0D 0A 1A 0A). Used by RecordingEngine to gate WGC still-frame success.</summary>
     public bool IsValidPngSignature;
+
+    // Microphone audio outcome tracking.
+    public string? AudioStatus; // "not_requested" | "recorded" | "start_failed" | "lost" | "missing_audio_track"
+    public bool HasAudioStream;
+    public string? AudioCodec;
+
+    /// <summary>
+    /// When <see cref="AudioStatus"/> is "lost", this is the best-effort wall-clock
+    /// timestamp (UTC milliseconds since epoch) at which audio was last known to be
+    /// present. Null when no reliable evidence is available.
+    /// </summary>
+    public long? AudioLostAtMs;
 }

@@ -98,4 +98,5 @@ Context files are written using a random temp file in the same directory and ato
 - The portable package is not code-signed.
 - Some GPU-accelerated windows may not capture reliably through FFmpeg
   `gdigrab`.
-- Microphone/system audio support is not a completed product path yet. Requests that set `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` fail fast with `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.
+- Microphone recording is implemented via FFmpeg dshow and encoded as AAC; the capture backend does not open the audio stream until after local user confirmation. System audio recording is not implemented; requests that set `audio.system_audio.enabled=true` fail fast with `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.
+- The bundled FFmpeg build is the validated microphone-discovery path. Some newer external FFmpeg builds use a different dshow listing format and can temporarily report device enumeration as unavailable when selected through an environment override or `PATH`.

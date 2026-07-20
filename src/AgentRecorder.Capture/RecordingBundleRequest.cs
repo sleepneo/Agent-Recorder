@@ -23,6 +23,9 @@ public sealed class RecordingBundleRequest
     public string Backend { get; }
     public string StopReason { get; }
     public bool AudioMicrophone { get; }
+    public string AudioStatus { get; }
+    public string? AudioDeviceId { get; }
+    public long? AudioLostAtMs { get; }
 
     public string? NestedRole { get; }
     public string? NestedSessionId { get; }
@@ -49,6 +52,9 @@ public sealed class RecordingBundleRequest
         string backend,
         string stopReason,
         bool audioMicrophone,
+        string audioStatus,
+        string? audioDeviceId,
+        long? audioLostAtMs,
         string? nestedRole,
         string? nestedSessionId,
         string? parentRecordingId,
@@ -72,6 +78,9 @@ public sealed class RecordingBundleRequest
         Backend = backend ?? "";
         StopReason = stopReason ?? "";
         AudioMicrophone = audioMicrophone;
+        AudioStatus = audioStatus ?? "not_requested";
+        AudioDeviceId = audioDeviceId;
+        AudioLostAtMs = audioLostAtMs;
         NestedRole = nestedRole;
         NestedSessionId = nestedSessionId;
         ParentRecordingId = parentRecordingId;

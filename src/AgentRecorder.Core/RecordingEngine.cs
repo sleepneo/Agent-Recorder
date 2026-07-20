@@ -21,6 +21,8 @@ public sealed class RecordingEngine
     private readonly AuditLogger _audit;
     private readonly IPerformanceTracer _tracer;
     private readonly IRecordingBundleGenerator? _bundleGenerator;
+    private readonly IMicrophoneDeviceProvider _microphoneProvider;
+    private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
     private readonly object _lock = new();
     private ITrayContext? _tray;
 
@@ -44,12 +46,32 @@ public sealed class RecordingEngine
     /// </summary>
     internal TimeSpan ConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
-    public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null, IRecordingBundleGenerator? bundleGenerator = null)
+    public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null,
+        IRecordingBundleGenerator? bundleGenerator = null,
+        IMicrophoneDeviceProvider? microphoneProvider = null,
+        IMicrophoneStatusProvider? microphoneStatusProvider = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _bundleGenerator = bundleGenerator;
+        _microphoneProvider = microphoneProvider ?? new EmptyMicrophoneProvider();
+        _microphoneStatusProvider = microphoneStatusProvider ?? NullMicrophoneStatusProvider.Instance;
     }
+
+    /// <summary>
+    /// Injectable microphone device provider used by request parsing and bundle
+    /// metadata. Production composition roots pass a single shared instance.
+    /// Tests that do not inject a provider get a safe <see cref="EmptyMicrophoneProvider"/>
+    /// instead of a mutable global fallback.
+    /// </summary>
+    public IMicrophoneDeviceProvider MicrophoneProvider => _microphoneProvider;
+
+    /// <summary>
+    /// Injectable microphone status provider used for fresh mute/volume checks
+    /// during request parsing. Production composition roots pass a single shared
+    /// instance; tests get <see cref="NullMicrophoneStatusProvider"/> by default.
+    /// </summary>
+    public IMicrophoneStatusProvider MicrophoneStatusProvider => _microphoneStatusProvider;
 
     public void SetTray(ITrayContext tray) => _tray = tray;
 
@@ -120,12 +142,22 @@ public sealed class RecordingEngine
     /// Computes a stable, finite, non-sensitive machine error code for a failed
     /// terminal recording. Never returns free-text messages, paths, or ffmpeg args.
     /// </summary>
-    private static string ResolveTerminalErrorCode(string? backendType, OutputMeta meta, int exitCode,
+    private static string ResolveTerminalErrorCode(string? backendType, bool microphoneRequested, OutputMeta meta, int exitCode,
         bool fileOk, bool durationOk, bool rangeOk, bool exitOk)
     {
         bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
                                string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
         bool isWgc = string.Equals(backendType, "wgc", StringComparison.OrdinalIgnoreCase);
+
+        // Microphone-specific outcomes take precedence over generic validation so
+        // callers get a stable, actionable code when audio evidence is missing.
+        if (microphoneRequested)
+        {
+            if (string.Equals(meta.AudioStatus, "missing_audio_track", StringComparison.OrdinalIgnoreCase))
+                return "microphone_missing_audio_track";
+            if (string.Equals(meta.AudioStatus, "start_failed", StringComparison.OrdinalIgnoreCase))
+                return "microphone_start_failed";
+        }
 
         if (isWgc && isWgcStillFrame)
         {
@@ -245,7 +277,7 @@ public sealed class RecordingEngine
         object summary;
         try
         {
-            rec = ConfigParser.Build(cfg, agent, out summary);
+            rec = ConfigParser.Build(cfg, agent, out summary, _microphoneProvider, _microphoneStatusProvider);
         }
         catch (ApiException ex)
         {
@@ -366,7 +398,9 @@ public sealed class RecordingEngine
         {
             recording_id = rec.Id,
             agent, source_type = rec.SourceType,
-            audio_microphone = rec.Microphone, requires_confirmation = true,
+            audio_microphone = rec.Microphone,
+            audio_device_id = rec.MicrophoneDeviceId ?? "",
+            requires_confirmation = true,
             nested_role = rec.NestedRole ?? "none",
             parent_recording_id = rec.ParentRecordingId ?? ""
         });
@@ -782,6 +816,11 @@ public sealed class RecordingEngine
             bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
                                    string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
 
+            bool microphoneRequested = rec.Microphone;
+            bool audioOk = !microphoneRequested ||
+                           string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(meta.AudioStatus, "lost", StringComparison.OrdinalIgnoreCase);
+
             bool success;
             if (isWgcStillFrame && string.Equals(rec.BackendType, "wgc", StringComparison.OrdinalIgnoreCase))
             {
@@ -808,13 +847,25 @@ public sealed class RecordingEngine
             }
             else
             {
-                success = fileOk && durationOk && exitOk && rangeOk;
+                success = fileOk && durationOk && exitOk && rangeOk && audioOk;
                 if (!success)
                 {
                     if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
                     if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
                     if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
                     if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
+                    if (!audioOk) rec.Warnings.Add($"microphone_audio_failed: audio_status={meta.AudioStatus ?? "unknown"}");
+                }
+            }
+
+            // Merge backend-produced warnings (e.g. microphone failure evidence)
+            // into the recording so they are visible to API consumers.
+            if (meta.Warnings is { Length: > 0 })
+            {
+                foreach (var w in meta.Warnings)
+                {
+                    if (!rec.Warnings.Contains(w))
+                        rec.Warnings.Add(w);
                 }
             }
 
@@ -846,7 +897,9 @@ public sealed class RecordingEngine
                     capture_method = meta.CaptureMethod ?? "",
                     width = meta.Width,
                     height = meta.Height,
-                    ffmpeg_exit_code = exitCode
+                    ffmpeg_exit_code = exitCode,
+                    audio_microphone = rec.Microphone,
+                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested")
                 });
             }
             else
@@ -857,7 +910,7 @@ public sealed class RecordingEngine
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 BumpStateVersion();
                 rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
-                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
+                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.Microphone, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", stopReason: rec.StopReason, errorCode: stableErrorCode);
                 _audit.Log("recording.failed", new
                 {
@@ -873,7 +926,9 @@ public sealed class RecordingEngine
                     ffmpeg_exit_code = exitCode,
                     size_bytes = meta.SizeBytes,
                     duration_seconds = meta.DurationSeconds,
-                    stderr_excerpt = rec.StderrExcerpt ?? ""
+                    stderr_excerpt = rec.StderrExcerpt ?? "",
+                    audio_microphone = rec.Microphone,
+                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested")
                 });
             }
         }
@@ -925,6 +980,9 @@ public sealed class RecordingEngine
             backend: rec.BackendType,
             stopReason: rec.StopReason ?? "duration_reached",
             audioMicrophone: rec.Microphone,
+            audioStatus: meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
+            audioDeviceId: rec.MicrophoneDeviceId,
+            audioLostAtMs: meta.AudioLostAtMs,
             nestedRole: rec.NestedRole,
             nestedSessionId: rec.NestedSessionId,
             parentRecordingId: rec.ParentRecordingId,
@@ -1083,7 +1141,17 @@ public sealed class RecordingEngine
             started_at = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             completed_at = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             elapsed_seconds = elapsed,
-            audio = new { microphone = new { enabled = rec.Microphone } },
+            audio = new
+            {
+                microphone = new
+                {
+                    enabled = rec.Microphone,
+                    device_id = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
+                    status = rec.Microphone
+                        ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
+                        : "not_requested"
+                }
+            },
             output = new
             {
                 path = actualPath,
@@ -1253,7 +1321,17 @@ public sealed class RecordingEngine
             StartedAt = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             CompletedAt = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             ElapsedSeconds = elapsed,
-            Audio = new { Microphone = new { Enabled = rec.Microphone } },
+            Audio = new
+            {
+                Microphone = new
+                {
+                    Enabled = rec.Microphone,
+                    DeviceId = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
+                    Status = rec.Microphone
+                        ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
+                        : "not_requested"
+                }
+            },
             Output = new
             {
                 Path = actualPath,
@@ -1378,8 +1456,12 @@ public sealed class RecordingEngine
                 warnings.Add("Duration is 0 - no video content was captured. FFmpeg/gdigrab may have failed silently.");
         }
 
+        var audioStatus = rec.Microphone
+            ? (m.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
+            : "not_requested";
+
         if (!full)
-            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, warnings };
+            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, audio_status = audioStatus, warnings };
         return new
         {
             path = actualPath, exists, size_bytes = m.SizeBytes,
@@ -1389,6 +1471,7 @@ public sealed class RecordingEngine
             command_args = rec.Config?.CommandArgs ?? "",
             backend = rec.BackendType,
             source_type = rec.SourceType,
+            audio_status = audioStatus,
             warnings
         };
     }

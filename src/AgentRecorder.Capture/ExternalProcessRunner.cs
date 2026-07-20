@@ -17,12 +17,14 @@ public sealed class ExternalProcessRunner : IExternalProcessRunner
 {
     private const int MaxStderrChars = 4000;
     private static readonly TimeSpan KillWaitTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StderrDrainTimeout = TimeSpan.FromSeconds(2);
 
     public async Task<ExternalProcessResult> RunAsync(
         string fileName,
         IReadOnlyList<string> argumentList,
         TimeSpan timeout,
         bool captureStderr = true,
+        Encoding? stderrEncoding = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(fileName))
@@ -40,7 +42,8 @@ public sealed class ExternalProcessRunner : IExternalProcessRunner
                 ErrorDialog = false,
                 RedirectStandardError = captureStderr,
                 RedirectStandardOutput = false,
-                RedirectStandardInput = false
+                RedirectStandardInput = false,
+                StandardErrorEncoding = stderrEncoding ?? Encoding.Default
             },
             EnableRaisingEvents = true
         };
@@ -48,14 +51,17 @@ public sealed class ExternalProcessRunner : IExternalProcessRunner
         foreach (var arg in argumentList ?? Array.Empty<string>())
             proc.StartInfo.ArgumentList.Add(arg);
 
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        proc.Exited += (_, _) => tcs.TrySetResult(true);
+        var stderrEof = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         if (captureStderr)
         {
             proc.ErrorDataReceived += (_, e) =>
             {
-                if (string.IsNullOrEmpty(e.Data)) return;
+                if (e.Data == null)
+                {
+                    stderrEof.TrySetResult(true);
+                    return;
+                }
                 lock (stderr)
                 {
                     if (stderr.Length < MaxStderrChars)
@@ -68,43 +74,52 @@ public sealed class ExternalProcessRunner : IExternalProcessRunner
             };
         }
 
-        using (cancellationToken.Register(() => tcs.TrySetCanceled(), useSynchronizationContext: false))
+        bool timedOut = false;
+        try
         {
             proc.Start();
             if (captureStderr)
                 proc.BeginErrorReadLine();
 
-            bool timedOut = false;
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             try
             {
-                using var cts = new CancellationTokenSource(timeout);
-                using (cts.Token.Register(() => tcs.TrySetCanceled(), useSynchronizationContext: false))
-                {
-                    try { await tcs.Task; }
-                    catch (OperationCanceledException)
-                    {
-                        if (cancellationToken.IsCancellationRequested) throw;
-                    }
-                }
-
-                timedOut = !proc.HasExited;
-                if (timedOut)
+                await proc.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
                 {
                     await KillTreeAndWaitAsync(proc);
+                    throw;
                 }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
+
+                timedOut = true;
                 await KillTreeAndWaitAsync(proc);
-                throw;
             }
 
-            int exitCode;
-            try { exitCode = proc.HasExited ? proc.ExitCode : -1; } catch { exitCode = -1; }
-            string stderrSnapshot;
-            lock (stderr) stderrSnapshot = stderr.ToString();
-            return new ExternalProcessResult(exitCode, timedOut, stderrSnapshot);
+            // The process has exited, but the asynchronous stderr reader may not
+            // have delivered its EOF yet. Wait for the real EOF (e.Data == null)
+            // so trailing stderr is preserved, but only when we are capturing.
+            if (captureStderr && !stderrEof.Task.IsCompleted)
+            {
+                using var drainCts = new CancellationTokenSource(StderrDrainTimeout);
+                try { await stderrEof.Task.WaitAsync(drainCts.Token).ConfigureAwait(false); }
+                catch { }
+            }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await KillTreeAndWaitAsync(proc);
+            throw;
+        }
+
+        int exitCode;
+        try { exitCode = proc.HasExited ? proc.ExitCode : -1; } catch { exitCode = -1; }
+        string stderrSnapshot;
+        lock (stderr) stderrSnapshot = stderr.ToString();
+        return new ExternalProcessResult(exitCode, timedOut, stderrSnapshot);
     }
 
     /// <summary>

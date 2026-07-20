@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
@@ -179,5 +180,71 @@ public class ExternalProcessRunnerTests : IDisposable
         {
             EnsureProcessTreeDead(pid);
         }
+    }
+
+    [Fact]
+    public async Task RunAsync_Utf8StderrWithTrailingLines_DrainsCompletely()
+    {
+        Assert.True(File.Exists(PowerShellPath), $"PowerShell not found at {PowerShellPath}");
+
+        var scriptPath = Path.Combine(_tmpDir, "stderr-drain.ps1");
+        WriteUtf8StderrScript(scriptPath);
+
+        var args = new[]
+        {
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", scriptPath
+        };
+
+        var runner = new ExternalProcessRunner();
+        var result = await runner.RunAsync(PowerShellPath, args, TimeSpan.FromSeconds(5), captureStderr: true, stderrEncoding: Encoding.UTF8);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.False(result.TimedOut);
+        Assert.Contains("耳机 (AirPods Pro)", result.Stderr);
+        Assert.Contains("EOF_SENTINEL_耳机", result.Stderr);
+    }
+
+    [Fact]
+    public async Task RunAsync_EofSentinelPreserved_TwentyConsecutiveRuns()
+    {
+        Assert.True(File.Exists(PowerShellPath), $"PowerShell not found at {PowerShellPath}");
+
+        var scriptPath = Path.Combine(_tmpDir, "stderr-drain.ps1");
+        WriteUtf8StderrScript(scriptPath);
+
+        var args = new[]
+        {
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", scriptPath
+        };
+
+        var runner = new ExternalProcessRunner();
+        for (int i = 0; i < 20; i++)
+        {
+            var result = await runner.RunAsync(PowerShellPath, args, TimeSpan.FromSeconds(5), captureStderr: true, stderrEncoding: Encoding.UTF8);
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains("EOF_SENTINEL_耳机", result.Stderr);
+        }
+    }
+
+    private static void WriteUtf8StderrScript(string path)
+    {
+        // Write a large (but under 4000 char) UTF-8 stderr payload and place the
+        // sentinel immediately before the process exits. The script is saved with
+        // a UTF-8 BOM so Windows PowerShell reads the Chinese string literals
+        // correctly, and the raw stderr stream is written with explicit UTF-8
+        // bytes so the runner decodes them as UTF-8.
+        File.WriteAllText(path,
+            "$utf8 = [System.Text.Encoding]::UTF8\n" +
+            "$err = [System.Console]::OpenStandardError()\n" +
+            "$writer = New-Object System.IO.StreamWriter($err, $utf8, 1024, $true)\n" +
+            "$chunk = '耳机 (AirPods Pro) ' * 150\n" +
+            "$writer.Write($chunk)\n" +
+            "$writer.Write('EOF_SENTINEL_耳机')\n" +
+            "$writer.Flush()\n",
+            Encoding.UTF8);
     }
 }

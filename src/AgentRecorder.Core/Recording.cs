@@ -12,6 +12,8 @@ public sealed class Recording
     public string SourceType { get; set; } = "";
     public string SourceTitle { get; set; } = "";
     public bool Microphone { get; set; }
+    public string? MicrophoneDeviceId { get; set; }
+    public string? MicrophoneDeviceName { get; set; }
     public string OutputPath { get; set; } = "";
     public DateTime StartedAtUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }

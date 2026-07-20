@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
@@ -8,6 +9,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
+using AgentRecorder.Windows;
 
 namespace AgentRecorder.Headless;
 
@@ -252,8 +254,15 @@ internal static class Program
         var perfTracer = new RecordingPerformanceTracer(_dataDir);
         _perfTracer = perfTracer;
 
+        // Production microphone device provider: owned by the engine and shared
+        // with /audio/devices, /permissions, and /capabilities via the engine
+        // reference. Keeps a short TTL cache so multiple API calls within a few
+        // seconds do not repeatedly spawn FFmpeg device-enumeration processes.
+        var micProvider = new CachingMicrophoneDeviceProvider(new FfmpegDshowMicrophoneProvider());
+        var micStatusProvider = new CoreAudioCaptureStatusProvider();
+
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
-        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator);
+        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator, micProvider, micStatusProvider);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 

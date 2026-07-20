@@ -145,7 +145,9 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 
-Audio support (microphone and system audio) is currently **not implemented**. The legacy `recording.audio` array is preserved for backward compatibility and is always empty. Sending `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+Microphone recording is implemented via FFmpeg dshow and encoded as AAC. The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+
+`recording.audio_capabilities.microphone` reports `{ "supported": true, "status": "ready" }` when device enumeration succeeds and at least one active input is present, otherwise `{ "supported": true, "status": "no_devices" }` or `{ "supported": true, "status": "unavailable" }`. `system_audio` remains `{ "supported": false, "status": "not_implemented" }`.
 
 Stop controls are reported under `interaction.stop_controls`:
 
@@ -399,12 +401,12 @@ The response includes a `context` object that provides a snapshot of system stat
 GET /permissions
 ```
 
-Returns the current permission status. Screen capture and output-directory selection are granted locally. Microphone and system audio are not implemented.
+Returns the current permission status. Screen capture and output-directory selection are granted locally. Microphone is supported; its permission status honestly reflects device availability (`available`, `no_devices`, or `unavailable`). This version does not probe the real Windows microphone ACL, so it does not report `granted`. System audio is not implemented.
 
 ```json
 {
   "screen_capture": { "status": "granted" },
-  "microphone": { "supported": false, "status": "not_implemented" },
+  "microphone": { "supported": true, "status": "available" },
   "system_audio": { "supported": false, "status": "not_implemented" },
   "output_directory": {
     "status": "granted",
@@ -420,16 +422,46 @@ Returns the current permission status. Screen capture and output-directory selec
 GET /audio/devices
 ```
 
-Audio input enumeration is not implemented. The endpoint returns an empty `input_devices` array and explicitly reports the unimplemented status.
+Enumerates real microphone input devices via FFmpeg dshow and enriches each entry with fresh read-only CoreAudio state. Returns `status: "ready"` when devices are found, `"no_devices"` when enumeration succeeds but no device is present, and `"unavailable"` when enumeration fails. `microphone_supported` is `true`; `system_audio_supported` is `false`.
+
+The bundled FFmpeg build is the currently validated device-enumeration path. The development build may also resolve FFmpeg through `AGENT_RECORDER_FFMPEG_DIR` or `PATH`; until the FFmpeg 8.x listing parser lands, some newer external builds can return `status: "unavailable"` even when Windows has a microphone. This affects discovery through that external binary, not the bundled portable path.
+
+The `id` is the FFmpeg dshow alternative name (the example below shows an alternative-name ID without the `audio=` prefix). Callers must pass this `id` back unchanged in `audio.microphone.device_id`; Agent Recorder adds the `audio=` prefix internally when building the FFmpeg command line.
 
 ```json
 {
-  "status": "not_implemented",
-  "microphone_supported": false,
-  "input_devices": [],
+  "status": "ready",
+  "microphone_supported": true,
+  "input_devices": [
+    {
+      "id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
+      "name": "Microphone (Realtek(R) Audio)",
+      "is_default": true,
+      "state": "active",
+      "is_muted": false,
+      "volume_percent": 75
+    }
+  ],
   "system_audio_supported": false
 }
 ```
+
+Device fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | FFmpeg dshow alternative name. Pass back unchanged. |
+| `name` | string | Human-readable device name. |
+| `is_default` | boolean \| null | `true` when this is the current CoreAudio multimedia default capture endpoint. Falls back to the dshow-provided default only when CoreAudio cannot be queried. `null` means unknown. |
+| `state` | string \| null | `"active"` when the CoreAudio endpoint is active; otherwise `"inactive"`. `null` means unknown. |
+| `is_muted` | boolean \| null | `true` when the endpoint is software-muted. `null` means unknown. |
+| `volume_percent` | integer \| null | Master volume scalar rounded to `0..100`. `null` means unknown. |
+
+`is_default`, `state`, `is_muted`, and `volume_percent` are read fresh on every request and are **not** cached by the 10-second dshow enumeration cache. Muting, unmuting, or changing the default device is reflected immediately on the next call.
+
+A state of `null` or `"active"` does not block recording. A state of `"inactive"` blocks recording before any region-selection or confirmation UI is shown.
+
+If `is_muted` is `false` and `volume_percent` is below `10`, the confirmation UI shows a low-volume warning. This warning does not block recording, and Agent Recorder does not modify the system volume.
 
 ## Quick Recording
 
@@ -453,6 +485,12 @@ Use this endpoint first for common natural-language intents.
     "fps": 30,
     "quality": "medium"
   },
+  "audio": {
+    "microphone": {
+      "enabled": true,
+      "device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}"
+    }
+  },
   "output": {
     "directory": "default",
     "filename_template": "recording-{datetime}"
@@ -460,7 +498,9 @@ Use this endpoint first for common natural-language intents.
 }
 ```
 
-`audio.microphone.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`. `audio.system_audio.enabled` is similarly reserved.
+`audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the `id` from `GET /api/v1/audio/devices`. `audio.system_audio.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+
+If the selected microphone is muted, the request fails immediately with `409 AUDIO_DEVICE_MUTED` before any region-selection or confirmation UI is shown. Agent Recorder does not automatically unmute the system; the user must unmute the device in Windows sound settings and retry. If the selected device is known to be inactive, the request fails with `503 AUDIO_DEVICE_NOT_AVAILABLE`. A transient CoreAudio failure that leaves the state unknown does not block recording.
 
 Supported `target.type` values:
 
@@ -605,7 +645,9 @@ Display source:
 }
 ```
 
-Audio must be disabled or omitted. Setting `audio.microphone.enabled=true` or `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+Microphone audio may be enabled with `audio.microphone.enabled: true`. Provide `audio.microphone.device_id` from `GET /audio/devices` when multiple active microphones are present; omit it to auto-select a single active device or the single CoreAudio multimedia default. `audio.system_audio.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+
+Muted or inactive devices are rejected before any region-selection or confirmation UI is shown (`409 AUDIO_DEVICE_MUTED` and `503 AUDIO_DEVICE_NOT_AVAILABLE` respectively). Agent Recorder never automatically unmutes a device. Unknown state does not block.
 
 Region source:
 
@@ -908,7 +950,10 @@ Stable bundle error codes:
     "fps": 30,
     "backend": "ffmpeg-region",
     "stop_reason": "duration_reached",
-    "audio_microphone": false,
+    "audio_microphone": true,
+    "audio_status": "recorded",
+    "audio_device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
+    "audio_lost_at_ms": null,
     "nested_role": "none",
     "nested_session_id": null,
     "parent_recording_id": null
@@ -929,6 +974,16 @@ Stable bundle error codes:
   }
 }
 ```
+
+`recording.audio_status` values:
+
+| value | meaning |
+| --- | --- |
+| `not_requested` | No microphone audio was requested. |
+| `recorded` | Microphone audio was successfully written to the output and an AAC stream is present. |
+| `start_failed` | Microphone was requested but FFmpeg could not open the device. |
+| `lost` | The microphone device was lost or disconnected during recording, but an AAC stream is still present. |
+| `missing_audio_track` | Microphone was requested and FFmpeg exited cleanly, but the output does not contain an AAC audio stream. |
 
 ### `marks.json`
 
@@ -957,4 +1012,8 @@ is empty until mouse/keyboard mark support is implemented.
 | `OUTER_RECORDING_ALREADY_EXISTS` | Nested outer already active |
 | `INNER_RECORDING_ALREADY_EXISTS` | Nested inner already active |
 | `PARENT_NOT_RECORDING` | Nested inner parent is not recording |
+| `AUDIO_DEVICE_MUTED` | Selected microphone is muted; unmute it in Windows sound settings and retry |
+| `AUDIO_DEVICE_NOT_AVAILABLE` | Selected microphone is inactive or no microphone is available; check the device and retry |
+| `AUDIO_DEVICE_NOT_FOUND` | The requested `audio.microphone.device_id` was not found; list devices and retry |
+| `AUDIO_DEVICE_REQUIRED` | Multiple microphones are available and `audio.microphone.device_id` is required |
 | `METHOD_NOT_ALLOWED` | HTTP confirmation approval/rejection is blocked |

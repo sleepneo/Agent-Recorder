@@ -60,6 +60,20 @@ public sealed class ApiServer
         _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
 
+    /// <summary>
+    /// Returns the single microphone provider used for request parsing and public
+    /// device list endpoints. The engine always owns the provider instance, so
+    /// there is no separate ApiServer-level injection and no static fallback.
+    /// </summary>
+    private IMicrophoneDeviceProvider EffectiveMicrophoneProvider => _engine.MicrophoneProvider;
+
+    /// <summary>
+    /// Returns the microphone status provider used for fresh mute/volume checks.
+    /// This is intentionally separate from the device enumeration provider so
+    /// device caching does not stale dynamic mute/volume state.
+    /// </summary>
+    private IMicrophoneStatusProvider EffectiveMicrophoneStatusProvider => _engine.MicrophoneStatusProvider;
+
     public void Start()
     {
         _listener.Start();
@@ -275,13 +289,7 @@ public sealed class ApiServer
                 return ApiResponse.Ok(new { window = SystemQuery.ActiveWindow() }, reqId);
 
             case ("GET", "/audio/devices"):
-                return ApiResponse.Ok(new
-                {
-                    status = "not_implemented",
-                    microphone_supported = false,
-                    input_devices = SystemQuery.AudioInputs(),
-                    system_audio_supported = false
-                }, reqId);
+                return ApiResponse.Ok(BuildAudioDevicesResponse(), reqId);
 
             case ("POST", "/recordings"):
                 return CreateRecording(req, reqBody, reqId);
@@ -499,11 +507,12 @@ public sealed class ApiServer
 
         JsonObject cfg = BuildQuickRecordingConfig(body);
 
-        // Fail before target resolution so unsupported audio never causes
-        // display/window enumeration or opens the region-selection UI.
+        // Resolve audio intent before any target resolution so microphone failures
+        // (system audio, unknown device, no devices, enumeration unavailable) fail
+        // fast without display/window enumeration or opening the region-selection UI.
         try
         {
-            ConfigParser.RejectUnsupportedAudioFeatures(cfg);
+            ConfigParser.ResolveAudioIntent(cfg, EffectiveMicrophoneProvider, EffectiveMicrophoneStatusProvider);
         }
         catch (ApiException ex)
         {
@@ -541,8 +550,10 @@ public sealed class ApiServer
                             ["type"] = "window",
                             ["window_id"] = window.id
                         };
-                        // Pre-build to get the clamped capture bounds for the response
-                        var preBuilt = ConfigParser.Build(cfg, agent, out _);
+                        // Pre-build to get the clamped capture bounds for the response.
+                        // Use the engine's providers so active-window pre-build cannot
+                        // diverge from the device list endpoint or the real recording path.
+                        var preBuilt = ConfigParser.Build(cfg, agent, out _, EffectiveMicrophoneProvider, EffectiveMicrophoneStatusProvider);
                         var capBounds = preBuilt.Config.Bounds;
                         var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
                         var resolved = new JsonObject
@@ -892,10 +903,10 @@ public sealed class ApiServer
             recording = new
             {
                 sources = new[] { "display", "window", "region" },
-                audio = Array.Empty<string>(),
+                audio = new[] { "microphone" },
                 audio_capabilities = new
                 {
-                    microphone = new { supported = false, status = "not_implemented" },
+                    microphone = new { supported = true, status = GetMicrophoneAvailability(out _) },
                     system_audio = new { supported = false, status = "not_implemented" }
                 },
                 containers = new[] { "mp4" },
@@ -1187,13 +1198,83 @@ public sealed class ApiServer
         );
     }
 
-    private static object Permissions() => new
+    private object BuildAudioDevicesResponse()
     {
-        screen_capture = new { status = "granted" },
-        microphone = new { supported = false, status = "not_implemented" },
-        system_audio = new { supported = false, status = "not_implemented" },
-        output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
-    };
+        var availability = GetMicrophoneAvailability(out var devices);
+        return new
+        {
+            status = availability,
+            microphone_supported = true,
+            system_audio_supported = false,
+            input_devices = devices.Select(d =>
+            {
+                var status = QueryMicrophoneStatusSafe(d.Id);
+                return new
+                {
+                    id = d.Id,
+                    name = d.Name,
+                    is_default = status.IsDefault ?? d.IsDefault,
+                    state = status.State ?? d.State,
+                    is_muted = status.IsMuted,
+                    volume_percent = status.VolumePercent
+                };
+            }).ToArray()
+        };
+    }
+
+    private MicrophoneStatus QueryMicrophoneStatusSafe(string deviceId)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            return EffectiveMicrophoneStatusProvider.GetStatusAsync(deviceId, cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            return new MicrophoneStatus(null, null, null, null);
+        }
+    }
+
+    private object Permissions()
+    {
+        var availability = GetMicrophoneAvailability(out _);
+        // Permissions distinguishes "device availability" from "OS permission granted".
+        // The honest values are available / no_devices / unavailable; "granted" is not
+        // reported because this version does not probe the real Windows microphone ACL.
+        var permissionStatus = availability switch
+        {
+            "ready" => "available",
+            _ => availability
+        };
+
+        return new
+        {
+            screen_capture = new { status = "granted" },
+            microphone = new { supported = true, status = permissionStatus },
+            system_audio = new { supported = false, status = "not_implemented" },
+            output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
+        };
+    }
+
+    /// <summary>
+    /// Queries the effective microphone provider and returns a stable availability
+    /// status: "ready" when devices are present, "no_devices" when the enumeration
+    /// succeeded but returned nothing, and "unavailable" when enumeration failed.
+    /// </summary>
+    private string GetMicrophoneAvailability(out IReadOnlyList<MicrophoneDeviceInfo> devices)
+    {
+        try
+        {
+            devices = EffectiveMicrophoneProvider.GetDevicesAsync().GetAwaiter().GetResult();
+            return devices.Count > 0 ? "ready" : "no_devices";
+        }
+        catch
+        {
+            devices = Array.Empty<MicrophoneDeviceInfo>();
+            return "unavailable";
+        }
+    }
 }
 
 internal sealed class HttpRequest

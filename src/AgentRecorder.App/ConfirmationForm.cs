@@ -151,6 +151,7 @@ internal sealed class ConfirmationForm : Form
     internal Rectangle TimeoutProgressBoundsForTests => _timeoutProgressBar?.Bounds ?? Rectangle.Empty;
     internal Rectangle TimeoutLabelBoundsForTests => _timeoutLabel?.Bounds ?? Rectangle.Empty;
     internal Rectangle WarningLabelBoundsForTests => _warningLabel?.Bounds ?? Rectangle.Empty;
+    internal string WarningTextForTests => _warningLabel?.Text ?? "";
     internal Rectangle ApproveButtonBoundsForTests => GetFormRelativeBounds(_approveButton);
     internal Rectangle RejectButtonBoundsForTests => GetFormRelativeBounds(_rejectButton);
     internal string ApproveButtonTextForTests => _approveButton?.Text ?? "";
@@ -467,7 +468,11 @@ internal sealed class ConfirmationForm : Form
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceType"), GetString(s, "source_type"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), GetString(s, "source_title"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), GetString(s, "duration"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Audio"), GetString(s, "audio"));
+        var rawAudio = GetString(s, "audio");
+        var audioDisplayValue = TryGetString(s, "audio_device", out var audioDeviceName)
+            ? audioDeviceName
+            : (rawAudio == "No audio" ? _text.Get("Confirmation_Info_NoAudio") : rawAudio);
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Audio"), audioDisplayValue);
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), GetString(s, "nested_role"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_RecordingId"), GetString(s, "recording_id"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), GetString(s, "confirmation_id"));
@@ -607,6 +612,15 @@ internal sealed class ConfirmationForm : Form
             MaximumSize = new Size(maxTextWidth, 0),
             Margin = new Padding(0, 0, 0, 16)
         };
+
+        // Low-volume warning: if the microphone is enabled and the volume is
+        // below 10%, show an explicit warning but do not block recording.
+        // Muted devices are rejected before the confirmation form is created.
+        if (s["audio_volume_percent"]?.GetValue<int?>() is int volumePercent && volumePercent >= 0 && volumePercent < 10)
+        {
+            _warningLabel.Text = _text.Format("Confirmation_Warning_LowVolume", volumePercent);
+        }
+
         rootTable.Controls.Add(_warningLabel, 0, 5);
 
         // Buttons
@@ -822,6 +836,12 @@ internal sealed class ConfirmationForm : Form
         var val = node[key];
         if (val == null) return "N/A";
         return val.ToString();
+    }
+
+    private static bool TryGetString(JsonNode node, string key, out string value)
+    {
+        value = GetString(node, key);
+        return value != "N/A" && !string.IsNullOrEmpty(value);
     }
 
     private string GetInitialOutputDirectory(string? defaultOutputDirectory)

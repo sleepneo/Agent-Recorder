@@ -1514,4 +1514,70 @@ public class ConfirmationFormTests
             form.CloseWithoutResult();
         });
     }
+
+    [Fact]
+    public void Form_WithLowMicrophoneVolume_ShowsWarning()
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "region: test",
+                source_type = "region",
+                source_title = "test",
+                audio = "Microphone: Test Mic",
+                audio_device = "Test Mic",
+                audio_volume_percent = 5,
+                duration = "30s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_1",
+                confirmation_id = "conf_1",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem("conf_1", "rec_1", summary, _ => { }, 60);
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.Contains("5%", form.WarningTextForTests);
+            Assert.Contains("音量较低", form.WarningTextForTests);
+
+            form.CloseWithoutResult();
+        });
+    }
+
+    [Fact]
+    public void Form_WithNormalMicrophoneVolume_DoesNotShowLowVolumeWarning()
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "region: test",
+                source_type = "region",
+                source_title = "test",
+                audio = "Microphone: Test Mic",
+                audio_device = "Test Mic",
+                audio_volume_percent = 50,
+                duration = "30s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_1",
+                confirmation_id = "conf_1",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem("conf_1", "rec_1", summary, _ => { }, 60);
+            using var form = new ConfirmationForm(item, 1, 1);
+            form.Show();
+
+            Assert.DoesNotContain("音量较低", form.WarningTextForTests);
+            Assert.DoesNotContain("50%", form.WarningTextForTests);
+
+            form.CloseWithoutResult();
+        });
+    }
 }

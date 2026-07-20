@@ -41,14 +41,19 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
         Assert.NotEmpty(args);
-        Assert.Contains("-f gdigrab", args);
-        Assert.Contains("-offset_x 1138", args);
-        Assert.Contains("-offset_y 341", args);
-        Assert.Contains("-video_size 1592x892", args);
-        Assert.Contains("-i desktop", args);
+        Assert.Contains("-f", args);
+        Assert.Contains("gdigrab", args);
+        Assert.Contains("-offset_x", args);
+        Assert.Contains("1138", args);
+        Assert.Contains("-offset_y", args);
+        Assert.Contains("341", args);
+        Assert.Contains("-video_size", args);
+        Assert.Contains("1592x892", args);
+        Assert.Contains("-i", args);
+        Assert.Contains("desktop", args);
     }
 
     [Fact]
@@ -66,9 +71,9 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.DoesNotContain("-i title=", args);
+        Assert.DoesNotContain("title=", args);
     }
 
     [Fact]
@@ -89,14 +94,19 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
         Assert.NotEmpty(args);
-        Assert.Contains("-f gdigrab", args);
-        Assert.Contains("-offset_x 100", args);
-        Assert.Contains("-offset_y 200", args);
-        Assert.Contains("-video_size 800x600", args);
-        Assert.Contains("-i desktop", args);
+        Assert.Contains("-f", args);
+        Assert.Contains("gdigrab", args);
+        Assert.Contains("-offset_x", args);
+        Assert.Contains("100", args);
+        Assert.Contains("-offset_y", args);
+        Assert.Contains("200", args);
+        Assert.Contains("-video_size", args);
+        Assert.Contains("800x600", args);
+        Assert.Contains("-i", args);
+        Assert.Contains("desktop", args);
     }
 
     [Fact]
@@ -116,10 +126,9 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.DoesNotContain("-i title=", args);
-        Assert.DoesNotContain("title=\"", args);
+        Assert.DoesNotContain("title=", args);
     }
 
     [Fact]
@@ -140,12 +149,16 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.Contains("-offset_x -1920", args);
-        Assert.Contains("-offset_y 100", args);
-        Assert.Contains("-video_size 1280x720", args);
-        Assert.Contains("-i desktop", args);
+        Assert.Contains("-offset_x", args);
+        Assert.Contains("-1920", args);
+        Assert.Contains("-offset_y", args);
+        Assert.Contains("100", args);
+        Assert.Contains("-video_size", args);
+        Assert.Contains("1280x720", args);
+        Assert.Contains("-i", args);
+        Assert.Contains("desktop", args);
     }
 
     [Fact]
@@ -165,9 +178,10 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.Contains("-t 25", args);
+        Assert.Contains("-t", args);
+        Assert.Contains("25", args);
     }
 
     [Fact]
@@ -189,13 +203,16 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.Contains("-offset_x 0", args);
-        Assert.Contains("-offset_y 0", args);
-        Assert.Contains("-video_size 3854x2088", args);
-        Assert.Contains("-i desktop", args);
-        Assert.DoesNotContain("-i title=", args);
+        Assert.Contains("-offset_x", args);
+        Assert.Contains("0", args);
+        Assert.Contains("-offset_y", args);
+        Assert.Contains("-video_size", args);
+        Assert.Contains("3854x2088", args);
+        Assert.Contains("-i", args);
+        Assert.Contains("desktop", args);
+        Assert.DoesNotContain("title=", args);
     }
 
     [Fact]
@@ -214,12 +231,15 @@ public class FfmpegRegionCommandArgsTests
         var method = typeof(FfmpegCaptureBackend).GetMethod(
             "BuildArgs",
             BindingFlags.NonPublic | BindingFlags.Static)!;
-        var args = (string)method.Invoke(null, new object[] { cfg })!;
+        var args = (List<string>)method.Invoke(null, new object[] { cfg })!;
 
-        Assert.Contains("-offset_x -2560", args);
-        Assert.Contains("-offset_y 0", args);
-        Assert.Contains("-video_size 1920x1080", args);
-        Assert.Contains("-i desktop", args);
+        Assert.Contains("-offset_x", args);
+        Assert.Contains("-2560", args);
+        Assert.Contains("-offset_y", args);
+        Assert.Contains("-video_size", args);
+        Assert.Contains("1920x1080", args);
+        Assert.Contains("-i", args);
+        Assert.Contains("desktop", args);
     }
 
     // -------------------------------------------------------------------------

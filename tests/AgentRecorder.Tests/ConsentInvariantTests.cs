@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Api;
 using AgentRecorder.Capture;
@@ -55,6 +56,32 @@ public class ConsentInvariantTests : IDisposable
         public void Dispose() { }
     }
 
+    private sealed class FakeMicrophoneProvider : IMicrophoneDeviceProvider
+    {
+        private readonly IReadOnlyList<MicrophoneDeviceInfo> _devices;
+        private readonly Exception? _exception;
+        public int CallCount { get; private set; }
+
+        public FakeMicrophoneProvider(params MicrophoneDeviceInfo[] devices)
+        {
+            _devices = devices.ToList();
+        }
+
+        public FakeMicrophoneProvider(Exception exception)
+        {
+            _exception = exception;
+            _devices = Array.Empty<MicrophoneDeviceInfo>();
+        }
+
+        public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            if (_exception != null)
+                throw _exception;
+            return Task.FromResult(_devices);
+        }
+    }
+
     private sealed class ControllableTray : ITrayContext
     {
         public string HostMode => "headless";
@@ -95,7 +122,7 @@ public class ConsentInvariantTests : IDisposable
     private RecordingEngine? _engine;
     private readonly FakeCaptureBackend _backend = new();
 
-    private ApiServer CreateServer(ControllableTray tray)
+    private ApiServer CreateServer(ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null)
     {
         _dataDir = Path.Combine(Path.GetTempPath(), $"consent-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dataDir);
@@ -103,7 +130,7 @@ public class ConsentInvariantTests : IDisposable
         ApiKeyAuth.InitializeForTesting(_dataDir);
 
         _audit = new CaptureAuditLogger();
-        _engine = new RecordingEngine(_audit);
+        _engine = new RecordingEngine(_audit, microphoneProvider: microphoneProvider);
         _engine.SetTray(tray);
         _engine.BackendFactory = _ => (_backend, "fake");
         _server = new ApiServer(_engine, _audit, tray);
@@ -274,10 +301,12 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateRecording_MicrophoneEnabled_FailsFast_NoConfirmation_NoBackend()
+    public async Task CreateRecording_MicrophoneEnabled_ValidDevice_GoesPending_BackendNotStarted()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
         try
         {
             SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
@@ -291,21 +320,20 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
-            var error = doc.RootElement.GetProperty("error");
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", error.GetProperty("code").GetString());
-            Assert.Equal("microphone", error.GetProperty("details").GetProperty("capability").GetString());
+            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
 
-            Assert.False(_backend.StartCalled, "Backend.Start must not be called for audio requests.");
-            Assert.DoesNotContain(_audit!.Events, e => e.Event == "confirmation.created");
+            // Consent invariant: backend must not start while pending confirmation.
+            Assert.False(_backend.StartCalled, "Backend.Start must not be called while pending confirmation for microphone request.");
+            Assert.Contains(_audit!.Events, e => e.Event == "confirmation.created");
 
-            // No output file should be created for a fast-failed request.
-            var recordings = _engine!.List().ToList();
-            Assert.Empty(recordings);
+            // The confirmation summary should expose the resolved device display name
+            // (without leaking it into the audit log).
+            var summary = doc.RootElement.GetProperty("data").GetProperty("summary");
+            Assert.Contains("Test Microphone", summary.GetProperty("audio").GetString());
         }
         finally
         {
@@ -314,10 +342,11 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_MicrophoneEnabled_FailsFast_NoConfirmation_NoBackend()
+    public async Task CreateRecording_MicrophoneEnabled_NoDevices_FailsFast_NoBackend()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider();
+        var server = CreateServer(tray, provider);
         try
         {
             SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
@@ -329,18 +358,53 @@ public class ConsentInvariantTests : IDisposable
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
-                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
+            Assert.Equal(503, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
             Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
-            var error = doc.RootElement.GetProperty("error");
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", error.GetProperty("code").GetString());
+            Assert.Equal("AUDIO_DEVICE_NOT_AVAILABLE", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
 
-            Assert.False(_backend.StartCalled, "Backend.Start must not be called for quick audio requests.");
+            Assert.False(_backend.StartCalled, "Backend.Start must not be called when no microphone device is available.");
             Assert.DoesNotContain(_audit!.Events, e => e.Event == "confirmation.created");
+
+            var recordings = _engine!.List().ToList();
+            Assert.Empty(recordings);
+        }
+        finally
+        {
+            server.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task CreateRecording_MicrophoneEnabled_Approved_BackendStartsWithResolvedDevice()
+    {
+        var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Approve };
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            Assert.True(_backend.StartCalled, "Backend.Start must be called after local approval for microphone request.");
+            Assert.NotNull(_backend.LastConfig);
+            Assert.True(_backend.LastConfig!.Microphone);
+            Assert.Equal("mic_1", _backend.LastConfig!.MicDevice);
         }
         finally
         {
@@ -382,10 +446,12 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_PrimaryDisplay_AudioEnabled_DoesNotCallDisplayProvider()
+    public async Task QuickRecording_PrimaryDisplay_MicrophoneEnabled_ValidDevice_GoesPending()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
         int displayCallCount = 0;
         try
         {
@@ -404,12 +470,12 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
-            Assert.Equal(0, displayCallCount);
+            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
+            Assert.True(displayCallCount >= 1, "Primary display resolution should call the display provider at least once.");
             Assert.False(_backend.StartCalled);
         }
         finally
@@ -419,10 +485,12 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_ActiveWindow_AudioEnabled_DoesNotCallActiveWindowProvider()
+    public async Task QuickRecording_ActiveWindow_MicrophoneEnabled_ValidDevice_GoesPending()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
         int activeWindowCallCount = 0;
         try
         {
@@ -432,6 +500,11 @@ public class ConsentInvariantTests : IDisposable
                 return new SystemQuery.WindowInfo("window_1", "Notepad", "notepad.exe", 1234, true, false,
                     new SystemQuery.Bounds(0, 0, 1280, 720));
             });
+            SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+            {
+                new("window_1", "Notepad", "notepad.exe", 1234, true, false,
+                    new SystemQuery.Bounds(0, 0, 1280, 720))
+            });
 
             server.Start();
             using var client = CreateClient();
@@ -439,12 +512,12 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"active_window\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
-            Assert.Equal(0, activeWindowCallCount);
+            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
+            Assert.Equal(1, activeWindowCallCount);
             Assert.False(_backend.StartCalled);
         }
         finally
@@ -454,10 +527,12 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_SelectedRegion_AudioEnabled_DoesNotCallRegionSelection()
+    public async Task QuickRecording_SelectedRegion_MicrophoneEnabled_RegionSelectionCalled()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
         try
         {
             server.Start();
@@ -466,12 +541,12 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
-            Assert.Equal(0, tray.RequestRegionSelectionCallCount);
+            Assert.Equal("display_unavailable", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
+            Assert.True(tray.RequestRegionSelectionCallCount > 0);
             Assert.False(_backend.StartCalled);
         }
         finally
@@ -481,10 +556,12 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_LastRegion_AudioEnabled_PrioritizesCapabilityError_OverSourceNotFound()
+    public async Task QuickRecording_LastRegion_MicrophoneEnabled_NoLastRegion_ReturnsSourceNotFound()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var provider = new FakeMicrophoneProvider(
+            new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active"));
+        var server = CreateServer(tray, provider);
         try
         {
             server.Start();
@@ -493,11 +570,11 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"last_region\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(404, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal("SOURCE_NOT_FOUND", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
             Assert.False(_backend.StartCalled);
         }
         finally
