@@ -13,6 +13,7 @@ namespace AgentRecorder.Tests;
 /// Tests for the CaptureBackendSelector - verifies backend selection logic
 /// based on source type and AGENT_RECORDER_WINDOW_BACKEND feature flag.
 /// </summary>
+[Collection("NonParallel-WindowBackend")]
 public class CaptureBackendSelectorTests
 {
     [Fact]

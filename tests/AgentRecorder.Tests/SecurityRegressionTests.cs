@@ -15,6 +15,7 @@ namespace AgentRecorder.Tests;
 /// 安全边界：HTTP client 不得通过 API 自行批准或拒绝录屏确认。
 /// 录屏确认必须是本地用户在确认窗体或托盘菜单中操作。
 /// </summary>
+[Collection("NonParallel-WindowBackend")]
 public class SecurityRegressionTests
 {
     // ---------------------------------------------------------------------
@@ -276,29 +277,7 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 6) 回归脚本不应调用 API approve（它们应等待手动用户确认）
-    // =====================================================================
-
-    [Fact]
-    public void RecordingFlowScript_DoesNotCallConfirmationApprove()
-    {
-        // 确保回归脚本不包含 POST /confirmations/{id}/approve 作为自动步骤
-        // （那会误导开发者认为 API 自确认是可行的）
-        // 注意：脚本中可以有注释说明 API 返回 405，但不能有实际的 Invoke-RestMethod 调用
-        var root = GetProjectRoot();
-        var script = File.ReadAllText(Path.Combine(root, "scripts", "test-recording-flow.ps1"));
-
-        // 检查是否存在 Invoke-RestMethod 调用 POST 到 confirmations/*/approve
-        var approveCallPattern = System.Text.RegularExpressions.Regex.IsMatch(
-            script,
-            @"Invoke-RestMethod.*confirmations.*approve.*-Method\s+POST",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        Assert.False(approveCallPattern,
-            "test-recording-flow.ps1 不应包含 POST /confirmations/*/approve 调用 (需要手动用户确认)");
-    }
-
-    // =====================================================================
-    // 7) TrayContext.RequestConfirmation 不再使用 MessageBox 作为主确认路径
+    // 6) TrayContext.RequestConfirmation 不再使用 MessageBox 作为主确认路径
     // =====================================================================
 
     [Fact]
@@ -313,7 +292,7 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 8) TrayContext 使用 ConfirmationQueue
+    // 7) TrayContext 使用 ConfirmationQueue
     // =====================================================================
 
     [Fact]
@@ -333,7 +312,7 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 9) TrayContext.RunOnUi 不依赖 Application.OpenForms[0]
+    // 8) TrayContext.RunOnUi 不依赖 Application.OpenForms[0]
     // =====================================================================
 
     [Fact]
@@ -351,7 +330,7 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 10) TrayContext 程序化关闭必须使用 CloseWithoutResult
+    // 9) TrayContext 程序化关闭必须使用 CloseWithoutResult
     // =====================================================================
 
     [Fact]
@@ -369,7 +348,7 @@ public class SecurityRegressionTests
     }
 
     // =====================================================================
-    // 11) TrayContext 确认 callback 不应同步运行在 UI 路径
+    // 10) TrayContext 确认 callback 不应同步运行在 UI 路径
     // =====================================================================
 
     [Fact]

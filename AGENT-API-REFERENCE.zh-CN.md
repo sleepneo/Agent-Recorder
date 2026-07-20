@@ -567,7 +567,7 @@ GET /audio/devices
 
 不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并为每个设备附加新鲜的 CoreAudio 只读状态。`status` 为 `ready`（存在设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。`microphone_supported` 为 `true`；`system_audio_supported` 为 `false`。
 
-当前已验证的设备枚举路径是 portable 包内捆绑的 FFmpeg。开发环境也可能通过 `AGENT_RECORDER_FFMPEG_DIR` 或 `PATH` 解析外部 FFmpeg；在 FFmpeg 8.x 新版 listing 格式兼容修复完成前，部分较新的外部构建即使 Windows 存在麦克风，也可能返回 `status: "unavailable"`。该限制只影响经此外部二进制进行的设备发现，不影响已验证的 portable 捆绑路径。
+设备枚举解析器同时支持 portable 包内 FFmpeg 的经典 `[dshow]` / `[dshow @ ...] DirectShow audio devices` 分段格式和 FFmpeg 8.x 的 `[in#N @ ...] "设备名" (audio)` tagged 格式。仅接受两类可信 logger 前缀：经典行必须以 `[dshow]` 或 `[dshow @ identity]` 开头，tagged 行必须以 `[in#N @ identity]` 开头（`N` 为至少一位数字，`identity` 非空）。引号内的 friendly name 与 alternative name 采用 consumed-length 解析，引号前后出现额外文本（如 `prefix "Name" (audio)` 或 `"Name" (audio) suffix`）均会被拒绝；同时解码 FFmpeg 的 `\"` 与 `\\` 转义并保留普通反斜杠（如 `\wave_{GUID}`）。任何不完整或畸形的设备记录——例如无效 logger 前缀、缺少 alternative name、孤立的 alternative、被其他行打断的候选设备、quoted value 后带尾部垃圾，或设备与无设备标记同时出现——都会使整个 listing 被视为无法识别，返回 `status: "unavailable"`。缺少可信 logger 前缀的行（包括普通 `warning:` 或其他 logger 输出）会被安全忽略，绝不会生成设备。classic 无设备标记必须位于已由可信 `DirectShow audio devices` header 开启的 audio section 内；tagged 无设备标记可直接来自可信 input logger。完整的 tagged 视频记录（`(video)` friendly name 加匹配的 alternative）可在任意顺序被安全忽略，不会中断音频枚举。解析器绝不返回部分音频设备列表。只有完整且可识别的 listing（有设备或无设备）才接受不同版本正常的 listing 退出码差异（`1`、`0`、`-2`），并返回 `ready` 或 `no_devices`。
 
 `id` 是 FFmpeg dshow 返回的 alternative name（示例展示的是不带 `audio=` 前缀的 alternative-name ID），调用者在后续请求中必须**原样传递**，不得自行添加 `audio=` 前缀；Agent Recorder 在构造 FFmpeg 参数时会负责添加该前缀。
 

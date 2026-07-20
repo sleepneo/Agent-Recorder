@@ -23,3 +23,12 @@ public sealed class NonParallelAgentRecorderDataDirCollection
 public sealed class NonParallelSystemQueryProvidersCollection
 {
 }
+
+/// <summary>
+/// Collection for tests that mutate <c>AGENT_RECORDER_WINDOW_BACKEND</c>. Members
+/// never execute in parallel with each other so feature-flag state does not leak.
+/// </summary>
+[CollectionDefinition("NonParallel-WindowBackend", DisableParallelization = true)]
+public sealed class NonParallelWindowBackendCollection
+{
+}

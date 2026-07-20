@@ -36,26 +36,94 @@ public class ExternalProcessRunnerTests : IDisposable
     private string WriteHelperScript()
     {
         var path = Path.Combine(_tmpDir, "helper.ps1");
+        // Publish the PID atomically: write to a temp file in the same directory,
+        // then move it to the final path. The reader only observes the final file,
+        // so a complete published PID is never confused with a half-written prefix.
         File.WriteAllText(path,
             "param([string]$PidFile)\n" +
-            "$PID | Out-File -FilePath $PidFile -Encoding ASCII -Force\n" +
+            "$tmp = \"$PidFile.tmp\"\n" +
+            "$PID | Out-File -FilePath $tmp -Encoding ASCII -Force\n" +
+            "Move-Item -Path $tmp -Destination $PidFile -Force\n" +
             "while ($true) { Start-Sleep -Milliseconds 200 }\n");
         return path;
     }
 
-    private static async Task<int> WaitForPidAsync(string pidFile, TimeSpan timeout)
+    internal static async Task<int> WaitForPidAsync(string pidFile, TimeSpan timeout)
     {
-        using var cts = new CancellationTokenSource(timeout);
-        while (!File.Exists(pidFile))
+        var sw = Stopwatch.StartNew();
+
+        while (true)
         {
-            cts.Token.ThrowIfCancellationRequested();
-            await Task.Delay(50, cts.Token);
+            var elapsed = sw.Elapsed;
+            if (elapsed >= timeout)
+                break;
+
+            if (!File.Exists(pidFile))
+            {
+                var delay = MinDelay(timeout - elapsed, TimeSpan.FromMilliseconds(50));
+                await Task.Delay(delay);
+                continue;
+            }
+
+            string? text = null;
+            try
+            {
+                text = await File.ReadAllTextAsync(pidFile);
+            }
+            catch (IOException)
+            {
+                // The atomic move just completed or the file is briefly locked;
+                // retry shortly rather than failing.
+                var delay = MinDelay(timeout - elapsed, TimeSpan.FromMilliseconds(50));
+                await Task.Delay(delay);
+                continue;
+            }
+
+            // The publication protocol guarantees that once the final file exists,
+            // it contains the complete single-line integer PID. No wall-clock stable
+            // window is required.
+            if (!string.IsNullOrWhiteSpace(text) && int.TryParse(text.Trim(), out var pid))
+                return pid;
+
+            // The final file exists but does not satisfy the protocol (e.g. a
+            // leftover invalid file). Wait for a valid publication.
+            var remaining = timeout - sw.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+                break;
+            await Task.Delay(MinDelay(remaining, TimeSpan.FromMilliseconds(50)));
         }
 
-        var text = await File.ReadAllTextAsync(pidFile);
-        if (!int.TryParse(text.Trim(), out var pid))
-            throw new InvalidOperationException($"Could not parse PID from '{text}'");
-        return pid;
+        throw new TimeoutException($"Timed out waiting for a valid PID in '{pidFile}'.");
+    }
+
+    private static TimeSpan MinDelay(TimeSpan remaining, TimeSpan max)
+    {
+        return remaining < max ? remaining : max;
+    }
+
+    private static string GetTempPidFile(string pidFile) => pidFile + ".tmp";
+
+    /// <summary>
+    /// Publishes a PID deterministically: writes to a temp file in the same
+    /// directory, then atomically renames it to the final path. The reader only
+    /// observes the final file, so a complete published value is never confused
+    /// with a half-written prefix.
+    /// </summary>
+    private static void PublishPid(string pidFile, int pid)
+    {
+        var tmp = GetTempPidFile(pidFile);
+        File.WriteAllText(tmp, pid.ToString() + "\n", Encoding.ASCII);
+        File.Move(tmp, pidFile, overwrite: true);
+    }
+
+    /// <summary>
+    /// Writes content to the temp file without publishing the final file.
+    /// Used to simulate a half-written or invalid PID prefix during tests.
+    /// </summary>
+    private static void WriteTempPidFile(string pidFile, string content)
+    {
+        var tmp = GetTempPidFile(pidFile);
+        File.WriteAllText(tmp, content + "\n", Encoding.ASCII);
     }
 
     private static bool IsProcessRunning(int pid)
@@ -135,6 +203,98 @@ public class ExternalProcessRunnerTests : IDisposable
         {
             EnsureProcessTreeDead(pid);
         }
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_MissingFile_ThrowsTimeoutException()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"missing-{Guid.NewGuid():N}.pid");
+        var timeout = TimeSpan.FromMilliseconds(100);
+
+        var ex = await Assert.ThrowsAsync<TimeoutException>(() => WaitForPidAsync(pidFile, timeout));
+        Assert.Contains(pidFile, ex.Message);
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_InvalidPublishedContent_ThrowsTimeoutException()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"invalid-{Guid.NewGuid():N}.pid");
+        PublishPid(pidFile, 123); // first publish a valid PID to create the final file
+        File.WriteAllText(pidFile, "not-a-pid"); // then overwrite it with invalid content
+
+        var timeout = TimeSpan.FromMilliseconds(100);
+        await Assert.ThrowsAsync<TimeoutException>(() => WaitForPidAsync(pidFile, timeout));
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_PublishedValidPid_ReturnsPid()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"valid-{Guid.NewGuid():N}.pid");
+        var expectedPid = 12345;
+
+        PublishPid(pidFile, expectedPid);
+
+        var pid = await WaitForPidAsync(pidFile, TimeSpan.FromSeconds(2));
+        Assert.Equal(expectedPid, pid);
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_TempFileOnly_DoesNotReturnUntilPublished()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"temp-only-{Guid.NewGuid():N}.pid");
+
+        // Only the temp file exists; the final file has not been published yet.
+        WriteTempPidFile(pidFile, "12");
+
+        var timeout = TimeSpan.FromMilliseconds(100);
+        await Assert.ThrowsAsync<TimeoutException>(() => WaitForPidAsync(pidFile, timeout));
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_HalfWrittenTempThenPublished_ReturnsFullPid()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"half-then-published-{Guid.NewGuid():N}.pid");
+        var expectedPid = 12345;
+
+        // The temp file contains a half-written prefix, but the final file does not exist yet.
+        WriteTempPidFile(pidFile, "12");
+
+        // Start the reader before publishing the final value.
+        var waitTask = WaitForPidAsync(pidFile, TimeSpan.FromSeconds(2));
+
+        // Deterministically publish the complete PID via atomic rename.
+        PublishPid(pidFile, expectedPid);
+
+        var pid = await waitTask;
+        Assert.Equal(expectedPid, pid);
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_InvalidTempThenValidPublished_ReturnsValidPid()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"invalid-then-published-{Guid.NewGuid():N}.pid");
+        var expectedPid = 55555;
+
+        // Temp file contains non-integer content; final file not yet published.
+        WriteTempPidFile(pidFile, "oops");
+
+        var waitTask = WaitForPidAsync(pidFile, TimeSpan.FromSeconds(2));
+        PublishPid(pidFile, expectedPid);
+
+        var pid = await waitTask;
+        Assert.Equal(expectedPid, pid);
+    }
+
+    [Fact]
+    public async Task WaitForPidAsync_RePublishedValidPid_ReturnsLatestValidPid()
+    {
+        var pidFile = Path.Combine(_tmpDir, $"republished-{Guid.NewGuid():N}.pid");
+
+        PublishPid(pidFile, 11111);
+        PublishPid(pidFile, 22222);
+
+        var pid = await WaitForPidAsync(pidFile, TimeSpan.FromSeconds(2));
+        Assert.Equal(22222, pid);
     }
 
     [Fact]

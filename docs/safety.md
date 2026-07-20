@@ -99,4 +99,4 @@ Context files are written using a random temp file in the same directory and ato
 - Some GPU-accelerated windows may not capture reliably through FFmpeg
   `gdigrab`.
 - Microphone recording is implemented via FFmpeg dshow and encoded as AAC; the capture backend does not open the audio stream until after local user confirmation. System audio recording is not implemented; requests that set `audio.system_audio.enabled=true` fail fast with `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.
-- The bundled FFmpeg build is the validated microphone-discovery path. Some newer external FFmpeg builds use a different dshow listing format and can temporarily report device enumeration as unavailable when selected through an environment override or `PATH`.
+- Microphone discovery supports both the bundled FFmpeg classic dshow listing and the FFmpeg 8.x tagged format. The parser accepts only trusted logger prefixes and complete records; malformed, incomplete, or conflicting listings fail closed as `unavailable`, and partial device lists are never returned. See [API reference](api.md#get-audiodevices) for the exact grammar and response contract.
