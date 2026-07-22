@@ -145,6 +145,8 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 
+A native `wgc-native-helper.exe` for WGC capture is present in the repository. Its no-screen automated and independent-review baseline has passed; **WGC continuous display recording is not exposed through the public API**, the default backend remains unchanged, and real desktop recording acceptance is pending. Public endpoints continue to reject continuous WGC sources; the helper is available only for controlled, human-supervised acceptance testing pending explicit project-lead authorization.
+
 Microphone recording is implemented via FFmpeg dshow and encoded as AAC. The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
 `recording.audio_capabilities.microphone` reports `{ "supported": true, "status": "ready" }` when device enumeration succeeds and at least one active input is present, otherwise `{ "supported": true, "status": "no_devices" }` or `{ "supported": true, "status": "unavailable" }`. `system_audio` remains `{ "supported": false, "status": "not_implemented" }`.

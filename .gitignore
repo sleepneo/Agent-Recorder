@@ -3,6 +3,9 @@ bin/
 obj/
 TestResults/
 
+# C++/WinRT generated projection headers
+tools/wgc-native-helper/src/Generated Files/
+
 # Keep bundled FFmpeg binaries used by the capture backend.
 !tools/ffmpeg/
 !tools/ffmpeg/bin/

@@ -244,6 +244,8 @@ GET /capabilities
 
 该接口不需要 API key。
 
+**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`，无屏幕自动化与独立复核基线已经通过；**WGC 连续显示器录制未通过公共 API 开放**，默认后端未改变，真实 10 秒桌面竖切尚未验收。公共端点继续拒绝 WGC continuous 源；helper 仅在项目负责人明确授权的人工监督验收场景下使用。
+
 **音频能力**：麦克风录制已通过 FFmpeg dshow 实现，编码为 AAC；`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：

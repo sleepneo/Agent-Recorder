@@ -83,17 +83,16 @@ Agents should use the paths returned by `ensure-running` or
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
 - Real microphone audio recording via FFmpeg dshow (AAC), with device enumeration and start/lost failure reporting.
+- The source tree contains an experimental native `wgc-native-helper.exe`. Its no-screen automated baseline has passed, but it is not included in the portable product path, is not exposed through the public API, and still requires supervised real-desktop acceptance. The default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 
 ## Documentation
 
-- `QUICKSTART.md`
-- `QUICKSTART.zh-CN.md`
-- `AGENT-INSTRUCTIONS.zh-CN.md`
-- `AGENT-API-REFERENCE.zh-CN.md`
-- `docs/api.md`
-- `docs/safety.md`
-- `docs/agent-tool-spec.md`
+- Human setup: `QUICKSTART.md` / `QUICKSTART.zh-CN.md`
+- Agent workflow: `AGENT-INSTRUCTIONS.zh-CN.md`
+- Agent API reference: `AGENT-API-REFERENCE.zh-CN.md`
+- Developer API reference: `docs/api.md`
+- Security model: `docs/safety.md`
 
 ## Project Layout
 
@@ -109,6 +108,7 @@ src/
 tools/
   AgentRecorder.Cli            agent startup/autostart helper
   ffmpeg/bin                   bundled FFmpeg/ffprobe
+  wgc-native-helper            native WGC helper (not part of the .NET solution)
 tests/
   AgentRecorder.Tests
 ```

@@ -86,6 +86,7 @@ POST /api/v1/recordings/quick
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 通过 FFmpeg dshow 捕获真实麦克风输入，生成含 AAC 音频的 MP4；系统声音暂未实现 |
+| WGC 连续录制 | 实验性源码 | 原生 helper 的无屏幕自动化基线已通过，但尚未接入公共 API、未进入 portable 产品链路，真实桌面验收待人工监督执行 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 ## 项目结构
@@ -102,6 +103,7 @@ src/
 tools/
   AgentRecorder.Cli            agent 启动握手和自启管理
   ffmpeg/bin                   随包分发的 FFmpeg/ffprobe
+  wgc-native-helper            实验性 WGC 原生 helper 源码
 tests/
   AgentRecorder.Tests
 ```

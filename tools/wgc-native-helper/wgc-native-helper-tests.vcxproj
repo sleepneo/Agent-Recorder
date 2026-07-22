@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B2C3D4E5-F6A7-4B8C-9D0E-1F2A3B4C5D6E}</ProjectGuid>
+    <RootNamespace>wgcnativehelpertests</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\tests\</IntDir>
+    <TargetName>wgc-native-helper-tests</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\tests\</IntDir>
+    <TargetName>wgc-native-helper-tests</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\wgc-native-helper\src;$(ProjectDir)..\wgc-native-helper\src\Generated Files;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;runtimeobject.lib;shcore.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\wgc-native-helper\src;$(ProjectDir)..\wgc-native-helper\src\Generated Files;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;runtimeobject.lib;shcore.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="tests\test_framework.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="tests\test_framework.cpp" />
+    <ClCompile Include="tests\test_options.cpp" />
+    <ClCompile Include="tests\test_path_policy.cpp" />
+    <ClCompile Include="tests\test_begin_gate.cpp" />
+    <ClCompile Include="tests\test_event_writer.cpp" />
+    <ClCompile Include="tests\test_timeline.cpp" />
+    <ClCompile Include="tests\test_pixel_utils.cpp" />
+    <ClCompile Include="tests\test_size_policy.cpp" />
+    <ClCompile Include="tests\test_video_encoder.cpp" />
+    <ClCompile Include="tests\test_startup_coordinator.cpp" />
+    <ClCompile Include="tests\test_frame_queue.cpp" />
+    <ClCompile Include="tests\test_progress_scheduler.cpp" />
+    <ClCompile Include="tests\test_capture_session_wiring.cpp" />
+    <ClCompile Include="tests\test_helper_end_to_end.cpp" />
+    <ClCompile Include="tests\test_watchdog.cpp" />
+    <ClCompile Include="tests\test_main.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\capture_session.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\begin_gate.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\event_writer.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\frame_queue.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\options.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\path_policy.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\progress_scheduler.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\startup_coordinator.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\stop_watcher.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\string_utils.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\timeline.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\pixel_utils.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\size_policy.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\video_encoder.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D}</ProjectGuid>
+    <RootNamespace>wgcnativehelper</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <CppWinRTOptimized>true</CppWinRTOptimized>
+    <CppWinRTHybridOptimization>true</CppWinRTHybridOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>wgc-native-helper</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>wgc-native-helper</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\Generated Files;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;runtimeobject.lib;shcore.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\Generated Files;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;runtimeobject.lib;shcore.lib;windowscodecs.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="src\begin_gate.h" />
+    <ClInclude Include="src\capture_lifecycle.h" />
+    <ClInclude Include="src\capture_session.h" />
+    <ClInclude Include="src\event_writer.h" />
+    <ClInclude Include="src\frame_queue.h" />
+    <ClInclude Include="src\options.h" />
+    <ClInclude Include="src\path_policy.h" />
+    <ClInclude Include="src\pixel_utils.h" />
+    <ClInclude Include="src\progress_scheduler.h" />
+    <ClInclude Include="src\probe.h" />
+    <ClInclude Include="src\size_policy.h" />
+    <ClInclude Include="src\startup_coordinator.h" />
+    <ClInclude Include="src\stop_watcher.h" />
+    <ClInclude Include="src\string_utils.h" />
+    <ClInclude Include="src\timeline.h" />
+    <ClInclude Include="src\video_encoder.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\begin_gate.cpp" />
+    <ClCompile Include="src\capture_session.cpp" />
+    <ClCompile Include="src\event_writer.cpp" />
+    <ClCompile Include="src\frame_queue.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\options.cpp" />
+    <ClCompile Include="src\path_policy.cpp" />
+    <ClCompile Include="src\pixel_utils.cpp" />
+    <ClCompile Include="src\probe.cpp" />
+    <ClCompile Include="src\progress_scheduler.cpp" />
+    <ClCompile Include="src\size_policy.cpp" />
+    <ClCompile Include="src\startup_coordinator.cpp" />
+    <ClCompile Include="src\stop_watcher.cpp" />
+    <ClCompile Include="src\string_utils.cpp" />
+    <ClCompile Include="src\timeline.cpp" />
+    <ClCompile Include="src\video_encoder.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <PropertyGroup>
+    <CppWinRTNamespace>winrt</CppWinRTNamespace>
+    <CppWinRTProjectName>wgc-native-helper</CppWinRTProjectName>
+  </PropertyGroup>
+  <Target Name="GenerateCppWinRT" BeforeTargets="ClCompile">
+    <PropertyGroup>
+      <CppWinRTSdkVersion>$(TargetPlatformVersion)</CppWinRTSdkVersion>
+      <CppWinRTSdkVersion Condition="'$(CppWinRTSdkVersion)' == ''">$(WindowsTargetPlatformVersion)</CppWinRTSdkVersion>
+      <CppWinRTExe>"$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots@KitsRoot10)bin\$(CppWinRTSdkVersion)\x64\cppwinrt.exe"</CppWinRTExe>
+      <CppWinRTExe Condition="!Exists($(CppWinRTExe))">"C:\Program Files (x86)\Windows Kits\10\bin\$(CppWinRTSdkVersion)\x64\cppwinrt.exe"</CppWinRTExe>
+    </PropertyGroup>
+    <MakeDir Directories="$(ProjectDir)src\Generated Files" />
+    <Exec Command="$(CppWinRTExe) -input $(CppWinRTSdkVersion) -output &quot;$(ProjectDir)src\Generated Files&quot;" />
+  </Target>
+</Project>
