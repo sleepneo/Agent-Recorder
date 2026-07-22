@@ -87,8 +87,23 @@ wgc-native-helper.exe --probe
 `--probe` 检查：
 
 - OS 版本是否满足 WGC 要求（Windows 10 1903+）。
+- 当前 DPI awareness 上下文（必须为 `per_monitor_v2`）。
+- 显示器数量与每个显示器的物理像素边界（`x,y,width,height`）及 primary 标记。
 - D3D11 设备（含 WARP 回退）能否初始化。
 - 能否通过 `MFTEnumEx` 创建 H.264 软件编码器。
+
+输出示例：
+
+```text
+RESULT: OK
+DpiAwareness: per_monitor_v2
+MonitorCount: 2
+Monitor[0]: x=0 y=0 width=3840 height=2160 primary=true
+Monitor[1]: x=3840 y=0 width=1920 height=1080 primary=false
+WgcSupported: true
+D3d11Initialized: true
+EncoderCreated: true
+```
 
 ## Consent Invariant
 
@@ -177,7 +192,7 @@ BytesWritten: <bytes>
 
 ## 架构要点
 
-- **显示器匹配**：根据 `--display-bounds` 枚举 `HMONITOR` 并做完整矩形精确匹配；找不到或多匹配时失败。
+- **显示器匹配**：helper 通过嵌入的 Per-Monitor V2 manifest 将进程设置为物理像素坐标空间，再由 `wmain` 入口调用 `SetProcessDpiAwarenessContext`（manifest 已固定时返回 `ERROR_ACCESS_DENIED`，随后验证当前上下文）做二次确认；之后根据 `--display-bounds` 枚举 `HMONITOR` 并做完整矩形精确匹配。找不到或多匹配时失败。`--display-bounds` 始终表示虚拟桌面的物理像素，与 Agent Recorder API 的 `/api/v1/displays[].bounds` 一致。
 - **D3D/WGC**：使用 BGRA-capable D3D11 设备，通过 `IGraphicsCaptureItemInterop::CreateForMonitor` 创建 capture item，`Direct3D11CaptureFramePool::CreateFreeThreaded` 接收帧。保留系统默认 WGC 隐私边框，不关闭 `IsBorderRequired`。
 - **帧背压**：有界帧队列（最大 3 帧），队列满时按策略丢旧帧或拒绝新帧并累计 `FramesDropped`。`FrameArrived` 回调只做 `TryGetNextFrame`、最小校验和有界入队；GPU->CPU 拷贝与编码在 worker 线程执行。
 - **编码**：Media Foundation Sink Writer，输入 `RGB32`（top-down，BGRA 内存布局直接映射），输出 `H.264`/`MFVideoFormat_H264`，软件编码优先（`MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS=FALSE`）。
@@ -203,7 +218,7 @@ BytesWritten: <bytes>
 - 本轮仅实现 **单个 display** 连续录制，不做 window、region、硬件编码、麦克风或系统声音。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
 - Windows 自带的 WGC 黄色边框是系统隐私提示，本 helper 不尝试绕过或隐藏。
-- 公共 API 仍拒绝 WGC continuous 录制；helper 仅作为下一轮人工验收的底层能力存在。
+- 2026-07-22 已完成一次受监督的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出可由 FFprobe 解析的 H.264 MP4，`FramesDropped=0`。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；下一步是通过托管 runner 在显式功能开关后接入，并保留 FFmpeg 回退。
 
 ## 测试
 

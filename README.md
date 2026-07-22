@@ -83,7 +83,7 @@ Agents should use the paths returned by `ensure-running` or
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
 - Real microphone audio recording via FFmpeg dshow (AAC), with device enumeration and start/lost failure reporting.
-- The source tree contains an experimental native `wgc-native-helper.exe`. Its no-screen automated baseline has passed, but it is not included in the portable product path, is not exposed through the public API, and still requires supervised real-desktop acceptance. The default FFmpeg backend is unchanged.
+- The source tree contains an experimental native `wgc-native-helper.exe`. Its automated baseline and one supervised 10-second 4K desktop recording have passed. It is not yet included in the portable product path or exposed through the public API; the default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 
 ## Documentation

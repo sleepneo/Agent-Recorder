@@ -1,5 +1,7 @@
 #include "probe.h"
 
+#include "dpi_context.h"
+
 #include <windows.h>
 #include <d3d11.h>
 #include <mfapi.h>
@@ -10,6 +12,7 @@
 
 #include <format>
 #include <string>
+#include <vector>
 
 namespace wgc {
 
@@ -46,6 +49,43 @@ HRESULT CreateD3D11Device(Microsoft::WRL::ComPtr<ID3D11Device>& device) {
     return D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
                              featureLevels, static_cast<UINT>(std::size(featureLevels)),
                              D3D11_SDK_VERSION, device.GetAddressOf(), nullptr, &context);
+}
+
+struct ProbeMonitorEnumContext {
+    std::vector<ProbeMonitorInfo>* monitors = nullptr;
+    std::string* error = nullptr;
+    int primaryCount = 0;
+    bool failed = false;
+};
+
+BOOL CALLBACK ProbeMonitorEnumProc(HMONITOR hMonitor, HDC /*hdcMonitor*/,
+                                   LPRECT lprcMonitor, LPARAM dwData) {
+    auto* ctx = reinterpret_cast<ProbeMonitorEnumContext*>(dwData);
+    if (!ctx || !ctx->monitors) {
+        return FALSE;
+    }
+
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!::GetMonitorInfoW(hMonitor, &mi)) {
+        ctx->failed = true;
+        if (ctx->error) {
+            *ctx->error = "GetMonitorInfoW failed during probe";
+        }
+        return FALSE;
+    }
+
+    ProbeMonitorInfo info;
+    info.bounds.x = lprcMonitor->left;
+    info.bounds.y = lprcMonitor->top;
+    info.bounds.width = lprcMonitor->right - lprcMonitor->left;
+    info.bounds.height = lprcMonitor->bottom - lprcMonitor->top;
+    info.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    if (info.primary) {
+        ctx->primaryCount++;
+    }
+    ctx->monitors->push_back(info);
+    return TRUE;
 }
 
 HRESULT CreateSoftwareH264Encoder() {
@@ -102,6 +142,22 @@ ProbeResult RunProbe() {
         bool needUninit;
         ~ComGuard() { if (needUninit) CoUninitialize(); }
     } comGuard{comInitialized};
+
+    result.dpiAwareness = DpiAwarenessToString(GetCurrentDpiAwareness());
+
+    ProbeMonitorEnumContext monitorCtx;
+    monitorCtx.monitors = &result.monitors;
+    monitorCtx.error = &result.error;
+    ::EnumDisplayMonitors(nullptr, nullptr, ProbeMonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
+
+    if (monitorCtx.failed) {
+        return result;
+    }
+
+    if (monitorCtx.primaryCount != 1) {
+        result.error = std::format("Expected exactly one primary monitor, found {}", monitorCtx.primaryCount);
+        return result;
+    }
 
     if (!IsWgcSupported()) {
         result.error = "Windows Graphics Capture requires Windows 10 version 1903 or later";

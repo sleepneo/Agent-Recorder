@@ -94,6 +94,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <Manifest Include="..\wgc-native-helper\src\wgc-native-helper.exe.manifest" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="tests\test_framework.h" />
   </ItemGroup>
   <ItemGroup>
@@ -110,10 +113,14 @@
     <ClCompile Include="tests\test_frame_queue.cpp" />
     <ClCompile Include="tests\test_progress_scheduler.cpp" />
     <ClCompile Include="tests\test_capture_session_wiring.cpp" />
+    <ClCompile Include="tests\test_dpi_context.cpp" />
+    <ClCompile Include="tests\test_display_geometry.cpp" />
+    <ClCompile Include="tests\test_embedded_manifest.cpp" />
     <ClCompile Include="tests\test_helper_end_to_end.cpp" />
     <ClCompile Include="tests\test_watchdog.cpp" />
     <ClCompile Include="tests\test_main.cpp" />
     <ClCompile Include="..\wgc-native-helper\src\capture_session.cpp" />
+    <ClCompile Include="..\wgc-native-helper\src\dpi_context.cpp" />
     <ClCompile Include="..\wgc-native-helper\src\begin_gate.cpp" />
     <ClCompile Include="..\wgc-native-helper\src\event_writer.cpp" />
     <ClCompile Include="..\wgc-native-helper\src\frame_queue.cpp" />

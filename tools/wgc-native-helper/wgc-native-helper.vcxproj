@@ -96,9 +96,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <Manifest Include="src\wgc-native-helper.exe.manifest" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="src\begin_gate.h" />
     <ClInclude Include="src\capture_lifecycle.h" />
     <ClInclude Include="src\capture_session.h" />
+    <ClInclude Include="src\dpi_context.h" />
     <ClInclude Include="src\event_writer.h" />
     <ClInclude Include="src\frame_queue.h" />
     <ClInclude Include="src\options.h" />
@@ -116,6 +120,7 @@
   <ItemGroup>
     <ClCompile Include="src\begin_gate.cpp" />
     <ClCompile Include="src\capture_session.cpp" />
+    <ClCompile Include="src\dpi_context.cpp" />
     <ClCompile Include="src\event_writer.cpp" />
     <ClCompile Include="src\frame_queue.cpp" />
     <ClCompile Include="src\main.cpp" />

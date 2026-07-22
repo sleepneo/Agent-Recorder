@@ -461,6 +461,9 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     // Worker mode: run the actual tests under WinRT MTA.
+    // The test executable embeds the same Per-Monitor V2 manifest as the
+    // helper, so every thread (including those spawned by CaptureSession tests)
+    // enumerates displays in the same physical-pixel coordinate space.
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::cerr << "TEST_MAIN_ENTER\n";
     int result = args.runWatchdog

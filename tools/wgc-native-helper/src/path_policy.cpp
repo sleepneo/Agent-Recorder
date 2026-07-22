@@ -46,35 +46,8 @@ std::wstring GetExecutableDirectory() {
     return EnsureTrailingSeparator(path.substr(0, lastSep));
 }
 
-// Walks up from the executable directory looking for a directory that contains
-// a .local-data folder or an AgentRecorder.sln file. This lets the helper find
-// the repository root regardless of the current working directory.
-std::wstring FindRepositoryRootImpl() {
-    std::wstring exeDir = GetExecutableDirectory();
-    if (exeDir.empty()) return {};
-    // Remove trailing separator for filesystem operations.
-    std::wstring dir = exeDir;
-    if (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) {
-        dir.pop_back();
-    }
-
-    constexpr int kMaxDepth = 6;
-    for (int i = 0; i < kMaxDepth && !dir.empty(); ++i) {
-        std::wstring localData = dir + L"\\.local-data";
-        std::wstring solution = dir + L"\\AgentRecorder.sln";
-        if (::GetFileAttributesW(localData.c_str()) != INVALID_FILE_ATTRIBUTES ||
-            ::GetFileAttributesW(solution.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            return EnsureTrailingSeparator(dir);
-        }
-        const size_t lastSep = dir.find_last_of(L"\\/");
-        if (lastSep == std::wstring::npos) break;
-        dir = dir.substr(0, lastSep);
-    }
-    return {};
-}
-
 std::wstring GetLocalDataWgcTestsRoot() {
-    std::wstring repoRoot = FindRepositoryRootImpl();
+    std::wstring repoRoot = FindRepositoryRoot();
     if (!repoRoot.empty()) {
         return repoRoot + L".local-data\\wgc-tests\\";
     }
@@ -82,7 +55,7 @@ std::wstring GetLocalDataWgcTestsRoot() {
 }
 
 std::wstring GetLocalDataWgcControlRoot() {
-    std::wstring repoRoot = FindRepositoryRootImpl();
+    std::wstring repoRoot = FindRepositoryRoot();
     if (!repoRoot.empty()) {
         return repoRoot + L".local-data\\wgc-control\\";
     }
@@ -91,8 +64,43 @@ std::wstring GetLocalDataWgcControlRoot() {
 
 } // namespace
 
+// Walks up from the given directory looking for the repository root.
+// The canonical marker is AgentRecorder.sln. A .local-data directory is only
+// used as a fallback, and the nearest (closest to startDir) candidate wins so
+// that nested/stale .local-data folders (e.g. under tools\) do not override
+// the application's own data root in portable layouts.
+std::wstring FindRepositoryRootFrom(std::wstring_view startDir) {
+    if (startDir.empty()) return {};
+    // Remove trailing separator for filesystem operations.
+    std::wstring dir(startDir);
+    if (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) {
+        dir.pop_back();
+    }
+
+    std::wstring localDataRoot;
+    constexpr int kMaxDepth = 6;
+    for (int i = 0; i < kMaxDepth && !dir.empty(); ++i) {
+        std::wstring solution = dir + L"\\AgentRecorder.sln";
+        if (::GetFileAttributesW(solution.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return EnsureTrailingSeparator(dir);
+        }
+
+        std::wstring localData = dir + L"\\.local-data";
+        if (localDataRoot.empty() &&
+            ::GetFileAttributesW(localData.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            // Remember only the nearest .local-data as a fallback.
+            localDataRoot = EnsureTrailingSeparator(dir);
+        }
+
+        const size_t lastSep = dir.find_last_of(L"\\/");
+        if (lastSep == std::wstring::npos) break;
+        dir = dir.substr(0, lastSep);
+    }
+    return localDataRoot;
+}
+
 std::wstring FindRepositoryRoot() {
-    return FindRepositoryRootImpl();
+    return FindRepositoryRootFrom(GetExecutableDirectory());
 }
 
 namespace {

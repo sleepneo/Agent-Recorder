@@ -1,6 +1,7 @@
 #include "capture_session.h"
 
 #include "capture_lifecycle.h"
+#include "display_geometry.h"
 #include "frame_queue.h"
 #include "progress_scheduler.h"
 #include "size_policy.h"
@@ -100,9 +101,7 @@ struct MonitorEnumContext {
 BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC /*hdcMonitor*/,
                               LPRECT lprcMonitor, LPARAM dwData) {
     auto* ctx = reinterpret_cast<MonitorEnumContext*>(dwData);
-    if (lprcMonitor->left == ctx->target.x && lprcMonitor->top == ctx->target.y &&
-        lprcMonitor->right - lprcMonitor->left == ctx->target.width &&
-        lprcMonitor->bottom - lprcMonitor->top == ctx->target.height) {
+    if (RectExactlyMatchesMonitor(ctx->target, *lprcMonitor)) {
         ctx->match = hMonitor;
         ctx->matchCount++;
     }

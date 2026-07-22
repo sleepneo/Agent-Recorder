@@ -1,5 +1,6 @@
 #include "begin_gate.h"
 #include "capture_session.h"
+#include "dpi_context.h"
 #include "event_writer.h"
 #include "options.h"
 #include "path_policy.h"
@@ -47,6 +48,16 @@ void PrintVersion() {
 
 void PrintProbeResult(const ProbeResult& result) {
     std::cout << "RESULT: " << (result.ok ? "OK" : "FAIL") << "\n";
+    std::cout << "DpiAwareness: " << result.dpiAwareness << "\n";
+    std::cout << "MonitorCount: " << result.monitors.size() << "\n";
+    for (size_t i = 0; i < result.monitors.size(); ++i) {
+        const auto& m = result.monitors[i];
+        std::cout << "Monitor[" << i << "]: x=" << m.bounds.x
+                  << " y=" << m.bounds.y
+                  << " width=" << m.bounds.width
+                  << " height=" << m.bounds.height
+                  << " primary=" << (m.primary ? "true" : "false") << "\n";
+    }
     std::cout << "WgcSupported: " << (result.wgcSupported ? "true" : "false") << "\n";
     std::cout << "D3d11Initialized: " << (result.d3d11Initialized ? "true" : "false") << "\n";
     std::cout << "EncoderCreated: " << (result.encoderCreated ? "true" : "false") << "\n";
@@ -213,6 +224,19 @@ int wmain(int argc, wchar_t* argv[]) {
     using namespace wgc;
 
     try {
+        // Establish Per-Monitor V2 process-wide DPI awareness before any
+        // DPI-sensitive API (including EnumDisplayMonitors and WGC) is invoked.
+        // The manifest declares Per-Monitor V2, so the runtime call normally
+        // returns ERROR_ACCESS_DENIED and the helper verifies the current
+        // context; this keeps the helper's coordinate space consistent with the
+        // Agent Recorder API.
+        const DpiContextResult dpiResult = InitializeDpiAwareness();
+        if (!dpiResult.ok) {
+            EventWriter writer;
+            writer.Fail(dpiResult.errorCode, dpiResult.errorReason, "", {}, 0, 0);
+            return kExitFailure;
+        }
+
         // Set stdout to unbuffered so IPC events are flushed immediately.
         std::setvbuf(stdout, nullptr, _IONBF, 0);
 

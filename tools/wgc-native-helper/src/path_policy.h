@@ -41,9 +41,13 @@ PathCheckResult ValidateControlPath(std::wstring_view path, const PathPolicy& po
 // reparse points for existing path components. Rejects relative inputs.
 std::wstring CanonicalPath(std::wstring_view path);
 
-// Walks up from the running executable to find the repository root (the first
-// ancestor containing .local-data or AgentRecorder.sln). Returns empty if not found.
+// Walks up from the running executable to find the repository root. An
+// AgentRecorder.sln marker wins at any scanned level; otherwise the nearest
+// ancestor containing .local-data is used. Returns empty if no marker is found.
 std::wstring FindRepositoryRoot();
+
+// Test seam: walks up from an arbitrary directory. Returns empty if not found.
+std::wstring FindRepositoryRootFrom(std::wstring_view startDir);
 
 // Checks whether child (canonical) is under parent (canonical, with trailing separator).
 bool IsPathContained(std::wstring_view childCanonical, std::wstring_view parentCanonical);

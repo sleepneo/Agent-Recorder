@@ -2,10 +2,13 @@
 
 #include "path_policy.h"
 
+#include "string_utils.h"
+
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <windows.h>
 #include <winioctl.h>
-#include <cstring>
 
 // REPARSE_DATA_BUFFER is not guaranteed to be visible with WIN32_LEAN_AND_MEAN.
 #ifndef REPARSE_DATA_BUFFER_HEADER_SIZE
@@ -318,6 +321,76 @@ TEST_REGISTRAR(CanonicalPathResolvesJunctionEscape, []() {
     std::filesystem::remove(fileViaJunction);
     std::filesystem::remove(junctionName);
     std::filesystem::remove_all(targetDir);
+});
+
+// RAII helper that removes a temporary directory tree on scope exit.
+struct ScopedTempTree {
+    std::wstring root;
+    explicit ScopedTempTree(std::wstring path) : root(std::move(path)) {}
+    ~ScopedTempTree() {
+        try {
+            std::filesystem::remove_all(root);
+        } catch (...) {
+            // Best-effort cleanup; do not throw from destructor.
+        }
+    }
+};
+
+TEST_REGISTRAR(FindRepositoryRootFrom_SolutionMarkerBeatsNestedLocalData, []() {
+    std::wstring tempRoot = GetTempDirectory();
+    std::wstring base = tempRoot + L"wgc_root_solution_" + std::to_wstring(GetCurrentProcessId());
+
+    std::wstring deepLocalData = base + L"\\deep\\.local-data";
+    std::wstring topLocalData = base + L"\\.local-data";
+    std::wstring startDir = base + L"\\deep\\app\\bin";
+    std::wstring slnPath = base + L"\\AgentRecorder.sln";
+
+    std::filesystem::create_directories(startDir);
+    std::filesystem::create_directories(deepLocalData);
+    std::filesystem::create_directories(topLocalData);
+
+    ScopedTempTree guard(base);
+
+    {
+        std::ofstream sln(WideToUtf8(slnPath));
+        ASSERT_TRUE(sln.is_open());
+    }
+
+    std::wstring root = FindRepositoryRootFrom(startDir);
+    ASSERT_EQ(root, base + L"\\");
+});
+
+TEST_REGISTRAR(FindRepositoryRootFrom_NearestLocalDataWinsWhenNoSolution, []() {
+    std::wstring tempRoot = GetTempDirectory();
+    std::wstring base = tempRoot + L"wgc_root_nearest_" + std::to_wstring(GetCurrentProcessId());
+
+    std::wstring startDir = base + L"\\a\\b\\c\\bin";
+    std::wstring nearest = base + L"\\a\\b\\c\\.local-data";
+    std::wstring middle = base + L"\\a\\b\\.local-data";
+    std::wstring top = base + L"\\a\\.local-data";
+
+    std::filesystem::create_directories(startDir);
+    std::filesystem::create_directories(nearest);
+    std::filesystem::create_directories(middle);
+    std::filesystem::create_directories(top);
+
+    ScopedTempTree guard(base);
+
+    std::wstring root = FindRepositoryRootFrom(startDir);
+    ASSERT_EQ(root, base + L"\\a\\b\\c\\");
+});
+
+TEST_REGISTRAR(FindRepositoryRootFrom_NoMarkers_ReturnsEmpty, []() {
+    std::wstring tempRoot = GetTempDirectory();
+    std::wstring base = tempRoot + L"wgc_root_empty_" + std::to_wstring(GetCurrentProcessId());
+    std::wstring startDir = base + L"\\a\\b\\c";
+
+    std::filesystem::create_directories(startDir);
+
+    ScopedTempTree guard(base);
+
+    std::wstring root = FindRepositoryRootFrom(startDir);
+    ASSERT_TRUE(root.empty());
 });
 
 } // namespace
