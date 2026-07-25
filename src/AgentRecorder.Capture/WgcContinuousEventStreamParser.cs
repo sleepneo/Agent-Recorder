@@ -52,8 +52,10 @@ public static class WgcContinuousEventStreamParser
 
     /// <summary>
     /// Parse a single event block (key-value pairs separated by newlines).
+    /// Internal so that the streaming session parser can reuse the same
+    /// key-value semantics without duplicating the IPC v2 interpretation.
     /// </summary>
-    private static WgcContinuousEvent? ParseEventBlock(List<string> lines)
+    internal static WgcContinuousEvent? ParseEventBlock(List<string> lines)
     {
         var evt = new WgcContinuousEvent();
         bool hasResult = false;
@@ -400,7 +402,9 @@ public static class WgcContinuousEventStreamParser
                     summary.FramesDropped = evt.FramesDropped;
                     summary.DurationMs = evt.DurationMs;
                     summary.BytesWritten = evt.BytesWritten;
+                    summary.HasBytesWritten = evt.BytesWritten.HasValue;
                     summary.FileSize = evt.FileSize ?? evt.BytesWritten;
+                    summary.HasFileSize = evt.FileSize.HasValue;
                     summary.Width = evt.Width;
                     summary.Height = evt.Height;
                     summary.StopReason = "duration_reached";
@@ -472,7 +476,9 @@ public static class WgcContinuousEventStreamParser
                     summary.FramesDropped = evt.FramesDropped;
                     summary.DurationMs = evt.DurationMs;
                     summary.BytesWritten = evt.BytesWritten;
+                    summary.HasBytesWritten = evt.BytesWritten.HasValue;
                     summary.FileSize = evt.FileSize ?? evt.BytesWritten;
+                    summary.HasFileSize = evt.FileSize.HasValue;
                     summary.Width = evt.Width ?? summary.Width;
                     summary.Height = evt.Height ?? summary.Height;
                     summary.StopReason = evt.StopReason ?? "user_requested";
@@ -496,7 +502,9 @@ public static class WgcContinuousEventStreamParser
                     summary.ErrorCode = evt.ErrorCode;
                     summary.PartialOutputPath = evt.PartialOutputPath;
                     summary.BytesWritten = evt.BytesWritten;
+                    summary.HasBytesWritten = evt.BytesWritten.HasValue;
                     summary.FileSize = evt.FileSize ?? evt.BytesWritten;
+                    summary.HasFileSize = evt.FileSize.HasValue;
                     summary.FramesCaptured = evt.FramesCaptured ?? lastFramesCaptured;
                     summary.FramesDropped = evt.FramesDropped;
                     summary.DurationMs = evt.DurationMs;

@@ -83,7 +83,7 @@ Agents should use the paths returned by `ensure-running` or
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
 - Real microphone audio recording via FFmpeg dshow (AAC), with device enumeration and start/lost failure reporting.
-- The source tree contains an experimental native `wgc-native-helper.exe`. Its automated baseline and one supervised 10-second 4K desktop recording have passed. It is not yet included in the portable product path or exposed through the public API; the default FFmpeg backend is unchanged.
+- The source tree contains an experimental WGC continuous pipeline: the native helper, managed session, and capture-backend adapter have passed scoped automation and one supervised 10-second 4K desktop recording. It is not yet wired into backend selection, the public API, or the portable product path; the default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 
 ## Documentation
@@ -108,7 +108,7 @@ src/
 tools/
   AgentRecorder.Cli            agent startup/autostart helper
   ffmpeg/bin                   bundled FFmpeg/ffprobe
-  wgc-native-helper            native WGC helper (not part of the .NET solution)
+  wgc-native-helper            experimental native WGC helper
 tests/
   AgentRecorder.Tests
 ```

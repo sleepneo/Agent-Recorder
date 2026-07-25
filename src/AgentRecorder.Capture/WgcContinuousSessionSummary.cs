@@ -84,9 +84,19 @@ public sealed class WgcContinuousSessionSummary
     public long? BytesWritten { get; set; }
 
     /// <summary>
+    /// Whether the final event explicitly provided BytesWritten.
+    /// </summary>
+    public bool HasBytesWritten { get; set; }
+
+    /// <summary>
     /// The FileSize from the final event.
     /// </summary>
     public long? FileSize { get; set; }
+
+    /// <summary>
+    /// Whether the final event explicitly provided FileSize.
+    /// </summary>
+    public bool HasFileSize { get; set; }
 
     /// <summary>
     /// The StopReason from STOPPED or FAIL events.

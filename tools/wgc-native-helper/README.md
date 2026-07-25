@@ -218,7 +218,7 @@ BytesWritten: <bytes>
 - 本轮仅实现 **单个 display** 连续录制，不做 window、region、硬件编码、麦克风或系统声音。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
 - Windows 自带的 WGC 黄色边框是系统隐私提示，本 helper 不尝试绕过或隐藏。
-- 2026-07-22 已完成一次受监督的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出可由 FFprobe 解析的 H.264 MP4，`FramesDropped=0`。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；下一步是通过托管 runner 在显式功能开关后接入，并保留 FFmpeg 回退。
+- 2026-07-22 已完成一次受监督的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出可由 FFprobe 解析的 H.264 MP4，`FramesDropped=0`。C# 托管会话与 `ICaptureBackend` 适配器已完成 scoped 自动化验收；公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变。下一步是接入 selector/API 实验开关、可用性探测和 FFmpeg 回退。
 
 ## 测试
 
@@ -228,7 +228,7 @@ BytesWritten: <bytes>
 .\tools\wgc-native-helper\bin\x64\Release\wgc-native-helper-tests.exe
 ```
 
-C# 侧使用 `WgcContinuousEventStreamParser` 验证 golden event streams，以及现有 `WgcContinuous*`、`WgcEvidence*`、`WgcErrorTaxonomyTests`、`WgcContinuousPublicBoundaryTests` 等契约测试。
+C# 侧覆盖 `WgcContinuousEventStreamParser`、托管异步会话、`WgcContinuousCaptureBackend`、staging 原子发布、真实父子进程树正反对照，以及 `WgcContinuous*`、`WgcEvidence*`、`WgcErrorTaxonomyTests`、`WgcContinuousPublicBoundaryTests` 等契约测试。
 
 ## 真实桌面验收边界
 
