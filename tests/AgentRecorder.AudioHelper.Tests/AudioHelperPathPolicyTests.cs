@@ -3,7 +3,7 @@ using Xunit;
 
 namespace AgentRecorder.AudioHelper.Tests;
 
-public class AudioHelperPathPolicyTests
+public class AudioHelperPathPolicyTests : IDisposable
 {
     private readonly string _root;
 

@@ -75,7 +75,7 @@ public class AudioHelperCaptureSessionTests
         => new(path, () => cts.Cancel());
 
     [Fact]
-    public void Run_WithData_EmitsStartedAndOkAndPublishesWav()
+    public async Task Run_WithData_EmitsStartedAndOkAndPublishesWav()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -99,7 +99,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => File.Exists(partial), TimeSpan.FromSeconds(2));
         File.WriteAllText(stopSignal, "stop");
 
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(0, exitCode);
         Assert.True(File.Exists(output));
@@ -139,7 +139,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_RecordingStoppedWithException_EmitsFail()
+    public async Task Run_RecordingStoppedWithException_EmitsFail()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -162,7 +162,7 @@ public class AudioHelperCaptureSessionTests
         input.InjectData(buffer, buffer.Length);
         input.InjectError(new InvalidOperationException("device lost"));
 
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.NotEqual(0, exitCode);
 
@@ -186,7 +186,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_NoDataCaptured_EmitsExactlyOneFail_WithAudioNoPacketsCaptured()
+    public async Task Run_NoDataCaptured_EmitsExactlyOneFail_WithAudioNoPacketsCaptured()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -205,7 +205,7 @@ public class AudioHelperCaptureSessionTests
         var runTask = Task.Run(() => session.Run());
         SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2));
         input.StopRecording();
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -222,7 +222,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_DataAvailableWriteFailure_EmitsFail_AudioWriteFailure()
+    public async Task Run_DataAvailableWriteFailure_EmitsFail_AudioWriteFailure()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -248,7 +248,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2));
         input.InjectData(new byte[320], 320);
         SpinWait.SpinUntil(() => input.Stopped, TimeSpan.FromSeconds(2));
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -263,7 +263,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_WriterDisposeFailure_EmitsFail_AudioWriterFinalizeFailed()
+    public async Task Run_WriterDisposeFailure_EmitsFail_AudioWriterFinalizeFailed()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -289,7 +289,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2));
         input.InjectData(new byte[320], 320);
         File.WriteAllText(stopSignal, "stop");
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -302,7 +302,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_OutputConflict_EmitsFail_AudioOutputConflict()
+    public async Task Run_OutputConflict_EmitsFail_AudioOutputConflict()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -324,7 +324,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => File.Exists(partial), TimeSpan.FromSeconds(2));
         File.WriteAllText(output, "conflict");
         File.WriteAllText(stopSignal, "stop");
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -338,7 +338,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_PublishMoveFailure_EmitsFail_AudioPublishFailed()
+    public async Task Run_PublishMoveFailure_EmitsFail_AudioPublishFailed()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -364,7 +364,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2));
         input.InjectData(new byte[320], 320);
         File.WriteAllText(stopSignal, "stop");
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -377,7 +377,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_RecordingStoppedWithException_EmitsFail_AudioCaptureError()
+    public async Task Run_RecordingStoppedWithException_EmitsFail_AudioCaptureError()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -397,7 +397,7 @@ public class AudioHelperCaptureSessionTests
         SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2));
         input.InjectData(new byte[320], 320);
         input.InjectError(new InvalidOperationException("device lost"));
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.NotEqual(0, exitCode);
@@ -410,7 +410,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_UserStop_EmitsExactlyOneStopped_ExitZero()
+    public async Task Run_UserStop_EmitsExactlyOneStopped_ExitZero()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -431,7 +431,7 @@ public class AudioHelperCaptureSessionTests
         input.InjectData(new byte[320], 320);
         SpinWait.SpinUntil(() => File.Exists(partial), TimeSpan.FromSeconds(2));
         File.WriteAllText(stopSignal, "stop");
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         Assert.Equal(0, exitCode);
@@ -448,7 +448,7 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
-    public void Run_ConcurrentStopAndError_EmitsExactlyOneTerminal()
+    public async Task Run_ConcurrentStopAndError_EmitsExactlyOneTerminal()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -470,7 +470,7 @@ public class AudioHelperCaptureSessionTests
         Parallel.Invoke(
             () => input.StopRecording(),
             () => input.InjectError(new InvalidOperationException("race")));
-        var exitCode = runTask.Wait(TimeSpan.FromSeconds(5)) ? runTask.Result : throw new TimeoutException();
+        var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         AssertExactlyOneTerminal(events);
