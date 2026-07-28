@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
@@ -24,6 +26,9 @@ public class RecordingEnginePreflightTests : IDisposable
     private readonly TempDirectory _tmp = new();
     private readonly RecordingPreflightChecker.TryGetFreeSpace _originalFreeSpace;
     private readonly RecordingPreflightChecker.TryGetEncoderPaths _originalEncoder;
+    private readonly RecordingPreflightChecker.TryResolveAudioHelper _originalAudioHelperPathResolver;
+    private readonly RecordingPreflightChecker.RunAudioHelperProbe _originalAudioHelperProbeRunner;
+    private readonly Func<bool> _originalShouldUseWasapiBackend;
     private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? _originalWindowProvider;
     private readonly Func<List<SystemQuery.DisplayInfo>>? _originalDisplayProvider;
 
@@ -88,6 +93,9 @@ public class RecordingEnginePreflightTests : IDisposable
 
         _originalFreeSpace = RecordingPreflightChecker.FreeSpaceProvider;
         _originalEncoder = RecordingPreflightChecker.EncoderProvider;
+        _originalAudioHelperPathResolver = RecordingPreflightChecker.AudioHelperPathResolver;
+        _originalAudioHelperProbeRunner = RecordingPreflightChecker.AudioHelperProbeRunner;
+        _originalShouldUseWasapiBackend = RecordingPreflightChecker.ShouldUseWasapiBackend;
         _originalWindowProvider = GetWindowProviderField();
         _originalDisplayProvider = GetDisplayProviderField();
 
@@ -104,6 +112,7 @@ public class RecordingEnginePreflightTests : IDisposable
             File.WriteAllText(p, "fake ffprobe");
             return true;
         };
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => false;
 
         SystemQuery.SetDisplayProvider(() => new()
         {
@@ -116,6 +125,9 @@ public class RecordingEnginePreflightTests : IDisposable
         DataDirResolver.ClearOverride();
         RecordingPreflightChecker.FreeSpaceProvider = _originalFreeSpace;
         RecordingPreflightChecker.EncoderProvider = _originalEncoder;
+        RecordingPreflightChecker.AudioHelperPathResolver = _originalAudioHelperPathResolver;
+        RecordingPreflightChecker.AudioHelperProbeRunner = _originalAudioHelperProbeRunner;
+        RecordingPreflightChecker.ShouldUseWasapiBackend = _originalShouldUseWasapiBackend;
         SystemQuery.SetWindowProvider(_originalWindowProvider);
         SystemQuery.SetDisplayProvider(_originalDisplayProvider);
         _tmp.Dispose();
@@ -135,12 +147,23 @@ public class RecordingEnginePreflightTests : IDisposable
         return (Func<List<SystemQuery.DisplayInfo>>?)field?.GetValue(null);
     }
 
-    private static RecordingEngine MakeEngine(AuditLogger audit, ControllableTray tray)
+    private static RecordingEngine MakeEngine(AuditLogger audit, ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null)
     {
-        var engine = new RecordingEngine(audit);
+        var engine = new RecordingEngine(audit, microphoneProvider: microphoneProvider);
         engine.SetTray(tray);
         engine.BackendFactory = _ => (new FakeCaptureBackend(), "fake");
         return engine;
+    }
+
+    private sealed class FakeMicrophoneProvider : IMicrophoneDeviceProvider
+    {
+        private readonly IReadOnlyList<MicrophoneDeviceInfo> _devices;
+        public FakeMicrophoneProvider(params MicrophoneDeviceInfo[] devices)
+        {
+            _devices = devices.ToList();
+        }
+        public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(_devices);
     }
 
     private static JsonNode WindowConfig(string windowId, string filename, int? durationSeconds = null)
@@ -162,6 +185,30 @@ public class RecordingEnginePreflightTests : IDisposable
         return root;
     }
 
+    private static JsonNode WindowConfigWithMicrophone(string windowId, string filename, string deviceId = "fake-mic")
+    {
+        var output = new JsonObject { ["filename"] = filename };
+        var source = new JsonObject
+        {
+            ["type"] = "window",
+            ["window_id"] = windowId
+        };
+        return new JsonObject
+        {
+            ["source"] = source,
+            ["video"] = new JsonObject { ["fps"] = 30 },
+            ["audio"] = new JsonObject
+            {
+                ["microphone"] = new JsonObject
+                {
+                    ["enabled"] = true,
+                    ["device_id"] = deviceId
+                }
+            },
+            ["output"] = output
+        };
+    }
+
     private static JsonNode DisplayConfig(string filename) =>
         new JsonObject
         {
@@ -172,6 +219,34 @@ public class RecordingEnginePreflightTests : IDisposable
             },
             ["video"] = new JsonObject { ["fps"] = 30 },
             ["output"] = new JsonObject { ["filename"] = filename }
+        };
+
+    private static JsonNode DisplayConfigWithMicrophone(string filename, string deviceId = "fake-mic") =>
+        new JsonObject
+        {
+            ["source"] = new JsonObject
+            {
+                ["type"] = "display",
+                ["display_id"] = "display_1"
+            },
+            ["video"] = new JsonObject { ["fps"] = 30 },
+            ["audio"] = new JsonObject
+            {
+                ["microphone"] = new JsonObject
+                {
+                    ["enabled"] = true,
+                    ["device_id"] = deviceId
+                }
+            },
+            ["output"] = new JsonObject { ["filename"] = filename }
+        };
+
+    private static AudioHelperProbeResult SuccessfulProbe()
+        => new()
+        {
+            Success = true,
+            ProtocolVersion = "audio-helper-v1",
+            TimestampFrequency = Stopwatch.Frequency
         };
 
     [Fact]
@@ -297,6 +372,92 @@ public class RecordingEnginePreflightTests : IDisposable
         var backend = (FakeCaptureBackend)rec.Backend!;
         Assert.True(backend.Started);
         Assert.Contains(audit.Events, e => e.Event == "recording.started");
+    }
+
+    [Fact]
+    public void CreateRecording_WasapiHelperProbeFails_DoesNotCreatePendingConfirmation()
+    {
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
+        {
+            Success = false,
+            ErrorCode = "audio_helper_probe_failed",
+            ErrorMessage = "simulated probe failure"
+        };
+
+        var audit = new CapturingAuditLogger();
+        var tray = new ControllableTray { Decision = ConfirmationDecision.Approve() };
+        var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
+        var engine = MakeEngine(audit, tray, mic);
+
+        var ex = Assert.Throws<ApiException>(() =>
+            engine.CreateRecording(DisplayConfigWithMicrophone("out.mp4"), "test-agent", tray));
+
+        Assert.Equal("audio_helper_probe_failed", ex.Code);
+        Assert.Empty(engine._confs);
+        Assert.Empty(engine._recs);
+        Assert.DoesNotContain(audit.Events, e => e.Event == "confirmation.created");
+    }
+
+    [Fact]
+    public void CreateRecording_WasapiHelperProbeSuccess_CreatesPendingConfirmation()
+    {
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => SuccessfulProbe();
+
+        var audit = new CapturingAuditLogger();
+        var tray = new ControllableTray { DeferCallback = true };
+        var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
+        var engine = MakeEngine(audit, tray, mic);
+
+        engine.CreateRecording(DisplayConfigWithMicrophone("out.mp4"), "test-agent", tray);
+
+        var rec = engine._recs.Values.Single();
+        Assert.Equal(RecState.pending_confirmation, rec.State);
+        Assert.Single(engine._confs);
+        Assert.Contains(audit.Events, e => e.Event == "confirmation.created");
+    }
+
+    [Fact]
+    public void CreateRecording_WasapiProbeSuccess_ApprovalThenWindowDisappears_FailsBeforeStartWithoutBackend()
+    {
+        var hwnd = new nint(12345);
+        var windowId = $"window_{hwnd.ToInt64()}";
+        SystemQuery.SetWindowProvider((_, _) => new()
+        {
+            new SystemQuery.WindowInfo(windowId, "Notepad", "notepad.exe", 42, false, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => SuccessfulProbe();
+
+        var audit = new CapturingAuditLogger();
+        var tray = new ControllableTray { DeferCallback = true };
+        var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
+        var engine = MakeEngine(audit, tray, mic);
+
+        engine.CreateRecording(WindowConfigWithMicrophone(windowId, "out.mp4"), "test-agent", tray);
+        var rec = engine._recs.Values.Single();
+        Assert.Equal(RecState.pending_confirmation, rec.State);
+
+        // Simulate the window disappearing between confirmation approval and capture start.
+        SystemQuery.SetWindowProvider((_, _) => new());
+        tray.InvokeApproved();
+
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Contains(rec.Warnings, w => w.StartsWith("preflight_failed: SOURCE_NOT_FOUND"));
+
+        var backend = (FakeCaptureBackend?)rec.Backend;
+        Assert.True(backend == null || !backend.Started);
+
+        Assert.Contains(audit.Events, e =>
+            e.Event == "recording.preflight_failed" &&
+            e.ErrorCode == "SOURCE_NOT_FOUND" &&
+            e.Stage == "before_start");
     }
 
     private sealed class CapturingAuditLogger : AuditLogger

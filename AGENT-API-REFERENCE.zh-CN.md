@@ -65,6 +65,17 @@ X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
 
 当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时不在服务端测量；cold/warm 分组的 P50/P95 聚合已通过 `/capabilities.perf_summary` 暴露（详见下文“检查能力”一节）。
 
+批准后（使用麦克风时）额外发出的生命周期事件：
+
+| 事件 | 触发时机 | 说明 |
+| --- | --- | --- |
+| `microphone_prepare_started` | capture-safe barrier 已完成，音频 worker 正在打开麦克风。 | 显示 `preparing` UI；尚未捕获屏幕。 |
+| `microphone_ready` | 音频 worker 已产生可信音频样本。 | 触发 3-2-1 倒计时。 |
+| `countdown_started` | 3-2-1 倒计时 UI 开始。 | 尚未开始屏幕捕获；`elapsed_seconds` 仍为 `0`。 |
+| `video_first_frame` | 独立视频 worker 报告首个可信帧。 | 进入 `recording` 状态并显示红色 REC；`StartedAtUtc` 在此时设置。 |
+| `capture_ended` | 屏幕捕获停止（达到计划时长或用户主动停止）。 | 立即隐藏 REC UI；进入 `finalizing`。 |
+| `finalization_completed` | 音频裁剪、合流、ffprobe 校验和 bundle 生成完成。 | 之后发布终态（`completed`/`failed`）。 |
+
 `ensure-running` 的冷/热握手现在可以通过一次性上下文关联到录制 trace。CLI 成功完成 `ensure-running` 后，会在 `<data-dir>\runtime\ensure-contexts` 下原子创建一个短期上下文文件，并在 JSON 输出中返回：
 
 - `startup_kind`: `cold`（本次新启动服务）或 `warm`（复用已有服务）
@@ -244,9 +255,9 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`，无屏幕自动化与独立复核基线已经通过；**WGC 连续显示器录制未通过公共 API 开放**，默认后端未改变，真实 10 秒桌面竖切尚未验收。公共端点继续拒绝 WGC continuous 源；helper 仅在项目负责人明确授权的人工监督验收场景下使用。
+**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；自动化基线和一次受监督的 10 秒 3840×2160 桌面竖切已经通过。**WGC 连续显示器录制仍未通过公共 API 开放**，也未接入 selector 或 portable 产品链路，默认后端未改变。公共端点继续拒绝 WGC continuous 源；helper 仅在项目负责人明确授权的人工监督验收场景下使用。
 
-**音频能力**：麦克风录制已通过 FFmpeg dshow 实现，编码为 AAC；`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
+**音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -569,9 +580,11 @@ GET /audio/devices
 
 不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并为每个设备附加新鲜的 CoreAudio 只读状态。`status` 为 `ready`（存在设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。`microphone_supported` 为 `true`；`system_audio_supported` 为 `false`。
 
+请求麦克风录制时，Agent Recorder 会启动独立的 Windows WASAPI helper（`AgentRecorder.AudioHelper.exe`），按 CoreAudio endpoint 精确采集。本接口返回的 `id` 仍为 FFmpeg dshow alternative name，以保持 API 兼容；Agent Recorder 内部会将其映射为对应的 CoreAudio endpoint ID。如需显式回退到 FFmpeg dshow 诊断后端，可在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`。
+
 设备枚举解析器同时支持 portable 包内 FFmpeg 的经典 `[dshow]` / `[dshow @ ...] DirectShow audio devices` 分段格式和 FFmpeg 8.x 的 `[in#N @ ...] "设备名" (audio)` tagged 格式。仅接受两类可信 logger 前缀：经典行必须以 `[dshow]` 或 `[dshow @ identity]` 开头，tagged 行必须以 `[in#N @ identity]` 开头（`N` 为至少一位数字，`identity` 非空）。引号内的 friendly name 与 alternative name 采用 consumed-length 解析，引号前后出现额外文本（如 `prefix "Name" (audio)` 或 `"Name" (audio) suffix`）均会被拒绝；同时解码 FFmpeg 的 `\"` 与 `\\` 转义并保留普通反斜杠（如 `\wave_{GUID}`）。任何不完整或畸形的设备记录——例如无效 logger 前缀、缺少 alternative name、孤立的 alternative、被其他行打断的候选设备、quoted value 后带尾部垃圾，或设备与无设备标记同时出现——都会使整个 listing 被视为无法识别，返回 `status: "unavailable"`。缺少可信 logger 前缀的行（包括普通 `warning:` 或其他 logger 输出）会被安全忽略，绝不会生成设备。classic 无设备标记必须位于已由可信 `DirectShow audio devices` header 开启的 audio section 内；tagged 无设备标记可直接来自可信 input logger。完整的 tagged 视频记录（`(video)` friendly name 加匹配的 alternative）可在任意顺序被安全忽略，不会中断音频枚举。解析器绝不返回部分音频设备列表。只有完整且可识别的 listing（有设备或无设备）才接受不同版本正常的 listing 退出码差异（`1`、`0`、`-2`），并返回 `ready` 或 `no_devices`。
 
-`id` 是 FFmpeg dshow 返回的 alternative name（示例展示的是不带 `audio=` 前缀的 alternative-name ID），调用者在后续请求中必须**原样传递**，不得自行添加 `audio=` 前缀；Agent Recorder 在构造 FFmpeg 参数时会负责添加该前缀。
+`id` 是 FFmpeg dshow 返回的 alternative name（示例展示的是不带 `audio=` 前缀的 alternative-name ID），调用者在后续请求中必须**原样传递**，不得自行添加 `audio=` 前缀；Agent Recorder 会将其映射为 WASAPI helper 所需的 CoreAudio endpoint ID。仅当显式启用 dshow 回退时，Agent Recorder 才会在构造 FFmpeg 参数时负责添加 `audio=` 前缀。
 
 ```json
 {
@@ -926,6 +939,8 @@ X-Agent-Name: <agent-name>
 
 `audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择单一 active 设备或单一 CoreAudio 多媒体默认设备；存在多个 active 设备且无法唯一确定默认设备时必须提供 `audio.microphone.device_id`（来自 `GET /audio/devices`）。`audio.system_audio.enabled` 必须为 `false` 或省略，`true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
+默认音频采集后端为独立 WASAPI helper。如需使用 FFmpeg dshow 诊断回退，请在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`；其它非法值会被拒绝。
+
 若选中设备被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`），应用不会自动取消系统静音；若选中设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`。CoreAudio 状态未知时不阻断录制。
 
 ### 显示器录制请求体
@@ -1208,8 +1223,10 @@ X-Agent-Recorder-Key: <api-key>
 `elapsed_seconds` 说明：
 
 - 表示从捕获开始到当前时刻或捕获结束的墙钟秒数，向下取整为非负整数。
-- 录制尚未真正开始（`created`、`pending_confirmation`、`rejected`、`expired` 等）时返回 `0`。
+- 录制尚未真正开始（`created`、`pending_confirmation`、`preparing`、`countdown`、`rejected`、`expired` 等）时返回 `0`。
+- `preparing` 和 `countdown` 阶段保持为 `0`；这两个阶段不计入屏幕实际录制时长。
 - 活动录制（`recording`、`stopping`）计算到当前时刻，会随查询增长。
+- 捕获结束时状态切换到 `finalizing`，`elapsed_seconds` 冻结在实际屏幕捕获时长；合流、探测和 bundle 生成时间不会加入。
 - 已结束录制计算到 `completed_at`；终态后重复查询结果稳定，不会继续增长。
 - `output.duration_seconds` 是媒体产物时长（由 ffprobe 探测），两者允许因编码、取整和后端行为存在小幅差异，不要把它直接当作 `elapsed_seconds`。
 
@@ -1238,7 +1255,10 @@ X-Agent-Recorder-Key: <api-key>
 | status | 说明 |
 | --- | --- |
 | `pending_confirmation` | 等待确认 |
-| `recording` | 正在录制 |
+| `preparing` | capture-safe barrier 完成；正在准备麦克风（无 REC、不捕获屏幕） |
+| `countdown` | 正在显示 3-2-1 倒计时（无 REC、不捕获屏幕） |
+| `recording` | 屏幕捕获中 |
+| `finalizing` | 屏幕捕获已结束；正在裁剪音频、合流、探测和生成 bundle |
 | `completed` | 已完成 |
 | `failed` | 失败（包括 preflight 复查失败、FFmpeg 异常退出等） |
 | `cancelled` | 已取消 |
@@ -1363,6 +1383,7 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
     "backend": "ffmpeg-region",
     "stop_reason": "duration_reached",
     "audio_microphone": true,
+    "audio_capture_backend": "wasapi-helper",
     "audio_status": "recorded",
     "audio_device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
     "audio_lost_at_ms": null,
@@ -1393,9 +1414,19 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
 | --- | --- |
 | `not_requested` | 未请求麦克风音频。 |
 | `recorded` | 麦克风音频已成功写入输出，且输出中存在 AAC 音轨。 |
-| `start_failed` | 请求了麦克风，但 FFmpeg 无法打开该设备（设备被占用、已禁用或不存在）。 |
+| `start_failed` | 请求了麦克风，但音频采集后端无法打开该设备（设备被占用、已禁用或不存在）。 |
 | `lost` | 录制过程中麦克风设备丢失或断开，但输出中仍存在 AAC 音轨。 |
-| `missing_audio_track` | 请求了麦克风且 FFmpeg 正常退出，但输出中不存在 AAC 音轨。 |
+| `missing_audio_track` | 请求了麦克风且音频采集后端正常退出，但输出中不存在 AAC 音轨。 |
+
+`recording.audio_continuity_status` 取值（新增）：
+
+| 值 | 说明 |
+| --- | --- |
+| `not_checked` | 未执行连续性检查（例如无麦克风，或未进入 finalization）。 |
+| `continuous` | 最终 AAC 音轨已检查，未检测到内部长静音。 |
+| `degraded` | 最终 AAC 音轨存在内部长静音，可能发生了麦克风信号中断。`warnings` 数组会包含 `microphone_signal_interruption_suspected`。 |
+
+`audio_status` 保持向后兼容。`recorded` 不再等同于“音频无内部缺口”；关心连续性的调用方应同时查看 `audio_continuity_status`。
 
 ### `marks.json`
 

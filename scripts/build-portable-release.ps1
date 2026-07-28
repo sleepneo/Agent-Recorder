@@ -4,7 +4,8 @@
     Build Agent Recorder portable release zip.
 
 .DESCRIPTION
-    Publishes AgentRecorder.App as a Windows x64 portable package, copies bundled
+    Publishes AgentRecorder.App, AgentRecorder.Headless, AgentRecorder.Cli and
+    AgentRecorder.AudioHelper as a Windows x64 portable package, copies bundled
     FFmpeg into the app directory, adds agent-facing API docs, excludes
     PDBs / .local-data / API keys, and creates a zip under
     .local-data/release-candidates/.
@@ -83,15 +84,23 @@ if (-not (Test-Path $cliProject)) {
     exit 1
 }
 
+$audioHelperProject = Join-Path $ProjectRoot "tools\AgentRecorder.AudioHelper\AgentRecorder.AudioHelper.csproj"
+if (-not (Test-Path $audioHelperProject)) {
+    Write-Host "[ERROR] AgentRecorder.AudioHelper.csproj not found at $audioHelperProject" -ForegroundColor Red
+    exit 1
+}
+
 $appPublishDir = Join-Path $StagingDir "AgentRecorder.App"
 $headlessPublishDir = Join-Path $StagingDir "AgentRecorder.Headless"
 $cliPublishDir = Join-Path $StagingDir "AgentRecorder.Cli"
-
-Write-Host "[1/8] Publishing AgentRecorder.App ($PublishMode)..." -ForegroundColor Yellow
+$audioHelperPublishDir = Join-Path $StagingDir "AgentRecorder.AudioHelper"
 
 # ReadyToRun: enabled by default for self-contained, disabled for framework-dependent or when explicitly requested.
 $enableR2R = ($PublishMode -eq "self-contained") -and -not $DisableReadyToRun
-Write-Host "  ReadyToRun: $(if ($enableR2R) { 'enabled' } else { 'disabled' })" -ForegroundColor Gray
+Write-Host "ReadyToRun: $(if ($enableR2R) { 'enabled' } else { 'disabled' })" -ForegroundColor Gray
+Write-Host ""
+
+Write-Host "[1/9] Publishing AgentRecorder.App ($PublishMode)..." -ForegroundColor Yellow
 
 if ($PublishMode -eq "self-contained") {
     $publishArgs = @(
@@ -125,7 +134,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[OK] Published to $appPublishDir" -ForegroundColor Green
 
-Write-Host "[2/8] Publishing AgentRecorder.Headless ($PublishMode)..." -ForegroundColor Yellow
+Write-Host "[2/9] Publishing AgentRecorder.Headless ($PublishMode)..." -ForegroundColor Yellow
 
 if ($PublishMode -eq "self-contained") {
     $headlessPublishArgs = @(
@@ -159,7 +168,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[OK] Published to $headlessPublishDir" -ForegroundColor Green
 
-Write-Host "[3/8] Publishing AgentRecorder.Cli ($PublishMode)..." -ForegroundColor Yellow
+Write-Host "[3/9] Publishing AgentRecorder.Cli ($PublishMode)..." -ForegroundColor Yellow
 
 if ($PublishMode -eq "self-contained") {
     $cliPublishArgs = @(
@@ -193,9 +202,43 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[OK] Published to $cliPublishDir" -ForegroundColor Green
 
-Write-Host "[4/8] Removing PDBs, XML docs, and dev artifacts..." -ForegroundColor Yellow
+Write-Host "[4/9] Publishing AgentRecorder.AudioHelper ($PublishMode)..." -ForegroundColor Yellow
+
+if ($PublishMode -eq "self-contained") {
+    $audioHelperPublishArgs = @(
+        "publish", $audioHelperProject,
+        "--configuration", "Release",
+        "--runtime", "win-x64",
+        "--self-contained", "true",
+        "--output", $audioHelperPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=$($enableR2R.ToString().ToLowerInvariant())",
+        "-p:Deterministic=false"
+    )
+} else {
+    $audioHelperPublishArgs = @(
+        "publish", $audioHelperProject,
+        "--configuration", "Release",
+        "--output", $audioHelperPublishDir,
+        "-p:DebugType=none",
+        "-p:DebugSymbols=false",
+        "-p:PublishReadyToRun=false",
+        "-p:Deterministic=false"
+    )
+}
+
+$audioHelperPublishResult = dotnet @audioHelperPublishArgs 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] dotnet publish (AudioHelper) failed:" -ForegroundColor Red
+    Write-Host $audioHelperPublishResult
+    exit 1
+}
+Write-Host "[OK] Published to $audioHelperPublishDir" -ForegroundColor Green
+
+Write-Host "[5/9] Removing PDBs, XML docs, and dev artifacts..." -ForegroundColor Yellow
 $removed = 0
-Get-ChildItem -Path $appPublishDir,$headlessPublishDir,$cliPublishDir -Recurse -File | Where-Object {
+Get-ChildItem -Path $appPublishDir,$headlessPublishDir,$cliPublishDir,$audioHelperPublishDir -Recurse -File | Where-Object {
     $_.Extension -eq ".pdb" -or
     $_.Extension -eq ".xml" -or
     ($_.Name -like "*Tests*") -or
@@ -206,7 +249,7 @@ Get-ChildItem -Path $appPublishDir,$headlessPublishDir,$cliPublishDir -Recurse -
 }
 Write-Host "[OK] Removed $removed non-essential files" -ForegroundColor Green
 
-Write-Host "[5/8] Copying FFmpeg binaries..." -ForegroundColor Yellow
+Write-Host "[6/9] Copying FFmpeg binaries..." -ForegroundColor Yellow
 $ffmpegSrc = Join-Path $ProjectRoot "tools\ffmpeg\bin"
 if (-not (Test-Path $ffmpegSrc)) {
     Write-Host "[ERROR] FFmpeg bin not found at $ffmpegSrc" -ForegroundColor Red
@@ -229,10 +272,32 @@ foreach ($file in $ffmpegFiles) {
 }
 Write-Host "[OK] FFmpeg copied to app directory" -ForegroundColor Green
 
-Write-Host "[6/8] Preparing portable package layout..." -ForegroundColor Yellow
-Write-Host "[OK] Portable package layout prepared" -ForegroundColor Green
+Write-Host "[7/9] Preparing portable package layout..." -ForegroundColor Yellow
 
-Write-Host "[7/8] Adding documentation..." -ForegroundColor Yellow
+$requiredAudioHelperFiles = @(
+    "AgentRecorder.AudioHelper.exe",
+    "NAudio.Core.dll",
+    "NAudio.Wasapi.dll"
+)
+
+$helperMissing = $false
+foreach ($file in $requiredAudioHelperFiles) {
+    $path = Join-Path $audioHelperPublishDir $file
+    if (-not (Test-Path $path)) {
+        Write-Host "[ERROR] Audio helper dependency missing: $path" -ForegroundColor Red
+        $helperMissing = $true
+    }
+}
+
+if ($helperMissing) {
+    exit 1
+}
+
+$helperSize = (Get-ChildItem -Path $audioHelperPublishDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
+$helperSizeMB = [math]::Round($helperSize / 1MB, 2)
+Write-Host "[OK] Portable package layout prepared (audio helper size: $helperSizeMB MB)" -ForegroundColor Green
+
+Write-Host "[8/9] Adding documentation..." -ForegroundColor Yellow
 
 # Root-level docs (including agent instructions and API reference)
 foreach ($rootDoc in @("README.md", "README.zh-CN.md", "AGENT-INSTRUCTIONS.zh-CN.md", "AGENT-API-REFERENCE.zh-CN.md")) {
@@ -251,7 +316,7 @@ foreach ($packageDoc in @("QUICKSTART.md", "QUICKSTART.zh-CN.md", "LICENSE", "LI
 
 Write-Host "[OK] Documentation added" -ForegroundColor Green
 
-Write-Host "[8/8] Creating zip archive..." -ForegroundColor Yellow
+Write-Host "[9/9] Creating zip archive..." -ForegroundColor Yellow
 $zipParent = Split-Path $ZipPath -Parent
 if (-not (Test-Path $zipParent)) {
     New-Item -ItemType Directory -Path $zipParent -Force | Out-Null
@@ -271,6 +336,7 @@ Write-Host "=== Release Build Complete ===" -ForegroundColor Cyan
 Write-Host "  Mode: $PublishMode"
 Write-Host "  Zip: $ZipPath"
 Write-Host "  Size: $zipSizeMB MB"
+Write-Host "  AudioHelper size: $helperSizeMB MB"
 Write-Host "  Staging: $StagingDir"
 Write-Host ""
 Write-Host "Smoke test (after extracting):" -ForegroundColor Cyan

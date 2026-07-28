@@ -19,6 +19,64 @@ internal interface IOutputDirectoryPicker
     string? PickDirectory(string initialDirectory);
 }
 
+/// <summary>
+/// Testable abstraction over the confirmation form lifecycle. Production code
+/// in <see cref="TrayContext"/> uses the events to implement the capture-safe
+/// barrier before starting recording.
+/// </summary>
+internal interface IConfirmationDialog
+{
+    bool IsHandleCreated { get; }
+    bool IsDisposed { get; }
+    bool Visible { get; }
+
+    /// <summary>
+    /// Raised when the form becomes hidden during close.
+    /// </summary>
+    event EventHandler<ConfirmationDialogLifecycleEventArgs>? Hidden;
+
+    /// <summary>
+    /// Raised after the form has closed. The handle may still exist at this point.
+    /// </summary>
+    event EventHandler<ConfirmationDialogLifecycleEventArgs>? Closed;
+
+    /// <summary>
+    /// Raised after the native window handle has been destroyed.
+    /// </summary>
+    event EventHandler<ConfirmationDialogLifecycleEventArgs>? HandleDestroyed;
+
+    /// <summary>
+    /// Closes the form and associates a user decision with the close. The
+    /// <see cref="Closed"/> and <see cref="HandleDestroyed"/> events will
+    /// carry the decision so the caller can complete the capture-safe barrier.
+    /// </summary>
+    void CloseWithDecision(ConfirmationDecision decision, string? closeReason = null);
+
+    /// <summary>
+    /// Closes the form without invoking any callback or raising decision events.
+    /// </summary>
+    void CloseWithoutResult(string? reason = null);
+}
+
+/// <summary>
+/// Arguments for <see cref="IConfirmationDialog"/> lifecycle events.
+/// </summary>
+internal sealed class ConfirmationDialogLifecycleEventArgs : EventArgs
+{
+    public ConfirmationDecision? Decision { get; }
+    public string? CloseReason { get; }
+    public long FormHandle { get; }
+    public bool Visible { get; }
+
+    public ConfirmationDialogLifecycleEventArgs(ConfirmationDecision? decision, string? closeReason, long formHandle, bool visible)
+    {
+        Decision = decision;
+        CloseReason = closeReason;
+        FormHandle = formHandle;
+        Visible = visible;
+    }
+}
+
 internal sealed class FolderBrowserDirectoryPicker : IOutputDirectoryPicker
 {
     private readonly IUiTextProvider _text;
@@ -49,7 +107,7 @@ internal sealed class FolderBrowserDirectoryPicker : IOutputDirectoryPicker
 /// Default Enter = Reject, Esc = Reject, Close X = Reject.
 /// Approve requires explicit click or focused confirmation button.
 /// </summary>
-internal sealed class ConfirmationForm : Form
+internal sealed class ConfirmationForm : Form, IConfirmationDialog
 {
     private readonly PendingConfirmationItem _item;
     private readonly int _queuePosition;
@@ -62,6 +120,11 @@ internal sealed class ConfirmationForm : Form
     private string? _selectedOutputDirectory;
     private bool _resultHandled;
     private bool _suppressCloseResult;
+    private ConfirmationDecision? _pendingDecision;
+
+    public event EventHandler<ConfirmationDialogLifecycleEventArgs>? Hidden;
+    public new event EventHandler<ConfirmationDialogLifecycleEventArgs>? Closed;
+    public new event EventHandler<ConfirmationDialogLifecycleEventArgs>? HandleDestroyed;
 
     private readonly IWindowActivator _windowActivator;
     private readonly Action<string, object>? _auditLogger;
@@ -272,18 +335,12 @@ internal sealed class ConfirmationForm : Form
             if (_previewBox != null)
                 _previewBox.Image = null;
 
+            // Lifecycle audit now happens in OnVisibleChanged/OnFormClosed/OnHandleDestroyed.
+            // Keep a final fallback only if those events were suppressed (e.g., constructor failure).
             if (!_closeAudited)
             {
                 _closeAudited = true;
-                LogAudit("confirmation.form_closed", new
-                {
-                    confirmation_id = _item.ConfirmationId,
-                    recording_id = _item.RecordingId,
-                    close_reason = _closeReason ?? "unknown",
-                    form_handle = IsHandleCreated ? Handle.ToInt64() : 0,
-                    visible = Visible,
-                    bounds = new { x = Bounds.X, y = Bounds.Y, w = Bounds.Width, h = Bounds.Height }
-                });
+                LogAudit("confirmation.form_closed", CreateLifecyclePayload("closed_fallback"));
             }
         }
         base.Dispose(disposing);
@@ -305,6 +362,8 @@ internal sealed class ConfirmationForm : Form
         KeyPreview = true;
         KeyDown += OnKeyDown;
         FormClosing += OnFormClosing;
+        FormClosed += OnFormClosed;
+        VisibleChanged += OnVisibleChanged;
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
@@ -347,22 +406,80 @@ internal sealed class ConfirmationForm : Form
         if (_suppressCloseResult) return;
         if (!_resultHandled)
         {
-            e.Cancel = true;
             _closeReason ??= _item.IsExpiredLocal ? _text.Get("Confirmation_Close_Expired") : _text.Get("Confirmation_Close_Rejected");
-            Reject();
+            _pendingDecision = ConfirmationDecision.Reject();
+            _resultHandled = true;
+            StopCountdownTimer();
+            StopForegroundVerificationTimer();
         }
+    }
+
+    private void OnVisibleChanged(object? sender, EventArgs e)
+    {
+        if (!Visible)
+        {
+            LogAudit("confirmation.form_hidden", CreateLifecyclePayload("hidden"));
+            Hidden?.Invoke(this, new ConfirmationDialogLifecycleEventArgs(
+                _pendingDecision, _closeReason,
+                IsHandleCreated ? Handle.ToInt64() : 0, Visible));
+        }
+    }
+
+    private void OnFormClosed(object? sender, FormClosedEventArgs e)
+    {
+        _closeAudited = true;
+        LogAudit("confirmation.form_closed", CreateLifecyclePayload("closed"));
+        Closed?.Invoke(this, new ConfirmationDialogLifecycleEventArgs(
+            _pendingDecision, _closeReason,
+            IsHandleCreated ? Handle.ToInt64() : 0, Visible));
+
+        // For tests and legacy callers that supplied a direct callback, invoke it
+        // exactly once after the form is closed.
+        if (!_suppressCloseResult && _pendingDecision != null)
+        {
+            var decision = _pendingDecision;
+            _pendingDecision = null;
+            try { _onResult?.Invoke(decision); }
+            catch { /* Callback failures must not break form teardown. */ }
+        }
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        base.OnHandleDestroyed(e);
+        LogAudit("confirmation.handle_destroyed", CreateLifecyclePayload("handle_destroyed"));
+        HandleDestroyed?.Invoke(this, new ConfirmationDialogLifecycleEventArgs(
+            _pendingDecision, _closeReason, 0, false));
     }
 
     /// <summary>
     /// Closes the form without triggering approve/reject callback.
     /// Used for programmatic close (queue advance, SetAllIdle, etc.).
     /// </summary>
-    internal void CloseWithoutResult(string? reason = null)
+    public void CloseWithoutResult(string? reason = null)
     {
         StopCountdownTimer();
         StopForegroundVerificationTimer();
         _closeReason ??= reason ?? _text.Get("Confirmation_Close_QueueAdvanced");
         _suppressCloseResult = true;
+        Close();
+    }
+
+    /// <summary>
+    /// Closes the form with the user decision. The decision is delivered via
+    /// the <see cref="Closed"/> and <see cref="HandleDestroyed"/> lifecycle
+    /// events so the caller can implement the capture-safe barrier.
+    /// </summary>
+    public void CloseWithDecision(ConfirmationDecision decision, string? closeReason = null)
+    {
+        if (_resultHandled) return;
+        _resultHandled = true;
+        StopCountdownTimer();
+        StopForegroundVerificationTimer();
+        _pendingDecision = decision;
+        _closeReason ??= closeReason ?? (decision.Approved
+            ? _text.Get("Confirmation_Close_Approved")
+            : _text.Get("Confirmation_Close_Rejected"));
         Close();
     }
 
@@ -941,13 +1058,7 @@ internal sealed class ConfirmationForm : Form
 
     private void Reject()
     {
-        if (_resultHandled) return;
-        _resultHandled = true;
-        StopCountdownTimer();
-        StopForegroundVerificationTimer();
-        _closeReason ??= _text.Get("Confirmation_Close_Rejected");
-        _onResult?.Invoke(ConfirmationDecision.Reject());
-        Close();
+        CloseWithDecision(ConfirmationDecision.Reject());
     }
 
     private void SetupCountdownTimer()
@@ -997,11 +1108,6 @@ internal sealed class ConfirmationForm : Form
 
     private void Approve()
     {
-        if (_resultHandled) return;
-        _resultHandled = true;
-        StopCountdownTimer();
-        StopForegroundVerificationTimer();
-        _closeReason ??= _text.Get("Confirmation_Close_Approved");
         var rememberOutputDirectory = _rememberOutputCheckBox?.Checked ?? false;
         var outputDirectory = _selectedOutputDirectory;
         if (rememberOutputDirectory && string.IsNullOrWhiteSpace(outputDirectory))
@@ -1010,8 +1116,7 @@ internal sealed class ConfirmationForm : Form
         var decision = ConfirmationDecision.Approve(
             outputDirectory,
             rememberOutputDirectory);
-        _onResult?.Invoke(decision);
-        Close();
+        CloseWithDecision(decision, _text.Get("Confirmation_Close_Approved"));
     }
 
     private void ApplyWindowLocation()
@@ -1213,6 +1318,7 @@ internal sealed class ConfirmationForm : Form
             confirmation_id = _item.ConfirmationId,
             recording_id = _item.RecordingId,
             stage,
+            close_reason = _closeReason ?? "unknown",
             form_handle = IsHandleCreated ? Handle.ToInt64() : 0,
             visible = Visible,
             topmost = TopMost,

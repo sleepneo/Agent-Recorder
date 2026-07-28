@@ -111,9 +111,15 @@ public sealed class UiTextProvider : IUiTextProvider
             // Tray context
             ["Tray_Idle"] = "Agent Recorder — 空闲",
             ["Tray_WaitingConfirmation"] = "Agent Recorder — 等待确认 ({0})",
+            ["Tray_Preparing"] = "Agent Recorder — 正在准备麦克风…",
+            ["Tray_Countdown"] = "Agent Recorder — 倒计时 {0}…",
             ["Tray_Recording"] = "Agent Recorder — 正在录制",
             ["Tray_Recording_WithCount"] = "Agent Recorder — 正在录制（{0}条并发）",
+            ["Tray_Finalizing"] = "Agent Recorder — 正在保存…",
             ["Tray_Stopping"] = "Agent Recorder — 正在停止…",
+            ["Tray_Status_Preparing"] = "状态：● 正在准备麦克风…",
+            ["Tray_Status_Countdown"] = "状态：● 倒计时 {0}…",
+            ["Tray_Status_Finalizing"] = "状态：● 正在保存…",
             ["Tray_Menu_Confirm"] = "✓ 确认录屏 ({0}/{1})",
             ["Tray_Menu_Reject"] = "✗ 拒绝录屏 ({0}/{1})",
             ["Tray_Menu_Stop"] = "停止录制",
@@ -138,6 +144,11 @@ public sealed class UiTextProvider : IUiTextProvider
             ["StopControl_Button_Stop"] = "■ 停止",
             ["StopControl_Button_Stopping"] = "停止中...",
             ["StopControl_Tooltip"] = "停止本次录制",
+
+            // Recording indicator phases
+            ["Indicator_Preparing"] = "正在准备麦克风…",
+            ["Indicator_Finalizing"] = "正在保存…",
+            ["Indicator_Countdown"] = "{0}",
         };
     }
 
@@ -210,9 +221,15 @@ public sealed class UiTextProvider : IUiTextProvider
             // Tray context
             ["Tray_Idle"] = "Agent Recorder — Idle",
             ["Tray_WaitingConfirmation"] = "Agent Recorder — Pending confirmation ({0})",
+            ["Tray_Preparing"] = "Agent Recorder — Preparing microphone…",
+            ["Tray_Countdown"] = "Agent Recorder — Countdown {0}…",
             ["Tray_Recording"] = "Agent Recorder — Recording",
             ["Tray_Recording_WithCount"] = "Agent Recorder — Recording ({0} concurrent)",
+            ["Tray_Finalizing"] = "Agent Recorder — Saving…",
             ["Tray_Stopping"] = "Agent Recorder — Stopping…",
+            ["Tray_Status_Preparing"] = "Status: ● Preparing microphone…",
+            ["Tray_Status_Countdown"] = "Status: ● Countdown {0}…",
+            ["Tray_Status_Finalizing"] = "Status: ● Saving…",
             ["Tray_Menu_Confirm"] = "✓ Confirm recording ({0}/{1})",
             ["Tray_Menu_Reject"] = "✗ Reject recording ({0}/{1})",
             ["Tray_Menu_Stop"] = "Stop recording",
@@ -237,6 +254,11 @@ public sealed class UiTextProvider : IUiTextProvider
             ["StopControl_Button_Stop"] = "■ Stop",
             ["StopControl_Button_Stopping"] = "Stopping...",
             ["StopControl_Tooltip"] = "Stop this recording",
+
+            // Recording indicator phases
+            ["Indicator_Preparing"] = "Preparing microphone...",
+            ["Indicator_Finalizing"] = "Saving...",
+            ["Indicator_Countdown"] = "{0}",
         };
     }
 }

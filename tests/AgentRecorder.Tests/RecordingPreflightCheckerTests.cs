@@ -1,6 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Windows;
 using Xunit;
@@ -18,6 +21,9 @@ public class RecordingPreflightCheckerTests : IDisposable
     private readonly TempDirectory _tmp = new();
     private readonly RecordingPreflightChecker.TryGetFreeSpace _originalFreeSpace;
     private readonly RecordingPreflightChecker.TryGetEncoderPaths _originalEncoder;
+    private readonly RecordingPreflightChecker.TryResolveAudioHelper _originalAudioHelperPathResolver;
+    private readonly RecordingPreflightChecker.RunAudioHelperProbe _originalAudioHelperProbeRunner;
+    private readonly Func<bool> _originalShouldUseWasapiBackend;
     private readonly Func<bool, bool, System.Collections.Generic.List<SystemQuery.WindowInfo>>? _originalWindowProvider;
     private readonly Func<System.Collections.Generic.List<SystemQuery.DisplayInfo>>? _originalDisplayProvider;
 
@@ -25,6 +31,9 @@ public class RecordingPreflightCheckerTests : IDisposable
     {
         _originalFreeSpace = RecordingPreflightChecker.FreeSpaceProvider;
         _originalEncoder = RecordingPreflightChecker.EncoderProvider;
+        _originalAudioHelperPathResolver = RecordingPreflightChecker.AudioHelperPathResolver;
+        _originalAudioHelperProbeRunner = RecordingPreflightChecker.AudioHelperProbeRunner;
+        _originalShouldUseWasapiBackend = RecordingPreflightChecker.ShouldUseWasapiBackend;
         _originalWindowProvider = GetWindowProviderField();
         _originalDisplayProvider = GetDisplayProviderField();
 
@@ -53,6 +62,9 @@ public class RecordingPreflightCheckerTests : IDisposable
     {
         RecordingPreflightChecker.FreeSpaceProvider = _originalFreeSpace;
         RecordingPreflightChecker.EncoderProvider = _originalEncoder;
+        RecordingPreflightChecker.AudioHelperPathResolver = _originalAudioHelperPathResolver;
+        RecordingPreflightChecker.AudioHelperProbeRunner = _originalAudioHelperProbeRunner;
+        RecordingPreflightChecker.ShouldUseWasapiBackend = _originalShouldUseWasapiBackend;
         SystemQuery.SetWindowProvider(_originalWindowProvider);
         SystemQuery.SetDisplayProvider(_originalDisplayProvider);
         _tmp.Dispose();
@@ -106,6 +118,26 @@ public class RecordingPreflightCheckerTests : IDisposable
                 OutputPath = outputPath,
                 DurationSeconds = durationSeconds,
                 WindowHandle = hwnd
+            }
+        };
+    }
+
+    private static Recording DisplayRecordingWithMicrophone(string outputPath, string? micDevice = null)
+    {
+        return new Recording
+        {
+            SourceType = "display",
+            SourceTitle = "Display 1",
+            OutputPath = outputPath,
+            Microphone = true,
+            MicrophoneDeviceId = micDevice,
+            Config = new AgentRecorder.Capture.CaptureConfig
+            {
+                SourceKind = "display",
+                Bounds = (0, 0, 1920, 1080),
+                OutputPath = outputPath,
+                Microphone = true,
+                MicDevice = micDevice
             }
         };
     }
@@ -244,5 +276,274 @@ public class RecordingPreflightCheckerTests : IDisposable
 
         Assert.False(result.Passed);
         Assert.Equal("SOURCE_UNAVAILABLE", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_MicrophoneDisabled_DoesNotProbeAudioHelper()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecording(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        bool probed = false;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => "should-not-be-called";
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
+        {
+            probed = true;
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.True(result.Passed);
+        Assert.False(probed);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_ExplicitDshow_DoesNotProbeAudioHelper()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => false;
+        bool probed = false;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => "should-not-be-called";
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
+        {
+            probed = true;
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.True(result.Passed);
+        Assert.False(probed);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_WasapiHelper_ProbesBeforeConfirmation()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath, micDevice: "fake-mic");
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        bool probed = false;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        File.WriteAllText(Path.Combine(_tmp.Path, "helper.exe"), "fake");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
+        {
+            probed = true;
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.True(result.Passed);
+        Assert.True(probed);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_HelperMissing_FailsAudioHelperUnavailable()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => null;
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_HelperProbeTimeout_FailsAudioHelperProbeTimeout()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, token) =>
+        {
+            token.WaitHandle.WaitOne(TimeSpan.FromSeconds(30));
+            token.ThrowIfCancellationRequested();
+            return new AudioHelperProbeResult { Success = true };
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_probe_timeout", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_HelperProbeBadVersion_FailsAudioHelperProtocolError()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
+        {
+            Success = true,
+            ProtocolVersion = "audio-helper-v2",
+            TimestampFrequency = Stopwatch.Frequency
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_protocol_error", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_HelperProbeBadFrequency_FailsAudioHelperProtocolError()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
+        {
+            Success = true,
+            ProtocolVersion = "audio-helper-v1",
+            TimestampFrequency = Stopwatch.Frequency + 1
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_protocol_error", result.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("audio-helper-v10")]
+    [InlineData("audio-helper-v1-malformed")]
+    [InlineData("audio-helper-v1evil")]
+    [InlineData("audio-helper-v2")]
+    [InlineData("v1")]
+    public void CheckBeforeConfirmation_HelperProbeProtocolPrefixSpoof_FailsAudioHelperProtocolError(string protocolVersion)
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
+        {
+            Success = true,
+            ProtocolVersion = protocolVersion,
+            TimestampFrequency = Stopwatch.Frequency
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_protocol_error", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_UnmappableEndpoint_FailsAudioEndpointIdUnmappable()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        // Contains the dshow \wave_ marker but no valid GUID, forcing the
+        // CoreAudio endpoint mapping to return empty and fail closed.
+        var rec = DisplayRecordingWithMicrophone(outputPath, micDevice: @"\\?\@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{not-a-valid-guid}");
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
+        {
+            Success = true,
+            ProtocolVersion = "audio-helper-v1",
+            TimestampFrequency = Stopwatch.Frequency
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_endpoint_id_unmappable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeStart_WasapiHelper_RunsProbeAndSourceChecks()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath, micDevice: "fake-mic");
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        bool probed = false;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
+        {
+            probed = true;
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeStart(rec);
+
+        Assert.True(result.Passed);
+        Assert.True(probed);
+    }
+
+    [Fact]
+    public void AudioHelperProbeLauncher_HangingFakeHelper_ReturnsTimeoutAndKillsProcess()
+    {
+        var baseDir = Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "tests", "AgentRecorder.AudioHelper.Fake", "bin");
+        string? fakeHelperPath = null;
+        foreach (var config in new[] { "Release", "Debug" })
+        {
+            var candidate = Path.GetFullPath(Path.Combine(baseDir, config, "net8.0-windows10.0.19041.0", "AgentRecorder.AudioHelper.Fake.exe"));
+            if (File.Exists(candidate))
+            {
+                fakeHelperPath = candidate;
+                break;
+            }
+        }
+        Assert.NotNull(fakeHelperPath);
+        Assert.True(File.Exists(fakeHelperPath), $"Fake helper not found under {baseDir}");
+
+        var previous = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG", "1");
+
+            var sw = Stopwatch.StartNew();
+            var result = AudioHelperProbeLauncher.Run(fakeHelperPath, TimeSpan.FromMilliseconds(500));
+            sw.Stop();
+
+            Assert.False(result.Success);
+            Assert.Equal("audio_helper_probe_timeout", result.ErrorCode);
+            Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(400), $"Timeout returned too early: {sw.Elapsed}");
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3), $"Timeout took too long: {sw.Elapsed}");
+
+            int pid = result.ProcessId;
+            Assert.NotEqual(0, pid);
+
+            // Give the OS a moment to reap the process, then assert it is gone.
+            for (int i = 0; i < 50; i++)
+            {
+                try
+                {
+                    if (Process.GetProcessById(pid).HasExited)
+                        break;
+                }
+                catch (ArgumentException)
+                {
+                    break;
+                }
+                Thread.Sleep(100);
+            }
+
+            try
+            {
+                Assert.True(Process.GetProcessById(pid).HasExited, "Hanging fake helper process was not terminated");
+            }
+            catch (ArgumentException)
+            {
+                // Process no longer exists: this is the expected outcome.
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG", previous);
+        }
     }
 }

@@ -313,7 +313,10 @@ public class ExternalProcessRunnerTests : IDisposable
         };
 
         var runner = new ExternalProcessRunner();
-        var runTask = runner.RunAsync(PowerShellPath, args, TimeSpan.FromMilliseconds(500));
+        // Allow enough time for PowerShell cold-start before the runner timeout
+        // fires, so the fixture can publish its PID and the test can verify that
+        // the timeout path still kills the process tree.
+        var runTask = runner.RunAsync(PowerShellPath, args, TimeSpan.FromMilliseconds(2500));
 
         int pid;
         try

@@ -125,7 +125,7 @@ public class SecurityRegressionTests
         // 确保之前设置的环境变量不影响测试
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
 
-        var (backend, type) = CaptureBackendSelector.Select("window");
+        var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
 
         Assert.NotNull(backend);
         Assert.Equal("ffmpeg-window-region", type);
@@ -138,7 +138,7 @@ public class SecurityRegressionTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
 
             Assert.NotNull(backend);
             Assert.Equal("wgc", type);

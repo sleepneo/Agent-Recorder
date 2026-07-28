@@ -1,7 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Windows;
 
@@ -16,6 +21,8 @@ internal static class RecordingPreflightChecker
 {
     public delegate bool TryGetFreeSpace(string path, out long freeBytes);
     public delegate bool TryGetEncoderPaths(out string? ffmpegPath, out string? ffprobePath);
+    public delegate string? TryResolveAudioHelper();
+    public delegate AudioHelperProbeResult RunAudioHelperProbe(string helperPath, CancellationToken token);
 
     /// <summary>
     /// Injectable disk-space provider for tests. Returns true if free space could
@@ -28,6 +35,22 @@ internal static class RecordingPreflightChecker
     /// FfmpegLocator cache directly in negative-path tests.
     /// </summary>
     public static TryGetEncoderPaths EncoderProvider { get; set; } = DefaultEncoderProvider;
+
+    /// <summary>
+    /// Injectable audio helper path resolver for tests.
+    /// </summary>
+    public static TryResolveAudioHelper AudioHelperPathResolver { get; set; } = DefaultAudioHelperPathResolver;
+
+    /// <summary>
+    /// Injectable audio helper version/probe runner for tests.
+    /// </summary>
+    public static RunAudioHelperProbe AudioHelperProbeRunner { get; set; } = DefaultAudioHelperProbeRunner;
+
+    /// <summary>
+    /// Injectable backend selector for tests. Returns true if the current
+    /// configuration would use the WASAPI helper backend.
+    /// </summary>
+    public static Func<bool> ShouldUseWasapiBackend { get; set; } = DefaultShouldUseWasapiBackend;
 
     /// <summary>
     /// Checks that can run immediately after ConfigParser.Build, before creating
@@ -47,6 +70,9 @@ internal static class RecordingPreflightChecker
         if (!result.Passed) return result;
 
         result = CheckBounds(rec, warnings);
+        if (!result.Passed) return result;
+
+        result = CheckWasapiHelperPreflight(rec);
         if (!result.Passed) return result;
 
         return Pass(warnings);
@@ -75,6 +101,9 @@ internal static class RecordingPreflightChecker
         if (!result.Passed) return result;
 
         result = CheckBounds(rec, warnings);
+        if (!result.Passed) return result;
+
+        result = CheckWasapiHelperPreflight(rec);
         if (!result.Passed) return result;
 
         return Pass(warnings);
@@ -298,4 +327,304 @@ internal static class RecordingPreflightChecker
             return false;
         }
     }
+
+    private static RecordingPreflightResult CheckWasapiHelperPreflight(Recording rec)
+    {
+        if (!rec.Config.Microphone || !ShouldUseWasapiBackend())
+            return Pass(new List<string>());
+
+        var helperPath = AudioHelperPathResolver();
+        if (string.IsNullOrEmpty(helperPath))
+        {
+            return Fail("audio_helper_unavailable",
+                "WASAPI audio helper executable not found.",
+                "ensure_audio_helper_exists");
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        AudioHelperProbeResult probe;
+        try
+        {
+            probe = AudioHelperProbeRunner(helperPath, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return Fail("audio_helper_probe_timeout",
+                "Timed out waiting for audio helper --version response.",
+                "check_audio_helper_responsiveness");
+        }
+        catch (Exception ex)
+        {
+            return Fail("audio_helper_unavailable",
+                $"Failed to start audio helper probe: {ex.Message}",
+                "ensure_audio_helper_exists");
+        }
+
+        if (!probe.Success)
+        {
+            return Fail(probe.ErrorCode ?? "audio_helper_probe_failed",
+                probe.ErrorMessage ?? "Audio helper probe failed.",
+                "check_audio_helper_version");
+        }
+
+        if (!string.Equals(probe.ProtocolVersion, "audio-helper-v1", StringComparison.Ordinal))
+        {
+            return Fail("audio_helper_protocol_error",
+                $"Unsupported audio helper protocol version: {probe.ProtocolVersion}",
+                "update_audio_helper");
+        }
+
+        if (probe.TimestampFrequency != Stopwatch.Frequency)
+        {
+            return Fail("audio_helper_protocol_error",
+                $"Audio helper timestamp frequency mismatch: helper={probe.TimestampFrequency}, host={Stopwatch.Frequency}",
+                "update_audio_helper");
+        }
+
+        if (!string.IsNullOrEmpty(rec.Config.MicDevice) &&
+            rec.Config.MicDevice.IndexOf(@"\wave_", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            string? endpointId;
+            try
+            {
+                endpointId = CoreAudioCaptureStatusProvider.ToCoreAudioEndpointId(rec.Config.MicDevice);
+            }
+            catch (Exception ex)
+            {
+                return Fail("audio_endpoint_id_unmappable",
+                    $"Could not map microphone device id to CoreAudio endpoint: {ex.Message}",
+                    "select_valid_microphone");
+            }
+
+            if (string.IsNullOrWhiteSpace(endpointId))
+            {
+                return Fail("audio_endpoint_id_unmappable",
+                    "Could not map microphone device id to CoreAudio endpoint.",
+                    "select_valid_microphone");
+            }
+        }
+
+        return Pass(new List<string>());
+    }
+
+    private static string? DefaultAudioHelperPathResolver()
+    {
+        try
+        {
+            return AudioHelperExePathResolver.TryResolve();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static AudioHelperProbeResult DefaultAudioHelperProbeRunner(string helperPath, CancellationToken token)
+    {
+        return AudioHelperProbeLauncher.Run(helperPath, TimeSpan.FromSeconds(10), token);
+    }
+
+    private static bool DefaultShouldUseWasapiBackend()
+    {
+        try
+        {
+            return AvWorkerFactory.GetBackend() == AvWorkerFactory.WasapiBackend;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+/// <summary>
+/// Launches the audio helper with <c>--version</c>, drains stdout/stderr with
+/// bounded buffers, and guarantees the process is terminated on cancellation or
+/// timeout. Extracted as an internal class so real process timeout behaviour can
+/// be exercised in tests without waiting for the production 10-second default.
+/// </summary>
+internal static class AudioHelperProbeLauncher
+{
+    public static AudioHelperProbeResult Run(string helperPath, TimeSpan timeout, CancellationToken externalToken = default)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        cts.CancelAfter(timeout);
+        return RunAsync(helperPath, cts.Token).GetAwaiter().GetResult();
+    }
+
+    private static async Task<AudioHelperProbeResult> RunAsync(string helperPath, CancellationToken token)
+    {
+        const int MaxProbeLogChars = 4096;
+        const int DrainTimeoutMs = 2000;
+        const int KillWaitTimeoutMs = 2000;
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = helperPath,
+            Arguments = "--version",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+
+        using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        var stdoutBuilder = new BoundedStringBuilder(MaxProbeLogChars);
+        var stderrBuilder = new BoundedStringBuilder(MaxProbeLogChars);
+
+        using var killRegistration = token.Register(() =>
+        {
+            try { proc?.Kill(true); } catch { }
+        });
+
+        try
+        {
+            proc.Start();
+        }
+        catch (Exception ex)
+        {
+            return new AudioHelperProbeResult
+            {
+                Success = false,
+                ErrorCode = "audio_helper_unavailable",
+                ErrorMessage = "Failed to start audio helper process: " + ex.Message
+            };
+        }
+
+        int processId = proc.Id;
+
+        var stdoutDrain = Task.Run(async () =>
+        {
+            try
+            {
+                string? line;
+                while ((line = await proc.StandardOutput.ReadLineAsync(token).ConfigureAwait(false)) != null)
+                    stdoutBuilder.AppendLine(line);
+            }
+            catch { }
+        }, token);
+
+        var stderrDrain = Task.Run(async () =>
+        {
+            try
+            {
+                string? line;
+                while ((line = await proc.StandardError.ReadLineAsync(token).ConfigureAwait(false)) != null)
+                    stderrBuilder.AppendLine(line);
+            }
+            catch { }
+        }, token);
+
+        bool canceled = false;
+        try
+        {
+            await proc.WaitForExitAsync(token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            canceled = true;
+            try { proc.Kill(true); } catch { }
+        }
+
+        // Bounded wait for the output streams to drain after process exit/kill.
+        try
+        {
+            await Task.WhenAll(stdoutDrain, stderrDrain)
+                .WaitAsync(TimeSpan.FromMilliseconds(DrainTimeoutMs), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch { }
+
+        // Final guarantee: no probe process is left behind.
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(true);
+        }
+        catch { }
+        try
+        {
+            proc.WaitForExit(TimeSpan.FromMilliseconds(KillWaitTimeoutMs));
+        }
+        catch { }
+
+        if (canceled || token.IsCancellationRequested)
+        {
+            return new AudioHelperProbeResult
+            {
+                Success = false,
+                ErrorCode = "audio_helper_probe_timeout",
+                ErrorMessage = "Timed out waiting for audio helper --version response.",
+                ProcessId = processId
+            };
+        }
+
+        if (proc.ExitCode != 0)
+        {
+            return new AudioHelperProbeResult
+            {
+                Success = false,
+                ErrorCode = "audio_helper_probe_failed",
+                ErrorMessage = $"Audio helper --version returned exit code {proc.ExitCode}. stderr: {stderrBuilder}",
+                ProcessId = processId
+            };
+        }
+
+        var stdout = stdoutBuilder.ToString();
+        string protocolVersion = "";
+        long timestampFrequency = 0;
+
+        foreach (var rawLine in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith("Protocol:", StringComparison.OrdinalIgnoreCase))
+            {
+                protocolVersion = line.Substring("Protocol:".Length).Trim();
+            }
+            else if (line.StartsWith("TimestampFrequency:", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = line.Substring("TimestampFrequency:".Length).Trim();
+                long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out timestampFrequency);
+            }
+        }
+
+        if (string.IsNullOrEmpty(protocolVersion))
+        {
+            return new AudioHelperProbeResult
+            {
+                Success = false,
+                ErrorCode = "audio_helper_protocol_error",
+                ErrorMessage = "Audio helper --version did not report a protocol version.",
+                ProcessId = processId
+            };
+        }
+
+        return new AudioHelperProbeResult
+        {
+            Success = true,
+            ProtocolVersion = protocolVersion,
+            TimestampFrequency = timestampFrequency,
+            ProcessId = processId
+        };
+    }
+}
+
+/// <summary>
+/// Result of an audio helper --version probe.
+/// </summary>
+public sealed class AudioHelperProbeResult
+{
+    public bool Success { get; set; }
+    public string ErrorCode { get; set; } = "";
+    public string ErrorMessage { get; set; } = "";
+    public string ProtocolVersion { get; set; } = "";
+    public long TimestampFrequency { get; set; }
+
+    /// <summary>
+    /// Process id of the probe helper process. Exposed for test verification
+    /// that no helper process is left behind after a timeout.
+    /// </summary>
+    internal int ProcessId { get; set; }
 }

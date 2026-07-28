@@ -480,6 +480,7 @@ public class TrayContextStopTests
             using var ctx = CreateTrayContext(engine, audit, confirmationActivator: activator);
 
             var approved = false;
+            using var approvedMre = new ManualResetEvent(false);
             var summary = new
             {
                 source = "region: test",
@@ -496,7 +497,11 @@ public class TrayContextStopTests
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            ctx.RequestConfirmation(summary, decision => { approved = decision.Approved; });
+            ctx.RequestConfirmation(summary, decision =>
+            {
+                approved = decision.Approved;
+                approvedMre.Set();
+            });
             Application.DoEvents();
             Thread.Sleep(50);
             Application.DoEvents();
@@ -507,18 +512,21 @@ public class TrayContextStopTests
 
             var approveFromMenu = ctx.GetType().GetMethod("ApproveFromMenu", BindingFlags.NonPublic | BindingFlags.Instance);
             approveFromMenu!.Invoke(ctx, Array.Empty<object>());
-            Application.DoEvents();
-            Thread.Sleep(50);
+
+            // The capture-safe barrier and callback are asynchronous. Pump messages
+            // and wait for the callback to fire rather than relying on a fixed short sleep.
+            Assert.True(approvedMre.WaitOne(TimeSpan.FromSeconds(5)), "Approval callback should be invoked after the capture-safe barrier.");
             Application.DoEvents();
 
             Assert.True(approved);
 
-            var approvedFromMenu = audit.Events.Where(e => e.evt == "confirmation.approved_from_menu").ToList();
+            var approvedFromMenu = audit.Events.Where(e => e.evt == "confirmation.ui_approved").ToList();
             Assert.Single(approvedFromMenu);
 
             var formClosed = audit.Events.LastOrDefault(e => e.evt == "confirmation.form_closed");
             Assert.NotEqual(default, formClosed);
-            Assert.Contains("\"close_reason\":\"queue_advanced\"", formClosed.json);
+            Assert.Contains("\"close_reason\"", formClosed.json);
+            Assert.DoesNotContain("queue_advanced", formClosed.json);
         });
     }
 

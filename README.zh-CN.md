@@ -85,7 +85,7 @@ POST /api/v1/recordings/quick
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
-| 麦克风录制 | 已实现 | 通过 FFmpeg dshow 捕获真实麦克风输入，生成含 AAC 音频的 MP4；系统声音暂未实现 |
+| 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断和稳定错误码，FFmpeg dshow 仅作为显式诊断回退；系统声音暂未实现 |
 | WGC 连续录制 | 实验性实现 | 原生 helper、托管会话和 backend 适配器已通过 scoped 自动化及一次受监督的 10 秒 4K 主屏真实录制；尚未接入 selector、公共 API 或 portable 产品链路 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
@@ -96,16 +96,18 @@ src/
   AgentRecorder.App            WinForms 托盘程序、本地选区和确认 UI
   AgentRecorder.Api            本地 HTTP API
   AgentRecorder.Core           录制状态机与核心契约
-  AgentRecorder.Capture        FFmpeg 捕获后端与预热
+  AgentRecorder.Capture        FFmpeg/WASAPI 捕获、合流、bundle 与预热
   AgentRecorder.Windows        Win32 显示器/窗口枚举
   AgentRecorder.Security       安全策略与自批准拦截
   AgentRecorder.Logging        审计日志
 tools/
   AgentRecorder.Cli            agent 启动握手和自启管理
+  AgentRecorder.AudioHelper    隔离的 Windows WASAPI 麦克风 helper
   ffmpeg/bin                   随包分发的 FFmpeg/ffprobe
   wgc-native-helper            实验性 WGC 原生 helper
 tests/
   AgentRecorder.Tests
+  AgentRecorder.AudioHelper.Tests
 ```
 
 ## 构建与测试

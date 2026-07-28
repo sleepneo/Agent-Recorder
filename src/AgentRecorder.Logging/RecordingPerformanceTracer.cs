@@ -187,6 +187,21 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
             data: new Dictionary<string, object?> { ["error_code"] = errorCode, ["error_type"] = errorType });
     }
 
+    public void MicrophonePrepareStarted(string traceId, string recordingId)
+    {
+        Write(traceId, "microphone_prepare_started", recordingId: recordingId);
+    }
+
+    public void MicrophoneReady(string traceId, string recordingId)
+    {
+        Write(traceId, "microphone_ready", recordingId: recordingId);
+    }
+
+    public void CountdownStarted(string traceId, string recordingId)
+    {
+        Write(traceId, "countdown_started", recordingId: recordingId);
+    }
+
     // Test-only gate: default null, production never invokes. Allows deterministic
     // concurrency tests to pause first-frame enqueue after claim and before write.
     internal Action? BeforeFirstFrameEnqueueGateForTests { get; set; }
@@ -241,6 +256,17 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
                 Interlocked.Increment(ref _operationCount);
             }
         }
+    }
+
+    public void CaptureEnded(string traceId, string recordingId)
+    {
+        Write(traceId, "capture_ended", recordingId: recordingId);
+    }
+
+    public void FinalizationCompleted(string traceId, string recordingId, bool success)
+    {
+        Write(traceId, "finalization_completed", recordingId: recordingId,
+            data: new Dictionary<string, object?> { ["success"] = success });
     }
 
     public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null)

@@ -101,11 +101,14 @@ public class UiLanguageStoreTests : IDisposable
         var path = SettingsPath(_tmp.Path);
         var originalJson = File.ReadAllText(path);
 
-        // Make the existing config file read-only so the atomic replace fails.
-        var originalAttributes = File.GetAttributes(path);
+        // Make the temporary write path read-only so the atomic replace fails
+        // before the existing valid config can be touched.
+        var tempPath = path + ".tmp";
+        File.WriteAllText(tempPath, "");
+        var originalAttributes = File.GetAttributes(tempPath);
         try
         {
-            File.SetAttributes(path, originalAttributes | FileAttributes.ReadOnly);
+            File.SetAttributes(tempPath, originalAttributes | FileAttributes.ReadOnly);
 
             // Save with a different language should fail silently.
             UiLanguageStore.Save(UiLanguage.EnUs);
@@ -117,7 +120,8 @@ public class UiLanguageStoreTests : IDisposable
         }
         finally
         {
-            File.SetAttributes(path, originalAttributes);
+            File.SetAttributes(tempPath, originalAttributes);
+            try { File.Delete(tempPath); } catch { }
         }
     }
 

@@ -101,6 +101,18 @@ internal static class Program
         };
 
         var dataDir = DataDirResolver.Resolve();
+
+        // Cleanup failed-recording diagnostics older than 24 hours. Failure here
+        // must not block startup, and the scope is limited to <data-dir>/failed/.
+        try
+        {
+            new TempRetentionPolicy(dataDir).Cleanup();
+        }
+        catch
+        {
+            // Best-effort cleanup; do not prevent application startup.
+        }
+
         var perfTracer = new RecordingPerformanceTracer(dataDir);
 
         // Production microphone device provider: owned by the engine and shared

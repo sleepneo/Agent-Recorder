@@ -62,4 +62,21 @@ public interface ITrayContext
     void SetIdle(object rec);
     void SetAllIdle();
     void ShowError(string text);
+
+    /// <summary>
+    /// Shows a non-intrusive "preparing" indicator (e.g. amber border) for the
+    /// recording while the microphone or backend initializes.
+    /// </summary>
+    void SetPreparing(object rec) { }
+
+    /// <summary>
+    /// Shows a countdown overlay for the recording. The engine drives the timing;
+    /// the host only updates the visible number. Passing null hides the overlay.
+    /// </summary>
+    void SetCountdown(object rec, int? remainingSeconds) { }
+
+    /// <summary>
+    /// Shows a "finalizing" / "saving" indicator after screen capture has ended.
+    /// </summary>
+    void SetFinalizing(object rec) { }
 }

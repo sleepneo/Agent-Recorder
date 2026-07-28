@@ -619,7 +619,7 @@ public class AudioCapabilityContractTests : IDisposable
                     .EnumerateArray().Count(r =>
                     {
                         var status = r.GetProperty("status").GetString();
-                        return status != "completed" && status != "failed";
+                        return status is not ("completed" or "failed" or "cancelled" or "rejected" or "expired");
                     });
                 if (activeCount == 0)
                     break;

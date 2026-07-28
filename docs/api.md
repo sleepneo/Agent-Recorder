@@ -93,6 +93,17 @@ This identifier is also written to the local performance trace file (`<data-dir>
 
 The current trace events cover the request-to-backend-start and first-frame-progress path. Model thinking time is not measured by the server. Cold/warm grouped P50/P95 summaries are exposed via `/capabilities.perf_summary` (see the Capabilities section below).
 
+Additional lifecycle events emitted after approval (microphone recordings):
+
+| Event | Emitted when | Notes |
+| --- | --- | --- |
+| `microphone_prepare_started` | The capture-safe barrier completed and the audio worker is opening the selected microphone. | `preparing` UI is shown; no screen capture yet. |
+| `microphone_ready` | The audio worker has produced credible audio samples. | Triggers the 3-2-1 countdown. |
+| `countdown_started` | The 3-2-1 countdown UI started. | Screen capture has not started; `elapsed_seconds` remains `0`. |
+| `video_first_frame` | The independent video worker reported its first credible frame. | `recording` state and REC UI begin here; `StartedAtUtc` is set. |
+| `capture_ended` | Screen capture stopped (duration reached or user-initiated stop). | REC UI is hidden immediately; `finalizing` begins. |
+| `finalization_completed` | Audio crop, mux, ffprobe validation and bundle generation finished. | Terminal state (`completed`/`failed`) is published after this. |
+
 The `ensure-running` cold/warm handshake can now be reliably correlated with a recording trace through a one-time context. After a successful `ensure-running`, the CLI atomically creates a short-lived context file under `<data-dir>\runtime\ensure-contexts` and returns the following in its JSON output:
 
 - `startup_kind`: `cold` (service was started this time) or `warm` (an existing service was reused)
@@ -145,9 +156,11 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 
-A native `wgc-native-helper.exe` for WGC capture is present in the repository. Its automated baseline and one supervised 10-second 3840x2160 desktop recording have passed. **WGC continuous display recording is still not exposed through the public API**, the default backend remains unchanged, and public endpoints continue to reject continuous WGC sources. The next implementation step is managed-runner integration behind an explicit feature flag with FFmpeg fallback.
+A native `wgc-native-helper.exe`, managed continuous session, and capture-backend adapter are present in the repository. Their automated baseline and one supervised 10-second 3840x2160 desktop recording have passed. **WGC continuous display recording is still not exposed through the public API**, has not been wired into backend selection or the portable product path, and the default FFmpeg backend remains unchanged. Public endpoints continue to reject continuous WGC sources.
 
-Microphone recording is implemented via FFmpeg dshow and encoded as AAC. The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via NAudio CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. This isolates device/COM/driver exceptions from the main application and avoids the DirectShow sample-delivery issues that cause intermittent voice loss on some Bluetooth headsets. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
+
+The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
 `recording.audio_capabilities.microphone` reports `{ "supported": true, "status": "ready" }` when device enumeration succeeds and at least one active input is present, otherwise `{ "supported": true, "status": "no_devices" }` or `{ "supported": true, "status": "unavailable" }`. `system_audio` remains `{ "supported": false, "status": "not_implemented" }`.
 
@@ -426,9 +439,11 @@ GET /audio/devices
 
 Enumerates real microphone input devices via FFmpeg dshow and enriches each entry with fresh read-only CoreAudio state. Returns `status: "ready"` when devices are found, `"no_devices"` when enumeration succeeds but no device is present, and `"unavailable"` when enumeration fails. `microphone_supported` is `true`; `system_audio_supported` is `false`.
 
+When microphone audio is requested, Agent Recorder launches an isolated Windows WASAPI helper (`AgentRecorder.AudioHelper.exe`) to capture from the selected CoreAudio endpoint. The device `id` returned by this endpoint is still the FFmpeg dshow alternative name for API compatibility; Agent Recorder maps it to the matching CoreAudio endpoint ID internally. dshow capture remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`.
+
 The device-enumeration parser recognizes both the bundled FFmpeg classic `[dshow]` / `[dshow @ ...] DirectShow audio devices` section and the FFmpeg 8.x tagged `[in#N @ ...] "Name" (audio)` format. Only these two trusted logger prefixes are accepted: classic lines must start with `[dshow]` or `[dshow @ identity]`, and tagged lines must start with `[in#N @ identity]` where `N` is one or more digits and `identity` is non-empty. Quoted friendly/alternative names are parsed with consumed-length validation, so extra text before or after the quoted value (e.g. `prefix "Name" (audio)` or `"Name" (audio) suffix`) is rejected. It decodes FFmpeg `\"` and `\\` escapes in quoted names while preserving ordinary backslashes (e.g. `\wave_{GUID}`). Any malformed or incomplete device record—such as an invalid logger prefix, a missing alternative name, an orphaned alternative, a candidate interrupted by another line, trailing junk after a quoted value, or a conflict between devices and the no-devices marker—causes the entire listing to be treated as unrecognized and reported as `status: "unavailable"`. Lines that lack a trusted logger prefix, including ordinary `warning:` or other logger output, are ignored and never create devices. A classic no-devices marker is only accepted inside a classic audio section that was opened by the trusted `DirectShow audio devices` header; a tagged no-devices marker is accepted directly from a trusted input logger. Complete tagged video records (`(video)` friendly name plus matching alternative) are safely ignored in any order and never interrupt audio enumeration. The parser never returns a partial audio device list. Recognized complete listings (with or without devices) accept normal listing exit-code differences across versions (`1`, `0`, `-2`); otherwise the endpoint returns `ready` or `no_devices`.
 
-The `id` is the FFmpeg dshow alternative name (the example below shows an alternative-name ID without the `audio=` prefix). Callers must pass this `id` back unchanged in `audio.microphone.device_id`; Agent Recorder adds the `audio=` prefix internally when building the FFmpeg command line.
+The `id` is the FFmpeg dshow alternative name (the example below shows an alternative-name ID without the `audio=` prefix). Callers must pass this `id` back unchanged in `audio.microphone.device_id`; Agent Recorder maps it to the matching CoreAudio endpoint ID for the WASAPI helper. When the dshow fallback is explicitly enabled, Agent Recorder adds the `audio=` prefix internally when building the FFmpeg command line.
 
 ```json
 {
@@ -501,6 +516,8 @@ Use this endpoint first for common natural-language intents.
 ```
 
 `audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the `id` from `GET /api/v1/audio/devices`. `audio.system_audio.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+
+The default audio capture backend is the isolated WASAPI helper. Set the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow` before starting Agent Recorder to use the FFmpeg dshow diagnostic fallback instead; any other value is rejected.
 
 If the selected microphone is muted, the request fails immediately with `409 AUDIO_DEVICE_MUTED` before any region-selection or confirmation UI is shown. Agent Recorder does not automatically unmute the system; the user must unmute the device in Windows sound settings and retry. If the selected device is known to be inactive, the request fails with `503 AUDIO_DEVICE_NOT_AVAILABLE`. A transient CoreAudio failure that leaves the state unknown does not block recording.
 
@@ -812,8 +829,10 @@ Long-polling response includes additional fields:
 `elapsed_seconds` semantics:
 
 - Wall-clock seconds from capture start to now (for active recordings) or to capture end (for terminal recordings), truncated to a non-negative integer.
-- Returns `0` if capture has not actually started (e.g. `created`, `pending_confirmation`, `rejected`, `expired`).
+- Returns `0` if capture has not actually started (e.g. `created`, `pending_confirmation`, `preparing`, `countdown`, `rejected`, `expired`).
+- During `preparing` and `countdown` the value stays `0`; these phases are not part of the recorded screen-capture duration.
 - For active recordings (`recording`, `stopping`) it grows with each query.
+- When capture ends the state switches to `finalizing` and `elapsed_seconds` freezes at the actual screen-capture duration; finalization time (mux, ffprobe, bundle) is not added.
 - For terminal recordings it is computed from `completed_at` and remains stable across repeated queries.
 - `output.duration_seconds` is the media file duration from ffprobe; the two may differ slightly due to encoding, rounding, and backend behavior. Do not use `duration_seconds` as a substitute for `elapsed_seconds`.
 
@@ -843,7 +862,10 @@ Recording states:
 | State | Meaning |
 | --- | --- |
 | `pending_confirmation` | Waiting for local user confirmation |
-| `recording` | Recording is active |
+| `preparing` | Capture-safe barrier done; preparing microphone (no REC, no screen capture) |
+| `countdown` | 3-2-1 countdown is shown (no REC, no screen capture) |
+| `recording` | Screen capture is active |
+| `finalizing` | Screen capture ended; cropping, muxing, probing and bundle generation in progress |
 | `stopping` | Stop requested |
 | `completed` | Recording completed |
 | `failed` | Recording failed (including preflight re-check failures and backend errors) |
@@ -953,6 +975,7 @@ Stable bundle error codes:
     "backend": "ffmpeg-region",
     "stop_reason": "duration_reached",
     "audio_microphone": true,
+    "audio_capture_backend": "wasapi-helper",
     "audio_status": "recorded",
     "audio_device_id": "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D}",
     "audio_lost_at_ms": null,
@@ -986,6 +1009,16 @@ Stable bundle error codes:
 | `start_failed` | Microphone was requested but FFmpeg could not open the device. |
 | `lost` | The microphone device was lost or disconnected during recording, but an AAC stream is still present. |
 | `missing_audio_track` | Microphone was requested and FFmpeg exited cleanly, but the output does not contain an AAC audio stream. |
+
+`recording.audio_continuity_status` values (new):
+
+| value | meaning |
+| --- | --- |
+| `not_checked` | Continuity was not checked (e.g. no microphone, or finalization did not run). |
+| `continuous` | The final AAC track was checked and no internal long silence was detected. |
+| `degraded` | The final AAC track contains an internal silence gap that may indicate a microphone signal interruption. The `warnings` array includes `microphone_signal_interruption_suspected`. |
+
+`audio_status` remains available for backward compatibility. A value of `recorded` no longer implies that the audio is free of internal gaps; agents that care about continuity should also inspect `audio_continuity_status`.
 
 ### `marks.json`
 

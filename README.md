@@ -82,7 +82,10 @@ Agents should use the paths returned by `ensure-running` or
 - User-level autostart controls and FFmpeg prewarm support.
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
-- Real microphone audio recording via FFmpeg dshow (AAC), with device enumeration and start/lost failure reporting.
+- Real microphone audio recording through an isolated Windows WASAPI helper,
+  followed by AAC muxing, with device enumeration, continuity diagnostics, and
+  stable failure reporting. FFmpeg dshow remains an explicit diagnostic
+  fallback.
 - The source tree contains an experimental WGC continuous pipeline: the native helper, managed session, and capture-backend adapter have passed scoped automation and one supervised 10-second 4K desktop recording. It is not yet wired into backend selection, the public API, or the portable product path; the default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 
@@ -101,16 +104,18 @@ src/
   AgentRecorder.App            WinForms tray host, selection UI, confirmation UI
   AgentRecorder.Api            localhost HTTP API
   AgentRecorder.Core           recording state machine and contracts
-  AgentRecorder.Capture        FFmpeg capture backend and prewarm
+  AgentRecorder.Capture        FFmpeg/WASAPI capture, muxing, bundles, prewarm
   AgentRecorder.Windows        Win32 display/window helpers
   AgentRecorder.Security       safety policy checks
   AgentRecorder.Logging        audit log writer
 tools/
   AgentRecorder.Cli            agent startup/autostart helper
+  AgentRecorder.AudioHelper    isolated Windows WASAPI microphone helper
   ffmpeg/bin                   bundled FFmpeg/ffprobe
   wgc-native-helper            experimental native WGC helper
 tests/
   AgentRecorder.Tests
+  AgentRecorder.AudioHelper.Tests
 ```
 
 ## Build And Test

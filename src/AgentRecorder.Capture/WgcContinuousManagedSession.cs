@@ -1622,6 +1622,13 @@ internal sealed class FileAuthorizationSignalWriter : IAuthorizationSignalWriter
                 if (!string.IsNullOrEmpty(dir))
                     Directory.CreateDirectory(dir);
 
+                // .NET 8 on Windows treats File.Move(source, existingDirectory, overwrite: true)
+                // as a rename/replace of the directory with the file, which silently corrupts
+                // the signal path. Explicitly reject a directory target so authorization fails
+                // deterministically and tests that block writes by creating a directory work.
+                if (Directory.Exists(finalPath))
+                    throw new IOException($"Begin signal path '{finalPath}' is a directory.");
+
                 await File.WriteAllTextAsync(tmpPath, token, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 File.Move(tmpPath, finalPath, overwrite: true);

@@ -18,6 +18,7 @@ public sealed class RecordingEngine
 {
     internal readonly ConcurrentDictionary<string, Recording> _recs = new();
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _countdownCts = new();
     private readonly AuditLogger _audit;
     private readonly IPerformanceTracer _tracer;
     private readonly IRecordingBundleGenerator? _bundleGenerator;
@@ -32,12 +33,20 @@ public sealed class RecordingEngine
 
     /// <summary>
     /// Factory used to select an ICaptureBackend for a given source type.
-    /// Default: <c>CaptureBackendSelector.Select(sourceType)</c>.
+    /// Default: <c>CaptureBackendSelector.Select(cfg)</c>.
     /// Replaceable for tests (e.g. to inject a WgcWindowCaptureBackend
     /// wired to a fake process runner).
     /// </summary>
-    public Func<string, (ICaptureBackend Backend, string BackendType)> BackendFactory { get; set; }
+    public Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> BackendFactory { get; set; }
         = CaptureBackendSelector.Select;
+
+    /// <summary>
+    /// Legacy test seam: set a factory that only needs the source kind.
+    /// </summary>
+    internal void SetBackendFactory(Func<string, (ICaptureBackend Backend, string BackendType)> factory)
+    {
+        BackendFactory = cfg => factory(cfg.SourceKind);
+    }
 
     /// <summary>
     /// Test seam: overrides the confirmation expiry delay. Production default is
@@ -45,6 +54,22 @@ public sealed class RecordingEngine
     /// without waiting for the real timeout.
     /// </summary>
     internal TimeSpan ConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Test seam: per-step countdown interval. Production default is 1 second.
+    /// </summary>
+    internal TimeSpan CountdownInterval { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Test seam: number of countdown steps. Production default is 3 (3-2-1).
+    /// </summary>
+    internal int CountdownSteps { get; set; } = 3;
+
+    /// <summary>
+    /// Test seam: timeout waiting for the first video frame after StartVideo.
+    /// Production default is 10 seconds.
+    /// </summary>
+    internal TimeSpan FirstFrameTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null,
         IRecordingBundleGenerator? bundleGenerator = null,
@@ -109,7 +134,17 @@ public sealed class RecordingEngine
         {
             end = rec.CompletedAtUtc.Value;
         }
-        else if (rec.State is RecState.recording or RecState.stopping)
+        else if (rec.State is RecState.preparing or RecState.countdown)
+        {
+            // Microphone/encoder warmup and countdown are not user-visible recording time.
+            return 0;
+        }
+        else if (rec.State == RecState.finalizing && rec.CaptureEndedAtUtc.HasValue)
+        {
+            // Once screen capture has ended, freeze elapsed time at the capture-ended boundary.
+            end = rec.CaptureEndedAtUtc.Value;
+        }
+        else if (rec.State is RecState.recording or RecState.stopping or RecState.finalizing)
         {
             end = DateTime.UtcNow;
         }
@@ -148,6 +183,15 @@ public sealed class RecordingEngine
         bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
                                string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
         bool isWgc = string.Equals(backendType, "wgc", StringComparison.OrdinalIgnoreCase);
+
+        // WASAPI helper failures: if a stable, normalized helper error code was
+        // captured and a microphone was requested, prioritize it over generic
+        // ffmpeg-style codes like non_zero_exit. This must work for all real
+        // AvSplit backend types (ffmpeg-av-split, ffmpeg-region-av-split,
+        // ffmpeg-window-region-av-split), not only for a fictional wasapi-helper
+        // backend type.
+        if (microphoneRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
+            return meta.AudioHelperErrorCode;
 
         // Microphone-specific outcomes take precedence over generic validation so
         // callers get a stable, actionable code when audio evidence is missing.
@@ -212,7 +256,7 @@ public sealed class RecordingEngine
         lock (_lock)
         {
             var active = _recs.Values
-                .Where(r => r.State is RecState.recording or RecState.stopping or RecState.pending_confirmation)
+                .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing)
                 .ToList();
 
             if (isNested)
@@ -327,7 +371,7 @@ public sealed class RecordingEngine
         lock (_lock)
         {
             var currentActive = _recs.Values
-                .Where(r => r.State is RecState.recording or RecState.stopping or RecState.pending_confirmation)
+                .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing)
                 .ToList();
 
             if (isNested)
@@ -603,10 +647,10 @@ public sealed class RecordingEngine
         if (preflight.Passed)
             return true;
 
-        rec.State = RecState.failed;
         MarkBundleNotApplicable(rec);
         rec.Error = preflight.Message;
         rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
+        rec.State = RecState.failed;
         BumpStateVersion();
         _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", errorCode: preflight.ErrorCode);
         _audit.Log("recording.preflight_failed", new
@@ -650,9 +694,16 @@ public sealed class RecordingEngine
     {
         // Select backend FIRST, so WGC still-frame backends can signal
         // "I am synchronous and might complete during Start()".
-        var selection = BackendFactory(rec.SourceType);
+        var selection = BackendFactory(rec.Config);
         rec.Backend = selection.Backend;
         rec.BackendType = selection.BackendType;
+
+        // Inject the microphone status provider into backends that can use it
+        // for runtime endpoint supervision.
+        if (rec.Backend is IMicrophoneStatusConsumer consumer)
+        {
+            consumer.MicrophoneStatusProvider = _microphoneStatusProvider;
+        }
 
         _audit.Log("recording.backend_selected", new
         {
@@ -664,7 +715,7 @@ public sealed class RecordingEngine
         // Hook natural exit BEFORE setting state and BEFORE calling
         // Backend.Start(). This way a synchronous backend (like WGC
         // still-frame) can FinalizeRecording() from inside Start(),
-        // which will bump state recording -> completed/failed.
+        // which will bump state preparing -> completed/failed.
         rec.Backend.OnNaturalExit((exitCode, meta) =>
         {
             FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: null, tray);
@@ -674,34 +725,30 @@ public sealed class RecordingEngine
         // This catches synchronous observations that happen inside Start().
         if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
         {
-            observable.FirstFrameObserved += obs =>
-            {
-                try
-                {
-                    _tracer.CaptureFirstFrameObserved(traceId ?? "trace_unknown", rec.Id,
-                        new FirstFrameEvidence
-                        {
-                            EvidenceKind = obs.EvidenceKind,
-                            FrameNumber = obs.FrameNumber,
-                            TotalSizeBytes = obs.TotalSizeBytes,
-                            OutTimeUs = obs.OutTimeUs
-                        });
-                }
-                catch
-                {
-                    // First-frame diagnostics must never change recording state.
-                }
-            };
+            observable.FirstFrameObserved += obs => OnFirstFrameObserved(rec, obs, traceId, tray);
         }
 
-        // Set state to recording NOW, before Backend.Start() runs.
-        // If Backend.Start() runs synchronously and completes (WGC),
-        // FinalizeRecording will bump state recording -> completed/failed
-        // without being overwritten afterwards.
-        rec.State = RecState.recording;
-        rec.StartedAtUtc = DateTime.UtcNow;
+        // Subscribe to capture-ended events so the UI can switch to "saving"
+        // before muxing/probing/bundle generation complete.
+        if (rec.Backend is ICaptureEndedObservableBackend endedObservable)
+        {
+            endedObservable.CaptureEnded += obs => OnCaptureEnded(rec, obs, traceId, tray);
+        }
+
+        // Split A/V backends with a microphone first warm up the audio worker.
+        // Subscribe to AudioReady BEFORE starting the backend so a synchronous
+        // ready signal cannot be missed, then check IsAudioReady for catch-up.
+        if (rec.Backend is IAudioReadyBackend audioReady && rec.Microphone)
+        {
+            audioReady.AudioReady += () => OnAudioReady(rec, traceId, tray);
+        }
+
+        // Enter preparing: backend initialization (including microphone warmup)
+        // has begun, but no REC UI, no elapsed timer, and no user-visible start
+        // until credible first-frame evidence arrives.
+        rec.State = RecState.preparing;
+        rec.BackendStartAtUtc = DateTime.UtcNow;
         BumpStateVersion();
-        tray.SetRecording(rec);
 
         // Start the backend FIRST to populate CommandArgs,
         // THEN record audit with the actual ffmpeg_args.
@@ -718,6 +765,38 @@ public sealed class RecordingEngine
                 backend = rec.BackendType,
                 ffmpeg_args = rec.Config.CommandArgs ?? ""
             });
+
+            // After the backend has started, catch the race where AudioReady fired
+            // before the subscription above was attached.
+            if (rec.Backend is IAudioReadyBackend audioReadyBackend && rec.Microphone && audioReadyBackend.IsAudioReady)
+            {
+                OnAudioReady(rec, traceId, tray);
+            }
+
+            // Split A/V backends with a microphone: show preparing UI and wait
+            // for AudioReady before the 3-2-1 countdown.
+            if (rec.Backend is IAudioReadyBackend && rec.Microphone)
+            {
+                _tracer.MicrophonePrepareStarted(traceId ?? "trace_unknown", rec.Id);
+                _audit.Log("recording.microphone_prepare_started", new
+                {
+                    recording_id = rec.Id,
+                    device_id = rec.MicrophoneDeviceId ?? "",
+                    device_name = rec.MicrophoneDeviceName ?? ""
+                });
+                tray.SetPreparing(rec);
+            }
+            // For other first-frame-observable backends (e.g. no-microphone FFmpeg),
+            // show preparing until credible first-frame evidence arrives.
+            else if (rec.Backend is IFirstFrameObservableCaptureBackend && !rec.IsFinalized)
+            {
+                tray.SetPreparing(rec);
+            }
+            // Non-observable backends (e.g. WGC still-frame) cannot wait for evidence.
+            else if (!rec.IsFinalized)
+            {
+                TransitionToRecording(rec, traceId, tray, firstFrameEvidence: null);
+            }
         }
         catch (Exception ex)
         {
@@ -742,12 +821,15 @@ public sealed class RecordingEngine
 
             // Backend.Start() threw before any terminal state was reached:
             // transition to failed with a single terminal event and one user error.
-            rec.State = RecState.failed;
-            MarkBundleNotApplicable(rec);
-            rec.CompletedAtUtc = DateTime.UtcNow;
-            BumpStateVersion();
-            rec.Error = ex.Message;
-            rec.Warnings.Add("launch_error: " + ex.Message);
+            lock (rec)
+            {
+                MarkBundleNotApplicable(rec);
+                rec.CompletedAtUtc = DateTime.UtcNow;
+                rec.Error = ex.Message;
+                rec.Warnings.Add("launch_error: " + ex.Message);
+                rec.State = RecState.failed;
+                BumpStateVersion();
+            }
             _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
                 stopReason: "unexpected_exit", errorCode: "backend_start_exception");
             _audit.Log("recording.failed", new
@@ -761,13 +843,317 @@ public sealed class RecordingEngine
         }
     }
 
+    private void OnFirstFrameObserved(Recording rec, FirstFrameObservation obs, string? traceId, ITrayContext tray)
+    {
+        try
+        {
+            _tracer.CaptureFirstFrameObserved(traceId ?? "trace_unknown", rec.Id,
+                new FirstFrameEvidence
+                {
+                    EvidenceKind = obs.EvidenceKind,
+                    FrameNumber = obs.FrameNumber,
+                    TotalSizeBytes = obs.TotalSizeBytes,
+                    OutTimeUs = obs.OutTimeUs
+                });
+        }
+        catch
+        {
+            // First-frame diagnostics must never change recording state.
+        }
+
+        TransitionToRecording(rec, traceId, tray, obs);
+    }
+
+    /// <summary>
+    /// Moves a recording from <see cref="RecState.preparing"/> or
+    /// <see cref="RecState.countdown"/> to <see cref="RecState.recording"/> exactly once.
+    /// Sets <see cref="Recording.StartedAtUtc"/> to the credible-recording time,
+    /// starts the optional duration deadline watchdog, and notifies the tray.
+    /// Thread-safe against concurrent stop, failure, or natural exit.
+    /// </summary>
+    private void TransitionToRecording(Recording rec, string? traceId, ITrayContext tray, FirstFrameObservation? firstFrameEvidence)
+    {
+        lock (rec)
+        {
+            if (rec.State is not (RecState.preparing or RecState.countdown))
+                return;
+
+            rec.State = RecState.recording;
+            rec.StartedAtUtc = DateTime.UtcNow;
+            BumpStateVersion();
+        }
+
+        _audit.Log("recording.first_frame_observed", new
+        {
+            recording_id = rec.Id,
+            backend = rec.BackendType,
+            evidence_kind = firstFrameEvidence?.EvidenceKind ?? "none",
+            frame_number = firstFrameEvidence?.FrameNumber ?? 0,
+            out_time_us = firstFrameEvidence?.OutTimeUs ?? 0
+        });
+
+        StartDeadlineWatchdog(rec, traceId, tray);
+        tray.SetRecording(rec);
+    }
+
+    private void StartDeadlineWatchdog(Recording rec, string? traceId, ITrayContext tray)
+    {
+        var duration = rec.DurationSeconds;
+        if (duration == null || duration <= 0)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(duration.Value)).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            // CaptureEndedAtUtc is the exactly-once gate: the first caller records
+            // the tracer/audit/tray transition. Even if a backend event already won
+            // the race, the deadline path must still stop the backend and drive
+            // finalization so the recording never stalls in an intermediate state.
+            TryRecordCaptureEnded(rec, DateTime.UtcNow, 0, "duration_reached", traceId, tray);
+
+            OutputMeta meta;
+            int exitCode;
+            try
+            {
+                meta = rec.Backend?.Stop() ?? new OutputMeta();
+                exitCode = rec.Backend?.ExitCode ?? -1;
+            }
+            catch (Exception ex)
+            {
+                meta = new OutputMeta { StderrLog = "deadline_stop_failed: " + ex };
+                exitCode = -1;
+            }
+
+            // FinalizeRecording is guarded by rec.IsFinalized, so a race with an
+            // explicit Stop(...) or a synchronous natural-exit callback is safe.
+            // This ensures the deadline path always leaves the finalizing state.
+            FinalizeRecording(rec, meta, exitCode, natural: false, stopReason: "duration_reached", tray);
+        });
+    }
+
+    /// <summary>
+    /// Records the capture-ended transition exactly once per recording.
+    /// <see cref="Recording.CaptureEndedAtUtc"/> is the durable gate: the first
+    /// caller (deadline, backend event, or manual stop sequence) writes the
+    /// tracer/audit/tray transition; later callers observe the timestamp and
+    /// return false without producing duplicate events.
+    /// </summary>
+    private bool TryRecordCaptureEnded(Recording rec, DateTime endedAtUtc, int exitCode, string reason, string? traceId, ITrayContext tray)
+    {
+        bool transitioned = false;
+        lock (rec)
+        {
+            if (rec.IsFinalized || rec.CaptureEndedAtUtc.HasValue)
+                return false;
+
+            if (rec.State is RecState.recording or RecState.stopping or RecState.countdown or RecState.finalizing)
+            {
+                if (rec.State != RecState.finalizing)
+                {
+                    rec.State = RecState.finalizing;
+                    BumpStateVersion();
+                }
+                rec.CaptureEndedAtUtc = endedAtUtc;
+                transitioned = true;
+            }
+        }
+
+        if (transitioned)
+        {
+            _tracer.CaptureEnded(traceId ?? "trace_unknown", rec.Id);
+            _audit.Log("recording.capture_ended", new
+            {
+                recording_id = rec.Id,
+                ended_at = Iso(endedAtUtc),
+                exit_code = exitCode,
+                reason
+            });
+            tray.SetFinalizing(rec);
+        }
+
+        return transitioned;
+    }
+
+    /// <summary>
+    /// Invoked when a split A/V backend reports that the microphone is ready.
+    /// Starts the 3-2-1 countdown and then launches the video worker.
+    /// </summary>
+    private void OnAudioReady(Recording rec, string? traceId, ITrayContext tray)
+    {
+        lock (rec)
+        {
+            if (rec.State != RecState.preparing || rec.IsFinalized)
+                return;
+
+            rec.State = RecState.countdown;
+            rec.CountdownStartedAtUtc = DateTime.UtcNow;
+            BumpStateVersion();
+        }
+
+        _tracer.MicrophoneReady(traceId ?? "trace_unknown", rec.Id);
+        _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
+        _audit.Log("recording.countdown_started", new
+        {
+            recording_id = rec.Id,
+            microphone_ready_at = Iso(rec.CountdownStartedAtUtc.Value)
+        });
+
+        var cts = new CancellationTokenSource();
+        _countdownCts[rec.Id] = cts;
+        _ = RunCountdownAsync(rec, traceId, tray, cts.Token);
+    }
+
+    /// <summary>
+    /// Drives the 3-2-1 countdown overlay and starts video capture when it reaches zero.
+    /// Keeps the recording in the countdown state until real first-frame evidence is
+    /// observed. Uses Task.Delay so the UI thread is never blocked.
+    /// </summary>
+    private async Task RunCountdownAsync(Recording rec, string? traceId, ITrayContext tray, CancellationToken ct)
+    {
+        try
+        {
+            for (int remaining = CountdownSteps; remaining >= 1; remaining--)
+            {
+                tray.SetCountdown(rec, remaining);
+                await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        lock (rec)
+        {
+            if (rec.State != RecState.countdown || rec.IsFinalized)
+                return;
+        }
+
+        tray.SetCountdown(rec, null);
+
+        if (rec.Backend is IAudioReadyBackend audioReady)
+        {
+            try
+            {
+                audioReady.StartVideo();
+            }
+            catch (Exception ex)
+            {
+                _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+                    rec.BackendType ?? "unknown", "video_start_failed", ex.GetType().Name);
+                lock (rec)
+                {
+                    MarkBundleNotApplicable(rec);
+                    rec.CompletedAtUtc = DateTime.UtcNow;
+                    rec.Error = "Failed to start video capture: " + ex.Message;
+                    rec.Warnings.Add("video_start_failed: " + ex.Message);
+                    rec.State = RecState.failed;
+                    BumpStateVersion();
+                }
+                _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+                    stopReason: "video_start_failed", errorCode: "video_start_failed");
+                _audit.Log("recording.failed", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    error = rec.Error,
+                    stage = "video_start"
+                });
+                tray.SetIdle(rec);
+                tray.ShowError(rec.Error);
+                return;
+            }
+        }
+
+        // Wait for real first-frame evidence before showing REC. If no first frame
+        // arrives within the bounded timeout, the recording has failed.
+        var firstFrameTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Action<FirstFrameObservation>? firstFrameHandler = null;
+        firstFrameHandler = _ =>
+        {
+            if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
+                observable.FirstFrameObserved -= firstFrameHandler;
+            firstFrameTcs.TrySetResult(true);
+        };
+
+        if (rec.Backend is IFirstFrameObservableCaptureBackend frameObservable)
+            frameObservable.FirstFrameObserved += firstFrameHandler;
+
+        // If the first frame was already observed synchronously during StartVideo,
+        // we are already recording.
+        lock (rec)
+        {
+            if (rec.State == RecState.recording)
+                firstFrameTcs.TrySetResult(true);
+        }
+
+        var timeoutTask = Task.Delay(FirstFrameTimeout, ct);
+        var completed = await Task.WhenAny(firstFrameTcs.Task, timeoutTask).ConfigureAwait(false);
+
+        if (completed == timeoutTask)
+        {
+            // Timeout: clean up and fail the recording.
+            lock (rec)
+            {
+                if (rec.IsFinalized || rec.State != RecState.countdown)
+                    return;
+
+                MarkBundleNotApplicable(rec);
+                rec.CompletedAtUtc = DateTime.UtcNow;
+                rec.Error = "First video frame was not observed within the timeout.";
+                rec.Warnings.Add("first_frame_timeout");
+                rec.State = RecState.failed;
+                BumpStateVersion();
+            }
+            _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+                stopReason: "first_frame_timeout", errorCode: "first_frame_timeout");
+            _audit.Log("recording.failed", new
+            {
+                recording_id = rec.Id,
+                backend = rec.BackendType,
+                error = rec.Error,
+                stage = "first_frame_wait"
+            });
+            try { rec.Backend?.Cancel(); } catch { }
+            tray.SetIdle(rec);
+            tray.ShowError(rec.Error);
+            return;
+        }
+
+        // First frame observed; OnFirstFrameObserved has already transitioned to recording.
+    }
+
+    /// <summary>
+    /// Invoked when the actual screen capture ends (before muxing/probing).
+    /// Switches the recording to <see cref="RecState.finalizing"/> and updates
+    /// the tray so the REC border/timer disappears immediately. Delegates to
+    /// <see cref="TryRecordCaptureEnded"/> so the tracer/audit/tray transition
+    /// is recorded exactly once per recording.
+    /// </summary>
+    private void OnCaptureEnded(Recording rec, CaptureEndedObservation obs, string? traceId, ITrayContext tray)
+    {
+        TryRecordCaptureEnded(rec, obs.EndedAtUtc, obs.ExitCode, obs.Reason, traceId, tray);
+    }
+
     private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
+        CancelCountdown(rec.Id);
         RecordingBundleRequest? bundleRequest = null;
+        bool finalizationSuccess = false;
         lock (rec)
         {
             if (rec.IsFinalized)
                 return;
+
+            rec.AudioContinuityStatus = meta.AudioContinuityStatus;
 
             // If a user-initiated stop is already in flight (rec.StopReason set by Stop(...)),
             // treat the backend's natural-exit callback as part of that explicit stop. This
@@ -871,6 +1257,7 @@ public sealed class RecordingEngine
 
             if (success)
             {
+                finalizationSuccess = true;
                 if (natural)
                     rec.StopReason = "duration_reached";
 
@@ -883,8 +1270,8 @@ public sealed class RecordingEngine
                     : RecordingBundleSnapshot.NotApplicable();
 
                 rec.State = RecState.completed;
-                BumpStateVersion();
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "completed", stopReason: rec.StopReason);
+                BumpStateVersion();
                 _audit.Log("recording.completed", new
                 {
                     recording_id = rec.Id,
@@ -899,19 +1286,20 @@ public sealed class RecordingEngine
                     height = meta.Height,
                     ffmpeg_exit_code = exitCode,
                     audio_microphone = rec.Microphone,
-                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested")
+                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
+                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked")
                 });
             }
             else
             {
                 if (natural)
                     rec.StopReason = "unexpected_exit";
-                rec.State = RecState.failed;
-                rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
-                BumpStateVersion();
-                rec.Error = rec.Warnings.Count > 0 ? string.Join("; ", rec.Warnings) : "ffmpeg produced invalid output";
                 var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.Microphone, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
+                rec.Error = stableErrorCode;
+                rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
+                rec.State = RecState.failed;
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", stopReason: rec.StopReason, errorCode: stableErrorCode);
+                BumpStateVersion();
                 _audit.Log("recording.failed", new
                 {
                     recording_id = rec.Id,
@@ -928,10 +1316,13 @@ public sealed class RecordingEngine
                     duration_seconds = meta.DurationSeconds,
                     stderr_excerpt = rec.StderrExcerpt ?? "",
                     audio_microphone = rec.Microphone,
-                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested")
+                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
+                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked")
                 });
             }
         }
+
+        _tracer.FinalizationCompleted(GetTraceIdForRecording(rec.Id), rec.Id, finalizationSuccess);
 
         if (bundleRequest != null)
         {
@@ -939,6 +1330,19 @@ public sealed class RecordingEngine
         }
 
         tray.SetIdle(rec);
+    }
+
+    /// <summary>
+    /// Cancels and disposes the countdown timer for a recording, if one is running.
+    /// Called on stop, failure, or terminal finalization to prevent late StartVideo calls.
+    /// </summary>
+    private void CancelCountdown(string recordingId)
+    {
+        if (_countdownCts.TryRemove(recordingId, out var cts))
+        {
+            try { cts.Cancel(); } catch { }
+            try { cts.Dispose(); } catch { }
+        }
     }
 
     private static string DeriveBundlePath(string mediaPath)
@@ -981,6 +1385,7 @@ public sealed class RecordingEngine
             stopReason: rec.StopReason ?? "duration_reached",
             audioMicrophone: rec.Microphone,
             audioStatus: meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
+            audioContinuityStatus: meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
             audioDeviceId: rec.MicrophoneDeviceId,
             audioLostAtMs: meta.AudioLostAtMs,
             nestedRole: rec.NestedRole,
@@ -1073,15 +1478,49 @@ public sealed class RecordingEngine
             if (IsTerminalState(rec.State))
                 return BuildStopResponse(rec);
 
+            // If capture has already ended and finalization is in progress,
+            // do not restart the stop sequence; the natural-exit path will complete.
+            if (rec.State == RecState.finalizing)
+                return BuildStoppingResponse(rec);
+
             // First explicit stop request becomes the owner. Subsequent concurrent
             // requests see the stopping state and return immediately without calling
             // backend.Stop() again or overwriting the first stop reason.
             if (rec.State == RecState.stopping)
                 return BuildStoppingResponse(rec);
 
-            rec.State = RecState.stopping;
-            rec.StopReason = NormalizeStopReason(reason);
-            BumpStateVersion();
+            // If the recording has not reached active capture yet, cancel it instead
+            // of finalizing. This avoids starting a video worker or producing output
+            // for a recording that never really began.
+            if (rec.State is RecState.preparing or RecState.countdown)
+            {
+                rec.State = RecState.cancelled;
+                rec.StopReason = NormalizeStopReason(reason);
+                rec.CompletedAtUtc = DateTime.UtcNow;
+                rec.IsFinalized = true;
+                MarkBundleNotApplicable(rec);
+                BumpStateVersion();
+            }
+            else
+            {
+                rec.State = RecState.stopping;
+                rec.StopReason = NormalizeStopReason(reason);
+                BumpStateVersion();
+            }
+        }
+
+        CancelCountdown(rec.Id);
+
+        if (rec.State == RecState.cancelled)
+        {
+            _audit.Log("recording.cancelled", new { recording_id = rec.Id, reason = rec.StopReason });
+            // Cancel the backend first so any synchronous first-frame observation
+            // emitted during teardown can still be traced before the terminal tombstone
+            // is recorded.
+            try { rec.Backend?.Cancel(); } catch { }
+            _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
+            _tray!.SetIdle(rec);
+            return BuildStopResponse(rec);
         }
 
         _audit.Log("recording.stopping", new { recording_id = rec.Id, reason = rec.StopReason });
@@ -1149,7 +1588,10 @@ public sealed class RecordingEngine
                     device_id = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
                     status = rec.Microphone
                         ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
-                        : "not_requested"
+                        : "not_requested",
+                    continuity_status = rec.Microphone
+                        ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
+                        : "not_checked"
                 }
             },
             output = new
@@ -1329,7 +1771,10 @@ public sealed class RecordingEngine
                     DeviceId = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
                     Status = rec.Microphone
                         ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
-                        : "not_requested"
+                        : "not_requested",
+                    ContinuityStatus = rec.Microphone
+                        ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
+                        : "not_checked"
                 }
             },
             Output = new
@@ -1377,7 +1822,7 @@ public sealed class RecordingEngine
         lock (_lock)
         {
             var anyActive = _recs.Values.Any(r =>
-                r.State is RecState.recording or RecState.stopping or RecState.pending_confirmation);
+                r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing);
             if (!anyActive)
                 tray.SetAllIdle();
         }
@@ -1385,7 +1830,7 @@ public sealed class RecordingEngine
 
     public void StopAllSync(string reason)
     {
-        foreach (var r in _recs.Values.Where(r => r.State == RecState.recording))
+        foreach (var r in _recs.Values.Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording))
             try { Stop(r.Id, reason); } catch { }
     }
 
@@ -1459,9 +1904,12 @@ public sealed class RecordingEngine
         var audioStatus = rec.Microphone
             ? (m.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
             : "not_requested";
+        var audioContinuityStatus = rec.Microphone
+            ? (m.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
+            : "not_checked";
 
         if (!full)
-            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, audio_status = audioStatus, warnings };
+            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, audio_status = audioStatus, audio_continuity_status = audioContinuityStatus, warnings };
         return new
         {
             path = actualPath, exists, size_bytes = m.SizeBytes,
@@ -1472,6 +1920,7 @@ public sealed class RecordingEngine
             backend = rec.BackendType,
             source_type = rec.SourceType,
             audio_status = audioStatus,
+            audio_continuity_status = audioContinuityStatus,
             warnings
         };
     }

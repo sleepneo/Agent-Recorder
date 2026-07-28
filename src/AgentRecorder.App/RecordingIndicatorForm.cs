@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using AgentRecorder.Core;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
@@ -441,6 +442,17 @@ internal static class RecordingIndicatorGeometry
 }
 
 /// <summary>
+/// Visual phase of the recording indicator.
+/// </summary>
+internal enum RecordingIndicatorPhase
+{
+    Preparing,
+    Countdown,
+    Recording,
+    Finalizing
+}
+
+/// <summary>
 /// Top-most, click-through, non-activating border window that indicates an active recording region.
 /// Displays a red border and a small REC timer label. Does not capture focus or block user input.
 /// </summary>
@@ -453,11 +465,14 @@ internal sealed class RecordingIndicatorForm : Form
     private readonly int? _durationSeconds;
     private readonly string? _nestedRole;
     private readonly IWindowDisplayAffinity _displayAffinity;
+    private readonly Func<IUiTextProvider> _textProviderFactory;
     private System.Windows.Forms.Timer _timer = null!;
     private Label _label = null!;
     private bool _displayAffinityApplied;
     private Exception? _displayAffinityError;
     private int _actualWindowDpi;
+    private RecordingIndicatorPhase _phase = RecordingIndicatorPhase.Recording;
+    private int? _countdownValue;
 
     internal RecordingIndicatorBounds BoundsForTests => _bounds;
     internal int ActualWindowDpiForTests => _actualWindowDpi;
@@ -470,6 +485,8 @@ internal sealed class RecordingIndicatorForm : Form
     internal CaptureVisibilityMode CaptureVisibilityModeForTests => _presentation.Mode;
     internal RecordingIndicatorPresentation PresentationForTests => _presentation;
     internal Rectangle[] BorderRectanglesForTests => _presentation.BorderRectangles;
+    internal RecordingIndicatorPhase PhaseForTests => _phase;
+    internal int? CountdownValueForTests => _countdownValue;
 
     public RecordingIndicatorForm(
         string recordingId,
@@ -478,7 +495,7 @@ internal sealed class RecordingIndicatorForm : Form
         int? durationSeconds = null,
         string? nestedRole = null,
         IWindowDisplayAffinity? displayAffinity = null)
-        : this(recordingId, bounds, startedAtUtc, durationSeconds, nestedRole, null, displayAffinity)
+        : this(recordingId, bounds, startedAtUtc, durationSeconds, nestedRole, null, displayAffinity, null)
     {
     }
 
@@ -488,7 +505,8 @@ internal sealed class RecordingIndicatorForm : Form
         DateTime startedAtUtc,
         int? durationSeconds = null,
         string? nestedRole = null,
-        IWindowDisplayAffinity? displayAffinity = null)
+        IWindowDisplayAffinity? displayAffinity = null,
+        Func<IUiTextProvider>? textProviderFactory = null)
     {
         _recordingId = recordingId;
         _presentation = presentation;
@@ -497,6 +515,7 @@ internal sealed class RecordingIndicatorForm : Form
         _durationSeconds = durationSeconds;
         _nestedRole = nestedRole;
         _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
+        _textProviderFactory = textProviderFactory ?? (() => new UiTextProvider(UiLanguageStore.LoadOrDefault()));
 
         InitializeComponent();
         StartPosition = FormStartPosition.Manual;
@@ -510,7 +529,8 @@ internal sealed class RecordingIndicatorForm : Form
         int? durationSeconds,
         string? nestedRole,
         RecordingIndicatorPresentation? presentation,
-        IWindowDisplayAffinity? displayAffinity)
+        IWindowDisplayAffinity? displayAffinity,
+        Func<IUiTextProvider>? textProviderFactory = null)
     {
         _recordingId = recordingId;
         _bounds = RecordingIndicatorGeometry.ClampToVirtualScreen(bounds);
@@ -518,6 +538,7 @@ internal sealed class RecordingIndicatorForm : Form
         _durationSeconds = durationSeconds;
         _nestedRole = nestedRole;
         _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
+        _textProviderFactory = textProviderFactory ?? (() => new UiTextProvider(UiLanguageStore.LoadOrDefault()));
 
         _presentation = presentation ?? new RecordingIndicatorPresentation(
             CaptureVisibilityMode.ExcludeFromCapture,
@@ -671,11 +692,19 @@ internal sealed class RecordingIndicatorForm : Form
     {
         base.OnPaint(e);
 
+        var borderColor = _phase switch
+        {
+            RecordingIndicatorPhase.Preparing => Color.FromArgb(255, 255, 165, 0), // amber
+            RecordingIndicatorPhase.Countdown => Color.FromArgb(255, 255, 165, 0), // amber
+            RecordingIndicatorPhase.Finalizing => Color.FromArgb(255, 128, 128, 128), // gray
+            _ => Color.Red
+        };
+
         if (_presentation.Mode == CaptureVisibilityMode.ParentVisible)
         {
-            // In parent-visible mode the red frame is drawn as four explicit rectangles
+            // In parent-visible mode the frame is drawn as four explicit rectangles
             // just outside the inner capture rectangle, keeping the inner capture clean.
-            using var brush = new SolidBrush(Color.Red);
+            using var brush = new SolidBrush(borderColor);
             foreach (var border in _presentation.BorderRectangles)
             {
                 var clientRect = new Rectangle(
@@ -688,7 +717,7 @@ internal sealed class RecordingIndicatorForm : Form
         }
         else
         {
-            using var pen = new Pen(Color.Red, RecordingIndicatorGeometry.BorderWidth);
+            using var pen = new Pen(borderColor, RecordingIndicatorGeometry.BorderWidth);
             var rect = ClientRectangle;
             // Draw slightly inside so the full border is visible.
             float offset = RecordingIndicatorGeometry.BorderWidth / 2.0f;
@@ -817,8 +846,51 @@ internal sealed class RecordingIndicatorForm : Form
         }
     }
 
+    /// <summary>
+    /// Switches the indicator to a non-recording phase (preparing, countdown, finalizing)
+    /// and updates the label/border color accordingly. Safe to call multiple times.
+    /// </summary>
+    internal void SetPhase(RecordingIndicatorPhase phase, int? countdownValue = null)
+    {
+        _phase = phase;
+        _countdownValue = countdownValue;
+
+        var textProvider = _textProviderFactory();
+        switch (phase)
+        {
+            case RecordingIndicatorPhase.Preparing:
+                _label.BackColor = Color.FromArgb(180, 255, 165, 0); // amber
+                _label.Text = textProvider.Get("Indicator_Preparing");
+                _timer.Stop();
+                break;
+            case RecordingIndicatorPhase.Finalizing:
+                _label.BackColor = Color.FromArgb(180, 128, 128, 128); // gray
+                _label.Text = textProvider.Get("Indicator_Finalizing");
+                _timer.Stop();
+                break;
+            case RecordingIndicatorPhase.Countdown:
+                _label.BackColor = Color.FromArgb(180, 255, 165, 0); // amber
+                _label.Text = countdownValue.HasValue
+                    ? textProvider.Format("Indicator_Countdown", countdownValue.Value)
+                    : textProvider.Get("Indicator_Preparing");
+                _timer.Stop();
+                break;
+            case RecordingIndicatorPhase.Recording:
+            default:
+                _label.BackColor = Color.FromArgb(180, 255, 0, 0); // red
+                _timer.Start();
+                UpdateLabel();
+                break;
+        }
+
+        Invalidate();
+    }
+
     private void UpdateLabel()
     {
+        if (_phase != RecordingIndicatorPhase.Recording)
+            return;
+
         var elapsed = DateTime.UtcNow - _startedAtUtc;
         if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
         _label.Text = FormatLabel(elapsed);

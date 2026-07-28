@@ -20,7 +20,7 @@ public class CaptureBackendSelectorTests
     public void Select_DisplaySource_ReturnsFfmpeg()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        var (backend, type) = CaptureBackendSelector.Select("display");
+        var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "display" });
         Assert.NotNull(backend);
         Assert.Equal("ffmpeg", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
@@ -33,7 +33,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("display");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "display" });
             Assert.Equal("ffmpeg", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
@@ -47,7 +47,7 @@ public class CaptureBackendSelectorTests
     public void Select_WindowSource_NoFlag_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        var (backend, type) = CaptureBackendSelector.Select("window");
+        var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
         Assert.NotNull(backend);
         Assert.Equal("ffmpeg-window-region", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
@@ -59,7 +59,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
             Assert.Equal("ffmpeg-window-region", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
@@ -75,7 +75,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
             Assert.NotNull(backend);
             Assert.Equal("wgc", type);
             Assert.IsType<WgcWindowCaptureBackend>(backend);
@@ -92,7 +92,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "  wgc  ");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
             Assert.Equal("wgc", type);
             Assert.IsType<WgcWindowCaptureBackend>(backend);
         }
@@ -108,7 +108,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "WGC");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
             Assert.Equal("wgc", type);
             Assert.IsType<WgcWindowCaptureBackend>(backend);
         }
@@ -124,7 +124,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "something-else");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("window");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
             Assert.Equal("ffmpeg-window-region", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
@@ -138,7 +138,7 @@ public class CaptureBackendSelectorTests
     public void Select_InvalidSourceType_Throws()
     {
         var ex = Assert.Throws<ApiException>(() =>
-            CaptureBackendSelector.Select("unknown-type"));
+            CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "unknown-type" }));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
     }
@@ -146,14 +146,14 @@ public class CaptureBackendSelectorTests
     [Fact]
     public void SelectBackendType_Display_ReturnsFfmpeg()
     {
-        Assert.Equal("ffmpeg", CaptureBackendSelector.SelectBackendType("display"));
+        Assert.Equal("ffmpeg", CaptureBackendSelector.SelectBackendType(new CaptureConfig { SourceKind = "display" }));
     }
 
     [Fact]
     public void SelectBackendType_WindowNoFlag_ReturnsFfmpegWindowRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        Assert.Equal("ffmpeg-window-region", CaptureBackendSelector.SelectBackendType("window"));
+        Assert.Equal("ffmpeg-window-region", CaptureBackendSelector.SelectBackendType(new CaptureConfig { SourceKind = "window" }));
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
         try
         {
-            Assert.Equal("wgc", CaptureBackendSelector.SelectBackendType("window"));
+            Assert.Equal("wgc", CaptureBackendSelector.SelectBackendType(new CaptureConfig { SourceKind = "window" }));
         }
         finally
         {
@@ -174,7 +174,7 @@ public class CaptureBackendSelectorTests
     public void Select_RegionSource_ReturnsFfmpegRegion()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        var (backend, type) = CaptureBackendSelector.Select("region");
+        var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "region" });
         Assert.NotNull(backend);
         Assert.Equal("ffmpeg-region", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
@@ -187,7 +187,7 @@ public class CaptureBackendSelectorTests
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
         try
         {
-            var (backend, type) = CaptureBackendSelector.Select("region");
+            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "region" });
             Assert.Equal("ffmpeg-region", type);
             Assert.IsType<FfmpegCaptureBackend>(backend);
         }
@@ -200,7 +200,7 @@ public class CaptureBackendSelectorTests
     [Fact]
     public void SelectBackendType_Region_ReturnsFfmpegRegion()
     {
-        Assert.Equal("ffmpeg-region", CaptureBackendSelector.SelectBackendType("region"));
+        Assert.Equal("ffmpeg-region", CaptureBackendSelector.SelectBackendType(new CaptureConfig { SourceKind = "region" }));
     }
 }
 
@@ -960,7 +960,10 @@ public class RecordingEngineWgcStillFrameTests
 
             Assert.DoesNotContain(meta.Warnings, w => w.Contains("Duration is 0", StringComparison.Ordinal));
             Assert.DoesNotContain(rec.Warnings, w => w.Contains("zero_duration", StringComparison.Ordinal));
-            Assert.True(tray.SetRecordingCallCount >= 1, "SetRecording should be called before Start()");
+            // Synchronous WGC still-frame finalizes inside Start(), so the recording
+            // never enters the user-visible recording state and REC is not shown.
+            Assert.Equal(0, tray.SetRecordingCallCount);
+            Assert.True(tray.SetIdleCallCount >= 1, "SetIdle should be called after synchronous completion");
             Assert.True(File.Exists(scope.ExpectedAuditLogPath), "Audit log should be written to isolated test directory: " + scope.ExpectedAuditLogPath);
         }
         finally
@@ -1206,7 +1209,7 @@ public class RecordingEngineWgcStillFrameTests
         {
             var engine = new RecordingEngine(new AgentRecorder.Logging.AuditLogger());
             var factory = engine.BackendFactory;
-            var (backend, backendType) = factory("window");
+            var (backend, backendType) = factory(new CaptureConfig { SourceKind = "window" });
 
             Assert.NotNull(backend);
             Assert.Equal("ffmpeg-window-region", backendType);

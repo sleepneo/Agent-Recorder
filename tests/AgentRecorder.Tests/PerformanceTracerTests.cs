@@ -86,8 +86,23 @@ public class PerformanceTracerTests : IDisposable
         public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) =>
             Events.Add((traceId, "capture.backend_start_failed"));
 
+        public void MicrophonePrepareStarted(string traceId, string recordingId) =>
+            Events.Add((traceId, "microphone_prepare_started"));
+
+        public void MicrophoneReady(string traceId, string recordingId) =>
+            Events.Add((traceId, "microphone_ready"));
+
+        public void CountdownStarted(string traceId, string recordingId) =>
+            Events.Add((traceId, "countdown_started"));
+
         public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) =>
             Events.Add((traceId, "capture.first_frame_observed"));
+
+        public void CaptureEnded(string traceId, string recordingId) =>
+            Events.Add((traceId, "capture_ended"));
+
+        public void FinalizationCompleted(string traceId, string recordingId, bool success) =>
+            Events.Add((traceId, "finalization_completed"));
 
         public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) =>
             Events.Add((traceId, "recording.terminal"));
@@ -278,9 +293,10 @@ public class PerformanceTracerTests : IDisposable
         }
 
         await Task.WhenAll(tasks);
-        writer.Flush();
+        writer.Flush(TimeSpan.FromSeconds(10));
 
         var written = ReadAllLines(path).ToHashSet();
+        Assert.Equal(0, writer.DroppedCount);
         Assert.Equal(expected.Count, written.Count);
         foreach (var line in expected)
         {

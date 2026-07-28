@@ -111,3 +111,18 @@ X-Agent-Recorder-Key: <api-key>
 The tray menu provides a Chinese/English language selector. The choice is
 persisted locally and applies to newly opened selection, confirmation, and
 recording-control windows.
+
+## Portable Package Contents
+
+```text
+AgentRecorder.App\                 desktop application and local UI
+AgentRecorder.Headless\            advanced non-interactive service host
+AgentRecorder.Cli\                 agent startup/readiness helper
+AgentRecorder.AudioHelper\         isolated WASAPI microphone helper
+README.md                          English overview
+QUICKSTART.md                      this guide
+AGENT-INSTRUCTIONS.zh-CN.md        agent operating instructions
+AGENT-API-REFERENCE.zh-CN.md       agent API reference
+LICENSE                            Agent Recorder MIT license
+LICENSE-NOTICE.md                  third-party license notices
+```

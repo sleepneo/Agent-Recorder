@@ -391,7 +391,7 @@ public class RecordingEngineElapsedSecondsTests : IDisposable
     }
 
     [Fact]
-    public void BackendStartThrow_AfterStartedAt_SetsCompletedAtUtcAndStableElapsed()
+    public void BackendStartThrow_BeforeFirstFrame_FailsWithoutStartedAtAndStableElapsed()
     {
         var engine = CreateEngine();
         var rec = new Recording
@@ -403,7 +403,10 @@ public class RecordingEngineElapsedSecondsTests : IDisposable
         engine.BackendFactory = _ => (new ThrowingBackend("boom"), "fake");
         engine.StartCaptureForTests(rec, new NoOpTray());
 
-        Assert.True(rec.StartedAtUtc != default);
+        // The backend threw before any credible first-frame evidence, so the
+        // recording never entered the user-visible recording state.
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal(default, rec.StartedAtUtc);
         Assert.True(rec.CompletedAtUtc.HasValue);
 
         var first = GetElapsedSeconds(engine.GetStatus(rec.Id));
@@ -411,7 +414,7 @@ public class RecordingEngineElapsedSecondsTests : IDisposable
         var second = GetElapsedSeconds(engine.GetStatus(rec.Id));
 
         Assert.Equal(first, second);
-        Assert.True(first >= 0);
+        Assert.Equal(0, first);
 
         // This is the path that previously wrote to the real user audit log.
         // Verify it is now isolated in the test temp directory.

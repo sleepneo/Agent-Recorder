@@ -1720,7 +1720,12 @@ public class PerformanceTraceIntegrationTests : IDisposable
         public void CaptureStartRequested(string traceId, string recordingId, string backendType) => _events.Add((traceId, "capture.start_requested"));
         public void CaptureBackendStartReturned(string traceId, string recordingId, string backendType) => _events.Add((traceId, "capture.backend_start_returned"));
         public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) => _events.Add((traceId, "capture.backend_start_failed"));
+        public void MicrophonePrepareStarted(string traceId, string recordingId) => _events.Add((traceId, "microphone_prepare_started"));
+        public void MicrophoneReady(string traceId, string recordingId) => _events.Add((traceId, "microphone_ready"));
+        public void CountdownStarted(string traceId, string recordingId) => _events.Add((traceId, "countdown_started"));
         public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) => _events.Add((traceId, "capture.first_frame_observed"));
+        public void CaptureEnded(string traceId, string recordingId) => _events.Add((traceId, "capture_ended"));
+        public void FinalizationCompleted(string traceId, string recordingId, bool success) => _events.Add((traceId, "finalization_completed"));
         public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) => _events.Add((traceId, "recording.terminal"));
         public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) => _events.Add((traceId, "long_poll.completed"));
         public void Flush() { }
@@ -1753,7 +1758,12 @@ public class PerformanceTraceIntegrationTests : IDisposable
         public void CaptureStartRequested(string traceId, string recordingId, string backendType) => _inner.CaptureStartRequested(traceId, recordingId, backendType);
         public void CaptureBackendStartReturned(string traceId, string recordingId, string backendType) => _inner.CaptureBackendStartReturned(traceId, recordingId, backendType);
         public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) => _inner.CaptureBackendStartFailed(traceId, recordingId, backendType, errorCode, errorType);
+        public void MicrophonePrepareStarted(string traceId, string recordingId) => _inner.MicrophonePrepareStarted(traceId, recordingId);
+        public void MicrophoneReady(string traceId, string recordingId) => _inner.MicrophoneReady(traceId, recordingId);
+        public void CountdownStarted(string traceId, string recordingId) => _inner.CountdownStarted(traceId, recordingId);
         public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) => _inner.CaptureFirstFrameObserved(traceId, recordingId, evidence);
+        public void CaptureEnded(string traceId, string recordingId) => _inner.CaptureEnded(traceId, recordingId);
+        public void FinalizationCompleted(string traceId, string recordingId, bool success) => _inner.FinalizationCompleted(traceId, recordingId, success);
         public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) => _inner.RecordingTerminal(traceId, recordingId, status, stopReason, errorCode);
         public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) => _inner.LongPollCompleted(traceId, kind, requestedWaitMs, actualWaitMs, changed, recordingId, confirmationId);
         public void Flush() => _inner.Flush();

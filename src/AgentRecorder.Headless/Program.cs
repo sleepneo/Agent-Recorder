@@ -238,8 +238,20 @@ internal static class Program
     private static void Run(HeadlessOptions opts)
     {
         _dataDir = DataDirResolver.Resolve();
+        var dataDir = _dataDir;
 
         WritePidFile(opts.PidFile);
+
+        // Cleanup failed-recording diagnostics older than 24 hours. Failure here
+        // must not block startup, and the scope is limited to <data-dir>/failed/.
+        try
+        {
+            new TempRetentionPolicy(dataDir).Cleanup();
+        }
+        catch
+        {
+            // Best-effort cleanup; do not prevent service startup.
+        }
 
         var audit = new AuditLogger();
         _audit = audit;

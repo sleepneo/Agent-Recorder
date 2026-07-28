@@ -15,7 +15,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Capture;
 
-public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend
+public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IMicrophoneStatusConsumer
 {
     private Process? _proc;
     private string _output = "";
@@ -28,10 +28,25 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     private bool _hasExited = false;
     private bool _manualStopped = false;
     private int _firstFrameObserved;
+    private long _runtimeAudioLostAtMs;
+    private IMicrophoneStatusProvider? _microphoneStatusProvider;
+    private CancellationTokenSource? _microphoneMonitorCts;
+    private Task? _microphoneMonitorTask;
 
     private static readonly TimeSpan StdoutDrainTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MicrophoneMonitorInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MicrophoneMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
 
     public event Action<FirstFrameObservation>? FirstFrameObserved;
+
+    /// <summary>
+    /// Injected microphone status provider used to supervise the capture
+    /// endpoint while a recording is active. May be null.
+    /// </summary>
+    public IMicrophoneStatusProvider MicrophoneStatusProvider
+    {
+        set => _microphoneStatusProvider = value;
+    }
 
     public void Start(CaptureConfig cfg)
     {
@@ -128,6 +143,8 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             RunNaturalExitLifecycle(_stdoutReader!, exitCode, _output, _stderrLog, StdoutDrainTimeout,
                 (code, meta) => _onNaturalExit?.Invoke(code, meta));
         });
+
+        StartMicrophoneMonitor(cfg);
     }
 
     private Action<int, OutputMeta>? _onNaturalExit;
@@ -216,8 +233,10 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         string stderr;
         lock (_lock) stderr = stderrLog.ToString();
         meta.StderrLog = stderr;
-        ClassifyAudioOutcome(meta, stderr, _cfg);
+        ClassifyAudioOutcome(meta, stderr, _cfg, _runtimeAudioLostAtMs);
         _completionMeta = meta;
+
+        StopMicrophoneMonitor();
 
         lock (_lock)
         {
@@ -237,7 +256,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
         var meta = Probe(output);
         meta.StderrLog = stderr;
-        ClassifyAudioOutcome(meta, stderr, _cfg);
+        ClassifyAudioOutcome(meta, stderr, _cfg, _runtimeAudioLostAtMs);
         _completionMeta = meta;
         _hasExited = true;
         return meta;
@@ -270,7 +289,9 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         // Wait for any remaining -progress lines to be processed before the
         // caller finalizes the recording. This keeps first-frame observations
         // ordered before recording.terminal in the performance trace.
-        return RunStopLifecycle(_stdoutReader!, _output, stderr, StdoutDrainTimeout);
+        var meta = RunStopLifecycle(_stdoutReader!, _output, stderr, StdoutDrainTimeout);
+        StopMicrophoneMonitor();
+        return meta;
     }
 
     public bool HasExited => _proc?.HasExited ?? _hasExited;
@@ -283,6 +304,111 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             return -1;
         }
     }
+
+    /// <summary>
+    /// Starts a bounded, cancellable monitor that watches the selected microphone
+    /// endpoint while recording. The monitor only flags a loss after it has
+    /// first observed an active state and then sees inactive/unavailable.
+    /// Unknown states are ignored. The monitor is tied to this recording instance
+    /// and does not use any global threads.
+    /// </summary>
+    private void StartMicrophoneMonitor(CaptureConfig cfg)
+    {
+        if (!cfg.Microphone || _microphoneStatusProvider == null)
+            return;
+
+        var deviceId = string.IsNullOrEmpty(cfg.MicDevice) ? "default" : cfg.MicDevice;
+        var cts = new CancellationTokenSource();
+        var oldCts = Interlocked.CompareExchange(ref _microphoneMonitorCts, cts, null);
+        if (oldCts != null)
+        {
+            cts.Dispose();
+            return; // already running
+        }
+
+        _microphoneMonitorTask = Task.Run(() => RunMicrophoneMonitorAsync(deviceId, cts.Token), cts.Token);
+    }
+
+    private async Task RunMicrophoneMonitorAsync(string deviceId, CancellationToken cancellationToken)
+    {
+        bool? wasActive = null;
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                MicrophoneStatus status;
+                try
+                {
+                    status = await _microphoneStatusProvider!.GetStatusAsync(deviceId, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // Provider failure is treated as unknown; do not flip to lost.
+                    status = new MicrophoneStatus(null, null, null, null);
+                }
+
+                // "unknown" (all null) must not be interpreted as lost.
+                if (string.IsNullOrEmpty(status.State))
+                {
+                    await Task.Delay(MicrophoneMonitorInterval, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool isActive = string.Equals(status.State, "Active", StringComparison.OrdinalIgnoreCase);
+
+                if (wasActive == true && !isActive)
+                {
+                    Interlocked.CompareExchange(ref _runtimeAudioLostAtMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0);
+                    break; // loss detected; stop monitoring
+                }
+
+                wasActive = isActive;
+                await Task.Delay(MicrophoneMonitorInterval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown.
+        }
+        catch
+        {
+            // Monitor failures must never affect video recording.
+        }
+    }
+
+    /// <summary>
+    /// Stops the microphone monitor and waits for it to complete. Safe to call
+    /// more than once and from either the Stop() path or the natural-exit path.
+    /// </summary>
+    private void StopMicrophoneMonitor()
+    {
+        var cts = Interlocked.Exchange(ref _microphoneMonitorCts, null);
+        if (cts == null)
+            return;
+
+        try { cts.Cancel(); } catch { }
+
+        var task = _microphoneMonitorTask;
+        if (task != null)
+        {
+            try { task.Wait(MicrophoneMonitorShutdownTimeout); } catch { }
+        }
+
+        try { cts.Dispose(); } catch { }
+    }
+
+    // Silence-detection constants. These are chosen to catch Bluetooth/ wireless
+    // microphone dropouts and slow-start artifacts without flagging normal pauses.
+    // They are public for tests and must stay in sync with the parser thresholds.
+    internal const double SilenceDetectThresholdDb = -50.0;
+    internal const double SilenceDetectMinDurationSeconds = 3.0;
+    internal const double InternalSilenceWarningThresholdSeconds = 3.0;
 
     internal static List<string> BuildArgs(CaptureConfig cfg)
     {
@@ -300,12 +426,16 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         args.Add("-progress");
         args.Add("pipe:1");
 
-        AppendVideoInputArgs(args, cfg);
-
+        // When a microphone is enabled, open the (potentially slow-starting)
+        // dshow audio input FIRST so that FFmpeg blocks on audio readiness
+        // before gdigrab begins capturing screen frames. This prevents the
+        // confirmation window from being recorded while the microphone initializes.
         if (cfg.Microphone)
         {
             AppendAudioInputArgs(args, cfg);
         }
+
+        AppendVideoInputArgs(args, cfg);
 
         AppendOutputArgs(args, cfg);
 
@@ -378,6 +508,18 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             args.Add("scale=1920:1080:force_original_aspect_ratio=decrease");
         }
 
+        // With microphone enabled the dshow audio input is index 0 and the
+        // gdigrab video input is index 1. Explicit -map makes the final
+        // stream selection independent of input order and guarantees a single
+        // video stream plus the selected audio stream.
+        if (cfg.Microphone)
+        {
+            args.Add("-map");
+            args.Add("0:a:0");
+            args.Add("-map");
+            args.Add("1:v:0");
+        }
+
         args.Add("-c:v");
         args.Add("libx264");
         args.Add("-preset");
@@ -399,7 +541,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             args.Add("-b:a");
             args.Add("128k");
             args.Add("-af");
-            args.Add("aresample=async=1:first_pts=0");
+            args.Add(BuildAudioFilter(cfg));
         }
 
         // Output-level duration guarantees the whole muxed output stops at the
@@ -413,6 +555,18 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         args.Add("-movflags");
         args.Add("+faststart");
         args.Add(cfg.OutputPath);
+    }
+
+    /// <summary>
+    /// Builds the audio filter chain for microphone captures. aresample keeps
+    /// A/V sync robust; silencedetect runs after resampling and emits stderr
+    /// markers for later continuity diagnosis without changing the audio stream.
+    /// </summary>
+    private static string BuildAudioFilter(CaptureConfig cfg)
+    {
+        var thresholdDb = SilenceDetectThresholdDb.ToString(CultureInfo.InvariantCulture);
+        var minDuration = SilenceDetectMinDurationSeconds.ToString(CultureInfo.InvariantCulture);
+        return $"aresample=async=1:first_pts=0,silencedetect=noise={thresholdDb}dB:d={minDuration}";
     }
 
     /// <summary>
@@ -442,20 +596,22 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     }
 
     /// <summary>
-    /// Examines stderr for stable, non-localized signs of microphone failure
-    /// and records the result in <paramref name="meta"/>. Both <c>recorded</c>
-    /// and <c>lost</c> require the final output to contain a compliant AAC audio
-    /// stream, as reported by ffprobe. Stderr only distinguishes between an
-    /// explicit open failure, a runtime loss with media evidence, and a clean
-    /// capture. This prevents falsely claiming success when FFmpeg exits cleanly
-    /// but produces a silent video, or claiming <c>lost</c> when there was never
-    /// an audio track to lose.
+    /// Examines stderr for stable, non-localized signs of microphone failure,
+    /// runtime CoreAudio device loss, and internal long silences. Records the
+    /// result in <paramref name="meta"/>. Both <c>recorded</c> and <c>lost</c>
+    /// require the final output to contain a compliant AAC audio stream, as
+    /// reported by ffprobe. Stderr only distinguishes between an explicit open
+    /// failure, a runtime loss with media evidence, and a clean capture. This
+    /// prevents falsely claiming success when FFmpeg exits cleanly but produces
+    /// a silent video, or claiming <c>lost</c> when there was never an audio
+    /// track to lose.
     /// </summary>
-    private static void ClassifyAudioOutcome(OutputMeta meta, string stderr, CaptureConfig? cfg)
+    private static void ClassifyAudioOutcome(OutputMeta meta, string stderr, CaptureConfig? cfg, long runtimeAudioLostAtMs)
     {
         if (cfg == null || !cfg.Microphone)
         {
             meta.AudioStatus = "not_requested";
+            meta.AudioContinuityStatus = "not_checked";
             return;
         }
 
@@ -472,6 +628,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         if (openFailed)
         {
             meta.AudioStatus = "start_failed";
+            meta.AudioContinuityStatus = "not_checked";
             meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
                 .Append("microphone_start_failed: ffmpeg could not open the selected audio device")
                 .ToArray();
@@ -487,18 +644,20 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         if (!hasAacTrack)
         {
             meta.AudioStatus = "missing_audio_track";
+            meta.AudioContinuityStatus = "not_checked";
             meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
                 .Append("microphone_missing_audio_track: the output does not contain an AAC audio stream")
                 .ToArray();
             return;
         }
 
-        // Runtime device loss / disconnection. These patterns require an actual
-        // AAC track as evidence that audio was present before being lost.
-        // "buffer underrun" on its own is treated as a transient queue pressure
-        // warning, not as proof of permanent device loss, so it does not flip
-        // the status to lost.
-        bool lostInCapture = lower.Contains("error reading input") ||
+        // Runtime device loss / disconnection. CoreAudio evidence (when available)
+        // takes precedence over stderr heuristics because it is tied to the
+        // specific endpoint. Stderr patterns require an actual AAC track as
+        // evidence that audio was present before being lost.
+        bool runtimeLost = runtimeAudioLostAtMs > 0;
+        bool lostInCapture = runtimeLost ||
+                             lower.Contains("error reading input") ||
                              (lower.Contains("i/o error") && lower.Contains("dshow"));
 
         bool bufferUnderrun = lower.Contains("buffer underrun");
@@ -506,6 +665,8 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         if (lostInCapture)
         {
             meta.AudioStatus = "lost";
+            meta.AudioContinuityStatus = "not_checked";
+            meta.AudioLostAtMs = runtimeLost ? runtimeAudioLostAtMs : null;
             meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
                 .Append("microphone_lost: audio input was lost during recording")
                 .ToArray();
@@ -516,6 +677,22 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         {
             meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
                 .Append("microphone_buffer_underrun: transient audio queue pressure detected")
+                .ToArray();
+        }
+
+        // Non-destructive continuity check: internal long silences produce a
+        // warning but do not flip the status away from recorded.
+        var silence = SilenceIntervalParser.ParseAndClassify(
+            stderr ?? "",
+            meta.DurationSeconds,
+            InternalSilenceWarningThresholdSeconds);
+
+        meta.AudioContinuityStatus = silence.HasInternalSilence ? "degraded" : "continuous";
+        if (silence.HasInternalSilence)
+        {
+            var longest = silence.LongestInternalSeconds;
+            meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
+                .Append($"microphone_signal_interruption_suspected: internal silence {longest:F1}s >= {InternalSilenceWarningThresholdSeconds:F1}s")
                 .ToArray();
         }
 

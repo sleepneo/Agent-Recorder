@@ -864,14 +864,14 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     }
 
     // -----------------------------------------------------------------
-    // 14. CaptureBackendSelector.Select("display") 仍返回 FFmpeg
+    // 14. CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "display" }) 仍返回 FFmpeg
     // -----------------------------------------------------------------
 
     [Fact]
     public void CaptureBackendSelector_Display_StillReturnsFfmpeg()
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        var (backend, type) = CaptureBackendSelector.Select("display");
+        var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "display" });
         Assert.Equal("ffmpeg", type);
         Assert.IsType<FfmpegCaptureBackend>(backend);
     }

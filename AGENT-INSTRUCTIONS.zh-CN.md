@@ -353,6 +353,8 @@ AgentRecorder.Cli.exe autostart disable --json
 - 状态 `rejected` -> 录制被拒绝，告知用户
 - 状态 `expired` -> 确认超时，建议重试
 
+用户批准后，录制可能依次经过 `preparing`（准备麦克风）、`countdown`（3-2-1 倒计时）、`recording`（屏幕捕获）、`finalizing`（保存处理）。Agent 只需继续轮询 `/recordings/{id}` 直到进入 `completed`/`failed`/`cancelled` 终态，无需单独处理中间状态。
+
 复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、精确来源与停止条件等）仍可使用原始 `POST /api/v1/recordings`。
 
 ### 停止录制

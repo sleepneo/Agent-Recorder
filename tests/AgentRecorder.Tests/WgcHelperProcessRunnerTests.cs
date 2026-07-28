@@ -96,10 +96,13 @@ Start-Sleep -Seconds 30
             File.WriteAllText(scriptPath, script);
 
             var sw = Stopwatch.StartNew();
+            // Give PowerShell enough time to cold-start and build the three-level
+            // process tree before the runner timeout fires, so the test can verify
+            // both the ready-signal creation and the kill-tree behavior.
             var result = runner.Run(
                 "powershell.exe",
                 new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, pidFile, readyFile, "0" },
-                timeoutMs: 3000);
+                timeoutMs: 8000);
             sw.Stop();
 
             var report = new StringBuilder();

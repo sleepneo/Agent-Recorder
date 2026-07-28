@@ -47,4 +47,65 @@ public sealed class OutputMeta
     /// present. Null when no reliable evidence is available.
     /// </summary>
     public long? AudioLostAtMs;
+
+    /// <summary>
+    /// Best-effort continuity classification for the final media:
+    /// not_checked, continuous, degraded.
+    /// </summary>
+    public string? AudioContinuityStatus;
+
+    /// <summary>video media-start anchor availability: available or missing.</summary>
+    public string? VideoAnchorStatus;
+
+    /// <summary>audio media-start anchor availability: available or missing.</summary>
+    public string? AudioAnchorStatus;
+
+    /// <summary>Computed audio pre-roll before video start, in milliseconds.</summary>
+    public double? AudioPreRollMs;
+
+    /// <summary>Probe duration of the temporary video before mux, in seconds.</summary>
+    public double? TempVideoDurationSeconds;
+
+    /// <summary>Probe duration of the temporary audio before mux, in seconds.</summary>
+    public double? TempAudioDurationSeconds;
+
+    /// <summary>Required audio coverage before mux, in seconds.</summary>
+    public double? RequiredAudioCoverageSeconds;
+
+    /// <summary>Actual audio duration minus required coverage, in seconds.</summary>
+    public double? AudioCoverageDeltaSeconds;
+
+    /// <summary>True when the production audio worker requested timestamp compensation.</summary>
+    public bool? AudioTimestampCompensationApplied;
+
+    /// <summary>Bounded summary of detected audio timeline holes, in seconds.</summary>
+    public double? AudioTimestampCompensationGapSeconds;
+
+    /// <summary>Audio capture backend identifier: "wasapi-helper" or "dshow".</summary>
+    public string? AudioCaptureBackend;
+
+    /// <summary>Audio helper protocol/version summary.</summary>
+    public string? AudioHelperProtocol;
+
+    /// <summary>Observed audio sample rate.</summary>
+    public int? AudioSampleRate;
+
+    /// <summary>Observed audio channel count.</summary>
+    public int? AudioChannels;
+
+    /// <summary>Observed audio bits per sample.</summary>
+    public int? AudioBitsPerSample;
+
+    /// <summary>Audio capture method summary (e.g. "WASAPI_SHARED_CAPTURE").</summary>
+    public string? AudioCaptureMethod;
+
+    /// <summary>Estimated cumulative audio gap reported by the helper, in milliseconds.</summary>
+    public long? AudioEstimatedGapMs;
+
+    /// <summary>
+    /// Stable error code from the WASAPI helper, normalized to the allowlist
+    /// of machine-readable codes. Null when no helper was used or no error
+    /// was reported.
+    /// </summary>
+    public string? AudioHelperErrorCode;
 }

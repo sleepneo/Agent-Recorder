@@ -1,0 +1,460 @@
+using System.Diagnostics;
+using System.Globalization;
+
+namespace AgentRecorder.Capture;
+
+/// <summary>
+/// Parses the blank-line-delimited event stream produced by
+/// AgentRecorder.AudioHelper.exe on stdout. Supports \n and \r\n line endings
+/// and blank lines that may contain spaces or tabs.
+/// </summary>
+public static class AudioHelperEventStreamParser
+{
+    /// <summary>
+    /// Parses the helper stdout into a list of structured events.
+    /// Never throws - returns an empty list on empty/malformed input.
+    /// </summary>
+    public static List<AudioHelperEvent> ParseEvents(string? stdout)
+    {
+        var events = new List<AudioHelperEvent>();
+        if (string.IsNullOrWhiteSpace(stdout))
+            return events;
+
+        var blockLines = new List<string>();
+        using (var reader = new StringReader(stdout))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (line.Trim().Length == 0)
+                {
+                    if (blockLines.Count > 0)
+                    {
+                        var evt = ParseEventBlock(blockLines);
+                        if (evt != null)
+                            events.Add(evt);
+                        blockLines.Clear();
+                    }
+                    continue;
+                }
+                blockLines.Add(line);
+            }
+        }
+
+        if (blockLines.Count > 0)
+        {
+            var evt = ParseEventBlock(blockLines);
+            if (evt != null)
+                events.Add(evt);
+        }
+
+        return events;
+    }
+
+    /// <summary>
+    /// Parses a single event block (key-value pairs separated by newlines).
+    /// </summary>
+    internal static AudioHelperEvent? ParseEventBlock(List<string> lines)
+    {
+        var evt = new AudioHelperEvent();
+        bool hasResult = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+                continue;
+
+            int colonIdx = line.IndexOf(": ", StringComparison.Ordinal);
+            if (colonIdx <= 0)
+                continue;
+
+            var key = line.Substring(0, colonIdx).Trim();
+            var value = line.Substring(colonIdx + 2).Trim();
+
+            switch (key)
+            {
+                case "RESULT":
+                    evt.Result = ParseResult(value);
+                    hasResult = true;
+                    break;
+                case "Stage":
+                    evt.Stage = value;
+                    break;
+                case "RecordingId":
+                    evt.RecordingId = value;
+                    break;
+                case "SampleRate":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sr))
+                        evt.SampleRate = sr;
+                    else
+                        evt.SampleRateParseFailed = true;
+                    break;
+                case "Channels":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ch))
+                        evt.Channels = ch;
+                    else
+                        evt.ChannelsParseFailed = true;
+                    break;
+                case "BitsPerSample":
+                    if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bps))
+                        evt.BitsPerSample = bps;
+                    else
+                        evt.BitsPerSampleParseFailed = true;
+                    break;
+                case "FirstSampleAnchorTicks":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var fst))
+                        evt.FirstSampleAnchorTicks = fst;
+                    else
+                        evt.FirstSampleAnchorTicksParseFailed = true;
+                    break;
+                case "TimestampFrequency":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var tf))
+                        evt.TimestampFrequency = tf;
+                    else
+                        evt.TimestampFrequencyParseFailed = true;
+                    break;
+                case "BytesWritten":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bw))
+                        evt.BytesWritten = bw;
+                    else
+                        evt.BytesWrittenParseFailed = true;
+                    break;
+                case "CaptureMethod":
+                    evt.CaptureMethod = value;
+                    break;
+                case "ElapsedMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var em))
+                        evt.ElapsedMs = em;
+                    else
+                        evt.ElapsedMsParseFailed = true;
+                    break;
+                case "WallElapsedMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var wm))
+                        evt.WallElapsedMs = wm;
+                    else
+                        evt.WallElapsedMsParseFailed = true;
+                    break;
+                case "EstimatedGapMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var eg))
+                        evt.EstimatedGapMs = eg;
+                    else
+                        evt.EstimatedGapMsParseFailed = true;
+                    break;
+                case "DurationMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var dm))
+                        evt.DurationMs = dm;
+                    else
+                        evt.DurationMsParseFailed = true;
+                    break;
+                case "StopReason":
+                    evt.StopReason = value;
+                    break;
+                case "ErrorCode":
+                    evt.ErrorCode = value;
+                    break;
+                case "Reason":
+                    evt.Reason = value;
+                    break;
+                case "HRESULT":
+                    evt.Hresult = value;
+                    break;
+                case "PartialOutputPath":
+                    evt.PartialOutputPath = value;
+                    break;
+                    // Unknown fields: ignore for forward compatibility.
+            }
+        }
+
+        return hasResult ? evt : null;
+    }
+
+    private static AudioHelperEventResult ParseResult(string value)
+    {
+        return value.ToUpperInvariant() switch
+        {
+            "STARTED" => AudioHelperEventResult.Started,
+            "PROGRESS" => AudioHelperEventResult.Progress,
+            "OK" => AudioHelperEventResult.Ok,
+            "STOPPED" => AudioHelperEventResult.Stopped,
+            "FAIL" => AudioHelperEventResult.Fail,
+            _ => AudioHelperEventResult.Unknown
+        };
+    }
+
+    /// <summary>
+    /// Validates the event sequence according to the audio helper state machine.
+    /// Returns a summary with the terminal state and any validation errors.
+    /// </summary>
+    public static AudioHelperSessionSummary ValidateAndSummarize(List<AudioHelperEvent> events)
+    {
+        var summary = new AudioHelperSessionSummary();
+
+        if (events.Count == 0)
+        {
+            summary.State = AudioHelperSessionState.MalformedSequence;
+            summary.ValidationErrors.Add("No events in stream");
+            return summary;
+        }
+
+        bool seenStarted = false;
+        bool seenTerminalEvent = false;
+        bool hasMalformedSequence = false;
+        string? firstRecordingId = null;
+
+        long lastElapsedMs = -1;
+        long lastWallElapsedMs = -1;
+        long lastBytesWritten = -1;
+        long lastEstimatedGapMs = -1;
+
+        foreach (var evt in events)
+        {
+            if (evt.HasNumericParseError)
+                summary.HasNumericParseError = true;
+
+            switch (evt.Result)
+            {
+                case AudioHelperEventResult.Started:
+                    if (seenStarted || seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Duplicate or out-of-order STARTED event");
+                    }
+                    seenStarted = true;
+                    firstRecordingId = evt.RecordingId;
+
+                    if (string.IsNullOrEmpty(evt.RecordingId))
+                        summary.ValidationErrors.Add("STARTED event missing required field: RecordingId");
+                    if (!evt.SampleRate.HasValue || evt.SampleRate <= 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: SampleRate");
+                    if (!evt.Channels.HasValue || evt.Channels <= 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: Channels");
+                    if (!evt.BitsPerSample.HasValue || evt.BitsPerSample <= 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: BitsPerSample");
+                    if (!evt.FirstSampleAnchorTicks.HasValue || evt.FirstSampleAnchorTicks <= 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: FirstSampleAnchorTicks");
+                    if (!evt.TimestampFrequency.HasValue || evt.TimestampFrequency <= 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: TimestampFrequency");
+
+                    summary.RecordingId = evt.RecordingId;
+                    summary.SampleRate = evt.SampleRate;
+                    summary.Channels = evt.Channels;
+                    summary.BitsPerSample = evt.BitsPerSample;
+                    summary.FirstSampleAnchorTicks = evt.FirstSampleAnchorTicks;
+                    summary.TimestampFrequency = evt.TimestampFrequency;
+                    if (!evt.BytesWritten.HasValue || evt.BytesWritten < 0)
+                        summary.ValidationErrors.Add("STARTED event missing required field: BytesWritten");
+
+                    summary.CaptureMethod = evt.CaptureMethod;
+                    break;
+
+                case AudioHelperEventResult.Progress:
+                    if (!seenStarted)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("PROGRESS event before STARTED");
+                    }
+                    if (seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("PROGRESS event after terminal event");
+                    }
+
+                    if (!evt.ElapsedMs.HasValue)
+                        summary.ValidationErrors.Add("PROGRESS event missing required field: ElapsedMs");
+                    else if (evt.ElapsedMs.Value < 0)
+                        summary.ValidationErrors.Add("PROGRESS event has negative ElapsedMs");
+                    else if (evt.ElapsedMs.Value < lastElapsedMs)
+                        summary.ValidationErrors.Add("PROGRESS event ElapsedMs regressed");
+
+                    if (!evt.WallElapsedMs.HasValue)
+                        summary.ValidationErrors.Add("PROGRESS event missing required field: WallElapsedMs");
+                    else if (evt.WallElapsedMs.Value < 0)
+                        summary.ValidationErrors.Add("PROGRESS event has negative WallElapsedMs");
+                    else if (evt.WallElapsedMs.Value < lastWallElapsedMs)
+                        summary.ValidationErrors.Add("PROGRESS event WallElapsedMs regressed");
+
+                    if (!evt.BytesWritten.HasValue)
+                        summary.ValidationErrors.Add("PROGRESS event missing required field: BytesWritten");
+                    else if (evt.BytesWritten.Value < 0)
+                        summary.ValidationErrors.Add("PROGRESS event has negative BytesWritten");
+                    else if (evt.BytesWritten.Value < lastBytesWritten)
+                        summary.ValidationErrors.Add("PROGRESS event BytesWritten regressed");
+
+                    if (!evt.EstimatedGapMs.HasValue)
+                        summary.ValidationErrors.Add("PROGRESS event missing required field: EstimatedGapMs");
+                    else if (evt.EstimatedGapMs.Value < 0)
+                        summary.ValidationErrors.Add("PROGRESS event has negative EstimatedGapMs");
+                    else if (evt.EstimatedGapMs.Value < lastEstimatedGapMs)
+                        summary.ValidationErrors.Add("PROGRESS event EstimatedGapMs regressed");
+
+                    if (evt.ElapsedMs.HasValue && evt.ElapsedMs.Value >= 0)
+                        lastElapsedMs = evt.ElapsedMs.Value;
+                    if (evt.WallElapsedMs.HasValue && evt.WallElapsedMs.Value >= 0)
+                        lastWallElapsedMs = evt.WallElapsedMs.Value;
+                    if (evt.BytesWritten.HasValue && evt.BytesWritten.Value >= 0)
+                        lastBytesWritten = evt.BytesWritten.Value;
+                    if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value >= 0)
+                        lastEstimatedGapMs = evt.EstimatedGapMs.Value;
+                    break;
+
+                case AudioHelperEventResult.Ok:
+                    if (!seenStarted)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("OK event without prior STARTED");
+                    }
+                    if (seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Duplicate terminal event (OK)");
+                    }
+                    seenTerminalEvent = true;
+                    summary.State = AudioHelperSessionState.Success;
+                    summary.DurationMs = evt.DurationMs;
+                    summary.BytesWritten = evt.BytesWritten;
+                    summary.EstimatedGapMs = evt.EstimatedGapMs;
+                    summary.StopReason = "duration_reached";
+                    break;
+
+                case AudioHelperEventResult.Stopped:
+                    if (!seenStarted)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("STOPPED event without prior STARTED");
+                    }
+                    if (seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Duplicate terminal event (STOPPED)");
+                    }
+                    seenTerminalEvent = true;
+                    summary.State = AudioHelperSessionState.Stopped;
+                    summary.DurationMs = evt.DurationMs ?? evt.ElapsedMs;
+                    summary.BytesWritten = evt.BytesWritten;
+                    summary.EstimatedGapMs = evt.EstimatedGapMs;
+                    summary.StopReason = evt.StopReason ?? "user_requested";
+                    break;
+
+                case AudioHelperEventResult.Fail:
+                    if (!seenStarted)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("FAIL event without prior STARTED");
+                    }
+                    if (seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Duplicate terminal event (FAIL)");
+                    }
+                    seenTerminalEvent = true;
+                    summary.State = AudioHelperSessionState.Failed;
+                    summary.ErrorCode = evt.ErrorCode;
+                    summary.Reason = evt.Reason;
+                    summary.Hresult = evt.Hresult;
+                    summary.PartialOutputPath = evt.PartialOutputPath;
+                    summary.BytesWritten = evt.BytesWritten;
+                    summary.DurationMs = evt.DurationMs;
+                    summary.StopReason = evt.StopReason ?? evt.ErrorCode;
+
+                    if (string.IsNullOrEmpty(evt.ErrorCode))
+                        summary.ValidationErrors.Add("FAIL event missing required field: ErrorCode");
+                    break;
+
+                case AudioHelperEventResult.Unknown:
+                    hasMalformedSequence = true;
+                    summary.ValidationErrors.Add("Unknown RESULT value in event");
+                    break;
+            }
+
+            if (!string.IsNullOrEmpty(evt.RecordingId) && !string.IsNullOrEmpty(firstRecordingId))
+            {
+                if (evt.RecordingId != firstRecordingId)
+                {
+                    hasMalformedSequence = true;
+                    summary.ValidationErrors.Add($"RecordingId mismatch: expected '{firstRecordingId}', got '{evt.RecordingId}'");
+                }
+            }
+        }
+
+        if (!seenStarted && !seenTerminalEvent)
+        {
+            hasMalformedSequence = true;
+            summary.ValidationErrors.Add("No STARTED event found");
+        }
+
+        if (seenStarted && !seenTerminalEvent)
+        {
+            hasMalformedSequence = true;
+            summary.ValidationErrors.Add("No terminal event (OK/STOPPED/FAIL) found");
+        }
+
+        summary.HasMalformedSequence = hasMalformedSequence;
+
+        bool hasDeclarativeFailure = summary.State == AudioHelperSessionState.Failed && !string.IsNullOrEmpty(summary.ErrorCode);
+
+        if ((hasMalformedSequence || summary.ValidationErrors.Count > 0 || summary.HasNumericParseError) && !hasDeclarativeFailure)
+        {
+            summary.State = AudioHelperSessionState.MalformedSequence;
+        }
+
+        if (summary.FirstSampleAnchorTicks.HasValue &&
+            summary.TimestampFrequency.HasValue &&
+            summary.TimestampFrequency.Value != Stopwatch.Frequency)
+        {
+            summary.ValidationErrors.Add($"TimestampFrequency mismatch: helper={summary.TimestampFrequency.Value}, host={Stopwatch.Frequency}");
+            if (!hasDeclarativeFailure)
+                summary.State = AudioHelperSessionState.MalformedSequence;
+        }
+
+        return summary;
+    }
+
+    /// <summary>
+    /// Convenience method to parse and validate in one call.
+    /// </summary>
+    public static AudioHelperSessionSummary ParseAndValidate(string? stdout)
+    {
+        var events = ParseEvents(stdout);
+        return ValidateAndSummarize(events);
+    }
+}
+
+/// <summary>
+/// Terminal state of an audio helper session as derived from its event stream.
+/// </summary>
+public enum AudioHelperSessionState
+{
+    Unknown,
+    Success,
+    Stopped,
+    Failed,
+    MalformedSequence
+}
+
+/// <summary>
+/// Summary of a parsed audio helper event stream.
+/// </summary>
+public sealed class AudioHelperSessionSummary
+{
+    public AudioHelperSessionState State { get; set; }
+    public List<string> ValidationErrors { get; } = new();
+    public bool HasMalformedSequence { get; set; }
+    public bool HasNumericParseError { get; set; }
+
+    public string? RecordingId { get; set; }
+    public int? SampleRate { get; set; }
+    public int? Channels { get; set; }
+    public int? BitsPerSample { get; set; }
+    public long? FirstSampleAnchorTicks { get; set; }
+    public long? TimestampFrequency { get; set; }
+    public string? CaptureMethod { get; set; }
+    public long? DurationMs { get; set; }
+    public long? BytesWritten { get; set; }
+    public long? EstimatedGapMs { get; set; }
+    public string? StopReason { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? Reason { get; set; }
+    public string? Hresult { get; set; }
+    public string? PartialOutputPath { get; set; }
+}

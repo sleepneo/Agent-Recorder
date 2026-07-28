@@ -24,6 +24,7 @@ public sealed class RecordingBundleRequest
     public string StopReason { get; }
     public bool AudioMicrophone { get; }
     public string AudioStatus { get; }
+    public string? AudioContinuityStatus { get; }
     public string? AudioDeviceId { get; }
     public long? AudioLostAtMs { get; }
 
@@ -53,6 +54,7 @@ public sealed class RecordingBundleRequest
         string stopReason,
         bool audioMicrophone,
         string audioStatus,
+        string? audioContinuityStatus,
         string? audioDeviceId,
         long? audioLostAtMs,
         string? nestedRole,
@@ -79,6 +81,7 @@ public sealed class RecordingBundleRequest
         StopReason = stopReason ?? "";
         AudioMicrophone = audioMicrophone;
         AudioStatus = audioStatus ?? "not_requested";
+        AudioContinuityStatus = audioContinuityStatus;
         AudioDeviceId = audioDeviceId;
         AudioLostAtMs = audioLostAtMs;
         NestedRole = nestedRole;

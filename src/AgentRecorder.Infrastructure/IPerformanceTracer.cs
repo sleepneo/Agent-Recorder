@@ -55,12 +55,27 @@ public interface IPerformanceTracer
     /// <summary>Record that capture backend Start() threw.</summary>
     void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType);
 
+    /// <summary>Record that microphone/encoder warmup began after approval.</summary>
+    void MicrophonePrepareStarted(string traceId, string recordingId);
+
+    /// <summary>Record that the microphone produced credible audio samples.</summary>
+    void MicrophoneReady(string traceId, string recordingId);
+
+    /// <summary>Record that the 3-2-1 countdown started.</summary>
+    void CountdownStarted(string traceId, string recordingId);
+
     /// <summary>
     /// Record that the backend observed evidence of the first processed video
     /// frame with positive output bytes. Must be exactly-once per trace and must
     /// be ignored if the recording has already reached a terminal state.
     /// </summary>
     void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence);
+
+    /// <summary>Record that actual screen capture ended (before finalization).</summary>
+    void CaptureEnded(string traceId, string recordingId);
+
+    /// <summary>Record that finalization (mux/probe/bundle) completed.</summary>
+    void FinalizationCompleted(string traceId, string recordingId, bool success);
 
     /// <summary>Record that a recording reached a terminal state.</summary>
     void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null);

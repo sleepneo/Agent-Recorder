@@ -32,3 +32,13 @@ public sealed class NonParallelSystemQueryProvidersCollection
 public sealed class NonParallelWindowBackendCollection
 {
 }
+
+/// <summary>
+/// Collection for tests that mutate the injectable DWM composition flush used by
+/// <see cref="AgentRecorder.App.DwmCompositionBarrier"/>. Members never execute in
+/// parallel so static override state does not leak between tests.
+/// </summary>
+[CollectionDefinition("NonParallel-DwmCompositionBarrier", DisableParallelization = true)]
+public sealed class NonParallelDwmCompositionBarrierCollection
+{
+}

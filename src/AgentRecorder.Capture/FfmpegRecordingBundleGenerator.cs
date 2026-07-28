@@ -346,6 +346,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                 stop_reason = r.StopReason,
                 audio_microphone = r.AudioMicrophone,
                 audio_status = r.AudioStatus,
+                audio_continuity_status = (object?)(r.AudioContinuityStatus ?? null),
                 audio_device_id = (object?)(r.AudioDeviceId ?? null),
                 audio_lost_at_ms = (object?)(r.AudioLostAtMs ?? null),
                 nested_role = (object?)(r.NestedRole ?? "none"),

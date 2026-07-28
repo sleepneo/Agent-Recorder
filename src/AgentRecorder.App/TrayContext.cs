@@ -259,11 +259,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         var workingAreas = Screen.AllScreens.Select(screen => screen.WorkingArea).ToList();
         var fallbackWorkingArea = GetFallbackWorkingArea(captureBounds, workingAreas);
 
+        var confirmationId = current.ConfirmationId;
+        var recordingId = current.RecordingId;
+
         _currentForm = new ConfirmationForm(current, position, items.Count,
-            onResult: decision =>
-            {
-                ResolveCurrentConfirmation(decision, decision.Approved ? "confirmation.ui_approved" : "confirmation.ui_rejected");
-            },
+            onResult: null,
             defaultOutputDirectory: OutputSettingsStore.GetEffectiveDefaultOutputDir(),
             windowActivator: _confirmationWindowActivator,
             auditLogger: (evt, payload) => _audit.Log(evt, payload),
@@ -271,6 +271,30 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             fallbackWorkingArea: fallbackWorkingArea,
             textProvider: _uiText,
             tracer: _tracer);
+
+        _currentForm.Closed += (sender, e) =>
+        {
+            if (e.Decision == null) return;
+
+            var item = _confirmationQueue.ResolveCurrent();
+            if (item == null) return;
+
+            // Capture the form reference before the UI thread nulls it out.
+            var form = _currentForm;
+
+            RunOnUi(() =>
+            {
+                _currentForm = null;
+                UpdateConfirmationMenu();
+                if (_confirmationQueue.PendingCount > 0)
+                {
+                    ShowCurrentConfirmation();
+                }
+            });
+
+            var auditEvent = e.Decision.Approved ? "confirmation.ui_approved" : "confirmation.ui_rejected";
+            FinishConfirmationWithDecision(item, e.Decision, auditEvent, confirmationId, recordingId, form);
+        };
 
         try
         {
@@ -313,10 +337,96 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     }
 
     /// <summary>
-    /// Resolves the current confirmation by removing it from the queue and executing the callback.
-    /// UI updates happen synchronously on the UI thread, while the callback (which may involve
-    /// heavy operations like starting FFmpeg recording) is executed on a background thread.
-    /// This prevents blocking the UI thread and the queue lock during recording startup.
+    /// Completes the confirmation after the form has delivered a decision.
+    /// Waits for handle destruction and a DWM composition flush, then invokes
+    /// the recording callback on a background thread. All timing and fallback
+    /// state is audited.
+    /// </summary>
+    private async void FinishConfirmationWithDecision(
+        PendingConfirmationItem item,
+        ConfirmationDecision decision,
+        string auditEvent,
+        string confirmationId,
+        string recordingId,
+        IConfirmationDialog? form)
+    {
+        _audit.Log(auditEvent, new
+        {
+            confirmation_id = confirmationId,
+            recording_id = recordingId,
+            approved = decision.Approved,
+            output_directory = decision.OutputDirectory ?? ""
+        });
+
+        var barrierStopwatch = Stopwatch.StartNew();
+        bool usedFallback = false;
+        bool flushed = false;
+
+        try
+        {
+            // Wait for the native handle to be destroyed before flushing composition.
+            if (form != null && form.IsHandleCreated)
+            {
+                var tcs = new TaskCompletionSource<object?>();
+                EventHandler<ConfirmationDialogLifecycleEventArgs>? handler = null;
+                handler = (_, _) =>
+                {
+                    form.HandleDestroyed -= handler;
+                    tcs.TrySetResult(null);
+                };
+                form.HandleDestroyed += handler;
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                cts.Token.Register(() => tcs.TrySetCanceled());
+                try { await tcs.Task; }
+                catch { /* Bounded wait: proceed even if handle destruction was not observed. */ }
+            }
+
+            // Ensure DWM composition has settled after the form disappeared.
+            var flushResult = DwmCompositionBarrier.Wait(TimeSpan.FromMilliseconds(200));
+            flushed = flushResult.Flushed;
+            usedFallback = flushResult.UsedFallback;
+            barrierStopwatch.Stop();
+        }
+        catch
+        {
+            barrierStopwatch.Stop();
+            usedFallback = true;
+        }
+
+        _audit.Log("confirmation.capture_safe", new
+        {
+            confirmation_id = confirmationId,
+            recording_id = recordingId,
+            approved = decision.Approved,
+            barrier_ms = (long)barrierStopwatch.Elapsed.TotalMilliseconds,
+            dwm_flush_completed = flushed,
+            used_fallback = usedFallback
+        });
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                item.InvokeCallback(decision);
+            }
+            catch (Exception ex)
+            {
+                _audit.Log("confirmation.callback_error", new
+                {
+                    confirmation_id = confirmationId,
+                    recording_id = recordingId,
+                    approved = decision.Approved,
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                });
+            }
+        });
+    }
+
+    /// <summary>
+    /// Fallback path when a confirmation decision must be resolved without a
+    /// visible form. Performs the same background callback dispatch but skips
+    /// the capture-safe barrier. Kept for completeness and source-level tests.
     /// </summary>
     private void ResolveCurrentConfirmation(ConfirmationDecision decision, string auditEvent)
     {
@@ -325,14 +435,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 
         var confirmationId = current.ConfirmationId;
         var recordingId = current.RecordingId;
-
-        _audit.Log(auditEvent, new
-        {
-            confirmation_id = confirmationId,
-            recording_id = recordingId,
-            approved = decision.Approved,
-            output_directory = decision.OutputDirectory ?? ""
-        });
 
         var item = _confirmationQueue.ResolveCurrent();
         if (item == null) return;
@@ -367,6 +469,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             }
         });
     }
+
 
     private void UpdateConfirmationMenu()
     {
@@ -412,10 +515,13 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
 
     /// <summary>
     /// Triggered by tray menu item to approve (only local UI; cannot be called by HTTP API).
+    /// Closes the visible confirmation form with an approve decision; the form's
+    /// <see cref="IConfirmationDialog.Closed"/> handler runs the shared capture-safe
+    /// barrier and then invokes the recording callback on a background thread.
     /// </summary>
     private void ApproveFromMenu()
     {
-        ResolveCurrentConfirmation(ConfirmationDecision.Approve(), "confirmation.approved_from_menu");
+        _currentForm?.CloseWithDecision(ConfirmationDecision.Approve(), _uiText.Get("Confirmation_Close_Approved"));
     }
 
     /// <summary>
@@ -423,7 +529,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     /// </summary>
     private void RejectFromMenu()
     {
-        ResolveCurrentConfirmation(ConfirmationDecision.Reject(), "confirmation.rejected_from_menu");
+        _currentForm?.CloseWithDecision(ConfirmationDecision.Reject(), _uiText.Get("Confirmation_Close_Rejected"));
     }
 
     public void SetRecording(object rec)
@@ -434,11 +540,58 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         {
             _activeRecordings[recording.Id] = recording;
             var resolution = TryResolveActiveParentForUi(recording, _activeRecordings);
+            _indicatorManager.HideCountdownAndShowRecording(recording);
             _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
             // "Recording started" tray balloons are intentionally never shown;
             // recording state is communicated by the indicator border, REC label,
             // floating stop button and dynamic tray icon/text.
+        });
+    }
+
+    public void SetPreparing(object rec)
+    {
+        var recording = rec as Recording;
+        if (recording == null) return;
+        RunOnUi(() =>
+        {
+            _activeRecordings[recording.Id] = recording;
+            var resolution = TryResolveActiveParentForUi(recording, _activeRecordings);
+            _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
+            _indicatorManager.ShowPreparing(recording, resolution.Parent, resolution.FallbackReason);
+            UpdateRecordingUi();
+        });
+    }
+
+    public void SetCountdown(object rec, int? remainingSeconds)
+    {
+        var recording = rec as Recording;
+        if (recording == null) return;
+        RunOnUi(() =>
+        {
+            _activeRecordings[recording.Id] = recording;
+            if (remainingSeconds.HasValue)
+            {
+                _indicatorManager.ShowCountdown(recording, remainingSeconds.Value);
+            }
+            else
+            {
+                // Hide overlay but keep indicator in countdown phase (e.g. cancellation).
+                _indicatorManager.HideCountdownAndShowRecording(recording);
+            }
+            UpdateRecordingUi();
+        });
+    }
+
+    public void SetFinalizing(object rec)
+    {
+        var recording = rec as Recording;
+        if (recording == null) return;
+        RunOnUi(() =>
+        {
+            _activeRecordings[recording.Id] = recording;
+            _indicatorManager.ShowFinalizing(recording);
+            UpdateRecordingUi();
         });
     }
 
@@ -584,23 +737,74 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     {
         int count = _activeRecordings.Count;
         int stoppingCount = _stoppingIds.Count;
+
+        // Categorize active recordings by visual phase so tray chrome can reflect
+        // preparing/countdown/finalizing distinctly from the red REC state.
+        int preparingCount = 0;
+        int countdownCount = 0;
+        int finalizingCount = 0;
+        int recordingCount = 0;
+        int? anyCountdownValue = null;
+        foreach (var r in _activeRecordings.Values)
+        {
+            switch (r.State)
+            {
+                case RecState.preparing:
+                    preparingCount++;
+                    break;
+                case RecState.countdown:
+                    countdownCount++;
+                    anyCountdownValue ??= r.Id switch
+                    {
+                        _ when _indicatorManager.IndicatorsForTests.TryGetValue(r.Id, out var ind) => ind.CountdownValueForTests,
+                        _ => null
+                    };
+                    break;
+                case RecState.finalizing:
+                    finalizingCount++;
+                    break;
+                case RecState.recording:
+                case RecState.stopping:
+                    recordingCount++;
+                    break;
+            }
+        }
+
         bool allStopping = count > 0 && stoppingCount >= count;
 
         // Keep text within NotifyIcon's typical 128-byte tooltip limit.
-        string text = count > 1
-            ? _uiText.Format("Tray_Recording_WithCount", count)
-            : _uiText.Get("Tray_Recording");
+        string text;
         if (allStopping)
             text = _uiText.Get("Tray_Stopping");
+        else if (finalizingCount > 0)
+            text = _uiText.Get("Tray_Finalizing");
+        else if (countdownCount > 0)
+            text = _uiText.Format("Tray_Countdown", anyCountdownValue ?? 0);
+        else if (preparingCount > 0)
+            text = _uiText.Get("Tray_Preparing");
+        else if (count > 1)
+            text = _uiText.Format("Tray_Recording_WithCount", count);
+        else
+            text = _uiText.Get("Tray_Recording");
         if (text.Length > 127)
             text = text[..127];
 
         _icon.Text = text;
-        _statusItem.Text = count > 1
-            ? _uiText.Format("Tray_Status_RecordingWithCount", count)
-            : _uiText.Get("Tray_Status_Recording");
+
+        string statusText;
         if (allStopping)
-            _statusItem.Text = _uiText.Get("Tray_Status_Stopping");
+            statusText = _uiText.Get("Tray_Status_Stopping");
+        else if (finalizingCount > 0)
+            statusText = _uiText.Get("Tray_Status_Finalizing");
+        else if (countdownCount > 0)
+            statusText = _uiText.Format("Tray_Status_Countdown", anyCountdownValue ?? 0);
+        else if (preparingCount > 0)
+            statusText = _uiText.Get("Tray_Status_Preparing");
+        else if (count > 1)
+            statusText = _uiText.Format("Tray_Status_RecordingWithCount", count);
+        else
+            statusText = _uiText.Get("Tray_Status_Recording");
+        _statusItem.Text = statusText;
 
         if (allStopping)
         {
@@ -626,7 +830,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         {
             active_count = count,
             stopping_count = stoppingCount,
-            state = allStopping ? "stopping" : "recording",
+            preparing_count = preparingCount,
+            countdown_count = countdownCount,
+            finalizing_count = finalizingCount,
+            recording_count = recordingCount,
+            state = allStopping ? "stopping" : (finalizingCount > 0 ? "finalizing" : (countdownCount > 0 ? "countdown" : (preparingCount > 0 ? "preparing" : "recording"))),
             nested_roles = _activeRecordings.Values.Select(r => r.NestedRole ?? "none").ToArray()
         });
     }

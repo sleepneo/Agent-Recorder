@@ -1,0 +1,154 @@
+using Xunit;
+
+namespace AgentRecorder.AudioHelper.Tests;
+
+public class AudioHelperArgumentParserTests
+{
+    [Fact]
+    public void Parse_CaptureModeWithAllArgs_ReturnsOk()
+    {
+        var args = new[]
+        {
+            "--endpoint-id", "{0.0.1.00000000}.{guid}",
+            "--output", "C:\\temp\\rec.wav",
+            "--allowed-root", "C:\\temp",
+            "--stop-signal", "C:\\temp\\stop.signal",
+            "--recording-id", "rec_abc123"
+        };
+
+        var result = AudioHelperArgumentParser.Parse(args);
+
+        Assert.True(result.Ok);
+        Assert.Equal(AudioHelperMode.Capture, result.Options.Mode);
+        Assert.Equal("{0.0.1.00000000}.{guid}", result.Options.EndpointId);
+        Assert.Equal("C:\\temp\\rec.wav", result.Options.OutputPath);
+        Assert.Equal("C:\\temp", result.Options.AllowedRoot);
+        Assert.Equal("C:\\temp\\stop.signal", result.Options.StopSignalPath);
+        Assert.Equal("rec_abc123", result.Options.RecordingId);
+    }
+
+    [Fact]
+    public void Parse_VersionMode_DoesNotRequireOutput()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--version" });
+
+        Assert.True(result.Ok);
+        Assert.Equal(AudioHelperMode.Version, result.Options.Mode);
+    }
+
+    [Fact]
+    public void Parse_ProbeMode_DoesNotRequireOutput()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--probe" });
+
+        Assert.True(result.Ok);
+        Assert.Equal(AudioHelperMode.Probe, result.Options.Mode);
+    }
+
+    [Theory]
+    [InlineData("--endpoint-id")]
+    [InlineData("--output")]
+    [InlineData("--allowed-root")]
+    [InlineData("--stop-signal")]
+    [InlineData("--recording-id")]
+    public void Parse_MissingValue_ReturnsError(string arg)
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { arg });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Missing value", result.Error);
+    }
+
+    [Fact]
+    public void Parse_UnknownArgument_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--unknown", "value" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Unknown argument", result.Error);
+    }
+
+    [Fact]
+    public void Parse_PositionalArgument_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "positional" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("positional", result.Error);
+    }
+
+    [Fact]
+    public void Parse_DuplicateArgument_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--endpoint-id", "a", "--endpoint-id", "b" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Duplicate", result.Error);
+    }
+
+    [Fact]
+    public void Parse_ProbeAndVersion_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--probe", "--version" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("cannot be used together", result.Error);
+    }
+
+    [Fact]
+    public void Parse_VersionWithCaptureArgs_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--version", "--endpoint-id", "x" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("cannot be mixed", result.Error);
+    }
+
+    [Fact]
+    public void Parse_ProbeWithCaptureArgs_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--probe", "--output", "C:\\temp\\rec.wav" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("cannot be mixed", result.Error);
+    }
+
+    [Fact]
+    public void Parse_EndpointIdWithControlChar_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--endpoint-id", "a\nb" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("control characters", result.Error);
+    }
+
+    [Fact]
+    public void Parse_EmptyValue_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--endpoint-id", "" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Empty value", result.Error);
+    }
+
+    [Theory]
+    [InlineData("rec_valid-123.abc")]
+    [InlineData("a")]
+    [InlineData("123")]
+    public void ValidateRecordingId_Valid_ReturnsNull(string id)
+    {
+        Assert.Null(AudioHelperArgumentParser.ValidateRecordingId(id));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("a/b")]
+    [InlineData("a\\b")]
+    [InlineData("a b")]
+    [InlineData("a:b")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")] // 65 chars
+    public void ValidateRecordingId_Invalid_ReturnsError(string id)
+    {
+        Assert.NotNull(AudioHelperArgumentParser.ValidateRecordingId(id));
+    }
+}

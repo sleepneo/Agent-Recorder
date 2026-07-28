@@ -100,6 +100,7 @@ X-Agent-Recorder-Key: <api-key>
 AgentRecorder.App\                 应用主体
 AgentRecorder.Headless\            无交互 UI 的高级服务宿主
 AgentRecorder.Cli\                 agent 启动握手工具
+AgentRecorder.AudioHelper\         隔离的 WASAPI 麦克风 helper
 README.zh-CN.md                    中文说明
 QUICKSTART.zh-CN.md                本文件
 AGENT-INSTRUCTIONS.zh-CN.md        AI agent 操作指令

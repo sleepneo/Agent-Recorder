@@ -75,7 +75,7 @@ public class FFmpegProgressParserTests
     }
 
     [Fact]
-    public void UnknownFieldsAndMultipleGroups_DoNotThrow()
+    public void UnknownFieldsAndMultipleGroups_PublishesAllCompletedGroups()
     {
         var parser = new FFmpegProgressParser();
         var observations = new List<FirstFrameObservation>();
@@ -107,13 +107,17 @@ total_size=999
 progress=end
 ");
 
-        Assert.Single(observations);
+        Assert.Equal(3, observations.Count);
         Assert.Equal(1, observations[0].FrameNumber);
         Assert.Equal(100, observations[0].TotalSizeBytes);
+        Assert.Equal(2, observations[1].FrameNumber);
+        Assert.Equal(200, observations[1].TotalSizeBytes);
+        Assert.Equal(10, observations[2].FrameNumber);
+        Assert.Equal(999, observations[2].TotalSizeBytes);
     }
 
     [Fact]
-    public void MultipleQualifiedGroups_OnlyFirstObserved()
+    public void MultipleQualifiedGroups_AllPublishedForAnchorTracking()
     {
         var parser = new FFmpegProgressParser();
         var count = 0;
@@ -125,7 +129,7 @@ progress=end
 
         parser.FeedText("frame=1\ntotal_size=100\nprogress=continue\nframe=2\ntotal_size=200\nprogress=continue");
 
-        Assert.Equal(1, count);
+        Assert.Equal(2, count);
     }
 
     [Fact]

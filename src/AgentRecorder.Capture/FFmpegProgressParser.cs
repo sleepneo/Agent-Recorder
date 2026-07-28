@@ -7,21 +7,18 @@ namespace AgentRecorder.Capture;
 
 /// <summary>
 /// Parses FFmpeg -progress output into complete groups terminated by a
-/// progress= line. Non-qualifying groups are published normally; the first
-/// group with first-frame evidence is published once and later qualifying
-/// groups are suppressed.
+/// progress= line. The parser publishes every complete group; callers that
+/// need exactly-once first-frame notifications must enforce that at their
+/// own lifecycle boundary.
 /// </summary>
 public sealed class FFmpegProgressParser
 {
     private readonly Dictionary<string, string> _currentGroup = new();
     private readonly object _lock = new();
     private bool _hasProgressKey;
-    private int _qualifiedObserved;
-
     /// <summary>
-    /// Raised for completed progress groups, except qualifying first-frame
-    /// groups after the first. Each published group contains at least a
-    /// progress= key and any parsed numeric fields.
+    /// Raised for completed progress groups. Each published group contains at
+    /// least a progress= key and any parsed numeric fields.
     /// </summary>
     public event Action<FFmpegProgressGroup>? GroupCompleted;
 
@@ -114,15 +111,6 @@ public sealed class FFmpegProgressParser
         try
         {
             var parsed = new FFmpegProgressGroup(group);
-
-            // Only the first group that satisfies the first-frame criteria is
-            // reported; later groups are suppressed to provide exactly-once
-            // semantics at the parser level.
-            if (parsed.HasFirstFrameEvidence)
-            {
-                if (Interlocked.Exchange(ref _qualifiedObserved, 1) != 0)
-                    return;
-            }
 
             GroupCompleted?.Invoke(parsed);
         }

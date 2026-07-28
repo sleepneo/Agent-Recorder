@@ -102,7 +102,7 @@ public sealed class CoreAudioCaptureStatusProvider : IMicrophoneStatusProvider
     /// Maps a dshow device id to the CoreAudio capture endpoint id format.
     /// Returns an empty string when the input cannot be mapped.
     /// </summary>
-    internal static string ToCoreAudioEndpointId(string dshowDeviceId)
+    public static string ToCoreAudioEndpointId(string dshowDeviceId)
     {
         var guid = ExtractGuidFromDshowId(dshowDeviceId);
         return guid == null ? string.Empty : $"{{0.0.1.00000000}}.{guid}";

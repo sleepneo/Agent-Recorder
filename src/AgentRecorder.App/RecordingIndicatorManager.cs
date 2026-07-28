@@ -17,10 +17,11 @@ internal sealed class RecordingIndicatorManager
 {
     private readonly Dictionary<string, RecordingIndicatorForm> _indicators = new();
     private readonly Dictionary<string, RecordingStopControlForm> _stopControls = new();
+    private readonly Dictionary<string, CountdownOverlayForm> _countdownOverlays = new();
     private readonly AuditLogger _audit;
     private readonly Action<string> _onStopRequested;
     private readonly IDisplayDpiResolver _dpiResolver;
-    private readonly Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> _formFactory;
+    private readonly Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> _formFactory;
     private readonly Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> _stopControlFactory;
     private readonly Func<IUiTextProvider, Font, DisplayDpiInfo, Size> _stopControlSizeProvider;
     private Func<IUiTextProvider> _textProviderFactory = null!;
@@ -32,7 +33,7 @@ internal sealed class RecordingIndicatorManager
     }
 
     public RecordingIndicatorManager(AuditLogger audit, Action<string> onStopRequested, IUiTextProvider? textProvider = null)
-        : this(audit, onStopRequested, DefaultFormFactory, CreateStopControlFactory(textProvider), new DisplayDpiResolver())
+        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory), CreateStopControlFactory(textProvider), new DisplayDpiResolver())
     {
         _textProviderFactory = () => textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
     }
@@ -42,7 +43,7 @@ internal sealed class RecordingIndicatorManager
     /// This avoids capturing a stale <see cref="IUiTextProvider"/> when the UI language changes.
     /// </summary>
     public RecordingIndicatorManager(AuditLogger audit, Action<string> onStopRequested, Func<IUiTextProvider> textProviderFactory)
-        : this(audit, onStopRequested, DefaultFormFactory, (id, bounds, size, dpi, mode) => new RecordingStopControlForm(id, bounds, size, dpi, mode, textProviderFactory()), new DisplayDpiResolver())
+        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory), (id, bounds, size, dpi, mode) => new RecordingStopControlForm(id, bounds, size, dpi, mode, textProviderFactory()), new DisplayDpiResolver())
     {
         _textProviderFactory = textProviderFactory;
     }
@@ -50,9 +51,23 @@ internal sealed class RecordingIndicatorManager
     internal RecordingIndicatorManager(
         AuditLogger audit,
         Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> formFactory)
-        : this(audit, _ => { }, formFactory, DefaultStopControlFactory, new DisplayDpiResolver())
+        : this(audit, _ => { }, (id, p, s, d, r, _) => formFactory(id, p, s, d, r), DefaultStopControlFactory, new DisplayDpiResolver())
     {
         _textProviderFactory = () => new UiTextProvider(UiLanguageStore.LoadOrDefault());
+    }
+
+    /// <summary>
+    /// Legacy constructor for tests that create forms directly from presentation and visibility mode.
+    /// </summary>
+    internal RecordingIndicatorManager(
+        AuditLogger audit,
+        Action<string> onStopRequested,
+        Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> formFactory,
+        Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> stopControlFactory,
+        IDisplayDpiResolver? dpiResolver = null,
+        Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
+        : this(audit, onStopRequested, (id, p, s, d, r, _) => formFactory(id, p, s, d, r), stopControlFactory, dpiResolver, stopControlSizeProvider)
+    {
     }
 
     /// <summary>
@@ -84,7 +99,7 @@ internal sealed class RecordingIndicatorManager
     internal RecordingIndicatorManager(
         AuditLogger audit,
         Action<string> onStopRequested,
-        Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> formFactory,
+        Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> formFactory,
         Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> stopControlFactory,
         IDisplayDpiResolver? dpiResolver = null,
         Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
@@ -103,9 +118,10 @@ internal sealed class RecordingIndicatorManager
         RecordingIndicatorPresentation presentation,
         DateTime startedAtUtc,
         int? durationSeconds,
-        string? nestedRole)
+        string? nestedRole,
+        Func<IUiTextProvider> textProviderFactory)
     {
-        return new RecordingIndicatorForm(recordingId, presentation, startedAtUtc, durationSeconds, nestedRole);
+        return new RecordingIndicatorForm(recordingId, presentation, startedAtUtc, durationSeconds, nestedRole, null, textProviderFactory);
     }
 
     private static RecordingStopControlForm DefaultStopControlFactory(
@@ -118,10 +134,10 @@ internal sealed class RecordingIndicatorManager
         return new RecordingStopControlForm(recordingId, bounds, controlSize, dpiInfo, mode);
     }
 
-    private static Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, RecordingIndicatorForm> WrapLegacyFormFactory(
+    private static Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> WrapLegacyFormFactory(
         Func<string, RecordingIndicatorBounds, DateTime, int?, string?, RecordingIndicatorForm> legacy)
     {
-        return (id, presentation, started, duration, role) =>
+        return (id, presentation, started, duration, role, _) =>
             legacy(id, presentation.WindowBounds, started, duration, role);
     }
 
@@ -283,6 +299,83 @@ internal sealed class RecordingIndicatorManager
     }
 
     /// <summary>
+    /// Switches an existing indicator to the preparing phase (amber border + label).
+    /// If no indicator exists yet, shows one first.
+    /// </summary>
+    public void ShowPreparing(Recording recording, Recording? parentRecording = null, string? parentFallbackReason = null)
+    {
+        EnsureIndicator(recording, parentRecording, parentFallbackReason);
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        {
+            indicator.SetPhase(RecordingIndicatorPhase.Preparing);
+        }
+    }
+
+    /// <summary>
+    /// Shows the large countdown overlay in the center of the capture region.
+    /// </summary>
+    public void ShowCountdown(Recording recording, int remainingSeconds)
+    {
+        // Keep the indicator in countdown phase (amber border) while the large overlay shows the digit.
+        EnsureIndicator(recording, null, null);
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        {
+            indicator.SetPhase(RecordingIndicatorPhase.Countdown, remainingSeconds);
+        }
+
+        if (!_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        {
+            var bounds = recording.Config.Bounds;
+            var overlayBounds = ComputeCountdownBounds(bounds.x, bounds.y, bounds.w, bounds.h);
+            overlay = new CountdownOverlayForm(overlayBounds);
+            _countdownOverlays[recording.Id] = overlay;
+            overlay.SetNumber(remainingSeconds);
+            try { overlay.Show(); }
+            catch (Exception ex)
+            {
+                _audit.Log("recording_countdown_overlay.show_error", new
+                {
+                    recording_id = recording.Id,
+                    error = ex.Message
+                });
+            }
+        }
+        else
+        {
+            overlay.SetNumber(remainingSeconds);
+        }
+    }
+
+    /// <summary>
+    /// Hides the countdown overlay and switches the indicator to the recording phase.
+    /// </summary>
+    public void HideCountdownAndShowRecording(Recording recording)
+    {
+        if (_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        {
+            _countdownOverlays.Remove(recording.Id);
+            try { overlay.CloseWithoutResult(); } catch { }
+        }
+
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        {
+            indicator.SetPhase(RecordingIndicatorPhase.Recording);
+        }
+    }
+
+    /// <summary>
+    /// Switches an existing indicator to the finalizing phase (gray border + saving label).
+    /// Does not close the indicator; the engine closes it after terminal state.
+    /// </summary>
+    public void ShowFinalizing(Recording recording)
+    {
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        {
+            indicator.SetPhase(RecordingIndicatorPhase.Finalizing);
+        }
+    }
+
+    /// <summary>
     /// Shows or replaces the indicator and stop control for the given recording.
     /// A single combined plan is computed before any UI is created so that failures in any part
     /// cause a joint fallback to exclude-from-capture mode.
@@ -354,7 +447,8 @@ internal sealed class RecordingIndicatorManager
                 plan.IndicatorPresentation,
                 recording.StartedAtUtc,
                 recording.DurationSeconds,
-                recording.NestedRole);
+                recording.NestedRole,
+                _textProviderFactory);
             stopControl = _stopControlFactory(
                 recording.Id,
                 plan.StopBounds,
@@ -408,7 +502,8 @@ internal sealed class RecordingIndicatorManager
                     retryPlan.IndicatorPresentation,
                     recording.StartedAtUtc,
                     recording.DurationSeconds,
-                    recording.NestedRole);
+                    recording.NestedRole,
+                    _textProviderFactory);
                 stopControl = _stopControlFactory(
                     recording.Id,
                     retryPlan.StopBounds,
@@ -583,6 +678,56 @@ internal sealed class RecordingIndicatorManager
                 reason = reasonAuditEvent
             });
         }
+
+        if (_countdownOverlays.TryGetValue(recordingId, out var overlay))
+        {
+            _countdownOverlays.Remove(recordingId);
+            try { overlay.CloseWithoutResult(); } catch { }
+        }
+    }
+
+    private void EnsureIndicator(Recording recording, Recording? parentRecording, string? parentFallbackReason)
+    {
+        if (_indicators.ContainsKey(recording.Id))
+            return;
+
+        ShowFor(recording, parentRecording, parentFallbackReason);
+    }
+
+    private static Rectangle ComputeCountdownBounds(int x, int y, int w, int h)
+    {
+        const int MinSize = 160;
+        int size = Math.Max(MinSize, Math.Min(w, h));
+        if (size < MinSize)
+            size = MinSize;
+
+        int centerX = x + w / 2;
+        int centerY = y + h / 2;
+
+        // Clamp to virtual screen.
+        var vs = SystemInformation.VirtualScreen;
+        int left = centerX - size / 2;
+        int top = centerY - size / 2;
+        int right = left + size;
+        int bottom = top + size;
+
+        if (left < vs.X) left = vs.X;
+        if (top < vs.Y) top = vs.Y;
+        if (right > vs.X + vs.Width) right = vs.X + vs.Width;
+        if (bottom > vs.Y + vs.Height) bottom = vs.Y + vs.Height;
+
+        if (right - left < MinSize)
+        {
+            left = vs.X;
+            right = Math.Min(vs.X + vs.Width, left + MinSize);
+        }
+        if (bottom - top < MinSize)
+        {
+            top = vs.Y;
+            bottom = Math.Min(vs.Y + vs.Height, top + MinSize);
+        }
+
+        return new Rectangle(left, top, right - left, bottom - top);
     }
 
     /// <summary>
@@ -594,6 +739,8 @@ internal sealed class RecordingIndicatorManager
     {
         var ids = new HashSet<string>(_indicators.Keys);
         foreach (var id in _stopControls.Keys)
+            ids.Add(id);
+        foreach (var id in _countdownOverlays.Keys)
             ids.Add(id);
 
         foreach (var id in ids)

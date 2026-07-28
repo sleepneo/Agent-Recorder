@@ -9,7 +9,7 @@ using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using Xunit;
 
-[Collection("NonParallel-AgentRecorderDataDir")]
+[Collection("HeadlessHostIntegration")]
 public class LongPollingTests : IDisposable
 {
     private readonly string _testDir;

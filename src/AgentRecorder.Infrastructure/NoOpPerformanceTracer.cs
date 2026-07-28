@@ -23,7 +23,12 @@ public sealed class NoOpPerformanceTracer : IPerformanceTracer
     public void CaptureStartRequested(string traceId, string recordingId, string backendType) { }
     public void CaptureBackendStartReturned(string traceId, string recordingId, string backendType) { }
     public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) { }
+    public void MicrophonePrepareStarted(string traceId, string recordingId) { }
+    public void MicrophoneReady(string traceId, string recordingId) { }
+    public void CountdownStarted(string traceId, string recordingId) { }
     public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) { }
+    public void CaptureEnded(string traceId, string recordingId) { }
+    public void FinalizationCompleted(string traceId, string recordingId, bool success) { }
     public void RecordingTerminal(string traceId, string recordingId, string status, string? stopReason = null, string? errorCode = null) { }
     public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) { }
     public void Flush() { }

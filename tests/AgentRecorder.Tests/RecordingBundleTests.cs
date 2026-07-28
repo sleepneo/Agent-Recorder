@@ -38,6 +38,19 @@ public class RecordingBundleTests : IDisposable
 
     private string MediaPath(string stem) => Path.Combine(_tmpDir, stem + ".mp4");
 
+    private static JsonNode ConfigWithTempOutput(string tempDir, string? filename = null)
+    {
+        var output = new JsonObject { ["directory"] = tempDir };
+        if (!string.IsNullOrEmpty(filename))
+            output["filename"] = filename;
+        return new JsonObject
+        {
+            ["source"] = new JsonObject { ["type"] = "display", ["display_id"] = "0" },
+            ["video"] = new JsonObject { ["fps"] = 30 },
+            ["output"] = output
+        };
+    }
+
     private static string DefaultBackendFor(string sourceType) => sourceType switch
     {
         "display" => "ffmpeg",
@@ -80,6 +93,7 @@ public class RecordingBundleTests : IDisposable
             stopReason: "duration_reached",
             audioMicrophone: audioMicrophone,
             audioStatus: audioStatus,
+            audioContinuityStatus: audioMicrophone ? "continuous" : "not_checked",
             audioDeviceId: audioMicrophone ? "mic_test" : null,
             audioLostAtMs: null,
             nestedRole: nestedRole,
@@ -417,7 +431,8 @@ public class RecordingBundleTests : IDisposable
     [Fact]
     public void BundleSnapshot_Ready_ContentsFixedOrder()
     {
-        var snapshot = RecordingBundleSnapshot.Ready("D:\\Videos\\demo.bundle", new List<RecordingBundleContentItem>
+        var bundlePath = Path.Combine(_tmpDir, "demo.bundle");
+        var snapshot = RecordingBundleSnapshot.Ready(bundlePath, new List<RecordingBundleContentItem>
         {
             new("metadata.json", "application/json", 1),
             new("thumbnail.jpg", "image/jpeg", 2),
@@ -446,9 +461,10 @@ public class RecordingBundleTests : IDisposable
     [Fact]
     public void BundleSnapshot_Generating_UsesExpectedPathAndEmptyContents()
     {
-        var snapshot = RecordingBundleSnapshot.Generating("D:\\Videos\\demo.bundle");
+        var bundlePath = Path.Combine(_tmpDir, "demo.bundle");
+        var snapshot = RecordingBundleSnapshot.Generating(bundlePath);
         Assert.Equal("generating", snapshot.Status);
-        Assert.Equal("D:\\Videos\\demo.bundle", snapshot.Path);
+        Assert.Equal(bundlePath, snapshot.Path);
         Assert.Empty(snapshot.Contents);
         Assert.Null(snapshot.ErrorCode);
     }
@@ -456,10 +472,11 @@ public class RecordingBundleTests : IDisposable
     [Fact]
     public void BundleSnapshot_Failed_HasErrorCode()
     {
-        var snapshot = RecordingBundleSnapshot.Failed("D:\\Videos\\demo.bundle", "bundle_hash_failed");
+        var bundlePath = Path.Combine(_tmpDir, "demo.bundle");
+        var snapshot = RecordingBundleSnapshot.Failed(bundlePath, "bundle_hash_failed");
         Assert.Equal("failed", snapshot.Status);
         Assert.Equal("bundle_hash_failed", snapshot.ErrorCode);
-        Assert.Equal("D:\\Videos\\demo.bundle", snapshot.Path);
+        Assert.Equal(bundlePath, snapshot.Path);
         Assert.Empty(snapshot.Contents);
     }
 
@@ -483,7 +500,7 @@ public class RecordingBundleTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
         try
         {
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", new NoOpTray());
             var json = JsonSerializer.Serialize(resp);
             using var doc = JsonDocument.Parse(json);
@@ -508,7 +525,7 @@ public class RecordingBundleTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
         try
         {
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", new NoOpTray());
             var recId = JsonDocument.Parse(JsonSerializer.Serialize(resp)).RootElement.GetProperty("recording_id").GetString()!;
 
@@ -720,7 +737,7 @@ public class RecordingBundleTests : IDisposable
         try
         {
             var tray = new CallbackTray((_, cb) => { cb(new ConfirmationDecision(false)); return true; });
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", tray);
             var recId = JsonDocument.Parse(JsonSerializer.Serialize(resp)).RootElement.GetProperty("recording_id").GetString()!;
             var rec = engine._recs[recId];
@@ -745,7 +762,7 @@ public class RecordingBundleTests : IDisposable
         try
         {
             var tray = new CallbackTray((_, cb) => { cb(new ConfirmationDecision(true, "\\\\invalid\\path")); return true; });
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", tray);
             var recId = JsonDocument.Parse(JsonSerializer.Serialize(resp)).RootElement.GetProperty("recording_id").GetString()!;
             var rec = engine._recs[recId];
@@ -770,7 +787,7 @@ public class RecordingBundleTests : IDisposable
         try
         {
             var tray = new NoOpTray();
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", tray);
             var doc = JsonDocument.Parse(JsonSerializer.Serialize(resp));
             var recId = doc.RootElement.GetProperty("recording_id").GetString()!;
@@ -808,7 +825,7 @@ public class RecordingBundleTests : IDisposable
                 cb(new ConfirmationDecision(true));
                 return true;
             });
-            var cfg = JsonNode.Parse("""{"source":{"type":"display","display_id":"0"},"video":{"fps":30}}""")!;
+            var cfg = ConfigWithTempOutput(_tmpDir);
             var resp = engine.CreateRecording(cfg, "test", tray);
             var recId = JsonDocument.Parse(JsonSerializer.Serialize(resp)).RootElement.GetProperty("recording_id").GetString()!;
             var rec = engine._recs[recId];
