@@ -574,6 +574,39 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         CaptureConfig cfg,
         Exception ex)
     {
+        // Prevent any natural-exit callback from being dispatched for a session
+        // that never reached Running. If the completion handler already claimed
+        // the callback arbiter, wait until dispatch has started before we
+        // overwrite the terminal meta, so Dispose callers never return before
+        // the callback begins.
+        ClaimDisposeNotification();
+
+        // Move to a terminal state BEFORE disposing the session. Disposing the
+        // session may complete its CompletionTask and dispatch the wired
+        // OnSessionCompleted continuation. If the lifecycle is already Completed,
+        // that continuation sees a non-Running state and returns without
+        // overwriting the failure meta we are about to publish. Never overwrite
+        // a Disposed/Disposing transition won by Dispose.
+        while (true)
+        {
+            int snapshot = _lifecycleState;
+            if (snapshot == (int)LifecycleState.Disposed || snapshot == (int)LifecycleState.Disposing)
+                break;
+            if (snapshot == (int)LifecycleState.Completed)
+                break;
+            if (snapshot == (int)LifecycleState.Completing)
+            {
+                // The completion handler won the race; wait for it to finish,
+                // then publish our rollback meta so Stop() reports the start
+                // failure rather than whatever the handler observed.
+                WaitForTerminal(TimeSpan.FromSeconds(5));
+                Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completed, (int)LifecycleState.Completing);
+                break;
+            }
+            if (Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completed, snapshot) == snapshot)
+                break;
+        }
+
         if (session != null)
         {
             try
@@ -608,14 +641,6 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         _stagingReleased.TrySetResult(null);
         _terminalSignal.TrySetResult(null);
         _completionSignal.TrySetResult(null);
-
-        // Move to Completed so the object is in a determinate terminal state,
-        // but never overwrite a Disposed/Disposing transition won by Dispose.
-        int snapshot = _lifecycleState;
-        if (snapshot != (int)LifecycleState.Disposed && snapshot != (int)LifecycleState.Disposing)
-        {
-            Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completed, snapshot);
-        }
     }
 
     private static OutputMeta BuildFailureMetaFromException(Exception ex, CaptureConfig cfg)

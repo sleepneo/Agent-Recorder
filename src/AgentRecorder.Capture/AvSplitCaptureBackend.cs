@@ -36,6 +36,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     private int _audioPrematureExitCode;
     private string _audioPrematureStderr = "";
     private bool _audioPrematureExited;
+    private bool _audioFinalizationStarted;
     private int _firstFrameRaised;
 
     // Convergence primitive: the first caller that owns finalization completes
@@ -129,12 +130,18 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
     /// <summary>
     /// Starts the video worker. Called by the engine after the countdown phase.
+    /// If the backend has already concluded (e.g., audio helper failed before
+    /// video started), video capture is not started.
     /// </summary>
     public void StartVideo()
     {
         var cfg = _cfg ?? throw new InvalidOperationException("Start() must be called before StartVideo()");
-        if (_videoWorker != null)
-            return;
+
+        lock (_lock)
+        {
+            if (_videoWorker != null || _concluded)
+                return;
+        }
 
         var tempVideoPath = _tempVideoPath ?? throw new InvalidOperationException("Temp video path not initialized");
         StartVideoInternal(cfg, tempVideoPath);
@@ -163,33 +170,100 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     private void OnAudioNaturalExit(int exitCode, string stderr)
     {
         // Audio worker exiting naturally is unusual; rely on video worker to drive
-        // finalization. If video is not running, report failure. If video is still
-        // running, remember the audio stderr so the final metadata can explain why
-        // the audio track disappeared.
+        // finalization. If video is not running, report failure immediately. If
+        // video is still running and the helper has declared any non-success/stopped
+        // state (Failed, MalformedSequence, exit mismatch, no terminal event, etc.),
+        // drive finalization promptly so the video worker is stopped with a bounded
+        // timeout instead of running to the full duration.
+        bool driveFinalization;
         lock (_lock)
         {
-            if (_manualStopped || _hasExited) return;
+            if (_manualStopped || _hasExited || _concluded || _audioFinalizationStarted)
+                return;
+
+            var summary = (_audioWorker as IAudioHelperSummaryProvider)?.GetTerminalSummary();
             if (_videoWorker == null)
             {
-                var summary = (_audioWorker as IAudioHelperSummaryProvider)?.GetTerminalSummary();
                 var meta = new OutputMeta
                 {
                     StderrLog = stderr,
                     Warnings = new[] { "audio_worker_exited_before_video_started" },
-                    AudioHelperErrorCode = ResolveAudioHelperErrorCode(summary)
+                    AudioStatus = InferAudioStatusFromSummary(summary),
+                    AudioContinuityStatus = InferAudioContinuityStatusFromSummary(summary),
+                    AudioHelperErrorCode = ResolveEffectiveHelperErrorCode(summary)
                 };
+                ApplyHelperSummaryMetrics(meta, summary);
                 _completionMeta = meta;
                 _hasExited = true;
                 _concluded = true;
                 try { _onNaturalExit?.Invoke(exitCode, meta); }
                 catch { }
+                return;
             }
-            else
+
+            _audioPrematureExitCode = exitCode;
+            _audioPrematureStderr = stderr;
+            _audioPrematureExited = true;
+
+            // Treat any helper state other than explicit Success/Stopped as a
+            // failure that must stop the video and converge to a single failed
+            // terminal state.
+            bool isHelperFailure = summary == null ||
+                summary.State is not (AudioHelperSessionState.Success or AudioHelperSessionState.Stopped);
+            if (!isHelperFailure && exitCode != 0)
             {
-                _audioPrematureExitCode = exitCode;
-                _audioPrematureStderr = stderr;
-                _audioPrematureExited = true;
+                // A clean protocol state with a non-zero exit code is also a
+                // failure; FinalValidateStream will mark it as a mismatch.
+                isHelperFailure = true;
             }
+
+            if (!isHelperFailure)
+                return;
+
+            _audioFinalizationStarted = true;
+            driveFinalization = true;
+        }
+
+        if (driveFinalization)
+        {
+            // Offload to the thread pool to avoid synchronous re-entrancy. Stop the
+            // video worker with a bounded timeout, then drive finalization exactly
+            // once as if the video had exited naturally.
+            var task = Task.Run(() =>
+            {
+                try
+                {
+                    var video = _videoWorker;
+                    int videoExitCode = 0;
+                    string videoStderr = "";
+                    if (video != null && !video.HasExited)
+                    {
+                        video.Stop();
+                        video.WaitForExit(VideoStopTimeout);
+                        videoExitCode = video.ExitCode;
+                        videoStderr = video.GetStderrLog();
+                    }
+
+                    EnterConcludeCapture(videoExitCode, videoStderr, invokeNaturalExit: true);
+                }
+                catch (Exception ex)
+                {
+                    // Ensure the convergence TCS is not left dangling and the
+                    // exception is observed rather than becoming unobserved.
+                    try
+                    {
+                        EnterConcludeCapture(
+                            _audioPrematureExitCode,
+                            CombineStderr(_audioPrematureStderr, "audio_finalization_task_exception: " + ex),
+                            invokeNaturalExit: true);
+                    }
+                    catch { }
+                }
+            });
+
+            _ = task.ContinueWith(
+                t => { var _ = t.Exception; },
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
         }
     }
 
@@ -473,8 +547,23 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             if (audioRequested && _audioWorker is IAudioHelperSummaryProvider summaryProvider)
             {
                 var summary = summaryProvider.GetTerminalSummary();
-                videoMeta.AudioHelperErrorCode = ResolveAudioHelperErrorCode(summary);
+                var helperErrorCode = ResolveEffectiveHelperErrorCode(summary);
+                videoMeta.AudioHelperErrorCode = helperErrorCode;
                 videoMeta.AudioCaptureBackend = "wasapi-helper";
+                if (summary?.EstimatedGapMs.HasValue == true)
+                    videoMeta.AudioEstimatedGapMs = summary.EstimatedGapMs;
+                ApplyHelperSummaryMetrics(videoMeta, summary);
+                if (summary != null)
+                {
+                    videoMeta.AudioStatus = InferAudioStatusFromSummary(summary);
+                    videoMeta.AudioContinuityStatus = InferAudioContinuityStatusFromSummary(summary);
+                }
+                if (!string.IsNullOrEmpty(helperErrorCode))
+                {
+                    videoMeta.Warnings = (videoMeta.Warnings ?? Array.Empty<string>())
+                        .Append($"audio_helper_failed: {helperErrorCode}")
+                        .ToArray();
+                }
             }
 
             meta = videoMeta;
@@ -519,9 +608,61 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                     .Concat(retention.Errors)
                     .ToArray();
             }
+
+            TryWriteFailureDiagnostics(retention.FailedDirectoryPath, recordingId, meta);
         }
 
         return meta;
+    }
+
+    /// <summary>
+    /// Writes a small diagnostics.json next to the retained failed artifacts so
+    /// the real audio root cause (helper error code, status, gap and recovery
+    /// metrics) survives with the raw video/audio. Best effort, bounded size;
+    /// never a heavy "validation bundle".
+    /// </summary>
+    private static void TryWriteFailureDiagnostics(string? failedDir, string recordingId, OutputMeta meta)
+    {
+        if (string.IsNullOrEmpty(failedDir))
+            return;
+
+        try
+        {
+            string? stderrExcerpt = null;
+            if (!string.IsNullOrEmpty(meta.StderrLog))
+            {
+                int start = Math.Max(0, meta.StderrLog.Length - 2000);
+                stderrExcerpt = meta.StderrLog.Substring(start);
+            }
+
+            var diagnostics = new Dictionary<string, object?>
+            {
+                ["recording_id"] = recordingId,
+                ["created_at_utc"] = DateTime.UtcNow.ToString("o"),
+                ["audio_capture_backend"] = meta.AudioCaptureBackend,
+                ["audio_helper_protocol"] = meta.AudioHelperProtocol,
+                ["audio_helper_error_code"] = meta.AudioHelperErrorCode,
+                ["audio_status"] = meta.AudioStatus,
+                ["audio_continuity_status"] = meta.AudioContinuityStatus,
+                ["audio_estimated_gap_ms"] = meta.AudioEstimatedGapMs,
+                ["audio_max_estimated_gap_ms"] = meta.AudioMaxEstimatedGapMs,
+                ["audio_recovery_count"] = meta.AudioRecoveryCount,
+                ["audio_recovery_attempts"] = meta.AudioRecoveryAttempts,
+                ["audio_gap_filled_bytes"] = meta.AudioGapFilledBytes,
+                ["audio_gap_filled_ms"] = meta.AudioGapFilledMs,
+                ["audio_discontinuity_count"] = meta.AudioDiscontinuityCount,
+                ["audio_capture_method"] = meta.AudioCaptureMethod,
+                ["warnings"] = meta.Warnings ?? Array.Empty<string>(),
+                ["stderr_excerpt"] = stderrExcerpt
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(diagnostics, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(Path.Combine(failedDir, "diagnostics.json"), json);
+        }
+        catch
+        {
+            // Diagnostics must never affect the failure path itself.
+        }
     }
 
     private void RaiseCaptureEnded(int exitCode, string reason)
@@ -576,6 +717,39 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             return (video, File.Exists(_finalOutputPath) && video.DurationSeconds > 0);
         }
 
+        // If the WASAPI helper already declared a terminal failure, do not run
+        // the muxer or continuity check. Surface the helper's stable error code
+        // and a clear audio status so the engine routes the root cause instead
+        // of a generic mux/output validation failure.
+        var helperSummary = (_audioWorker as IAudioHelperSummaryProvider)?.GetTerminalSummary();
+        var helperErrorCode = ResolveEffectiveHelperErrorCode(helperSummary);
+        bool severeGapOnCleanTerminal = ResolveAudioHelperErrorCode(helperSummary) == null && IsSeverelyDiscontinuous(helperSummary);
+
+        if (!string.IsNullOrEmpty(helperErrorCode))
+        {
+            var failedMeta = FfmpegCaptureBackend.Probe(tempVideoPath);
+            failedMeta.StderrLog = CombineStderr(combinedStderr, audioStderr);
+            failedMeta.AudioStatus = InferAudioStatusFromSummary(helperSummary);
+            failedMeta.AudioContinuityStatus = InferAudioContinuityStatusFromSummary(helperSummary);
+            failedMeta.AudioHelperErrorCode = helperErrorCode;
+            failedMeta.AudioCaptureBackend = _audioWorker is WasapiAudioCaptureWorker ? "wasapi-helper" : "dshow";
+            failedMeta.AudioHelperProtocol = _audioWorker is WasapiAudioCaptureWorker ? "audio-helper-v1" : null;
+            if (helperSummary?.EstimatedGapMs.HasValue == true)
+                failedMeta.AudioEstimatedGapMs = helperSummary.EstimatedGapMs;
+            ApplyHelperSummaryMetrics(failedMeta, helperSummary);
+            failedMeta.Warnings = (failedMeta.Warnings ?? Array.Empty<string>())
+                .Append($"audio_helper_failed: {helperErrorCode}")
+                .ToArray();
+            if (severeGapOnCleanTerminal)
+            {
+                failedMeta.Warnings = (failedMeta.Warnings ?? Array.Empty<string>())
+                    .Append($"audio_capture_discontinuous: helper terminal state was clean but the media timeline lost " +
+                            $"{helperSummary!.EstimatedGapMs ?? 0}ms (max observed {helperSummary.MaxEstimatedGapMs ?? 0}ms)")
+                    .ToArray();
+            }
+            return (failedMeta, false);
+        }
+
         // Compute audio pre-roll relative to video start using monotonic anchors.
         // A positive value means the audio worker's media zero is before the first
         // video frame, which is the normal case. If anchors are missing or the
@@ -608,9 +782,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         meta.AudioTimestampCompensationApplied = _audioWorker is not WasapiAudioCaptureWorker;
         meta.AudioHelperProtocol = _audioWorker is WasapiAudioCaptureWorker ? "audio-helper-v1" : null;
 
-        if (_audioWorker is WasapiAudioCaptureWorker wasapiWorker)
+        if (_audioWorker is IAudioHelperSummaryProvider helperSummaryProvider)
         {
-            var summary = wasapiWorker.GetTerminalSummary();
+            var summary = helperSummaryProvider.GetTerminalSummary();
             if (summary != null)
             {
                 meta.AudioSampleRate = summary.SampleRate;
@@ -619,6 +793,14 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 meta.AudioCaptureMethod = summary.CaptureMethod;
                 meta.AudioEstimatedGapMs = summary.EstimatedGapMs;
                 meta.AudioHelperErrorCode = ResolveAudioHelperErrorCode(summary);
+                ApplyHelperSummaryMetrics(meta, summary);
+
+                // The helper's own continuity declaration is authoritative for
+                // gaps it measured and gap-filled during runtime recovery: a
+                // recovered recording keeps a complete timeline (mux succeeds)
+                // but must stay marked degraded with its recovery metrics.
+                if (string.Equals(summary.ContinuityStatus, "degraded", StringComparison.OrdinalIgnoreCase))
+                    meta.AudioContinuityStatus = "degraded";
             }
         }
 
@@ -725,6 +907,129 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             AudioHelperSessionState.Success or AudioHelperSessionState.Stopped => null,
             _ => AudioHelperErrorCodeResolver.Normalize(summary.ErrorCode)
         };
+    }
+
+    /// <summary>
+    /// Gap threshold above which a nominally clean terminal state (STOPPED/OK)
+    /// is treated as a severely discontinuous capture: the media timeline lost
+    /// far more than the muxer's coverage tolerance (0.25s), so the output can
+    /// never validate and the failure must surface the real audio root cause
+    /// instead of a generic output validation error. 500ms is 2x the muxer
+    /// tolerance and far above normal anchor jitter (tens of ms).
+    /// </summary>
+    internal const long DiscontinuityGapThresholdMs = 500;
+
+    private static bool IsSeverelyDiscontinuous(AudioHelperSessionSummary? summary)
+    {
+        if (summary == null)
+            return false;
+        // Only the residual (unrepaired) gap counts: a recovered session has a
+        // high MaxEstimatedGapMs by construction (that is why it recovered) but
+        // its timeline was gap-filled and is complete.
+        return (summary.EstimatedGapMs ?? 0) > DiscontinuityGapThresholdMs;
+    }
+
+    /// <summary>
+    /// Effective helper root cause: the helper's own declared failure code, or
+    /// <c>audio_capture_discontinuous</c> when a nominally clean terminal state
+    /// shows a severe wall/media gap (the media timeline was materially
+    /// shortened even though the helper did not declare an error). Used by every
+    /// failure path so the discontinuous root cause can never be downgraded to a
+    /// generic validation error.
+    /// </summary>
+    private static string? ResolveEffectiveHelperErrorCode(AudioHelperSessionSummary? summary)
+    {
+        var code = ResolveAudioHelperErrorCode(summary);
+        if (code == null && IsSeverelyDiscontinuous(summary))
+            return "audio_capture_discontinuous";
+        return code;
+    }
+
+    /// <summary>
+    /// Copies the helper's stream-health/recovery metrics into the metadata,
+    /// regardless of whether the final mux succeeded or failed.
+    /// </summary>
+    private static void ApplyHelperSummaryMetrics(OutputMeta meta, AudioHelperSessionSummary? summary)
+    {
+        if (summary == null)
+            return;
+
+        if (summary.EstimatedGapMs.HasValue)
+            meta.AudioEstimatedGapMs = summary.EstimatedGapMs;
+        if (summary.MaxEstimatedGapMs.HasValue)
+            meta.AudioMaxEstimatedGapMs = summary.MaxEstimatedGapMs;
+        if (summary.RecoveryCount.HasValue)
+            meta.AudioRecoveryCount = summary.RecoveryCount;
+        if (summary.RecoveryAttempts.HasValue)
+            meta.AudioRecoveryAttempts = summary.RecoveryAttempts;
+        if (summary.GapFilledBytes.HasValue)
+            meta.AudioGapFilledBytes = summary.GapFilledBytes;
+        if (summary.GapFilledMs.HasValue)
+            meta.AudioGapFilledMs = summary.GapFilledMs;
+        if (summary.DiscontinuityCount.HasValue)
+            meta.AudioDiscontinuityCount = summary.DiscontinuityCount;
+    }
+
+    /// <summary>
+    /// Infers the high-level <see cref="OutputMeta.AudioStatus"/> from a helper
+    /// summary. The result is always a known value; <c>unknown</c> is never
+    /// returned for a recognized terminal state. A clean terminal state with a
+    /// severe wall/media gap produced audio that is materially incomplete, so
+    /// it is <c>lost</c>, not <c>recorded</c>.
+    /// </summary>
+    private static string InferAudioStatusFromSummary(AudioHelperSessionSummary? summary)
+    {
+        if (summary == null)
+            return "lost";
+
+        if (IsSeverelyDiscontinuous(summary))
+            return "lost";
+
+        if (summary.State is AudioHelperSessionState.Success or AudioHelperSessionState.Stopped)
+            return "recorded";
+
+        var code = summary.ErrorCode ?? "";
+        if (IsStartFailureCode(code))
+            return "start_failed";
+
+        return "lost";
+    }
+
+    /// <summary>
+    /// Infers <see cref="OutputMeta.AudioContinuityStatus"/> from a helper
+    /// summary. The helper's own declared continuity takes precedence when
+    /// present. Initialization-time failures have not produced any timeline, so
+    /// they are <c>not_checked</c>. Failures after capture started (stalled,
+    /// discontinuous, lost, protocol errors, etc.) are <c>degraded</c>.
+    /// </summary>
+    private static string InferAudioContinuityStatusFromSummary(AudioHelperSessionSummary? summary)
+    {
+        if (summary == null)
+            return "degraded";
+
+        if (string.Equals(summary.ContinuityStatus, "degraded", StringComparison.OrdinalIgnoreCase))
+            return "degraded";
+
+        if (IsSeverelyDiscontinuous(summary))
+            return "degraded";
+
+        if (summary.State is AudioHelperSessionState.Success or AudioHelperSessionState.Stopped)
+            return "continuous";
+
+        var code = summary.ErrorCode ?? "";
+        if (IsStartFailureCode(code))
+            return "not_checked";
+
+        return "degraded";
+    }
+
+    private static bool IsStartFailureCode(string code)
+    {
+        return code.Contains("endpoint", StringComparison.OrdinalIgnoreCase) ||
+               code.Contains("format", StringComparison.OrdinalIgnoreCase) ||
+               code.Contains("start_failed", StringComparison.OrdinalIgnoreCase) ||
+               code.Contains("first_packet_timeout", StringComparison.OrdinalIgnoreCase) ||
+               code.Contains("no_packets_captured", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void TryDeleteTempFile(string? path)

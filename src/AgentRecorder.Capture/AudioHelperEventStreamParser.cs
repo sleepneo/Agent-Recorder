@@ -123,6 +123,9 @@ public static class AudioHelperEventStreamParser
                 case "CaptureMethod":
                     evt.CaptureMethod = value;
                     break;
+                case "CaptureEngine":
+                    evt.CaptureEngine = value;
+                    break;
                 case "ElapsedMs":
                     if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var em))
                         evt.ElapsedMs = em;
@@ -159,8 +162,62 @@ public static class AudioHelperEventStreamParser
                 case "HRESULT":
                     evt.Hresult = value;
                     break;
+                case "FailureStage":
+                    evt.FailureStage = value;
+                    break;
+                case "EndpointId":
+                    evt.EndpointId = value;
+                    break;
                 case "PartialOutputPath":
                     evt.PartialOutputPath = value;
+                    break;
+                case "SecondaryFailure":
+                    evt.SecondaryFailure = value;
+                    break;
+                case "LastCallbackAgeMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lca))
+                        evt.LastCallbackAgeMs = lca;
+                    else
+                        evt.LastCallbackAgeMsParseFailed = true;
+                    break;
+                case "DiscontinuityCount":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var dc))
+                        evt.DiscontinuityCount = dc;
+                    else
+                        evt.DiscontinuityCountParseFailed = true;
+                    break;
+                case "RecoveryCount":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rc))
+                        evt.RecoveryCount = rc;
+                    else
+                        evt.RecoveryCountParseFailed = true;
+                    break;
+                case "RecoveryAttempts":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ra))
+                        evt.RecoveryAttempts = ra;
+                    else
+                        evt.RecoveryAttemptsParseFailed = true;
+                    break;
+                case "GapFilledBytes":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var gfb))
+                        evt.GapFilledBytes = gfb;
+                    else
+                        evt.GapFilledBytesParseFailed = true;
+                    break;
+                case "GapFilledMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var gfm))
+                        evt.GapFilledMs = gfm;
+                    else
+                        evt.GapFilledMsParseFailed = true;
+                    break;
+                case "MaxEstimatedGapMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var meg))
+                        evt.MaxEstimatedGapMs = meg;
+                    else
+                        evt.MaxEstimatedGapMsParseFailed = true;
+                    break;
+                case "ContinuityStatus":
+                    evt.ContinuityStatus = value;
                     break;
                     // Unknown fields: ignore for forward compatibility.
             }
@@ -180,6 +237,23 @@ public static class AudioHelperEventStreamParser
             "FAIL" => AudioHelperEventResult.Fail,
             _ => AudioHelperEventResult.Unknown
         };
+    }
+
+    /// <summary>
+    /// Copies optional runtime stream-health/recovery metrics from a terminal
+    /// event into the session summary. Missing fields stay null so the host can
+    /// distinguish "helper did not report" from a real zero.
+    /// </summary>
+    private static void CopyStreamHealthMetrics(AudioHelperEvent evt, AudioHelperSessionSummary summary)
+    {
+        summary.LastCallbackAgeMs = evt.LastCallbackAgeMs;
+        summary.DiscontinuityCount = evt.DiscontinuityCount;
+        summary.RecoveryCount = evt.RecoveryCount;
+        summary.RecoveryAttempts = evt.RecoveryAttempts;
+        summary.GapFilledBytes = evt.GapFilledBytes;
+        summary.GapFilledMs = evt.GapFilledMs;
+        summary.MaxEstimatedGapMs = evt.MaxEstimatedGapMs;
+        summary.ContinuityStatus = evt.ContinuityStatus;
     }
 
     /// <summary>
@@ -246,6 +320,7 @@ public static class AudioHelperEventStreamParser
                         summary.ValidationErrors.Add("STARTED event missing required field: BytesWritten");
 
                     summary.CaptureMethod = evt.CaptureMethod;
+                    summary.CaptureEngine = evt.CaptureEngine;
                     break;
 
                 case AudioHelperEventResult.Progress:
@@ -315,6 +390,9 @@ public static class AudioHelperEventStreamParser
                     summary.BytesWritten = evt.BytesWritten;
                     summary.EstimatedGapMs = evt.EstimatedGapMs;
                     summary.StopReason = "duration_reached";
+                    summary.CaptureMethod ??= evt.CaptureMethod;
+                    summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyStreamHealthMetrics(evt, summary);
                     break;
 
                 case AudioHelperEventResult.Stopped:
@@ -334,6 +412,9 @@ public static class AudioHelperEventStreamParser
                     summary.BytesWritten = evt.BytesWritten;
                     summary.EstimatedGapMs = evt.EstimatedGapMs;
                     summary.StopReason = evt.StopReason ?? "user_requested";
+                    summary.CaptureMethod ??= evt.CaptureMethod;
+                    summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyStreamHealthMetrics(evt, summary);
                     break;
 
                 case AudioHelperEventResult.Fail:
@@ -352,10 +433,16 @@ public static class AudioHelperEventStreamParser
                     summary.ErrorCode = evt.ErrorCode;
                     summary.Reason = evt.Reason;
                     summary.Hresult = evt.Hresult;
+                    summary.FailureStage = evt.FailureStage;
+                    summary.EndpointId = evt.EndpointId;
                     summary.PartialOutputPath = evt.PartialOutputPath;
+                    summary.SecondaryFailure = evt.SecondaryFailure;
                     summary.BytesWritten = evt.BytesWritten;
                     summary.DurationMs = evt.DurationMs;
                     summary.StopReason = evt.StopReason ?? evt.ErrorCode;
+                    summary.CaptureMethod ??= evt.CaptureMethod;
+                    summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyStreamHealthMetrics(evt, summary);
 
                     if (string.IsNullOrEmpty(evt.ErrorCode))
                         summary.ValidationErrors.Add("FAIL event missing required field: ErrorCode");
@@ -449,6 +536,7 @@ public sealed class AudioHelperSessionSummary
     public long? FirstSampleAnchorTicks { get; set; }
     public long? TimestampFrequency { get; set; }
     public string? CaptureMethod { get; set; }
+    public string? CaptureEngine { get; set; }
     public long? DurationMs { get; set; }
     public long? BytesWritten { get; set; }
     public long? EstimatedGapMs { get; set; }
@@ -456,5 +544,20 @@ public sealed class AudioHelperSessionSummary
     public string? ErrorCode { get; set; }
     public string? Reason { get; set; }
     public string? Hresult { get; set; }
+    public string? FailureStage { get; set; }
+    public string? EndpointId { get; set; }
     public string? PartialOutputPath { get; set; }
+    public string? SecondaryFailure { get; set; }
+
+    // Runtime stream-health and recovery metrics from the terminal event.
+    public long? LastCallbackAgeMs { get; set; }
+    public long? DiscontinuityCount { get; set; }
+    public long? RecoveryCount { get; set; }
+    public long? RecoveryAttempts { get; set; }
+    public long? GapFilledBytes { get; set; }
+    public long? GapFilledMs { get; set; }
+    public long? MaxEstimatedGapMs { get; set; }
+
+    /// <summary>"continuous" or "degraded" as declared by the helper; null when not reported.</summary>
+    public string? ContinuityStatus { get; set; }
 }

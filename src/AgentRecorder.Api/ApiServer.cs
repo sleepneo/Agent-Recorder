@@ -906,7 +906,7 @@ public sealed class ApiServer
                 audio = new[] { "microphone" },
                 audio_capabilities = new
                 {
-                    microphone = new { supported = true, status = GetMicrophoneAvailability(out _) },
+                    microphone = new { supported = true, status = GetFreshMicrophoneAvailability() },
                     system_audio = new { supported = false, status = "not_implemented" }
                 },
                 containers = new[] { "mp4" },
@@ -1200,27 +1200,66 @@ public sealed class ApiServer
 
     private object BuildAudioDevicesResponse()
     {
-        var availability = GetMicrophoneAvailability(out var devices);
+        var devices = GetFreshMicrophoneDevices(out var enumerationAvailable);
+        var availability = AvailabilityFromDevices(devices, enumerationAvailable);
         return new
         {
             status = availability,
             microphone_supported = true,
             system_audio_supported = false,
-            input_devices = devices.Select(d =>
+            input_devices = devices.Select(d => new
             {
-                var status = QueryMicrophoneStatusSafe(d.Id);
-                return new
-                {
-                    id = d.Id,
-                    name = d.Name,
-                    is_default = status.IsDefault ?? d.IsDefault,
-                    state = status.State ?? d.State,
-                    is_muted = status.IsMuted,
-                    volume_percent = status.VolumePercent
-                };
+                id = d.Id,
+                name = d.Name,
+                is_default = d.IsDefault,
+                state = d.State,
+                is_muted = d.IsMuted,
+                volume_percent = d.VolumePercent
             }).ToArray()
         };
     }
+
+    /// <summary>
+    /// Enumerates microphones and merges each entry with fresh CoreAudio status.
+    /// Entries the fresh lookup definitively proves are gone (stale enumeration
+    /// cache entries) are removed, and the enumeration cache is invalidated so
+    /// the next call re-enumerates. Inconclusive status lookups never remove a
+    /// device. The returned id values are the provider's own identifiers and
+    /// round-trip unchanged into recording requests.
+    /// </summary>
+    private IReadOnlyList<MicrophoneDeviceInfo> GetFreshMicrophoneDevices(out bool enumerationAvailable)
+    {
+        IReadOnlyList<MicrophoneDeviceInfo> devices;
+        try
+        {
+            devices = EffectiveMicrophoneProvider.GetDevicesAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            enumerationAvailable = false;
+            return Array.Empty<MicrophoneDeviceInfo>();
+        }
+
+        enumerationAvailable = true;
+        var assembly = AudioDeviceListAssembler.Assemble(devices, QueryMicrophoneStatusSafe);
+        if (assembly.RemovedStaleDevices && EffectiveMicrophoneProvider is CachingMicrophoneDeviceProvider caching)
+            caching.Refresh();
+        return assembly.Devices;
+    }
+
+    private string GetFreshMicrophoneAvailability()
+    {
+        var devices = GetFreshMicrophoneDevices(out var enumerationAvailable);
+        return AvailabilityFromDevices(devices, enumerationAvailable);
+    }
+
+    /// <summary>
+    /// Maps a fresh device list to the stable availability status: "ready" when
+    /// devices are present, "no_devices" when the enumeration succeeded but
+    /// returned nothing, and "unavailable" when enumeration failed.
+    /// </summary>
+    private static string AvailabilityFromDevices(IReadOnlyList<MicrophoneDeviceInfo> devices, bool enumerationAvailable)
+        => !enumerationAvailable ? "unavailable" : devices.Count > 0 ? "ready" : "no_devices";
 
     private MicrophoneStatus QueryMicrophoneStatusSafe(string deviceId)
     {
@@ -1238,7 +1277,8 @@ public sealed class ApiServer
 
     private object Permissions()
     {
-        var availability = GetMicrophoneAvailability(out _);
+        var devices = GetFreshMicrophoneDevices(out var enumerationAvailable);
+        var availability = AvailabilityFromDevices(devices, enumerationAvailable);
         // Permissions distinguishes "device availability" from "OS permission granted".
         // The honest values are available / no_devices / unavailable; "granted" is not
         // reported because this version does not probe the real Windows microphone ACL.
@@ -1255,25 +1295,6 @@ public sealed class ApiServer
             system_audio = new { supported = false, status = "not_implemented" },
             output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
         };
-    }
-
-    /// <summary>
-    /// Queries the effective microphone provider and returns a stable availability
-    /// status: "ready" when devices are present, "no_devices" when the enumeration
-    /// succeeded but returned nothing, and "unavailable" when enumeration failed.
-    /// </summary>
-    private string GetMicrophoneAvailability(out IReadOnlyList<MicrophoneDeviceInfo> devices)
-    {
-        try
-        {
-            devices = EffectiveMicrophoneProvider.GetDevicesAsync().GetAwaiter().GetResult();
-            return devices.Count > 0 ? "ready" : "no_devices";
-        }
-        catch
-        {
-            devices = Array.Empty<MicrophoneDeviceInfo>();
-            return "unavailable";
-        }
     }
 }
 

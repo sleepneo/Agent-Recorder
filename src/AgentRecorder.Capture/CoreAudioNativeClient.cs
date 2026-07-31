@@ -57,6 +57,14 @@ public sealed class CoreAudioNativeClient : ICoreAudioNativeClient
                 return Unknown();
 
             int hr = enumerator.GetDevice(endpointId, out device);
+            if (hr == unchecked((int)0x80070490))
+            {
+                // ERROR_NOT_FOUND: the endpoint is definitively gone (e.g. the
+                // Bluetooth device disconnected). This is distinct from an
+                // inconclusive COM failure: callers may treat it as positive
+                // evidence that a cached enumeration entry is stale.
+                return new CoreAudioEndpointDetails(null, "not_present", null, null);
+            }
             if (hr != 0 || device == null)
                 return Unknown();
 

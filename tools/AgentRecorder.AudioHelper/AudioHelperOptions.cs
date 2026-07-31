@@ -8,9 +8,29 @@ internal enum AudioHelperMode
     Version
 }
 
+internal enum AudioCaptureEngine
+{
+    WasapiDirect,
+    WindowsMediaCapture
+}
+
+internal static class AudioCaptureEngineNames
+{
+    public const string WasapiDirect = "wasapi-direct";
+    public const string WindowsMediaCapture = "windows-mediacapture";
+
+    public static string ToCliValue(AudioCaptureEngine engine)
+    {
+        return engine == AudioCaptureEngine.WindowsMediaCapture
+            ? WindowsMediaCapture
+            : WasapiDirect;
+    }
+}
+
 internal sealed class AudioHelperOptions
 {
     public AudioHelperMode Mode { get; set; }
+    public AudioCaptureEngine CaptureEngine { get; set; } = AudioCaptureEngine.WasapiDirect;
     public string EndpointId { get; set; } = "";
     public string OutputPath { get; set; } = "";
     public string AllowedRoot { get; set; } = "";
@@ -142,6 +162,20 @@ internal static class AudioHelperArgumentParser
                 if (v == null) return result;
                 opts.RecordingId = v;
             }
+            else if (string.Equals(name, "capture-engine", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = TakeNext("capture-engine");
+                if (v == null) return result;
+                if (string.Equals(v, "wasapi-direct", StringComparison.OrdinalIgnoreCase))
+                    opts.CaptureEngine = AudioCaptureEngine.WasapiDirect;
+                else if (string.Equals(v, "windows-mediacapture", StringComparison.OrdinalIgnoreCase))
+                    opts.CaptureEngine = AudioCaptureEngine.WindowsMediaCapture;
+                else
+                {
+                    result.Error = $"Unknown capture engine: {v}";
+                    return result;
+                }
+            }
             else
             {
                 result.Error = $"Unknown argument: {arg}";
@@ -158,7 +192,8 @@ internal static class AudioHelperArgumentParser
                 !string.IsNullOrEmpty(opts.OutputPath) ||
                 !string.IsNullOrEmpty(opts.AllowedRoot) ||
                 !string.IsNullOrEmpty(opts.StopSignalPath) ||
-                !string.IsNullOrEmpty(opts.RecordingId))
+                !string.IsNullOrEmpty(opts.RecordingId) ||
+                seen.Contains("capture-engine"))
             {
                 string modeName = opts.Mode == AudioHelperMode.Version ? "version" : "probe";
                 result.Error = $"--{modeName} cannot be mixed with capture arguments";

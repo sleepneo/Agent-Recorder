@@ -40,6 +40,7 @@ internal sealed class EventWriter
             WriteLine("TimestampFrequency", info.TimestampFrequency);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("CaptureMethod", info.CaptureMethod);
+            WriteLine("CaptureEngine", info.CaptureEngine);
             EndBlock();
         }
     }
@@ -54,6 +55,14 @@ internal sealed class EventWriter
             WriteLine("WallElapsedMs", info.WallElapsedMs);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
+            WriteLine("LastCallbackAgeMs", info.LastCallbackAgeMs);
+            WriteLine("DiscontinuityCount", info.DiscontinuityCount);
+            WriteLine("RecoveryCount", info.RecoveryCount);
+            WriteLine("GapFilledBytes", info.GapFilledBytes);
+            WriteLine("GapFilledMs", info.GapFilledMs);
+            WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
+            WriteLine("ContinuityStatus", string.IsNullOrEmpty(info.ContinuityStatus) ? "continuous" : info.ContinuityStatus);
+            WriteLine("CaptureEngine", info.CaptureEngine);
             EndBlock();
         }
     }
@@ -67,6 +76,9 @@ internal sealed class EventWriter
             WriteLine("DurationMs", info.DurationMs);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
+            WriteLine("CaptureMethod", info.CaptureMethod);
+            WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteTerminalMetrics(info);
             EndBlock();
         }
     }
@@ -80,6 +92,9 @@ internal sealed class EventWriter
             WriteLine("DurationMs", info.DurationMs);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
+            WriteLine("CaptureMethod", info.CaptureMethod);
+            WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteTerminalMetrics(info);
             EndBlock();
         }
     }
@@ -95,12 +110,38 @@ internal sealed class EventWriter
                 WriteLine("Reason", info.Reason);
             if (!string.IsNullOrEmpty(info.Hresult))
                 WriteLine("HRESULT", info.Hresult);
+            if (!string.IsNullOrEmpty(info.FailureStage))
+                WriteLine("FailureStage", info.FailureStage);
+            if (!string.IsNullOrEmpty(info.EndpointId))
+                WriteLine("EndpointId", info.EndpointId);
             if (!string.IsNullOrEmpty(info.PartialOutputPath))
                 WriteLine("PartialOutputPath", info.PartialOutputPath);
+            if (!string.IsNullOrEmpty(info.SecondaryFailure))
+                WriteLine("SecondaryFailure", info.SecondaryFailure);
             if (info.BytesWritten >= 0)
                 WriteLine("BytesWritten", info.BytesWritten);
+            if (!string.IsNullOrEmpty(info.CaptureMethod))
+                WriteLine("CaptureMethod", info.CaptureMethod);
+            if (!string.IsNullOrEmpty(info.CaptureEngine))
+                WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteTerminalMetrics(info);
             EndBlock();
         }
+    }
+
+    /// <summary>
+    /// Terminal continuity/recovery metrics shared by OK/STOPPED/FAIL so the
+    /// host can propagate the real stream health regardless of the outcome.
+    /// </summary>
+    private void WriteTerminalMetrics(AudioHelperEventInfo info)
+    {
+        WriteLine("ContinuityStatus", string.IsNullOrEmpty(info.ContinuityStatus) ? "continuous" : info.ContinuityStatus);
+        WriteLine("RecoveryCount", info.RecoveryCount);
+        WriteLine("RecoveryAttempts", info.RecoveryAttempts);
+        WriteLine("GapFilledBytes", info.GapFilledBytes);
+        WriteLine("GapFilledMs", info.GapFilledMs);
+        WriteLine("DiscontinuityCount", info.DiscontinuityCount);
+        WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
     }
 
     public void WriteRaw(string text)
@@ -148,8 +189,22 @@ internal sealed class AudioHelperEventInfo
     public long EstimatedGapMs { get; set; }
     public long DurationMs { get; set; }
     public string CaptureMethod { get; set; } = "WASAPI_SHARED_CAPTURE";
+    public string CaptureEngine { get; set; } = "wasapi-direct";
     public string ErrorCode { get; set; } = "";
     public string Reason { get; set; } = "";
     public string Hresult { get; set; } = "";
+    public string FailureStage { get; set; } = "";
+    public string EndpointId { get; set; } = "";
     public string PartialOutputPath { get; set; } = "";
+    public string SecondaryFailure { get; set; } = "";
+
+    // Runtime stream-health and recovery metrics.
+    public long LastCallbackAgeMs { get; set; }
+    public long DiscontinuityCount { get; set; }
+    public long RecoveryCount { get; set; }
+    public long RecoveryAttempts { get; set; }
+    public long GapFilledBytes { get; set; }
+    public long GapFilledMs { get; set; }
+    public long MaxEstimatedGapMs { get; set; }
+    public string ContinuityStatus { get; set; } = "continuous";
 }

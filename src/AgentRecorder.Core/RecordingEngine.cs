@@ -1207,6 +1207,13 @@ public sealed class RecordingEngine
                            string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
                            string.Equals(meta.AudioStatus, "lost", StringComparison.OrdinalIgnoreCase);
 
+            // A stable helper-declared audio failure can never be a successful
+            // recording, even when the probed temp files look healthy and the
+            // audio status is a recoverable-looking "lost". The helper's own
+            // terminal verdict takes precedence over file heuristics.
+            if (microphoneRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
+                audioOk = false;
+
             bool success;
             if (isWgcStillFrame && string.Equals(rec.BackendType, "wgc", StringComparison.OrdinalIgnoreCase))
             {

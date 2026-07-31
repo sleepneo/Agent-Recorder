@@ -344,9 +344,12 @@ public static class ConfigParser
         var device = ResolveMicrophoneDevice(micNode, enriched);
 
         // If the selected endpoint is known to be non-active, fail before UI.
-        // Unknown state is treated as active so a transient COM failure does not
-        // block recording.
-        if (string.Equals(device.State, "inactive", StringComparison.OrdinalIgnoreCase))
+        // "not_present" is fresh CoreAudio evidence that the endpoint id no
+        // longer exists (e.g. a stale enumeration cache entry); it is rejected
+        // the same way as an inactive endpoint. Unknown state is treated as
+        // active so a transient COM failure does not block recording.
+        if (string.Equals(device.State, "inactive", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(device.State, "not_present", StringComparison.OrdinalIgnoreCase))
         {
             throw new ApiException(503, "AUDIO_DEVICE_NOT_AVAILABLE",
                 "The selected microphone is currently unavailable. Please check the device and try again.",

@@ -699,6 +699,36 @@ public sealed class AvSplitLifecycleTests : IDisposable
     }
 
     [Fact]
+    public void AudioHelperFailsBeforeVideoStarts_VideoWorkerDoesNotStart()
+    {
+        var audio = new FakeAudioCaptureWorker(naturalExitDelayMs: 0, stderrLog: "audio-premature-stderr");
+        audio.SetTerminalSummary(new AudioHelperSessionSummary
+        {
+            State = AudioHelperSessionState.Failed,
+            ErrorCode = "audio_endpoint_inactive"
+        });
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        backend.Start(CreateConfig());
+
+        // The fake audio worker raises natural exit asynchronously (even with
+        // delay 0), so wait for the backend to conclude before calling StartVideo.
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited, TimeSpan.FromSeconds(2)),
+            "Backend should conclude after the audio helper fails before video starts.");
+        Assert.Equal("audio_endpoint_inactive", backend.LastMeta?.AudioHelperErrorCode);
+
+        backend.StartVideo();
+
+        Assert.Null(video.OutputPath);
+        Assert.False(video.HasExited);
+    }
+
+    [Fact]
     public void AudioReady_SyncInStart_NotLost()
     {
         var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);

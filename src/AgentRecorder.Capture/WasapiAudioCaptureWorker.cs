@@ -542,7 +542,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         else if (evt.TimestampFrequency.Value != Stopwatch.Frequency)
             validationErrors.Add($"TimestampFrequency mismatch: helper={evt.TimestampFrequency.Value}, host={Stopwatch.Frequency}");
 
-        if (!evt.BytesWritten.HasValue || evt.BytesWritten.Value <= 0)
+        bool nativeMediaCapture = string.Equals(evt.CaptureEngine, "windows-mediacapture", StringComparison.OrdinalIgnoreCase);
+        if (!evt.BytesWritten.HasValue || evt.BytesWritten.Value < 0 || (!nativeMediaCapture && evt.BytesWritten.Value <= 0))
             validationErrors.Add("STARTED event missing or invalid field: BytesWritten");
 
         if (string.IsNullOrEmpty(evt.CaptureMethod))
@@ -685,6 +686,25 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         target.FirstSampleAnchorTicks = source.FirstSampleAnchorTicks;
         target.TimestampFrequency = source.TimestampFrequency;
         target.CaptureMethod = source.CaptureMethod;
+        target.CaptureEngine = source.CaptureEngine;
+        target.FailureStage = source.FailureStage;
+        target.EndpointId = source.EndpointId;
+        target.PartialOutputPath = source.PartialOutputPath;
+        target.SecondaryFailure = source.SecondaryFailure;
+
+        // Preserve stream-health diagnostics across the exit-code cross-check so
+        // a protocol mismatch never hides the real capture evidence.
+        target.DurationMs = source.DurationMs;
+        target.BytesWritten = source.BytesWritten;
+        target.EstimatedGapMs = source.EstimatedGapMs;
+        target.LastCallbackAgeMs = source.LastCallbackAgeMs;
+        target.DiscontinuityCount = source.DiscontinuityCount;
+        target.RecoveryCount = source.RecoveryCount;
+        target.RecoveryAttempts = source.RecoveryAttempts;
+        target.GapFilledBytes = source.GapFilledBytes;
+        target.GapFilledMs = source.GapFilledMs;
+        target.MaxEstimatedGapMs = source.MaxEstimatedGapMs;
+        target.ContinuityStatus = source.ContinuityStatus;
     }
 
     private string BuildStdoutSummary()

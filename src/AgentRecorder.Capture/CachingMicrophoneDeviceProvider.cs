@@ -11,25 +11,39 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class CachingMicrophoneDeviceProvider : IMicrophoneDeviceProvider
 {
+    /// <summary>
+    /// Default TTL for empty enumerations. An empty result usually means a
+    /// Bluetooth endpoint is mid-reconnect; caching it for the full TTL would
+    /// keep reporting no_devices long after the device came back. Empty results
+    /// expire much faster so the API recovers promptly.
+    /// </summary>
+    private static readonly TimeSpan DefaultEmptyResultTtl = TimeSpan.FromSeconds(1);
+
     private readonly IMicrophoneDeviceProvider _inner;
     private readonly TimeSpan _ttl;
+    private readonly TimeSpan _emptyResultTtl;
     private readonly object _lock = new();
     private IReadOnlyList<MicrophoneDeviceInfo>? _cache;
     private DateTime _cachedAt = DateTime.MinValue;
     private Task<IReadOnlyList<MicrophoneDeviceInfo>>? _inFlight;
 
-    public CachingMicrophoneDeviceProvider(IMicrophoneDeviceProvider inner, TimeSpan? ttl = null)
+    public CachingMicrophoneDeviceProvider(IMicrophoneDeviceProvider inner, TimeSpan? ttl = null, TimeSpan? emptyResultTtl = null)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _ttl = ttl ?? TimeSpan.FromSeconds(5);
+        _emptyResultTtl = emptyResultTtl ?? DefaultEmptyResultTtl;
     }
 
     public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
     {
         lock (_lock)
         {
-            if (_cache != null && DateTime.UtcNow - _cachedAt < _ttl)
-                return Task.FromResult(_cache);
+            if (_cache != null)
+            {
+                var effectiveTtl = _cache.Count == 0 ? _emptyResultTtl : _ttl;
+                if (DateTime.UtcNow - _cachedAt < effectiveTtl)
+                    return Task.FromResult(_cache);
+            }
 
             if (_inFlight != null)
             {

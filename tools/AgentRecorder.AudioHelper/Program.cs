@@ -15,7 +15,7 @@ internal static class Program
     private const int ExitRuntimeFailure = 6;
     private const int ExitAlreadyExists = 7;
 
-    internal static int Main(string[] args)
+    internal static async Task<int> Main(string[] args)
     {
         var result = AudioHelperArgumentParser.Parse(args);
         if (!result.Ok)
@@ -108,6 +108,12 @@ internal static class Program
 
         try
         {
+            if (opts.CaptureEngine == AudioCaptureEngine.WindowsMediaCapture)
+            {
+                using var nativeSession = new NativeMediaCaptureSession(opts, outputCheck, events, watcher, cts);
+                return await nativeSession.RunAsync().ConfigureAwait(false);
+            }
+
             using var session = new CaptureSession(opts, outputCheck, events, watcher, cts);
             return session.Run();
         }

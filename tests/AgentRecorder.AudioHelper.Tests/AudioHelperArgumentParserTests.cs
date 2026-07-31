@@ -25,6 +25,36 @@ public class AudioHelperArgumentParserTests
         Assert.Equal("C:\\temp", result.Options.AllowedRoot);
         Assert.Equal("C:\\temp\\stop.signal", result.Options.StopSignalPath);
         Assert.Equal("rec_abc123", result.Options.RecordingId);
+        Assert.Equal(AudioCaptureEngine.WasapiDirect, result.Options.CaptureEngine);
+    }
+
+    [Theory]
+    [InlineData("wasapi-direct", false)]
+    [InlineData("windows-mediacapture", true)]
+    [InlineData("WINDOWS-MEDIACAPTURE", true)]
+    public void Parse_CaptureEngine_ReturnsSelectedEngine(string value, bool expectedNative)
+    {
+        var result = AudioHelperArgumentParser.Parse(new[]
+        {
+            "--endpoint-id", "{0.0.1.00000000}.{guid}",
+            "--output", "C:\\temp\\rec.wav",
+            "--allowed-root", "C:\\temp",
+            "--stop-signal", "C:\\temp\\stop.signal",
+            "--recording-id", "rec_abc123",
+            "--capture-engine", value
+        });
+
+        Assert.True(result.Ok);
+        Assert.Equal(expectedNative, result.Options.CaptureEngine == AudioCaptureEngine.WindowsMediaCapture);
+    }
+
+    [Fact]
+    public void Parse_UnknownCaptureEngine_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--capture-engine", "media-foundation" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Unknown capture engine", result.Error);
     }
 
     [Fact]
@@ -108,6 +138,15 @@ public class AudioHelperArgumentParserTests
     public void Parse_ProbeWithCaptureArgs_ReturnsError()
     {
         var result = AudioHelperArgumentParser.Parse(new[] { "--probe", "--output", "C:\\temp\\rec.wav" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("cannot be mixed", result.Error);
+    }
+
+    [Fact]
+    public void Parse_ProbeWithCaptureEngine_ReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--probe", "--capture-engine", "windows-mediacapture" });
 
         Assert.False(result.Ok);
         Assert.Contains("cannot be mixed", result.Error);

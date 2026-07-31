@@ -19,6 +19,9 @@ public sealed class TempRetentionResult
     public bool AudioMoved { get; init; }
     public string? AudioSourcePath { get; init; }
     public string? AudioTargetPath { get; init; }
+
+    /// <summary>Directory the failed-recording artifacts were moved into.</summary>
+    public string? FailedDirectoryPath { get; init; }
     public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
 }
 
@@ -70,6 +73,7 @@ public sealed class TempRetentionPolicy
             AudioMoved = audioMoved,
             AudioSourcePath = tempAudio,
             AudioTargetPath = audioTarget,
+            FailedDirectoryPath = failedDir,
             Errors = errors
         };
     }

@@ -37,6 +37,7 @@ public class AudioHelperEventStreamParserTests
             "TimestampFrequency: 10000000",
             "BytesWritten: 320",
             "CaptureMethod: WASAPI_SHARED_CAPTURE",
+            "CaptureEngine: wasapi-direct",
             ""
         });
 
@@ -54,6 +55,7 @@ public class AudioHelperEventStreamParserTests
         Assert.Equal(10000000L, evt.TimestampFrequency);
         Assert.Equal(320L, evt.BytesWritten);
         Assert.Equal("WASAPI_SHARED_CAPTURE", evt.CaptureMethod);
+        Assert.Equal("wasapi-direct", evt.CaptureEngine);
     }
 
     [Fact]
@@ -165,6 +167,86 @@ public class AudioHelperEventStreamParserTests
         Assert.Equal(1000L, summary.DurationMs);
         Assert.Equal(32000L, summary.BytesWritten);
         Assert.Empty(summary.ValidationErrors);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_NativeMediaCaptureStopped_PreservesCaptureEngine()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            "RESULT: STARTED",
+            "RecordingId: rec_native",
+            "SampleRate: 16000",
+            "Channels: 1",
+            "BitsPerSample: 16",
+            "FirstSampleAnchorTicks: 123456789",
+            "TimestampFrequency: " + Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture),
+            "BytesWritten: 0",
+            "CaptureMethod: WINDOWS_MEDIACAPTURE",
+            "CaptureEngine: windows-mediacapture",
+            "",
+            "RESULT: STOPPED",
+            "StopReason: user_requested",
+            "DurationMs: 100",
+            "BytesWritten: 3244",
+            "EstimatedGapMs: 0",
+            "CaptureMethod: WINDOWS_MEDIACAPTURE",
+            "CaptureEngine: windows-mediacapture",
+            ""
+        });
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(AudioHelperEventStreamParser.ParseEvents(stdout));
+
+        Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+        Assert.Equal("WINDOWS_MEDIACAPTURE", summary.CaptureMethod);
+        Assert.Equal("windows-mediacapture", summary.CaptureEngine);
+        Assert.Empty(summary.ValidationErrors);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_NativeMediaCaptureFail_PreservesStructuredDiagnostics()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            "RESULT: STARTED",
+            "RecordingId: rec_native",
+            "SampleRate: 16000",
+            "Channels: 1",
+            "BitsPerSample: 16",
+            "FirstSampleAnchorTicks: 123456789",
+            "TimestampFrequency: " + Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture),
+            "BytesWritten: 0",
+            "CaptureMethod: WINDOWS_MEDIACAPTURE",
+            "CaptureEngine: windows-mediacapture",
+            "",
+            "RESULT: FAIL",
+            "ErrorCode: audio_native_recording_failed",
+            "Reason: stage=recording; endpoint={0.0.1.00000000}.{endpoint}; sourceEvent=MediaCapture.Failed",
+            "HRESULT: 0x88990001",
+            "FailureStage: recording",
+            "EndpointId: {0.0.1.00000000}.{endpoint}",
+            "PartialOutputPath: C:\\root\\rec.partial.wav",
+            "SecondaryFailure: stop:NativeAudioRecorderException:0x80004005:Injected",
+            "BytesWritten: 44",
+            "CaptureMethod: WINDOWS_MEDIACAPTURE",
+            "CaptureEngine: windows-mediacapture",
+            ""
+        });
+
+        var events = AudioHelperEventStreamParser.ParseEvents(stdout);
+        var fail = events[1];
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(events);
+
+        Assert.Equal("recording", fail.FailureStage);
+        Assert.Equal("{0.0.1.00000000}.{endpoint}", fail.EndpointId);
+        Assert.Equal("C:\\root\\rec.partial.wav", fail.PartialOutputPath);
+        Assert.Equal("stop:NativeAudioRecorderException:0x80004005:Injected", fail.SecondaryFailure);
+        Assert.Equal(AudioHelperSessionState.Failed, summary.State);
+        Assert.Equal("recording", summary.FailureStage);
+        Assert.Equal("{0.0.1.00000000}.{endpoint}", summary.EndpointId);
+        Assert.Equal("C:\\root\\rec.partial.wav", summary.PartialOutputPath);
+        Assert.Equal("stop:NativeAudioRecorderException:0x80004005:Injected", summary.SecondaryFailure);
+        Assert.Equal("windows-mediacapture", summary.CaptureEngine);
     }
 
     [Fact]

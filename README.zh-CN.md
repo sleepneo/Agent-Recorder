@@ -85,7 +85,7 @@ POST /api/v1/recordings/quick
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
-| 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断和稳定错误码，FFmpeg dshow 仅作为显式诊断回退；系统声音暂未实现 |
+| 麦克风录制 | 已实现，兼容性验收中 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断和稳定错误码。部分蓝牙 Hands-Free 端点可能初始化失败或样本断续，FFmpeg dshow 仅作为显式诊断回退；系统声音暂未实现 |
 | WGC 连续录制 | 实验性实现 | 原生 helper、托管会话和 backend 适配器已通过 scoped 自动化及一次受监督的 10 秒 4K 主屏真实录制；尚未接入 selector、公共 API 或 portable 产品链路 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 

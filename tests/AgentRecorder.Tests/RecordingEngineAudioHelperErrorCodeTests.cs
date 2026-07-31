@@ -145,6 +145,22 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
         return audio;
     }
 
+    private static FakeAudioCaptureWorker CreateStalledAudioWorker(long estimatedGapMs, int naturalExitDelayMs)
+    {
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            naturalExitDelayMs: naturalExitDelayMs,
+            stderrLog: "audio-stalled-stderr");
+        audio.SetTerminalSummary(new AudioHelperSessionSummary
+        {
+            State = AudioHelperSessionState.Failed,
+            ErrorCode = "audio_capture_stalled",
+            Reason = "No audio samples received",
+            EstimatedGapMs = estimatedGapMs
+        });
+        return audio;
+    }
+
     private string CreateValidVideo()
     {
         var path = Path.Combine(_tmpDir, $"fixture-video-{Guid.NewGuid():N}.mp4");
@@ -332,5 +348,100 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
         Assert.Equal(RecState.failed, rec.State);
         Assert.NotEqual("audio_helper_failure", rec.Error);
         Assert.DoesNotContain("non_zero_exit", rec.Error ?? "");
+    }
+
+    [Fact]
+    public void Stop_AudioHelperStallsAfterVideoStarts_BoundedStopAndSingleFailedState()
+    {
+        var tray = new NoOpTray();
+        var engine = CreateEngine(tray, out var tracer);
+        using var _ = tracer;
+        var outputPath = Path.Combine(_tmpDir, $"rec-{Guid.NewGuid():N}.mp4");
+        var audio = CreateStalledAudioWorker(estimatedGapMs: 12455, naturalExitDelayMs: 50);
+        var video = new FakeVideoCaptureWorker(firstFrameDelayMs: 0, naturalExitDelayMs: 30000);
+        var backend = CreateAvSplitBackend(audio, video, _tmpDir);
+        engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+        var rec = CreateRecording("display", outputPath);
+        engine.StartCaptureForTests(rec, tray);
+
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(10)),
+            "Recording should finalize promptly after audio helper stalls, without waiting for full duration.");
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("audio_capture_stalled", rec.Error);
+        Assert.True(video.StopCalled, "Video worker must be stopped when audio helper fails.");
+        Assert.True(tracer.TerminalRecorded.Wait(TimeSpan.FromSeconds(5)), "Tracer should record the terminal event.");
+        Assert.Equal("audio_capture_stalled", tracer.LastTerminalErrorCode);
+    }
+
+    [Fact]
+    public void Stop_AudioHelperFailure_PropagatesCodeGapAndStatus_NotUnknown()
+    {
+        var tray = new NoOpTray();
+        var engine = CreateEngine(tray, out var tracer);
+        using var _ = tracer;
+        var outputPath = Path.Combine(_tmpDir, $"rec-{Guid.NewGuid():N}.mp4");
+        var audio = CreateStalledAudioWorker(estimatedGapMs: 12455, naturalExitDelayMs: 50);
+        var video = new FakeVideoCaptureWorker(firstFrameDelayMs: 0, naturalExitDelayMs: 200);
+        var backend = CreateAvSplitBackend(audio, video, _tmpDir);
+        engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+        var rec = CreateRecording("display", outputPath);
+        engine.StartCaptureForTests(rec, tray);
+
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(5)));
+        Assert.Equal(RecState.failed, rec.State);
+
+        var meta = rec.LastMeta;
+        Assert.NotNull(meta);
+        Assert.Equal("audio_capture_stalled", meta.AudioHelperErrorCode);
+        Assert.Equal(12455, meta.AudioEstimatedGapMs);
+        Assert.NotEqual("unknown", meta.AudioStatus);
+        Assert.NotEqual("not_checked", meta.AudioContinuityStatus);
+        Assert.Contains("audio_helper_failed: audio_capture_stalled", meta.Warnings ?? Array.Empty<string>());
+    }
+
+    [Fact]
+    public void Stop_AllPaths_LeaveNoHelperOrFileResidues()
+    {
+        var outputPath = Path.Combine(_tmpDir, $"rec-{Guid.NewGuid():N}.mp4");
+        var audio = CreateFailingAudioWorker("audio_endpoint_inactive");
+        var video = new FakeVideoCaptureWorker();
+        var backend = CreateAvSplitBackend(audio, video, _tmpDir);
+        var tray = new NoOpTray();
+        var engine = CreateEngine(tray, out var tracer);
+        using var _ = tracer;
+        engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+        var rec = CreateRecording("display", outputPath);
+        engine.StartCaptureForTests(rec, tray);
+
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(5)));
+
+        // No leftover stop signal, temp files should be gone or moved to failed/.
+        var recordingId = Path.GetFileNameWithoutExtension(outputPath);
+        var dataDir = DataDirResolver.Resolve();
+        var tempDir = Path.Combine(dataDir, "temp");
+        var stopSignal = Path.Combine(tempDir, $"{recordingId}_audio_stop.signal");
+        Assert.False(File.Exists(stopSignal), "Audio helper stop signal should be cleaned up.");
+
+        // The backend's temp video/audio should not remain in temp/.
+        var residualVideo = Directory.GetFiles(tempDir, "*.mp4");
+        var residualAudio = Directory.GetFiles(tempDir, "*.wav");
+        Assert.DoesNotContain(residualVideo, f => f.Contains(recordingId));
+        Assert.DoesNotContain(residualAudio, f => f.Contains(recordingId));
+    }
+
+    [Theory]
+    [InlineData("audio_native_initialize_failed")]
+    [InlineData("audio_native_start_failed")]
+    [InlineData("audio_native_recording_failed")]
+    [InlineData("audio_native_stop_failed")]
+    [InlineData("audio_native_finalize_failed")]
+    [InlineData("audio_native_device_mapping_not_found")]
+    [InlineData("audio_native_device_mapping_ambiguous")]
+    [InlineData("audio_native_device_mapping_disabled")]
+    [InlineData("audio_native_device_enumeration_failed")]
+    public void Normalize_NativeMediaCaptureErrorCodes_PreservesStableCode(string code)
+    {
+        Assert.True(AudioHelperErrorCodeResolver.IsAllowed(code));
+        Assert.Equal(code, AudioHelperErrorCodeResolver.Normalize(code));
     }
 }

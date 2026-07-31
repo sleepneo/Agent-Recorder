@@ -102,6 +102,24 @@ public sealed class OutputMeta
     /// <summary>Estimated cumulative audio gap reported by the helper, in milliseconds.</summary>
     public long? AudioEstimatedGapMs;
 
+    /// <summary>Maximum wall-minus-media gap observed by the helper at any stall check, in milliseconds.</summary>
+    public long? AudioMaxEstimatedGapMs;
+
+    /// <summary>Number of successful runtime recoveries performed by the helper on the same approved endpoint.</summary>
+    public long? AudioRecoveryCount;
+
+    /// <summary>Total open/start attempts the helper spent on runtime recovery.</summary>
+    public long? AudioRecoveryAttempts;
+
+    /// <summary>Zero-sample bytes the helper wrote to fill objectively measured stream gaps.</summary>
+    public long? AudioGapFilledBytes;
+
+    /// <summary>Zero-sample milliseconds the helper wrote to fill objectively measured stream gaps.</summary>
+    public long? AudioGapFilledMs;
+
+    /// <summary>WASAPI DataDiscontinuity packets observed by the helper.</summary>
+    public long? AudioDiscontinuityCount;
+
     /// <summary>
     /// Stable error code from the WASAPI helper, normalized to the allowlist
     /// of machine-readable codes. Null when no helper was used or no error

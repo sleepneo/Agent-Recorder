@@ -82,10 +82,11 @@ Agents should use the paths returned by `ensure-running` or
 - User-level autostart controls and FFmpeg prewarm support.
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
-- Real microphone audio recording through an isolated Windows WASAPI helper,
-  followed by AAC muxing, with device enumeration, continuity diagnostics, and
-  stable failure reporting. FFmpeg dshow remains an explicit diagnostic
-  fallback.
+- Microphone recording through an isolated Windows WASAPI helper, followed by
+  AAC muxing, with device enumeration, continuity diagnostics, and stable
+  failure reporting. Hardware compatibility is still being validated; some
+  Bluetooth Hands-Free endpoints may fail initialization or deliver
+  discontinuous samples. FFmpeg dshow remains an explicit diagnostic fallback.
 - The source tree contains an experimental WGC continuous pipeline: the native helper, managed session, and capture-backend adapter have passed scoped automation and one supervised 10-second 4K desktop recording. It is not yet wired into backend selection, the public API, or the portable product path; the default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 

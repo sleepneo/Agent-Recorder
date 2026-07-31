@@ -28,6 +28,7 @@ public sealed class AudioHelperEvent
     public long? TimestampFrequency { get; set; }
     public long? BytesWritten { get; set; }
     public string? CaptureMethod { get; set; }
+    public string? CaptureEngine { get; set; }
     public long? ElapsedMs { get; set; }
     public long? WallElapsedMs { get; set; }
     public long? EstimatedGapMs { get; set; }
@@ -36,7 +37,20 @@ public sealed class AudioHelperEvent
     public string? ErrorCode { get; set; }
     public string? Reason { get; set; }
     public string? Hresult { get; set; }
+    public string? FailureStage { get; set; }
+    public string? EndpointId { get; set; }
     public string? PartialOutputPath { get; set; }
+    public string? SecondaryFailure { get; set; }
+
+    // Runtime stream-health and recovery metrics (optional, audio-helper-v1.1+).
+    public long? LastCallbackAgeMs { get; set; }
+    public long? DiscontinuityCount { get; set; }
+    public long? RecoveryCount { get; set; }
+    public long? RecoveryAttempts { get; set; }
+    public long? GapFilledBytes { get; set; }
+    public long? GapFilledMs { get; set; }
+    public long? MaxEstimatedGapMs { get; set; }
+    public string? ContinuityStatus { get; set; }
 
     public bool SampleRateParseFailed { get; set; }
     public bool ChannelsParseFailed { get; set; }
@@ -48,6 +62,13 @@ public sealed class AudioHelperEvent
     public bool WallElapsedMsParseFailed { get; set; }
     public bool EstimatedGapMsParseFailed { get; set; }
     public bool DurationMsParseFailed { get; set; }
+    public bool LastCallbackAgeMsParseFailed { get; set; }
+    public bool DiscontinuityCountParseFailed { get; set; }
+    public bool RecoveryCountParseFailed { get; set; }
+    public bool RecoveryAttemptsParseFailed { get; set; }
+    public bool GapFilledBytesParseFailed { get; set; }
+    public bool GapFilledMsParseFailed { get; set; }
+    public bool MaxEstimatedGapMsParseFailed { get; set; }
 
     public bool HasNumericParseError =>
         SampleRateParseFailed ||
@@ -59,5 +80,12 @@ public sealed class AudioHelperEvent
         ElapsedMsParseFailed ||
         WallElapsedMsParseFailed ||
         EstimatedGapMsParseFailed ||
-        DurationMsParseFailed;
+        DurationMsParseFailed ||
+        LastCallbackAgeMsParseFailed ||
+        DiscontinuityCountParseFailed ||
+        RecoveryCountParseFailed ||
+        RecoveryAttemptsParseFailed ||
+        GapFilledBytesParseFailed ||
+        GapFilledMsParseFailed ||
+        MaxEstimatedGapMsParseFailed;
 }

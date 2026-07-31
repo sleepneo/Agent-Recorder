@@ -257,7 +257,7 @@ GET /capabilities
 
 **WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；自动化基线和一次受监督的 10 秒 3840×2160 桌面竖切已经通过。**WGC 连续显示器录制仍未通过公共 API 开放**，也未接入 selector 或 portable 产品链路，默认后端未改变。公共端点继续拒绝 WGC continuous 源；helper 仅在项目负责人明确授权的人工监督验收场景下使用。
 
-**音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
+**音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`ready` 只表示存在 active 设备，不保证所有蓝牙 Hands-Free 端点都能被 helper 初始化或持续交付样本；实际失败会进入录制失败终态。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -580,7 +580,7 @@ GET /audio/devices
 
 不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并为每个设备附加新鲜的 CoreAudio 只读状态。`status` 为 `ready`（存在设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。`microphone_supported` 为 `true`；`system_audio_supported` 为 `false`。
 
-请求麦克风录制时，Agent Recorder 会启动独立的 Windows WASAPI helper（`AgentRecorder.AudioHelper.exe`），按 CoreAudio endpoint 精确采集。本接口返回的 `id` 仍为 FFmpeg dshow alternative name，以保持 API 兼容；Agent Recorder 内部会将其映射为对应的 CoreAudio endpoint ID。如需显式回退到 FFmpeg dshow 诊断后端，可在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`。
+请求麦克风录制时，Agent Recorder 会启动独立的 Windows WASAPI helper（`AgentRecorder.AudioHelper.exe`），按 CoreAudio endpoint 精确采集。本接口返回的 `id` 仍为 FFmpeg dshow alternative name，以保持 API 兼容；Agent Recorder 内部会将其映射为对应的 CoreAudio endpoint ID。设备可枚举且状态为 active 不等于 helper 必然能初始化；初始化失败或运行期样本中断会作为录制失败显式返回。如需显式回退到 FFmpeg dshow 诊断后端，可在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`。
 
 设备枚举解析器同时支持 portable 包内 FFmpeg 的经典 `[dshow]` / `[dshow @ ...] DirectShow audio devices` 分段格式和 FFmpeg 8.x 的 `[in#N @ ...] "设备名" (audio)` tagged 格式。仅接受两类可信 logger 前缀：经典行必须以 `[dshow]` 或 `[dshow @ identity]` 开头，tagged 行必须以 `[in#N @ identity]` 开头（`N` 为至少一位数字，`identity` 非空）。引号内的 friendly name 与 alternative name 采用 consumed-length 解析，引号前后出现额外文本（如 `prefix "Name" (audio)` 或 `"Name" (audio) suffix`）均会被拒绝；同时解码 FFmpeg 的 `\"` 与 `\\` 转义并保留普通反斜杠（如 `\wave_{GUID}`）。任何不完整或畸形的设备记录——例如无效 logger 前缀、缺少 alternative name、孤立的 alternative、被其他行打断的候选设备、quoted value 后带尾部垃圾，或设备与无设备标记同时出现——都会使整个 listing 被视为无法识别，返回 `status: "unavailable"`。缺少可信 logger 前缀的行（包括普通 `warning:` 或其他 logger 输出）会被安全忽略，绝不会生成设备。classic 无设备标记必须位于已由可信 `DirectShow audio devices` header 开启的 audio section 内；tagged 无设备标记可直接来自可信 input logger。完整的 tagged 视频记录（`(video)` friendly name 加匹配的 alternative）可在任意顺序被安全忽略，不会中断音频枚举。解析器绝不返回部分音频设备列表。只有完整且可识别的 listing（有设备或无设备）才接受不同版本正常的 listing 退出码差异（`1`、`0`、`-2`），并返回 `ready` 或 `no_devices`。
 

@@ -20,7 +20,8 @@ public class AudioHelperEventWriterTests
             FirstSampleAnchorTicks = 12345,
             TimestampFrequency = 10000000,
             BytesWritten = 100,
-            CaptureMethod = "WASAPI_SHARED_CAPTURE"
+            CaptureMethod = "WASAPI_SHARED_CAPTURE",
+            CaptureEngine = "wasapi-direct"
         });
 
         var output = sw.ToString();
@@ -33,6 +34,37 @@ public class AudioHelperEventWriterTests
         Assert.Contains("TimestampFrequency: 10000000", output);
         Assert.Contains("BytesWritten: 100", output);
         Assert.Contains("CaptureMethod: WASAPI_SHARED_CAPTURE", output);
+        Assert.Contains("CaptureEngine: wasapi-direct", output);
+    }
+
+    [Fact]
+    public void Fail_EmitsNativeCaptureEngineAndHresult()
+    {
+        var sw = new StringWriter();
+        var writer = new EventWriter(sw, null);
+
+        writer.Fail(new AudioHelperEventInfo
+        {
+            ErrorCode = "audio_native_initialize_failed",
+            Reason = "stage=initialize",
+            Hresult = "0x80004005",
+            FailureStage = "initialize",
+            EndpointId = "{0.0.1.00000000}.{endpoint}",
+            PartialOutputPath = "C:\\root\\rec.partial.wav",
+            SecondaryFailure = "dispose:InvalidOperationException:0x80131509:Injected",
+            CaptureMethod = "WINDOWS_MEDIACAPTURE",
+            CaptureEngine = "windows-mediacapture"
+        });
+
+        var output = sw.ToString();
+        Assert.Contains("RESULT: FAIL", output);
+        Assert.Contains("HRESULT: 0x80004005", output);
+        Assert.Contains("FailureStage: initialize", output);
+        Assert.Contains("EndpointId: {0.0.1.00000000}.{endpoint}", output);
+        Assert.Contains("PartialOutputPath: C:\\root\\rec.partial.wav", output);
+        Assert.Contains("SecondaryFailure: dispose:InvalidOperationException:0x80131509:Injected", output);
+        Assert.Contains("CaptureMethod: WINDOWS_MEDIACAPTURE", output);
+        Assert.Contains("CaptureEngine: windows-mediacapture", output);
     }
 
     [Fact]
