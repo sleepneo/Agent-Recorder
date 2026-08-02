@@ -274,6 +274,75 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
     }
 
     [Fact]
+    public async Task AvFinalizer_LaunchAnchorAcceptanceDurations_AllowsMux()
+    {
+        SkipIfNoFfmpeg();
+
+        var videoPath = Path.Combine(_tmpDir, "task188-acceptance-video.mp4");
+        var audioPath = Path.Combine(_tmpDir, "task188-acceptance-audio.wav");
+        var outputPath = Path.Combine(_tmpDir, "task188-acceptance-ok.mp4");
+        const double launchDerivedPreRollSeconds = 3.100;
+
+        GenerateTestVideo(videoPath, durationSeconds: 15.034);
+        GenerateTestAudio(audioPath, durationSeconds: 18.360);
+
+        var result = await new AvFinalizer(new ExternalProcessRunner())
+            .FinalizeAsync(
+                videoPath,
+                audioPath,
+                outputPath,
+                audioPreRoll: TimeSpan.FromSeconds(launchDerivedPreRollSeconds),
+                microphoneRequested: true,
+                applyContinuityCheck: false);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(result.Error);
+        Assert.True(File.Exists(outputPath));
+        Assert.DoesNotContain(result.Meta.Warnings ?? Array.Empty<string>(), w => w.Contains("audio_timeline_too_short"));
+        Assert.InRange(result.Meta.TempVideoDurationSeconds!.Value, 15.00, 15.10);
+        Assert.InRange(result.Meta.TempAudioDurationSeconds!.Value, 18.30, 18.40);
+        Assert.Equal(
+            launchDerivedPreRollSeconds + result.Meta.TempVideoDurationSeconds.Value,
+            result.Meta.RequiredAudioCoverageSeconds!.Value,
+            3);
+        Assert.Equal(
+            result.Meta.TempAudioDurationSeconds.Value - result.Meta.RequiredAudioCoverageSeconds.Value,
+            result.Meta.AudioCoverageDeltaSeconds!.Value,
+            3);
+        Assert.InRange(result.Meta.AudioCoverageDeltaSeconds.Value, -AvFinalizer.AudioCoverageToleranceSeconds, 0.30);
+    }
+
+    [Fact]
+    public async Task AvFinalizer_LaunchAnchorAcceptanceShortAudio_StillFailsCoverage()
+    {
+        SkipIfNoFfmpeg();
+
+        var videoPath = Path.Combine(_tmpDir, "task188-short-video.mp4");
+        var audioPath = Path.Combine(_tmpDir, "task188-short-audio.wav");
+        var outputPath = Path.Combine(_tmpDir, "task188-short-fail.mp4");
+        const double launchDerivedPreRollSeconds = 3.100;
+
+        GenerateTestVideo(videoPath, durationSeconds: 15.034);
+        GenerateTestAudio(audioPath, durationSeconds: 17.700);
+
+        var result = await new AvFinalizer(new ExternalProcessRunner())
+            .FinalizeAsync(
+                videoPath,
+                audioPath,
+                outputPath,
+                audioPreRoll: TimeSpan.FromSeconds(launchDerivedPreRollSeconds),
+                microphoneRequested: true,
+                applyContinuityCheck: false);
+
+        Assert.Contains(result.Meta.Warnings ?? Array.Empty<string>(), w => w.Contains("audio_timeline_too_short"));
+        Assert.NotNull(result.Error);
+        Assert.Contains("does not cover pre-roll plus video", result.Error);
+        Assert.True(result.Meta.RequiredAudioCoverageSeconds > 18.0);
+        Assert.True(result.Meta.AudioCoverageDeltaSeconds < -AvFinalizer.AudioCoverageToleranceSeconds);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
     public async Task AvFinalizer_MissingVideoAnchor_ReturnsStableDiagnostic()
     {
         SkipIfNoFfmpeg();
@@ -634,14 +703,16 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.True(File.Exists(FfmpegLocator.FfmpegPath), "Bundled FFmpeg not available.");
     }
 
-    private static void GenerateTestVideo(string path, int durationSeconds)
+    private static void GenerateTestVideo(string path, double durationSeconds)
     {
-        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i testsrc=duration={durationSeconds}:size=320x240:rate=30 -pix_fmt yuv420p -c:v libx264 -t {durationSeconds} \"{path}\"");
+        var duration = durationSeconds.ToString(CultureInfo.InvariantCulture);
+        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i testsrc=duration={duration}:size=320x240:rate=30 -pix_fmt yuv420p -c:v libx264 -t {duration} \"{path}\"");
     }
 
-    private static void GenerateTestAudio(string path, int durationSeconds)
+    private static void GenerateTestAudio(string path, double durationSeconds)
     {
-        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration={durationSeconds} -acodec pcm_s16le -ar 44100 -ac 2 -t {durationSeconds} \"{path}\"");
+        var duration = durationSeconds.ToString(CultureInfo.InvariantCulture);
+        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration={duration} -acodec pcm_s16le -ar 44100 -ac 2 -t {duration} \"{path}\"");
     }
 
     private static void GenerateTestAudioWithGap(string path, int durationSeconds, double gapStart, double gapDuration)

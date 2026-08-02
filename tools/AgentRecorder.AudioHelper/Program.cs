@@ -136,6 +136,8 @@ internal static class Program
             return "--stop-signal is required";
         if (string.IsNullOrWhiteSpace(opts.RecordingId))
             return "--recording-id is required";
+        if (!string.IsNullOrEmpty(opts.HfpRenderEndpointId) && opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
+            return "--hfp-render-endpoint-id requires --capture-engine wasapi-direct";
 
         var idError = AudioHelperArgumentParser.ValidateRecordingId(opts.RecordingId);
         if (idError != null)
@@ -143,6 +145,8 @@ internal static class Program
 
         if (opts.EndpointId.Length > 512)
             return "--endpoint-id is too long";
+        if (opts.HfpRenderEndpointId.Length > 512)
+            return "--hfp-render-endpoint-id is too long";
 
         return null;
     }

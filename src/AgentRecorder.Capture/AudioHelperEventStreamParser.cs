@@ -58,6 +58,7 @@ public static class AudioHelperEventStreamParser
     {
         var evt = new AudioHelperEvent();
         bool hasResult = false;
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var rawLine in lines)
         {
@@ -71,6 +72,18 @@ public static class AudioHelperEventStreamParser
 
             var key = line.Substring(0, colonIdx).Trim();
             var value = line.Substring(colonIdx + 2).Trim();
+
+            if (!seenKeys.Add(key))
+            {
+                evt.DuplicateField = true;
+                continue;
+            }
+
+            // Bound forward-compatible fields before storing them. This keeps
+            // unknown or hostile helper output from growing the host's memory
+            // or carrying control characters into diagnostics.
+            if (key.Length > 128 || value.Length > 4096 || value.Any(char.IsControl))
+                continue;
 
             switch (key)
             {
@@ -125,6 +138,27 @@ public static class AudioHelperEventStreamParser
                     break;
                 case "CaptureEngine":
                     evt.CaptureEngine = value;
+                    break;
+                case "CaptureStrategy":
+                    evt.CaptureStrategy = value;
+                    break;
+                case "PairEvidence":
+                    evt.PairEvidence = value;
+                    break;
+                case "AutoHfpPairStatus":
+                    evt.AutoHfpPairStatus = value;
+                    break;
+                case "AutoHfpPairResultCode":
+                    evt.AutoHfpPairResultCode = value;
+                    break;
+                case "AutoHfpPairTransportClassification":
+                    evt.AutoHfpPairTransportClassification = value;
+                    break;
+                case "RenderPrimeReadyMs":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rpr))
+                        evt.RenderPrimeReadyMs = rpr;
+                    else
+                        evt.RenderPrimeReadyMsParseFailed = true;
                     break;
                 case "ElapsedMs":
                     if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var em))
@@ -256,6 +290,22 @@ public static class AudioHelperEventStreamParser
         summary.ContinuityStatus = evt.ContinuityStatus;
     }
 
+    private static void CopyHfpMetadata(AudioHelperEvent evt, AudioHelperSessionSummary summary)
+    {
+        if (evt.CaptureStrategy != null)
+            summary.CaptureStrategy = evt.CaptureStrategy;
+        if (evt.PairEvidence != null)
+            summary.PairEvidence = evt.PairEvidence;
+        if (evt.RenderPrimeReadyMs.HasValue)
+            summary.RenderPrimeReadyMs = evt.RenderPrimeReadyMs;
+        if (evt.AutoHfpPairStatus != null)
+            summary.AutoHfpPairStatus = evt.AutoHfpPairStatus;
+        if (evt.AutoHfpPairResultCode != null)
+            summary.AutoHfpPairResultCode = evt.AutoHfpPairResultCode;
+        if (evt.AutoHfpPairTransportClassification != null)
+            summary.AutoHfpPairTransportClassification = evt.AutoHfpPairTransportClassification;
+    }
+
     /// <summary>
     /// Validates the event sequence according to the audio helper state machine.
     /// Returns a summary with the terminal state and any validation errors.
@@ -279,12 +329,19 @@ public static class AudioHelperEventStreamParser
         long lastElapsedMs = -1;
         long lastWallElapsedMs = -1;
         long lastBytesWritten = -1;
-        long lastEstimatedGapMs = -1;
+        long historicalProgressMaxEstimatedGapMs = -1;
 
         foreach (var evt in events)
         {
+            if (evt.DuplicateField)
+            {
+                hasMalformedSequence = true;
+                summary.ValidationErrors.Add("Duplicate field in event");
+            }
             if (evt.HasNumericParseError)
                 summary.HasNumericParseError = true;
+            if (evt.RenderPrimeReadyMs.HasValue && evt.RenderPrimeReadyMs.Value < 0)
+                summary.ValidationErrors.Add("RenderPrimeReadyMs must be non-negative");
 
             switch (evt.Result)
             {
@@ -321,6 +378,7 @@ public static class AudioHelperEventStreamParser
 
                     summary.CaptureMethod = evt.CaptureMethod;
                     summary.CaptureEngine = evt.CaptureEngine;
+                    CopyHfpMetadata(evt, summary);
                     break;
 
                 case AudioHelperEventResult.Progress:
@@ -360,8 +418,19 @@ public static class AudioHelperEventStreamParser
                         summary.ValidationErrors.Add("PROGRESS event missing required field: EstimatedGapMs");
                     else if (evt.EstimatedGapMs.Value < 0)
                         summary.ValidationErrors.Add("PROGRESS event has negative EstimatedGapMs");
-                    else if (evt.EstimatedGapMs.Value < lastEstimatedGapMs)
-                        summary.ValidationErrors.Add("PROGRESS event EstimatedGapMs regressed");
+
+                    if (!evt.MaxEstimatedGapMs.HasValue)
+                        summary.ValidationErrors.Add("PROGRESS event missing required field: MaxEstimatedGapMs");
+                    else if (evt.MaxEstimatedGapMs.Value < 0)
+                        summary.ValidationErrors.Add("PROGRESS event has negative MaxEstimatedGapMs");
+                    else if (historicalProgressMaxEstimatedGapMs >= 0 &&
+                             evt.MaxEstimatedGapMs.Value < historicalProgressMaxEstimatedGapMs)
+                        summary.ValidationErrors.Add("PROGRESS event MaxEstimatedGapMs regressed");
+
+                    if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value >= 0 &&
+                        evt.MaxEstimatedGapMs.HasValue && evt.MaxEstimatedGapMs.Value >= 0 &&
+                        evt.MaxEstimatedGapMs.Value < evt.EstimatedGapMs.Value)
+                        summary.ValidationErrors.Add("PROGRESS event MaxEstimatedGapMs below EstimatedGapMs");
 
                     if (evt.ElapsedMs.HasValue && evt.ElapsedMs.Value >= 0)
                         lastElapsedMs = evt.ElapsedMs.Value;
@@ -369,8 +438,10 @@ public static class AudioHelperEventStreamParser
                         lastWallElapsedMs = evt.WallElapsedMs.Value;
                     if (evt.BytesWritten.HasValue && evt.BytesWritten.Value >= 0)
                         lastBytesWritten = evt.BytesWritten.Value;
-                    if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value >= 0)
-                        lastEstimatedGapMs = evt.EstimatedGapMs.Value;
+                    if (evt.MaxEstimatedGapMs.HasValue && evt.MaxEstimatedGapMs.Value >= 0)
+                        historicalProgressMaxEstimatedGapMs = Math.Max(
+                            historicalProgressMaxEstimatedGapMs,
+                            evt.MaxEstimatedGapMs.Value);
                     break;
 
                 case AudioHelperEventResult.Ok:
@@ -392,7 +463,9 @@ public static class AudioHelperEventStreamParser
                     summary.StopReason = "duration_reached";
                     summary.CaptureMethod ??= evt.CaptureMethod;
                     summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyHfpMetadata(evt, summary);
                     CopyStreamHealthMetrics(evt, summary);
+                    ValidateTerminalGapMetrics(evt, historicalProgressMaxEstimatedGapMs, summary);
                     break;
 
                 case AudioHelperEventResult.Stopped:
@@ -414,7 +487,9 @@ public static class AudioHelperEventStreamParser
                     summary.StopReason = evt.StopReason ?? "user_requested";
                     summary.CaptureMethod ??= evt.CaptureMethod;
                     summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyHfpMetadata(evt, summary);
                     CopyStreamHealthMetrics(evt, summary);
+                    ValidateTerminalGapMetrics(evt, historicalProgressMaxEstimatedGapMs, summary);
                     break;
 
                 case AudioHelperEventResult.Fail:
@@ -442,10 +517,12 @@ public static class AudioHelperEventStreamParser
                     summary.StopReason = evt.StopReason ?? evt.ErrorCode;
                     summary.CaptureMethod ??= evt.CaptureMethod;
                     summary.CaptureEngine ??= evt.CaptureEngine;
+                    CopyHfpMetadata(evt, summary);
                     CopyStreamHealthMetrics(evt, summary);
 
                     if (string.IsNullOrEmpty(evt.ErrorCode))
                         summary.ValidationErrors.Add("FAIL event missing required field: ErrorCode");
+                    ValidateTerminalGapMetrics(evt, historicalProgressMaxEstimatedGapMs, summary);
                     break;
 
                 case AudioHelperEventResult.Unknown:
@@ -476,6 +553,15 @@ public static class AudioHelperEventStreamParser
             summary.ValidationErrors.Add("No terminal event (OK/STOPPED/FAIL) found");
         }
 
+        if (historicalProgressMaxEstimatedGapMs >= 0 &&
+            (!summary.MaxEstimatedGapMs.HasValue ||
+             summary.MaxEstimatedGapMs.Value < historicalProgressMaxEstimatedGapMs))
+        {
+            // Keep the summary's historical max distinct from the terminal
+            // current gap even when the terminal event is malformed.
+            summary.MaxEstimatedGapMs = historicalProgressMaxEstimatedGapMs;
+        }
+
         summary.HasMalformedSequence = hasMalformedSequence;
 
         bool hasDeclarativeFailure = summary.State == AudioHelperSessionState.Failed && !string.IsNullOrEmpty(summary.ErrorCode);
@@ -495,6 +581,36 @@ public static class AudioHelperEventStreamParser
         }
 
         return summary;
+    }
+
+    private static void ValidateTerminalGapMetrics(
+        AudioHelperEvent evt,
+        long historicalProgressMaxEstimatedGapMs,
+        AudioHelperSessionSummary summary)
+    {
+        if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value < 0)
+            summary.ValidationErrors.Add("Terminal event has negative EstimatedGapMs");
+
+        if (!evt.MaxEstimatedGapMs.HasValue)
+        {
+            if (historicalProgressMaxEstimatedGapMs >= 0)
+                summary.ValidationErrors.Add("Terminal event missing required field: MaxEstimatedGapMs");
+            return;
+        }
+
+        if (evt.MaxEstimatedGapMs.Value < 0)
+        {
+            summary.ValidationErrors.Add("Terminal event has negative MaxEstimatedGapMs");
+            return;
+        }
+
+        if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value >= 0 &&
+            evt.MaxEstimatedGapMs.Value < evt.EstimatedGapMs.Value)
+            summary.ValidationErrors.Add("Terminal event MaxEstimatedGapMs below EstimatedGapMs");
+
+        if (historicalProgressMaxEstimatedGapMs >= 0 &&
+            evt.MaxEstimatedGapMs.Value < historicalProgressMaxEstimatedGapMs)
+            summary.ValidationErrors.Add("Terminal MaxEstimatedGapMs below last PROGRESS historical max");
     }
 
     /// <summary>
@@ -537,6 +653,12 @@ public sealed class AudioHelperSessionSummary
     public long? TimestampFrequency { get; set; }
     public string? CaptureMethod { get; set; }
     public string? CaptureEngine { get; set; }
+    public string? CaptureStrategy { get; set; }
+    public string? PairEvidence { get; set; }
+    public string? AutoHfpPairStatus { get; set; }
+    public string? AutoHfpPairResultCode { get; set; }
+    public string? AutoHfpPairTransportClassification { get; set; }
+    public long? RenderPrimeReadyMs { get; set; }
     public long? DurationMs { get; set; }
     public long? BytesWritten { get; set; }
     public long? EstimatedGapMs { get; set; }

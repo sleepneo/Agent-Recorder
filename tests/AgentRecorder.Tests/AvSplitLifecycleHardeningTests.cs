@@ -592,7 +592,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
     }
 
     [Fact]
-    public void AvSplitFinalization_UsesLatestVideoWorkerAnchorAfterFirstFrameCallback()
+    public void AvSplitFinalization_UsesLaunchVideoAnchorAfterFirstFrameCallback()
     {
         var validAudio = CreateValidAudio(_tempDir);
         var validVideo = CreateValidVideo(_tempDir);
@@ -610,13 +610,18 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
 
-        video.SetFirstFrameAnchorTicks(audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10);
+        video.SetLaunchAnchorTicks(audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10);
+        video.SetFirstFrameAnchorTicks(audio.MediaStartAnchorTicks + Stopwatch.Frequency / 20);
         var meta = backend.Stop();
 
         Assert.Equal(1, runner.RunCallCount);
         Assert.Equal("available", meta.VideoAnchorStatus);
+        Assert.Equal(video.LaunchAnchorTicks, meta.VideoLaunchAnchorTicks);
+        Assert.Equal(video.FirstFrameAnchorTicks, meta.VideoProgressAnchorTicks);
         Assert.Equal("available", meta.AudioAnchorStatus);
-        Assert.True(meta.AudioPreRollMs is > 0);
+        Assert.NotNull(meta.AudioPreRollMs);
+        Assert.InRange(meta.AudioPreRollMs!.Value, 99.0, 101.0);
+        Assert.NotInRange(meta.AudioPreRollMs.Value, 49.0, 51.0);
     }
 
     private static FFmpegProgressGroup CreateProgressGroup(long frame, long totalSize, long? outTimeUs)

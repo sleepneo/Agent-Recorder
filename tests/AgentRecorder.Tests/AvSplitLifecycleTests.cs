@@ -178,7 +178,11 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public bool HasExited { get; private set; }
     public bool StopCalled { get; private set; }
     public bool WaitForExitCalled { get; private set; }
+    public long LaunchAnchorTicks { get; private set; }
     public long FirstFrameAnchorTicks { get; private set; }
+    public long? FirstProgressFrame { get; private set; }
+    public long? FirstProgressOutTimeUs { get; private set; }
+    public double? ProgressAnchorDeltaMs { get; private set; }
     public int FirstFrameCount { get; private set; }
 
     /// <summary>
@@ -200,6 +204,7 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public void Start(CaptureConfig cfg, string outputPath)
     {
         OutputPath = outputPath;
+        LaunchAnchorTicks = Stopwatch.GetTimestamp();
         if (_firstFrameDelayMs == 0)
         {
             EmitFirstFrame();
@@ -247,6 +252,11 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public void SetFirstFrameAnchorTicks(long ticks)
     {
         FirstFrameAnchorTicks = ticks;
+    }
+
+    public void SetLaunchAnchorTicks(long ticks)
+    {
+        LaunchAnchorTicks = ticks;
     }
 
     public void EmitNaturalExit(int exitCode, string stderr)

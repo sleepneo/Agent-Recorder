@@ -21,6 +21,8 @@ public class AudioHelperCaptureSessionTests
         public bool Disposed { get; private set; }
         public Exception? StartRecordingException { get; set; }
         public long DiscontinuityCount { get; set; }
+        public Action<FakeAudioInput>? OnStopRecording { get; set; }
+        public Action<FakeAudioInput>? OnDispose { get; set; }
 
         /// <summary>
         /// When set, RecordingStopped carrying this exception is raised
@@ -43,6 +45,7 @@ public class AudioHelperCaptureSessionTests
         {
             if (Stopped) return;
             Stopped = true;
+            OnStopRecording?.Invoke(this);
             RecordingStopped?.Invoke(this, new StoppedEventArgs());
         }
 
@@ -58,6 +61,7 @@ public class AudioHelperCaptureSessionTests
 
         public void Dispose()
         {
+            OnDispose?.Invoke(this);
             Disposed = true;
         }
     }
@@ -90,6 +94,17 @@ public class AudioHelperCaptureSessionTests
 
     private static StopWatcher Watcher(string path, CancellationTokenSource cts)
         => new(path, () => cts.Cancel());
+
+    private static void ForceProgress(CaptureSession session, long bytesWritten)
+    {
+        var firstCallback = (long)(typeof(CaptureSession)
+            .GetField("_firstCallbackTimestamp", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?.GetValue(session) ?? 0L);
+        var method = typeof(CaptureSession).GetMethod(
+            "TryEmitProgress", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(method);
+        method!.Invoke(session, new object?[] { bytesWritten, firstCallback, true, false });
+    }
 
     [Fact]
     public async Task Run_WithData_EmitsStartedAndOkAndPublishesWav()
@@ -465,6 +480,128 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
+    public async Task Run_ProgressDiscontinuityCount_IsPreservedInStoppedTerminal()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "rec.wav");
+        var partial = Path.Combine(dir, $"rec.{Environment.ProcessId}.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+
+        var input = new FakeAudioInput { DiscontinuityCount = 46 };
+        var opts = Options("rec_discontinuity_terminal", output, stopSignal);
+        var paths = PathResult(output, partial);
+        var cts = new CancellationTokenSource();
+        var watcher = Watcher(stopSignal, cts);
+        var sw = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(sw, null), watcher, cts, _ => (input, null, null));
+
+        var runTask = Task.Run(() => session.Run());
+        Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+        input.InjectData(new byte[320], 320);
+        Assert.True(SpinWait.SpinUntil(() => File.Exists(partial), TimeSpan.FromSeconds(2)));
+        ForceProgress(session, 320);
+
+        File.WriteAllText(stopSignal, "stop");
+        Assert.Equal(0, await runTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
+        var progress = events.Where(e => e.Result == AudioHelperEventResult.Progress).ToList();
+        var terminal = events.Last(e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+        Assert.NotEmpty(progress);
+        Assert.True(progress.Zip(progress.Skip(1), (a, b) => b.DiscontinuityCount >= a.DiscontinuityCount).All(v => v));
+        Assert.Equal(46, progress.Max(e => e.DiscontinuityCount));
+        Assert.Equal(AudioHelperEventResult.Stopped, terminal.Result);
+        Assert.Equal(46, terminal.DiscontinuityCount);
+        Assert.True(terminal.DiscontinuityCount >= progress.Max(e => e.DiscontinuityCount));
+
+        session.Dispose();
+        watcher.Dispose();
+        Directory.Delete(dir, true);
+    }
+
+    [Fact]
+    public async Task Run_NaturalOkAndUserStopped_PreserveCurrentInputDiscontinuityCount()
+    {
+        async Task<AudioHelperEvent> RunCaseAsync(string recordingId, long count, bool userStop)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+            var output = Path.Combine(dir, "rec.wav");
+            var partial = Path.Combine(dir, $"rec.{Environment.ProcessId}.partial.wav");
+            var stopSignal = Path.Combine(dir, "stop.signal");
+            var input = new FakeAudioInput { DiscontinuityCount = count };
+            var opts = Options(recordingId, output, stopSignal);
+            var paths = PathResult(output, partial);
+            var cts = new CancellationTokenSource();
+            var watcher = Watcher(stopSignal, cts);
+            var sw = new StringWriter();
+            var session = new CaptureSession(opts, paths, new EventWriter(sw, null), watcher, cts, _ => (input, null, null));
+
+            try
+            {
+                var runTask = Task.Run(() => session.Run());
+                Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+                input.InjectData(new byte[320], 320);
+                Assert.True(SpinWait.SpinUntil(() => File.Exists(partial), TimeSpan.FromSeconds(2)));
+                if (userStop)
+                    File.WriteAllText(stopSignal, "stop");
+                else
+                    input.StopRecording();
+                Assert.Equal(0, await runTask.WaitAsync(TimeSpan.FromSeconds(5)));
+                return AudioHelperEventStreamParser.ParseEvents(sw.ToString())
+                    .Last(e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+            }
+            finally
+            {
+                session.Dispose();
+                watcher.Dispose();
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        var natural = await RunCaseAsync("rec_natural_ok_count", 17, userStop: false);
+        var stopped = await RunCaseAsync("rec_user_stopped_count", 23, userStop: true);
+
+        Assert.Equal(AudioHelperEventResult.Ok, natural.Result);
+        Assert.Equal(17, natural.DiscontinuityCount);
+        Assert.Equal(AudioHelperEventResult.Stopped, stopped.Result);
+        Assert.Equal(23, stopped.DiscontinuityCount);
+    }
+
+    [Fact]
+    public async Task Run_FailTerminal_PreservesCurrentInputDiscontinuityCount()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "rec.wav");
+        var partial = Path.Combine(dir, $"rec.{Environment.ProcessId}.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput { DiscontinuityCount = 13 };
+        var opts = Options("rec_fail_count", output, stopSignal);
+        var paths = PathResult(output, partial);
+        var cts = new CancellationTokenSource();
+        var watcher = Watcher(stopSignal, cts);
+        var sw = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(sw, null), watcher, cts, _ => (input, null, null));
+
+        var runTask = Task.Run(() => session.Run());
+        Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+        input.InjectData(new byte[320], 320);
+        input.InjectError(new InvalidOperationException("device lost"));
+        Assert.NotEqual(0, await runTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
+        var terminal = events.Last(e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+        Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
+        Assert.Equal(13, terminal.DiscontinuityCount);
+
+        session.Dispose();
+        watcher.Dispose();
+        Directory.Delete(dir, true);
+    }
+
+    [Fact]
     public async Task Run_ConcurrentStopAndError_EmitsExactlyOneTerminal()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");
@@ -473,7 +610,7 @@ public class AudioHelperCaptureSessionTests
         var partial = Path.Combine(dir, $"rec.{Environment.ProcessId}.partial.wav");
         var stopSignal = Path.Combine(dir, "stop.signal");
 
-        var input = new FakeAudioInput();
+        var input = new FakeAudioInput { DiscontinuityCount = 19 };
         var opts = Options("rec_race", output, stopSignal);
         var paths = PathResult(output, partial);
         var cts = new CancellationTokenSource();
@@ -491,6 +628,8 @@ public class AudioHelperCaptureSessionTests
 
         var events = AudioHelperEventStreamParser.ParseEvents(sw.ToString());
         AssertExactlyOneTerminal(events);
+        var terminal = events.Last(e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+        Assert.Equal(19, terminal.DiscontinuityCount);
 
         session.Dispose();
         watcher.Dispose();
@@ -508,6 +647,7 @@ public class AudioHelperCaptureSessionTests
 
         var input = new FakeAudioInput
         {
+            DiscontinuityCount = 23,
             StartRecordingException = new AudioCaptureStartException(
                 "StartRecording failed (COMException, HRESULT=0x80070057): Value does not fall within the expected range.",
                 new InvalidOperationException("Value does not fall within the expected range."),
@@ -529,6 +669,7 @@ public class AudioHelperCaptureSessionTests
         AssertTerminalErrorCode(events, "audio_capture_start_failed");
         var terminal = events.Last(e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
         Assert.Contains("0x80070057", terminal.Hresult ?? "");
+        Assert.Equal(23, terminal.DiscontinuityCount);
 
         session.Dispose();
         watcher.Dispose();

@@ -83,6 +83,8 @@ internal sealed class CaptureSession : IDisposable
     private readonly CancellationTokenSource _cts;
     private readonly ManualResetEventSlim _completed = new(false);
     private readonly Func<TimeSpan, (IAudioInput? Input, string? ErrorCode, string? Reason)>? _inputFactory;
+    private readonly IHfpDuplexInputFactory? _hfpFactory;
+    private readonly IHfpPairResolver? _hfpPairResolver;
     private readonly TimeSpan _stallDetectionThreshold;
     private readonly TimeSpan _firstPacketTimeout;
     private readonly ISystemClock _clock;
@@ -94,6 +96,7 @@ internal sealed class CaptureSession : IDisposable
     private readonly object _stateLock = new();
     private readonly object _writerLock = new();
     private readonly object _firstPacketLock = new();
+    private readonly HashSet<IAudioInput> _finalizedInputs = new(ReferenceEqualityComparer.Instance);
 
     private IAudioInput? _input;
     private WaveFileWriter? _writer;
@@ -123,6 +126,7 @@ internal sealed class CaptureSession : IDisposable
     // Runtime starvation/recovery state.
     private int _gapOverThresholdChecks;
     private int _runtimeRecoveryInProgress;
+    private int _runtimeRecoveryThreadId;
     private int _successfulRecoveries;
     private long _recoveryAttemptCount;
     private long _gapFilledBytesTotal;
@@ -130,15 +134,24 @@ internal sealed class CaptureSession : IDisposable
     private long _maxEstimatedGapMsObserved;
     private long _lastStreamResumeTimestamp;
     private long _discontinuityCountCarry;
+    private int _inputFinalizationInProgress;
     private int _continuityDegraded;
 
     private string? _pendingErrorCode;
     private string _pendingReason = "";
     private string _pendingPartialPath = "";
     private string _pendingHresult = "";
+    private string _pendingFailureStage = "";
+    private string _captureStrategy = "";
+    private string _pairEvidence = "";
+    private long _renderPrimeReadyMs = -1;
+    private int _autoHfpPairResolutionAttempted;
+    private string? _resolvedHfpRenderEndpointId;
+    private HfpPairDiscoveryResult _autoHfpPairResult =
+        HfpPairDiscoveryResult.NotApplicable("Automatic HFP pair discovery was not requested");
 
     public CaptureSession(AudioHelperOptions options, PathCheckResult paths, EventWriter events, StopWatcher watcher, CancellationTokenSource cts)
-        : this(options, paths, events, watcher, cts, null, DefaultStallDetectionThreshold, DefaultFirstPacketTimeout, null) { }
+        : this(options, paths, events, watcher, cts, null, DefaultStallDetectionThreshold, DefaultFirstPacketTimeout, null, null, null, null) { }
 
     internal CaptureSession(AudioHelperOptions options, PathCheckResult paths, EventWriter events, StopWatcher watcher, CancellationTokenSource cts,
         Func<TimeSpan, (IAudioInput? Input, string? ErrorCode, string? Reason)>? inputFactory,
@@ -147,7 +160,9 @@ internal sealed class CaptureSession : IDisposable
         ISystemClock? clock = null,
         TimeSpan? runtimeGapThreshold = null,
         TimeSpan? recoveryOpenBudget = null,
-        TimeSpan? maxSingleGapPad = null)
+        TimeSpan? maxSingleGapPad = null,
+        IHfpDuplexInputFactory? hfpFactory = null,
+        IHfpPairResolver? hfpPairResolver = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -155,6 +170,8 @@ internal sealed class CaptureSession : IDisposable
         _watcher = watcher ?? throw new ArgumentNullException(nameof(watcher));
         _cts = cts ?? throw new ArgumentNullException(nameof(cts));
         _inputFactory = inputFactory;
+        _hfpFactory = hfpFactory;
+        _hfpPairResolver = hfpPairResolver;
         _stallDetectionThreshold = stallDetectionThreshold ?? DefaultStallDetectionThreshold;
         _firstPacketTimeout = firstPacketTimeout ?? DefaultFirstPacketTimeout;
         _clock = clock ?? SystemClock.Instance;
@@ -191,6 +208,25 @@ internal sealed class CaptureSession : IDisposable
         string? lastStartErrorCode = null;
         string? lastStartReason = null;
         string? lastStartHresult = null;
+        string? lastStartFailureStage = null;
+
+        EnsureAutomaticHfpPairResolved();
+        if (_autoHfpPairResult.IsBlockingFailure)
+        {
+            CaptureHfpFailureMetadata(AudioInputOpenResult.Failure(
+                _autoHfpPairResult.ResultCode ?? "audio_hfp_pair_discovery_failed",
+                _autoHfpPairResult.Reason,
+                HfpFailureStages.PairDiscovery,
+                pairEvidence: _autoHfpPairResult.PairEvidence,
+                captureStrategy: "hfp-auto-pair-discovery"));
+            ConvergeTerminal(
+                userRequested: false,
+                _autoHfpPairResult.ResultCode ?? "audio_hfp_pair_discovery_failed",
+                _autoHfpPairResult.Reason,
+                _paths.PartialPath,
+                failureStage: HfpFailureStages.PairDiscovery);
+            return;
+        }
 
         for (int startAttempt = 0; startAttempt < MaxStartAttempts; startAttempt++)
         {
@@ -201,7 +237,8 @@ internal sealed class CaptureSession : IDisposable
                 // most specific error we have, otherwise a generic budget error.
                 if (lastStartErrorCode != null)
                 {
-                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason ?? "", _paths.PartialPath, hresult: lastStartHresult);
+                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason ?? "", _paths.PartialPath,
+                        hresult: lastStartHresult, failureStage: lastStartFailureStage);
                 }
                 else
                 {
@@ -210,26 +247,32 @@ internal sealed class CaptureSession : IDisposable
                 return;
             }
 
-            var (input, errorCode, reason) = _inputFactory != null
-                ? _inputFactory(remainingBudget)
-                : WasapiAudioInput.Open(_options.EndpointId, remainingBudget);
+            var openResult = OpenInput(remainingBudget);
+            var input = openResult.Input;
             if (input == null)
             {
                 // If we already have a StartRecording failure pending, keep it
                 // unless the open attempt returned a more specific root cause
                 // (e.g. endpoint disconnected/not found).
-                if (lastStartErrorCode != null && !IsMoreSpecificOpenError(errorCode))
+                if (lastStartErrorCode != null && !IsMoreSpecificOpenError(openResult.ErrorCode))
                 {
-                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason ?? "", _paths.PartialPath, hresult: lastStartHresult);
+                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason ?? "", _paths.PartialPath,
+                        hresult: lastStartHresult, failureStage: lastStartFailureStage);
                 }
                 else
                 {
-                    ConvergeTerminal(userRequested: false, errorCode ?? "audio_endpoint_not_found", reason ?? "unknown", "");
+                    CaptureHfpFailureMetadata(openResult);
+                    ConvergeTerminal(userRequested: false, openResult.ErrorCode ?? "audio_endpoint_not_found",
+                        openResult.Reason, "", hresult: HfpDuplexAudioInputFactory.FormatHresult(openResult.Hresult),
+                        failureStage: IsHfpMode || _autoHfpPairResult.IsBlockingFailure
+                            ? openResult.FailureStage
+                            : null);
                 }
                 return;
             }
 
             _input = input;
+            CaptureHfpMetadata(input);
             var format = input.Format ?? throw new InvalidOperationException("Audio input has no wave format");
             _waveFormat = format;
 
@@ -267,12 +310,9 @@ internal sealed class CaptureSession : IDisposable
 
                 // Start was cancelled or the input was disposed by a concurrent
                 // Stop/Dispose. Do not treat this as a retryable Start failure.
-                input.DataAvailable -= OnDataAvailable;
-                input.RecordingStopped -= OnRecordingStopped;
-
-                try { input.StopRecording(); } catch { }
-                try { input.Dispose(); } catch { }
-                _input = null;
+                var cancelledInput = TakeCurrentInputForFinalization();
+                if (cancelledInput != null)
+                    FinalizeOwnedInput(cancelledInput);
 
                 _writer = null;
                 try { writer.Dispose(); } catch { }
@@ -295,16 +335,14 @@ internal sealed class CaptureSession : IDisposable
             }
             catch (AudioCaptureStartException ex)
             {
-                lastStartErrorCode = "audio_capture_start_failed";
+                lastStartErrorCode = ex.ErrorCode ?? "audio_capture_start_failed";
                 lastStartReason = $"StartRecording failed: {ex.Message}";
                 lastStartHresult = $"0x{ex.Hresult:X8}";
+                lastStartFailureStage = ex.Stage;
 
-                input.DataAvailable -= OnDataAvailable;
-                input.RecordingStopped -= OnRecordingStopped;
-
-                try { input.StopRecording(); } catch { }
-                try { input.Dispose(); } catch { }
-                _input = null;
+                var failedInput = TakeCurrentInputForFinalization();
+                if (failedInput != null)
+                    FinalizeOwnedInput(failedInput);
 
                 _writer = null;
                 try { writer.Dispose(); } catch { }
@@ -315,7 +353,8 @@ internal sealed class CaptureSession : IDisposable
 
                 if (startAttempt == MaxStartAttempts - 1)
                 {
-                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason, _paths.PartialPath, hresult: lastStartHresult);
+                    ConvergeTerminal(userRequested: false, lastStartErrorCode, lastStartReason, _paths.PartialPath,
+                        hresult: lastStartHresult, failureStage: lastStartFailureStage);
                     return;
                 }
                 // Retry: the next iteration will call _inputFactory / WasapiAudioInput.Open again.
@@ -326,7 +365,8 @@ internal sealed class CaptureSession : IDisposable
                     userRequested: false,
                     "audio_capture_start_failed",
                     "StartRecording failed: " + ex.Message,
-                    _paths.PartialPath);
+                    _paths.PartialPath,
+                    failureStage: IsHfpMode ? HfpFailureStages.CaptureStart : null);
                 return;
             }
         }
@@ -369,6 +409,7 @@ internal sealed class CaptureSession : IDisposable
     {
         if (Interlocked.Exchange(ref _userStopRequested, 1) != 0)
             return;
+
         Volatile.Read(ref _input)?.StopRecording();
     }
 
@@ -461,12 +502,21 @@ internal sealed class CaptureSession : IDisposable
         if (!ReferenceEquals(sender, Volatile.Read(ref _input)))
             return;
 
+        // A user stop may synchronously raise RecordingStopped while recovery is
+        // still inside candidate StartRecording. The recovery owner must finish
+        // that candidate lifecycle and publish the single terminal event after
+        // its metrics are committed; handling it here would race that commit.
+        if (Volatile.Read(ref _runtimeRecoveryInProgress) != 0 && _userStopRequested != 0)
+            return;
+
         if (e.Exception != null)
         {
             string? hresult = null;
+            string? failureStage = null;
             if (e.Exception is AudioCaptureRuntimeException runtimeEx)
             {
                 hresult = $"0x{runtimeEx.Hresult:X8}";
+                failureStage = runtimeEx.Stage;
             }
 
             if (Volatile.Read(ref _runtimeRecoveryInProgress) != 0 && _userStopRequested == 0)
@@ -475,11 +525,19 @@ internal sealed class CaptureSession : IDisposable
                     "audio_capture_discontinuous",
                     FormatRecoveryStopReason(e.Exception),
                     _paths.PartialPath,
-                    hresult);
+                    hresult,
+                    failureStage);
             }
             else
             {
-                SetPendingError("audio_capture_error", e.Exception.Message, _paths.PartialPath, hresult);
+                SetPendingError(
+                    e.Exception is AudioCaptureRuntimeException classified && !string.IsNullOrEmpty(classified.ErrorCode)
+                        ? classified.ErrorCode
+                        : "audio_capture_error",
+                    e.Exception.Message,
+                    _paths.PartialPath,
+                    hresult,
+                    failureStage);
             }
         }
         else if (Volatile.Read(ref _runtimeRecoveryInProgress) != 0 && _userStopRequested == 0)
@@ -490,7 +548,7 @@ internal sealed class CaptureSession : IDisposable
                 _paths.PartialPath);
         }
 
-        ConvergeTerminal(userRequested: _userStopRequested != 0);
+        ConvergeTerminal(userRequested: _userStopRequested != 0, fromInputCallback: true);
     }
 
     private void StartStallMonitor()
@@ -585,6 +643,7 @@ internal sealed class CaptureSession : IDisposable
     /// </summary>
     private void AttemptRuntimeRecovery(string trigger, string triggerMetrics)
     {
+        Volatile.Write(ref _runtimeRecoveryThreadId, Environment.CurrentManagedThreadId);
         try
         {
             // 1. Detach the starved input. Once _input is cleared the recovery
@@ -595,19 +654,11 @@ internal sealed class CaptureSession : IDisposable
                 if (_terminalEventRaised != 0 || _userStopRequested != 0)
                     return;
 
-                oldInput = _input;
-                _input = null;
-                if (oldInput != null)
-                    _discontinuityCountCarry += oldInput.DiscontinuityCount;
+                oldInput = TakeCurrentInputForFinalizationLocked();
             }
 
             if (oldInput != null)
-            {
-                oldInput.DataAvailable -= OnDataAvailable;
-                oldInput.RecordingStopped -= OnRecordingStopped;
-                try { oldInput.StopRecording(); } catch { }
-                try { oldInput.Dispose(); } catch { }
-            }
+                FinalizeOwnedInput(oldInput);
 
             bool budgetExhausted = false;
             lock (_stateLock)
@@ -629,6 +680,7 @@ internal sealed class CaptureSession : IDisposable
 
             string? lastFailure = null;
             string? lastFailureHresult = null;
+            string? lastFailureStage = null;
             for (int openAttempt = 0; openAttempt < MaxRecoveryOpenAttempts; openAttempt++)
             {
                 lock (_stateLock)
@@ -639,25 +691,24 @@ internal sealed class CaptureSession : IDisposable
 
                 Interlocked.Increment(ref _recoveryAttemptCount);
 
-                IAudioInput? candidate;
-                string? openCode, openReason;
+                AudioInputOpenResult openResult;
                 try
                 {
-                    (candidate, openCode, openReason) = _inputFactory != null
-                        ? _inputFactory(_recoveryOpenBudget)
-                        : WasapiAudioInput.Open(_options.EndpointId, _recoveryOpenBudget);
+                    openResult = OpenInput(_recoveryOpenBudget);
                 }
                 catch (Exception ex)
                 {
-                    candidate = null;
-                    openCode = "audio_helper_runtime_failure";
-                    openReason = ex.Message;
+                    openResult = AudioInputOpenResult.Failure("audio_helper_runtime_failure", ex.Message,
+                        IsHfpMode ? HfpFailureStages.PairValidation : "AudioOpen");
                 }
 
+                var candidate = openResult.Input;
                 if (candidate == null)
                 {
-                    lastFailure = $"reopen attempt {openAttempt + 1} failed ({openCode ?? "unknown"}: {openReason ?? "no details"})";
-                    lastFailureHresult = null;
+                    CaptureHfpFailureMetadata(openResult);
+                    lastFailure = $"reopen attempt {openAttempt + 1} failed ({openResult.ErrorCode ?? "unknown"}: {openResult.Reason})";
+                    lastFailureHresult = HfpDuplexAudioInputFactory.FormatHresult(openResult.Hresult);
+                    lastFailureStage = openResult.FailureStage;
                     continue;
                 }
 
@@ -669,6 +720,7 @@ internal sealed class CaptureSession : IDisposable
                 {
                     lastFailure = $"reopen attempt {openAttempt + 1} returned a different wave format";
                     lastFailureHresult = null;
+                    lastFailureStage = IsHfpMode ? HfpFailureStages.CaptureOpen : null;
                     DetachStopAndDispose(candidate);
                     continue;
                 }
@@ -699,7 +751,10 @@ internal sealed class CaptureSession : IDisposable
                 {
                     publishedForStart = _terminalEventRaised == 0 && _userStopRequested == 0;
                     if (publishedForStart)
+                    {
                         _input = candidate;
+                        CaptureHfpMetadata(candidate);
+                    }
                 }
 
                 if (!publishedForStart)
@@ -712,6 +767,7 @@ internal sealed class CaptureSession : IDisposable
                 StartRecordingResult startResult;
                 string? startFailure = null;
                 string? startFailureHresult = null;
+                string? startFailureStage = null;
                 try
                 {
                     startResult = candidate.StartRecording();
@@ -719,7 +775,7 @@ internal sealed class CaptureSession : IDisposable
                 catch (Exception ex)
                 {
                     startResult = StartRecordingResult.Cancelled;
-                    startFailure = FormatRecoveryStartFailure(ex, out startFailureHresult);
+                    startFailure = FormatRecoveryStartFailure(ex, out startFailureHresult, out startFailureStage);
                 }
 
                 if (startResult != StartRecordingResult.Started)
@@ -735,7 +791,10 @@ internal sealed class CaptureSession : IDisposable
                             ? candidate
                             : null;
                         if (candidateToClean != null)
+                        {
                             _input = null;
+                            _inputFinalizationInProgress++;
+                        }
                     }
 
                     if (terminalAlreadyRaised)
@@ -743,9 +802,10 @@ internal sealed class CaptureSession : IDisposable
 
                     lastFailure = $"reopen attempt {openAttempt + 1} start failed ({startFailure ?? startResult.ToString()})";
                     lastFailureHresult = startFailureHresult;
+                    lastFailureStage = startFailureStage ?? (IsHfpMode ? HfpFailureStages.CaptureStart : lastFailureStage);
 
                     if (candidateToClean != null)
-                        DetachStopAndDispose(candidateToClean);
+                        FinalizeOwnedInput(candidateToClean);
 
                     if (userStopRequested)
                     {
@@ -755,7 +815,7 @@ internal sealed class CaptureSession : IDisposable
 
                     if (startResult == StartRecordingResult.Disposed)
                     {
-                        FailDiscontinuous(trigger, lastFailure, triggerMetrics, lastFailureHresult);
+                    FailDiscontinuous(trigger, lastFailure, triggerMetrics, lastFailureHresult, lastFailureStage);
                         return;
                     }
 
@@ -776,6 +836,7 @@ internal sealed class CaptureSession : IDisposable
                     {
                         candidateToStop = candidate;
                         _input = null;
+                        _inputFinalizationInProgress++;
                     }
                     else if (!terminalAfterStart && ReferenceEquals(_input, candidate))
                     {
@@ -791,7 +852,7 @@ internal sealed class CaptureSession : IDisposable
 
                 if (candidateToStop != null)
                 {
-                    DetachStopAndDispose(candidateToStop);
+                    FinalizeOwnedInput(candidateToStop);
                     ConvergeTerminal(userRequested: true);
                     return;
                 }
@@ -808,7 +869,7 @@ internal sealed class CaptureSession : IDisposable
                 return;
             }
 
-            FailDiscontinuous(trigger, lastFailure ?? "reopen failed", triggerMetrics, lastFailureHresult);
+            FailDiscontinuous(trigger, lastFailure ?? "reopen failed", triggerMetrics, lastFailureHresult, lastFailureStage);
         }
         catch (Exception ex)
         {
@@ -816,23 +877,85 @@ internal sealed class CaptureSession : IDisposable
         }
         finally
         {
-            Interlocked.Exchange(ref _runtimeRecoveryInProgress, 0);
+            lock (_stateLock)
+            {
+                Volatile.Write(ref _runtimeRecoveryThreadId, 0);
+                Volatile.Write(ref _runtimeRecoveryInProgress, 0);
+                Monitor.PulseAll(_stateLock);
+            }
         }
     }
 
-    private void DetachAndDispose(IAudioInput input)
+    private void DetachStopAndDispose(IAudioInput input)
     {
-        try { input.DataAvailable -= OnDataAvailable; } catch { }
-        try { input.RecordingStopped -= OnRecordingStopped; } catch { }
-        try { input.Dispose(); } catch { }
+        lock (_stateLock)
+        {
+            if (ReferenceEquals(_input, input))
+                _input = null;
+            _inputFinalizationInProgress++;
+        }
+
+        FinalizeOwnedInput(input);
     }
 
-    private void DetachStopAndDispose(IAudioInput input)
+    private IAudioInput? TakeCurrentInputForFinalization()
+    {
+        lock (_stateLock)
+            return TakeCurrentInputForFinalizationLocked();
+    }
+
+    private IAudioInput? TakeCurrentInputForFinalizationLocked()
+    {
+        var input = _input;
+        _input = null;
+        if (input != null)
+            _inputFinalizationInProgress++;
+        return input;
+    }
+
+    private void WaitForInputFinalization()
+    {
+        lock (_stateLock)
+        {
+            while (_inputFinalizationInProgress != 0)
+                Monitor.Wait(_stateLock);
+        }
+    }
+
+    private void WaitForRuntimeRecovery(bool fromInputCallback)
+    {
+        var currentThreadId = Environment.CurrentManagedThreadId;
+        lock (_stateLock)
+        {
+            while (_runtimeRecoveryInProgress != 0 &&
+                   _runtimeRecoveryThreadId != currentThreadId &&
+                   !(fromInputCallback && _userStopRequested != 0))
+            {
+                Monitor.Wait(_stateLock);
+            }
+        }
+    }
+
+    private void FinalizeOwnedInput(IAudioInput input)
     {
         try { input.DataAvailable -= OnDataAvailable; } catch { }
         try { input.RecordingStopped -= OnRecordingStopped; } catch { }
         try { input.StopRecording(); } catch { }
         try { input.Dispose(); } catch { }
+
+        // AudioClientAudioInput joins its capture thread during Dispose, and the
+        // fake inputs model the same lifecycle. Read only after both operations
+        // so discontinuities raised while stopping or releasing are included.
+        long finalCount = 0;
+        try { finalCount = input.DiscontinuityCount; } catch { }
+
+        lock (_stateLock)
+        {
+            if (_finalizedInputs.Add(input))
+                _discontinuityCountCarry += finalCount;
+            _inputFinalizationInProgress--;
+            Monitor.PulseAll(_stateLock);
+        }
     }
 
     private static string FormatRecoveryStopReason(Exception ex)
@@ -845,18 +968,21 @@ internal sealed class CaptureSession : IDisposable
         return $"Runtime recovery candidate stopped with {ex.GetType().Name}: {ex.Message}";
     }
 
-    private static string FormatRecoveryStartFailure(Exception ex, out string? hresult)
+    private static string FormatRecoveryStartFailure(Exception ex, out string? hresult, out string? failureStage)
     {
         switch (ex)
         {
             case AudioCaptureStartException startEx:
                 hresult = $"0x{startEx.Hresult:X8}";
+                failureStage = startEx.Stage;
                 return $"AudioCaptureStartException: {startEx.Message}";
             case AudioCaptureRuntimeException runtimeEx:
                 hresult = $"0x{runtimeEx.Hresult:X8}";
+                failureStage = runtimeEx.Stage;
                 return $"AudioCaptureRuntimeException during {runtimeEx.Stage} (HRESULT={hresult}): {runtimeEx.Message}";
             default:
                 hresult = null;
+                failureStage = null;
                 return $"{ex.GetType().Name}: {ex.Message}";
         }
     }
@@ -865,7 +991,7 @@ internal sealed class CaptureSession : IDisposable
     /// Records the stable discontinuous-stream failure and converges to the
     /// single terminal FAIL.
     /// </summary>
-    private void FailDiscontinuous(string trigger, string detail, string triggerMetrics, string? hresult = null)
+    private void FailDiscontinuous(string trigger, string detail, string triggerMetrics, string? hresult = null, string? failureStage = null)
     {
         lock (_stateLock)
         {
@@ -876,7 +1002,8 @@ internal sealed class CaptureSession : IDisposable
                 "audio_capture_discontinuous",
                 $"Audio capture stream became discontinuous ({trigger}): {detail}. {triggerMetrics}",
                 _paths.PartialPath,
-                hresult);
+                hresult,
+                failureStage);
         }
 
         ConvergeTerminal(userRequested: false);
@@ -1045,7 +1172,8 @@ internal sealed class CaptureSession : IDisposable
             _input?.StopRecording();
     }
 
-    private void ConvergeTerminal(bool userRequested, string? initialErrorCode = null, string initialReason = "", string? initialPartialPath = null, string? hresult = null)
+    private void ConvergeTerminal(bool userRequested, string? initialErrorCode = null, string initialReason = "", string? initialPartialPath = null,
+        string? hresult = null, string? failureStage = null, bool fromInputCallback = false)
     {
         // Track errors discovered during convergence in locals. SetPendingErrorLocked
         // refuses to write once _terminalEventRaised is set, so any error raised
@@ -1054,6 +1182,7 @@ internal sealed class CaptureSession : IDisposable
         string localReason = initialReason;
         string localPartialPath = initialPartialPath ?? "";
         string? localHresult = hresult;
+        string? localFailureStage = failureStage;
 
         // Claim terminal ownership first. Watchdog callbacks also acquire this
         // lock and check _terminalEventRaised before writing a root cause, so
@@ -1072,6 +1201,7 @@ internal sealed class CaptureSession : IDisposable
                 localReason = _pendingReason;
                 localPartialPath = _pendingPartialPath;
                 localHresult = _pendingHresult;
+                localFailureStage = _pendingFailureStage;
             }
         }
 
@@ -1081,18 +1211,22 @@ internal sealed class CaptureSession : IDisposable
         StopStallMonitor();
         DisarmFirstPacketTimer();
 
-        // Owner-only path: detach the current input from session ownership, stop
-        // and release it, capture the monotonic stop instant, finalize the writer,
-        // and emit exactly one terminal event.
-        IAudioInput? terminalInput;
-        lock (_stateLock)
-        {
-            terminalInput = _input;
-            _input = null;
-        }
+        // Recovery owns the current generation and may still be inside a bounded
+        // reopen. Wait for that owner to finish candidate cleanup before terminal
+        // convergence takes its snapshot. Recovery-thread terminal calls skip
+        // this wait so they cannot deadlock themselves.
+        WaitForRuntimeRecovery(fromInputCallback);
 
-        try { terminalInput?.StopRecording(); } catch { }
-        try { terminalInput?.Dispose(); } catch { }
+        // Recovery may own a detached input while Stop/Dispose drains its final
+        // callbacks. Wait for that owner to publish its count as well.
+        WaitForInputFinalization();
+
+        // Owner-only path: detach the current input from session ownership, stop
+        // and release it, then merge its final count exactly once before the
+        // terminal event is built.
+        var terminalInput = TakeCurrentInputForFinalization();
+        if (terminalInput != null)
+            FinalizeOwnedInput(terminalInput);
 
         long stopTimestamp = Stopwatch.GetTimestamp();
         Interlocked.Exchange(ref _stopTimestamp, stopTimestamp);
@@ -1133,7 +1267,7 @@ internal sealed class CaptureSession : IDisposable
 
         if (localErrorCode != null)
         {
-            EmitFailEvent(localErrorCode, localReason, localPartialPath, localHresult);
+            EmitFailEvent(localErrorCode, localReason, localPartialPath, localHresult, localFailureStage);
             CleanupPartial();
             _completed.Set();
             return;
@@ -1168,15 +1302,15 @@ internal sealed class CaptureSession : IDisposable
         }
     }
 
-    private void SetPendingError(string errorCode, string reason, string partialPath, string? hresult = null)
+    private void SetPendingError(string errorCode, string reason, string partialPath, string? hresult = null, string? failureStage = null)
     {
         lock (_stateLock)
         {
-            SetPendingErrorLocked(errorCode, reason, partialPath, hresult);
+            SetPendingErrorLocked(errorCode, reason, partialPath, hresult, failureStage);
         }
     }
 
-    private void SetPendingErrorLocked(string errorCode, string reason, string partialPath, string? hresult = null)
+    private void SetPendingErrorLocked(string errorCode, string reason, string partialPath, string? hresult = null, string? failureStage = null)
     {
         if (_terminalEventRaised != 0)
             return;
@@ -1187,6 +1321,7 @@ internal sealed class CaptureSession : IDisposable
             _pendingReason = reason;
             _pendingPartialPath = partialPath;
             _pendingHresult = hresult ?? "";
+            _pendingFailureStage = failureStage ?? "";
         }
     }
 
@@ -1197,7 +1332,7 @@ internal sealed class CaptureSession : IDisposable
 
         Interlocked.Exchange(ref _stallCheckLastBytes, bytesWritten);
 
-        _events.Started(new AudioHelperEventInfo
+        var info = new AudioHelperEventInfo
         {
             RecordingId = _options.RecordingId,
             SampleRate = format.SampleRate,
@@ -1208,7 +1343,9 @@ internal sealed class CaptureSession : IDisposable
             BytesWritten = bytesWritten,
             CaptureMethod = "WASAPI_SHARED_CAPTURE",
             CaptureEngine = "wasapi-direct"
-        });
+        };
+        ApplyHfpMetadata(info);
+        _events.Started(info);
     }
 
     private void TryEmitProgress(long bytesWritten, long firstCallbackTimestamp, bool force = false, bool allowDuringRecovery = false)
@@ -1267,7 +1404,7 @@ internal sealed class CaptureSession : IDisposable
 
         TrackMaxGap(estimatedGapMs);
 
-        return new AudioHelperEventInfo
+        var info = new AudioHelperEventInfo
         {
             RecordingId = _options.RecordingId,
             SampleRate = format?.SampleRate ?? 0,
@@ -1290,9 +1427,11 @@ internal sealed class CaptureSession : IDisposable
             MaxEstimatedGapMs = Interlocked.Read(ref _maxEstimatedGapMsObserved),
             ContinuityStatus = Volatile.Read(ref _continuityDegraded) != 0 ? "degraded" : "continuous"
         };
+        ApplyHfpMetadata(info);
+        return info;
     }
 
-    private void EmitFailEvent(string errorCode, string reason, string partialPath, string? hresult = null)
+    private void EmitFailEvent(string errorCode, string reason, string partialPath, string? hresult = null, string? failureStage = null)
     {
         Interlocked.Exchange(ref _exitCode, 1);
 
@@ -1303,7 +1442,7 @@ internal sealed class CaptureSession : IDisposable
                 ? "continuous"
                 : "not_checked";
 
-        _events.Fail(new AudioHelperEventInfo
+        var info = new AudioHelperEventInfo
         {
             RecordingId = _options.RecordingId,
             ErrorCode = errorCode,
@@ -1320,8 +1459,134 @@ internal sealed class CaptureSession : IDisposable
             GapFilledMs = Interlocked.Read(ref _gapFilledMsTotal),
             MaxEstimatedGapMs = Interlocked.Read(ref _maxEstimatedGapMsObserved),
             ContinuityStatus = continuity
-        });
+        };
+        ApplyHfpMetadata(info);
+        if (IsHfpMode || _autoHfpPairResult.IsBlockingFailure)
+        {
+            info.EndpointId = _options.EndpointId;
+            info.FailureStage = failureStage ?? "HfpUnknown";
+        }
+        _events.Fail(info);
     }
+
+    private string? EffectiveHfpRenderEndpointId
+        => !string.IsNullOrEmpty(_options.HfpRenderEndpointId)
+            ? _options.HfpRenderEndpointId
+            : _resolvedHfpRenderEndpointId;
+
+    private bool IsHfpMode => !string.IsNullOrEmpty(EffectiveHfpRenderEndpointId) &&
+                               _options.CaptureEngine == AudioCaptureEngine.WasapiDirect;
+
+    private void EnsureAutomaticHfpPairResolved()
+    {
+        if (!_options.AutoHfpPairDiscovery ||
+            _options.CaptureEngine != AudioCaptureEngine.WasapiDirect ||
+            !string.IsNullOrEmpty(_options.HfpRenderEndpointId) ||
+            Interlocked.Exchange(ref _autoHfpPairResolutionAttempted, 1) != 0)
+            return;
+
+        try
+        {
+            var resolver = _hfpPairResolver ?? new HfpPairResolver();
+            _autoHfpPairResult = resolver.Resolve(_options.EndpointId);
+            _resolvedHfpRenderEndpointId = _autoHfpPairResult.RenderEndpointId;
+        }
+        catch
+        {
+            _autoHfpPairResult = HfpPairDiscoveryResult.EvidenceFailure(
+                "Automatic HFP pair resolver failed", HfpTransportClassification.Unknown);
+            _resolvedHfpRenderEndpointId = null;
+        }
+    }
+
+    private void ApplyHfpMetadata(AudioHelperEventInfo info)
+    {
+        info.AutoHfpPairStatus = DiscoveryStatusText(_autoHfpPairResult.Status);
+        info.AutoHfpPairResultCode = _autoHfpPairResult.ResultCode ?? "";
+        info.AutoHfpPairTransportClassification = TransportClassificationText(
+            _autoHfpPairResult.TransportClassification);
+
+        if (IsHfpMode)
+        {
+            info.CaptureStrategy = string.IsNullOrEmpty(_captureStrategy)
+                ? "hfp-duplex-prime-classic"
+                : _captureStrategy;
+            info.PairEvidence = string.IsNullOrEmpty(_pairEvidence) ? "unverified" : _pairEvidence;
+            info.RenderPrimeReadyMs = _renderPrimeReadyMs;
+            return;
+        }
+
+        info.CaptureStrategy = _autoHfpPairResult.IsBlockingFailure
+            ? "hfp-auto-pair-discovery"
+            : "wasapi-direct";
+        info.PairEvidence = string.IsNullOrEmpty(_autoHfpPairResult.PairEvidence)
+            ? "not_applicable"
+            : _autoHfpPairResult.PairEvidence;
+    }
+
+    private void CaptureHfpMetadata(IAudioInput input)
+    {
+        if (!IsHfpMode || input is not IHfpAudioInputMetadata metadata)
+            return;
+        _captureStrategy = metadata.CaptureStrategy;
+        _pairEvidence = metadata.PairEvidence;
+        _renderPrimeReadyMs = metadata.RenderPrimeReadyMs;
+    }
+
+    private void CaptureHfpFailureMetadata(AudioInputOpenResult result)
+    {
+        if (!IsHfpMode && !_autoHfpPairResult.IsBlockingFailure)
+            return;
+        _captureStrategy = string.IsNullOrEmpty(result.CaptureStrategy)
+            ? (_autoHfpPairResult.IsBlockingFailure ? "hfp-auto-pair-discovery" : "hfp-duplex-prime-classic")
+            : result.CaptureStrategy;
+        _pairEvidence = string.IsNullOrEmpty(result.PairEvidence)
+            ? (_autoHfpPairResult.IsBlockingFailure ? _autoHfpPairResult.PairEvidence : "unverified")
+            : result.PairEvidence;
+        _renderPrimeReadyMs = -1;
+    }
+
+    private AudioInputOpenResult OpenInput(TimeSpan budget)
+    {
+        EnsureAutomaticHfpPairResolved();
+        if (_autoHfpPairResult.IsBlockingFailure)
+        {
+            return AudioInputOpenResult.Failure(
+                _autoHfpPairResult.ResultCode ?? "audio_hfp_pair_discovery_failed",
+                _autoHfpPairResult.Reason,
+                HfpFailureStages.PairDiscovery,
+                pairEvidence: _autoHfpPairResult.PairEvidence,
+                captureStrategy: "hfp-auto-pair-discovery");
+        }
+
+        if (IsHfpMode)
+        {
+            var factory = _hfpFactory ?? new HfpDuplexAudioInputFactory();
+            return factory.Open(_options.EndpointId, EffectiveHfpRenderEndpointId!, budget);
+        }
+
+        return _inputFactory != null
+            ? AudioInputOpenResult.FromTuple(_inputFactory(budget), "AudioOpen")
+            : AudioInputOpenResult.FromTuple(WasapiAudioInput.Open(_options.EndpointId, budget), "AudioOpen");
+    }
+
+    private static string DiscoveryStatusText(HfpPairDiscoveryStatus status)
+        => status switch
+        {
+            HfpPairDiscoveryStatus.Paired => "paired",
+            HfpPairDiscoveryStatus.NoCandidate => "no_candidate",
+            HfpPairDiscoveryStatus.Ambiguous => "ambiguous",
+            HfpPairDiscoveryStatus.EvidenceFailure => "evidence_failure",
+            _ => "not_applicable"
+        };
+
+    private static string TransportClassificationText(HfpTransportClassification classification)
+        => classification switch
+        {
+            HfpTransportClassification.HfpCandidate => "hfp_candidate",
+            HfpTransportClassification.NotHfp => "not_hfp",
+            _ => "unknown"
+        };
 
     private void CleanupPartial()
     {

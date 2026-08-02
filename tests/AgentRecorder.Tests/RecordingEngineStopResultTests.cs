@@ -150,6 +150,52 @@ public class RecordingEngineStopResultTests
     }
 
     [Fact]
+    public void Stop_AutoHfpDiscoveryFailure_PreservesRootCauseAndPairDiagnosticsInApiAndAudit()
+    {
+        var (engine, rec, backend, audit) = Setup(30, new OutputMeta
+        {
+            DurationSeconds = 4.4,
+            SizeBytes = 263781,
+            AudioStatus = "lost",
+            AudioContinuityStatus = "not_checked",
+            AudioHelperErrorCode = "audio_hfp_pair_discovery_failed",
+            AudioCaptureStrategy = "hfp-auto-pair-discovery",
+            AudioPairEvidence = "hfp_pair_discovery_failed",
+            AudioAutoHfpPairStatus = "ambiguous",
+            AudioAutoHfpPairResultCode = "audio_hfp_pair_discovery_failed",
+            AudioHelperFailureReason = "multiple active same-container candidates",
+            AudioHelperFailureStage = "HfpPairDiscovery",
+            AudioHelperFailureHresult = "0x80004005",
+            AudioEstimatedGapMs = 0,
+            AudioMaxEstimatedGapMs = 0,
+            Stage = "HfpPairDiscovery"
+        });
+        rec.Microphone = true;
+        backend.ExitCodeValue = 1;
+
+        engine.Stop(rec.Id, "helper_failure");
+
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("audio_hfp_pair_discovery_failed", rec.Error);
+
+        using var status = JsonDocument.Parse(JsonSerializer.Serialize(engine.GetStatus(rec.Id)));
+        var microphone = status.RootElement.GetProperty("audio").GetProperty("microphone");
+        Assert.Equal("hfp-auto-pair-discovery", microphone.GetProperty("capture_strategy").GetString());
+        Assert.Equal("ambiguous", microphone.GetProperty("auto_hfp_pair_status").GetString());
+        Assert.Equal("audio_hfp_pair_discovery_failed", microphone.GetProperty("auto_hfp_pair_result_code").GetString());
+        Assert.Equal("multiple active same-container candidates", microphone.GetProperty("helper_failure_reason").GetString());
+        Assert.Equal("HfpPairDiscovery", microphone.GetProperty("helper_failure_stage").GetString());
+        Assert.Equal("0x80004005", microphone.GetProperty("helper_failure_hresult").GetString());
+
+        var failed = Assert.Single(audit.Events, e => e.evt == "recording.failed");
+        using var auditJson = JsonDocument.Parse(failed.json);
+        Assert.Equal("audio_hfp_pair_discovery_failed", auditJson.RootElement.GetProperty("error").GetString());
+        Assert.Equal("ambiguous", auditJson.RootElement.GetProperty("audio_auto_hfp_pair_status").GetString());
+        Assert.Equal("audio_hfp_pair_discovery_failed", auditJson.RootElement.GetProperty("audio_auto_hfp_pair_result_code").GetString());
+        Assert.Equal("HfpPairDiscovery", auditJson.RootElement.GetProperty("stage").GetString());
+    }
+
+    [Fact]
     public void Finalize_NaturalShortOutput_FailsWithUnexpectedExitReason()
     {
         var (engine, rec, backend, audit) = Setup(30);

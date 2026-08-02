@@ -439,6 +439,10 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
     [InlineData("audio_native_device_mapping_ambiguous")]
     [InlineData("audio_native_device_mapping_disabled")]
     [InlineData("audio_native_device_enumeration_failed")]
+    [InlineData("audio_hfp_pair_invalid")]
+    [InlineData("audio_hfp_pair_discovery_failed")]
+    [InlineData("audio_hfp_render_prime_failed")]
+    [InlineData("audio_hfp_render_runtime_failed")]
     public void Normalize_NativeMediaCaptureErrorCodes_PreservesStableCode(string code)
     {
         Assert.True(AudioHelperErrorCodeResolver.IsAllowed(code));

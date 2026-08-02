@@ -41,6 +41,7 @@ internal sealed class EventWriter
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteHfpMetadata(info);
             EndBlock();
         }
     }
@@ -63,6 +64,7 @@ internal sealed class EventWriter
             WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
             WriteLine("ContinuityStatus", string.IsNullOrEmpty(info.ContinuityStatus) ? "continuous" : info.ContinuityStatus);
             WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteHfpMetadata(info);
             EndBlock();
         }
     }
@@ -78,6 +80,7 @@ internal sealed class EventWriter
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteHfpMetadata(info);
             WriteTerminalMetrics(info);
             EndBlock();
         }
@@ -94,6 +97,7 @@ internal sealed class EventWriter
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteHfpMetadata(info);
             WriteTerminalMetrics(info);
             EndBlock();
         }
@@ -124,6 +128,7 @@ internal sealed class EventWriter
                 WriteLine("CaptureMethod", info.CaptureMethod);
             if (!string.IsNullOrEmpty(info.CaptureEngine))
                 WriteLine("CaptureEngine", info.CaptureEngine);
+            WriteHfpMetadata(info);
             WriteTerminalMetrics(info);
             EndBlock();
         }
@@ -142,6 +147,22 @@ internal sealed class EventWriter
         WriteLine("GapFilledMs", info.GapFilledMs);
         WriteLine("DiscontinuityCount", info.DiscontinuityCount);
         WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
+    }
+
+    private void WriteHfpMetadata(AudioHelperEventInfo info)
+    {
+        if (!string.IsNullOrEmpty(info.CaptureStrategy))
+            WriteLine("CaptureStrategy", info.CaptureStrategy);
+        if (!string.IsNullOrEmpty(info.PairEvidence))
+            WriteLine("PairEvidence", info.PairEvidence);
+        if (!string.IsNullOrEmpty(info.AutoHfpPairStatus))
+            WriteLine("AutoHfpPairStatus", info.AutoHfpPairStatus);
+        if (!string.IsNullOrEmpty(info.AutoHfpPairResultCode))
+            WriteLine("AutoHfpPairResultCode", info.AutoHfpPairResultCode);
+        if (!string.IsNullOrEmpty(info.AutoHfpPairTransportClassification))
+            WriteLine("AutoHfpPairTransportClassification", info.AutoHfpPairTransportClassification);
+        if (info.RenderPrimeReadyMs >= 0)
+            WriteLine("RenderPrimeReadyMs", info.RenderPrimeReadyMs);
     }
 
     public void WriteRaw(string text)
@@ -190,6 +211,12 @@ internal sealed class AudioHelperEventInfo
     public long DurationMs { get; set; }
     public string CaptureMethod { get; set; } = "WASAPI_SHARED_CAPTURE";
     public string CaptureEngine { get; set; } = "wasapi-direct";
+    public string CaptureStrategy { get; set; } = "";
+    public string PairEvidence { get; set; } = "";
+    public string AutoHfpPairStatus { get; set; } = "";
+    public string AutoHfpPairResultCode { get; set; } = "";
+    public string AutoHfpPairTransportClassification { get; set; } = "";
+    public long RenderPrimeReadyMs { get; set; } = -1;
     public string ErrorCode { get; set; } = "";
     public string Reason { get; set; } = "";
     public string Hresult { get; set; } = "";

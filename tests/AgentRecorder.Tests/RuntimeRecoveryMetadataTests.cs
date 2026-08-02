@@ -196,6 +196,7 @@ public class RuntimeRecoveryMetadataTests : IDisposable
         Assert.Equal("lost", root.GetProperty("audio_status").GetString());
         Assert.Equal("degraded", root.GetProperty("audio_continuity_status").GetString());
         Assert.Equal(13493, root.GetProperty("audio_estimated_gap_ms").GetInt64());
+        Assert.True(root.GetProperty("video_launch_anchor_ticks").GetInt64() > 0);
     }
 
     // -----------------------------------------------------------------

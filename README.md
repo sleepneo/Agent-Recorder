@@ -83,10 +83,12 @@ Agents should use the paths returned by `ensure-running` or
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
 - Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
 - Microphone recording through an isolated Windows WASAPI helper, followed by
-  AAC muxing, with device enumeration, continuity diagnostics, and stable
-  failure reporting. Hardware compatibility is still being validated; some
-  Bluetooth Hands-Free endpoints may fail initialization or deliver
-  discontinuous samples. FFmpeg dshow remains an explicit diagnostic fallback.
+  AAC muxing, with device enumeration, continuity diagnostics, runtime recovery,
+  and stable failure reporting. Bluetooth Hands-Free inputs can automatically
+  pair their matching render endpoint and hold the duplex HFP link; AirPods Pro
+  and Focal Bathys have passed supervised product-path recording. Compatibility
+  is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
+  fallback, and system-audio capture is not implemented.
 - The source tree contains an experimental WGC continuous pipeline: the native helper, managed session, and capture-backend adapter have passed scoped automation and one supervised 10-second 4K desktop recording. It is not yet wired into backend selection, the public API, or the portable product path; the default FFmpeg backend is unchanged.
 - Local audit log and MP4 output.
 

@@ -467,7 +467,13 @@ public class AudioHelperEventStreamParserTests
         };
     }
 
-    private static AudioHelperEvent MakeProgressEvent(string? recordingId, long elapsedMs, long wallElapsedMs, long bytesWritten, long estimatedGapMs)
+    private static AudioHelperEvent MakeProgressEvent(
+        string? recordingId,
+        long elapsedMs,
+        long wallElapsedMs,
+        long bytesWritten,
+        long estimatedGapMs,
+        long? maxEstimatedGapMs = null)
     {
         return new AudioHelperEvent
         {
@@ -476,7 +482,8 @@ public class AudioHelperEventStreamParserTests
             ElapsedMs = elapsedMs,
             WallElapsedMs = wallElapsedMs,
             BytesWritten = bytesWritten,
-            EstimatedGapMs = estimatedGapMs
+            EstimatedGapMs = estimatedGapMs,
+            MaxEstimatedGapMs = maxEstimatedGapMs ?? estimatedGapMs
         };
     }
 
@@ -593,6 +600,153 @@ public class AudioHelperEventStreamParserTests
         };
 
         var summary = AudioHelperEventStreamParser.ValidateAndSummarize(events);
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("ElapsedMs regressed"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_CurrentEstimatedGapMayDecreaseWhileHistoricalMaxRemains()
+    {
+        var events = new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap"),
+            MakeProgressEvent(null, 100, 140, 100, 40, 40),
+            MakeProgressEvent(null, 200, 240, 200, 12, 40),
+            new()
+            {
+                Result = AudioHelperEventResult.Stopped,
+                DurationMs = 200,
+                BytesWritten = 200,
+                EstimatedGapMs = 12,
+                MaxEstimatedGapMs = 40
+            }
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(events);
+
+        Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+        Assert.Empty(summary.ValidationErrors);
+        Assert.Equal(12, summary.EstimatedGapMs);
+        Assert.Equal(40, summary.MaxEstimatedGapMs);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(-1L)]
+    public void ValidateAndSummarize_MissingOrNegativeCurrentEstimatedGap_FailsClosed(long? currentGap)
+    {
+        var progress = MakeProgressEvent(null, 100, 100, 100, 0, 0);
+        progress.EstimatedGapMs = currentGap;
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_current"),
+            progress,
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 100, BytesWritten = 100, EstimatedGapMs = 0, MaxEstimatedGapMs = 0 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("EstimatedGapMs") &&
+            (currentGap is null ? e.Contains("missing") : e.Contains("negative")));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_MissingMaxEstimatedGap_FailsClosed()
+    {
+        var progress = MakeProgressEvent(null, 100, 100, 100, 0, 0);
+        progress.MaxEstimatedGapMs = null;
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_max_missing"),
+            progress,
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 100, BytesWritten = 100, EstimatedGapMs = 0, MaxEstimatedGapMs = 0 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("missing required field: MaxEstimatedGapMs"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_NegativeMaxEstimatedGap_FailsClosed()
+    {
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_max_negative"),
+            MakeProgressEvent(null, 100, 100, 100, 0, -1),
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 100, BytesWritten = 100, EstimatedGapMs = 0, MaxEstimatedGapMs = 0 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("negative MaxEstimatedGapMs"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_MaxEstimatedGapRegression_FailsClosed()
+    {
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_max_regress"),
+            MakeProgressEvent(null, 100, 100, 100, 50, 50),
+            MakeProgressEvent(null, 200, 200, 200, 10, 40),
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 200, BytesWritten = 200, EstimatedGapMs = 10, MaxEstimatedGapMs = 50 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("MaxEstimatedGapMs regressed"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_MaxEstimatedGapBelowCurrent_FailsClosed()
+    {
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_max_below_current"),
+            MakeProgressEvent(null, 100, 100, 100, 50, 40),
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 100, BytesWritten = 100, EstimatedGapMs = 50, MaxEstimatedGapMs = 50 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("MaxEstimatedGapMs below EstimatedGapMs"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_TerminalMaxBelowProgressHistoricalMax_FailsClosed()
+    {
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_gap_terminal_max"),
+            MakeProgressEvent(null, 100, 140, 100, 40, 40),
+            new() { Result = AudioHelperEventResult.Stopped, DurationMs = 100, BytesWritten = 100, EstimatedGapMs = 5, MaxEstimatedGapMs = 5 }
+        });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("Terminal MaxEstimatedGapMs below last PROGRESS historical max"));
+        Assert.Equal(5, summary.EstimatedGapMs);
+        Assert.Equal(40, summary.MaxEstimatedGapMs);
+    }
+
+    [Theory]
+    [InlineData("elapsed")]
+    [InlineData("wall")]
+    [InlineData("bytes")]
+    public void ValidateAndSummarize_TrueMonotonicProgressRegression_FailsClosed(string field)
+    {
+        var first = MakeProgressEvent(null, 100, 100, 100, 0, 0);
+        var second = MakeProgressEvent(null, 200, 200, 200, 0, 0);
+        switch (field)
+        {
+            case "elapsed": second.ElapsedMs = 50; break;
+            case "wall": second.WallElapsedMs = 50; break;
+            case "bytes": second.BytesWritten = 50; break;
+        }
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent>
+        {
+            MakeStartedEvent("rec_true_regression"),
+            first,
+            second,
+            new() { Result = AudioHelperEventResult.Ok, DurationMs = 200, BytesWritten = 200, EstimatedGapMs = 0, MaxEstimatedGapMs = 0 }
+        });
+
         Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
         Assert.Contains(summary.ValidationErrors, e => e.Contains("regressed"));
     }

@@ -16,11 +16,30 @@ public interface IVideoCaptureWorker : IDisposable
     bool HasExited { get; }
 
     /// <summary>
-    /// Monotonic timestamp (Stopwatch.GetTimestamp ticks) of the video media
-    /// start estimate. This is set only from the first credible positive
-    /// out_time_us progress group and remains zero while the anchor is missing.
+    /// Monotonic timestamp (Stopwatch.GetTimestamp ticks) recorded immediately
+    /// after the FFmpeg process reports a successful start. This is the video
+    /// A/V alignment anchor and remains zero when process start fails.
+    /// </summary>
+    long LaunchAnchorTicks { get; }
+
+    /// <summary>
+    /// Diagnostic monotonic timestamp estimated from the first credible
+    /// positive out_time_us progress group. This must not be used as the A/V
+    /// alignment anchor because it includes unmeasured stdout delivery delay.
     /// </summary>
     long FirstFrameAnchorTicks { get; }
+
+    /// <summary>First credible progress frame number, or null when absent.</summary>
+    long? FirstProgressFrame { get; }
+
+    /// <summary>First credible progress out_time_us, or null when absent.</summary>
+    long? FirstProgressOutTimeUs { get; }
+
+    /// <summary>
+    /// Progress-derived anchor minus the launch anchor, in milliseconds. Null
+    /// until both anchors exist; bounded to a finite diagnostic range.
+    /// </summary>
+    double? ProgressAnchorDeltaMs { get; }
 
     /// <summary>
     /// Starts capturing video.

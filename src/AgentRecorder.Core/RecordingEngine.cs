@@ -1294,7 +1294,22 @@ public sealed class RecordingEngine
                     ffmpeg_exit_code = exitCode,
                     audio_microphone = rec.Microphone,
                     audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
-                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked")
+                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
+                    audio_capture_strategy = meta.AudioCaptureStrategy ?? "",
+                    audio_pair_evidence = meta.AudioPairEvidence ?? "",
+                    audio_auto_hfp_pair_status = meta.AudioAutoHfpPairStatus ?? "",
+                    audio_auto_hfp_pair_result_code = meta.AudioAutoHfpPairResultCode ?? "",
+                    audio_auto_hfp_pair_transport_classification = meta.AudioAutoHfpPairTransportClassification ?? "",
+                    audio_helper_failure_reason = meta.AudioHelperFailureReason ?? "",
+                    audio_helper_failure_stage = meta.AudioHelperFailureStage ?? "",
+                    audio_helper_failure_hresult = meta.AudioHelperFailureHresult ?? "",
+                    audio_render_prime_ready_ms = meta.AudioRenderPrimeReadyMs,
+                    audio_estimated_gap_ms = meta.AudioEstimatedGapMs,
+                    audio_max_estimated_gap_ms = meta.AudioMaxEstimatedGapMs,
+                    audio_recovery_count = meta.AudioRecoveryCount,
+                    audio_recovery_attempts = meta.AudioRecoveryAttempts,
+                    audio_gap_filled_ms = meta.AudioGapFilledMs,
+                    audio_discontinuity_count = meta.AudioDiscontinuityCount
                 });
             }
             else
@@ -1324,7 +1339,22 @@ public sealed class RecordingEngine
                     stderr_excerpt = rec.StderrExcerpt ?? "",
                     audio_microphone = rec.Microphone,
                     audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
-                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked")
+                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
+                    audio_capture_strategy = meta.AudioCaptureStrategy ?? "",
+                    audio_pair_evidence = meta.AudioPairEvidence ?? "",
+                    audio_auto_hfp_pair_status = meta.AudioAutoHfpPairStatus ?? "",
+                    audio_auto_hfp_pair_result_code = meta.AudioAutoHfpPairResultCode ?? "",
+                    audio_auto_hfp_pair_transport_classification = meta.AudioAutoHfpPairTransportClassification ?? "",
+                    audio_helper_failure_reason = meta.AudioHelperFailureReason ?? "",
+                    audio_helper_failure_stage = meta.AudioHelperFailureStage ?? "",
+                    audio_helper_failure_hresult = meta.AudioHelperFailureHresult ?? "",
+                    audio_render_prime_ready_ms = meta.AudioRenderPrimeReadyMs,
+                    audio_estimated_gap_ms = meta.AudioEstimatedGapMs,
+                    audio_max_estimated_gap_ms = meta.AudioMaxEstimatedGapMs,
+                    audio_recovery_count = meta.AudioRecoveryCount,
+                    audio_recovery_attempts = meta.AudioRecoveryAttempts,
+                    audio_gap_filled_ms = meta.AudioGapFilledMs,
+                    audio_discontinuity_count = meta.AudioDiscontinuityCount
                 });
             }
         }
@@ -1598,7 +1628,16 @@ public sealed class RecordingEngine
                         : "not_requested",
                     continuity_status = rec.Microphone
                         ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
-                        : "not_checked"
+                        : "not_checked",
+                    capture_strategy = rec.LastMeta?.AudioCaptureStrategy ?? "",
+                    pair_evidence = rec.LastMeta?.AudioPairEvidence ?? "",
+                    auto_hfp_pair_status = rec.LastMeta?.AudioAutoHfpPairStatus ?? "",
+                    auto_hfp_pair_result_code = rec.LastMeta?.AudioAutoHfpPairResultCode ?? "",
+                    auto_hfp_pair_transport_classification = rec.LastMeta?.AudioAutoHfpPairTransportClassification ?? "",
+                    helper_failure_reason = rec.LastMeta?.AudioHelperFailureReason ?? "",
+                    helper_failure_stage = rec.LastMeta?.AudioHelperFailureStage ?? "",
+                    helper_failure_hresult = rec.LastMeta?.AudioHelperFailureHresult ?? "",
+                    render_prime_ready_ms = rec.LastMeta?.AudioRenderPrimeReadyMs
                 }
             },
             output = new
@@ -1781,7 +1820,16 @@ public sealed class RecordingEngine
                         : "not_requested",
                     ContinuityStatus = rec.Microphone
                         ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
-                        : "not_checked"
+                        : "not_checked",
+                    CaptureStrategy = rec.LastMeta?.AudioCaptureStrategy ?? "",
+                    PairEvidence = rec.LastMeta?.AudioPairEvidence ?? "",
+                    AutoHfpPairStatus = rec.LastMeta?.AudioAutoHfpPairStatus ?? "",
+                    AutoHfpPairResultCode = rec.LastMeta?.AudioAutoHfpPairResultCode ?? "",
+                    AutoHfpPairTransportClassification = rec.LastMeta?.AudioAutoHfpPairTransportClassification ?? "",
+                    HelperFailureReason = rec.LastMeta?.AudioHelperFailureReason ?? "",
+                    HelperFailureStage = rec.LastMeta?.AudioHelperFailureStage ?? "",
+                    HelperFailureHresult = rec.LastMeta?.AudioHelperFailureHresult ?? "",
+                    RenderPrimeReadyMs = rec.LastMeta?.AudioRenderPrimeReadyMs
                 }
             },
             Output = new
@@ -1928,6 +1976,15 @@ public sealed class RecordingEngine
             source_type = rec.SourceType,
             audio_status = audioStatus,
             audio_continuity_status = audioContinuityStatus,
+            audio_capture_strategy = m.AudioCaptureStrategy ?? "",
+            audio_pair_evidence = m.AudioPairEvidence ?? "",
+            audio_auto_hfp_pair_status = m.AudioAutoHfpPairStatus ?? "",
+            audio_auto_hfp_pair_result_code = m.AudioAutoHfpPairResultCode ?? "",
+            audio_auto_hfp_pair_transport_classification = m.AudioAutoHfpPairTransportClassification ?? "",
+            audio_helper_failure_reason = m.AudioHelperFailureReason ?? "",
+            audio_helper_failure_stage = m.AudioHelperFailureStage ?? "",
+            audio_helper_failure_hresult = m.AudioHelperFailureHresult ?? "",
+            audio_render_prime_ready_ms = m.AudioRenderPrimeReadyMs,
             warnings
         };
     }

@@ -29,6 +29,12 @@ public sealed class AudioHelperEvent
     public long? BytesWritten { get; set; }
     public string? CaptureMethod { get; set; }
     public string? CaptureEngine { get; set; }
+    public string? CaptureStrategy { get; set; }
+    public string? PairEvidence { get; set; }
+    public string? AutoHfpPairStatus { get; set; }
+    public string? AutoHfpPairResultCode { get; set; }
+    public string? AutoHfpPairTransportClassification { get; set; }
+    public long? RenderPrimeReadyMs { get; set; }
     public long? ElapsedMs { get; set; }
     public long? WallElapsedMs { get; set; }
     public long? EstimatedGapMs { get; set; }
@@ -69,6 +75,8 @@ public sealed class AudioHelperEvent
     public bool GapFilledBytesParseFailed { get; set; }
     public bool GapFilledMsParseFailed { get; set; }
     public bool MaxEstimatedGapMsParseFailed { get; set; }
+    public bool RenderPrimeReadyMsParseFailed { get; set; }
+    public bool DuplicateField { get; set; }
 
     public bool HasNumericParseError =>
         SampleRateParseFailed ||
@@ -87,5 +95,6 @@ public sealed class AudioHelperEvent
         RecoveryAttemptsParseFailed ||
         GapFilledBytesParseFailed ||
         GapFilledMsParseFailed ||
-        MaxEstimatedGapMsParseFailed;
+        MaxEstimatedGapMsParseFailed ||
+        RenderPrimeReadyMsParseFailed;
 }

@@ -31,7 +31,9 @@ internal sealed class AudioHelperOptions
 {
     public AudioHelperMode Mode { get; set; }
     public AudioCaptureEngine CaptureEngine { get; set; } = AudioCaptureEngine.WasapiDirect;
+    internal bool AutoHfpPairDiscovery { get; set; }
     public string EndpointId { get; set; } = "";
+    public string HfpRenderEndpointId { get; set; } = "";
     public string OutputPath { get; set; } = "";
     public string AllowedRoot { get; set; } = "";
     public string StopSignalPath { get; set; } = "";
@@ -106,6 +108,12 @@ internal static class AudioHelperArgumentParser
                 return result;
             }
 
+            if (string.Equals(name, "auto-hfp-pair", StringComparison.OrdinalIgnoreCase))
+            {
+                opts.AutoHfpPairDiscovery = true;
+                continue;
+            }
+
             string? TakeNext(string displayName)
             {
                 if (i + 1 >= args.Length)
@@ -137,6 +145,17 @@ internal static class AudioHelperArgumentParser
                     return result;
                 }
                 opts.EndpointId = v;
+            }
+            else if (string.Equals(name, "hfp-render-endpoint-id", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = TakeNext("hfp-render-endpoint-id");
+                if (v == null) return result;
+                if (ContainsControlCharacter(v))
+                {
+                    result.Error = "--hfp-render-endpoint-id contains control characters";
+                    return result;
+                }
+                opts.HfpRenderEndpointId = v;
             }
             else if (string.Equals(name, "output", StringComparison.OrdinalIgnoreCase))
             {
@@ -189,16 +208,31 @@ internal static class AudioHelperArgumentParser
         if (opts.Mode == AudioHelperMode.Version || opts.Mode == AudioHelperMode.Probe)
         {
             if (!string.IsNullOrEmpty(opts.EndpointId) ||
+                !string.IsNullOrEmpty(opts.HfpRenderEndpointId) ||
                 !string.IsNullOrEmpty(opts.OutputPath) ||
                 !string.IsNullOrEmpty(opts.AllowedRoot) ||
                 !string.IsNullOrEmpty(opts.StopSignalPath) ||
                 !string.IsNullOrEmpty(opts.RecordingId) ||
+                opts.AutoHfpPairDiscovery ||
                 seen.Contains("capture-engine"))
             {
                 string modeName = opts.Mode == AudioHelperMode.Version ? "version" : "probe";
                 result.Error = $"--{modeName} cannot be mixed with capture arguments";
                 return result;
             }
+        }
+
+        if (!string.IsNullOrEmpty(opts.HfpRenderEndpointId) &&
+            opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
+        {
+            result.Error = "--hfp-render-endpoint-id requires --capture-engine wasapi-direct";
+            return result;
+        }
+
+        if (opts.AutoHfpPairDiscovery && opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
+        {
+            result.Error = "--auto-hfp-pair requires --capture-engine wasapi-direct";
+            return result;
         }
 
         result.Ok = true;

@@ -49,6 +49,7 @@ internal static class Program
         bool progressBeforeStarted = false;
         string? malformedProgressField = null;
         bool progressRegress = false;
+        bool estimatedGapDecrease = false;
         bool unknownResult = false;
         bool duplicateTerminal = false;
         bool eventAfterTerminal = false;
@@ -102,6 +103,8 @@ internal static class Program
                 malformedProgressField = args[++i];
             else if (string.Equals(arg, "--progress-regress", StringComparison.OrdinalIgnoreCase))
                 progressRegress = true;
+            else if (string.Equals(arg, "--estimated-gap-decrease", StringComparison.OrdinalIgnoreCase))
+                estimatedGapDecrease = true;
             else if (string.Equals(arg, "--unknown-result", StringComparison.OrdinalIgnoreCase))
                 unknownResult = true;
             else if (string.Equals(arg, "--duplicate-terminal", StringComparison.OrdinalIgnoreCase))
@@ -216,13 +219,19 @@ internal static class Program
             EmitProgress(recordingId, bytesWritten, 50);
         }
 
+        if (estimatedGapDecrease)
+        {
+            EmitProgress(recordingId, bytesWritten, 100, estimatedGapMs: 100, maxEstimatedGapMs: 100);
+            EmitProgress(recordingId, bytesWritten, 101, estimatedGapMs: 25, maxEstimatedGapMs: 100);
+        }
+
         if (noTerminal)
         {
             Thread.Sleep(Timeout.Infinite);
             return 1;
         }
 
-        EmitOk(recordingId, bytesWritten);
+        EmitOk(recordingId, bytesWritten, estimatedGapDecrease ? 100 : 0);
 
         if (duplicateTerminal)
         {
@@ -291,14 +300,20 @@ internal static class Program
         EndBlock();
     }
 
-    private static void EmitProgress(string recordingId, long bytesWritten, long elapsedMs)
+    private static void EmitProgress(
+        string recordingId,
+        long bytesWritten,
+        long elapsedMs,
+        long estimatedGapMs = 0,
+        long maxEstimatedGapMs = 0)
     {
         WriteLine("RESULT", "PROGRESS");
         WriteLine("Stage", "AudioCapturing");
         WriteLine("ElapsedMs", elapsedMs);
         WriteLine("WallElapsedMs", elapsedMs);
         WriteLine("BytesWritten", bytesWritten);
-        WriteLine("EstimatedGapMs", 0);
+        WriteLine("EstimatedGapMs", estimatedGapMs);
+        WriteLine("MaxEstimatedGapMs", maxEstimatedGapMs);
         EndBlock();
     }
 
@@ -322,10 +337,11 @@ internal static class Program
             WriteLine("EstimatedGapMs", "bad");
         else
             WriteLine("EstimatedGapMs", 0);
+        WriteLine("MaxEstimatedGapMs", 0);
         EndBlock();
     }
 
-    private static void EmitOk(string recordingId, long bytesWritten)
+    private static void EmitOk(string recordingId, long bytesWritten, long maxEstimatedGapMs = 0)
     {
         long durationMs = (long)(bytesWritten / (double)(SampleRate * Channels * BytesPerSample) * 1000.0);
         WriteLine("RESULT", "OK");
@@ -333,6 +349,7 @@ internal static class Program
         WriteLine("DurationMs", durationMs);
         WriteLine("BytesWritten", bytesWritten);
         WriteLine("EstimatedGapMs", 0);
+        WriteLine("MaxEstimatedGapMs", maxEstimatedGapMs);
         EndBlock();
     }
 

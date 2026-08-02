@@ -158,7 +158,7 @@ The response includes:
 
 A native `wgc-native-helper.exe`, managed continuous session, and capture-backend adapter are present in the repository. Their automated baseline and one supervised 10-second 3840x2160 desktop recording have passed. **WGC continuous display recording is still not exposed through the public API**, has not been wired into backend selection or the portable product path, and the default FFmpeg backend remains unchanged. Public endpoints continue to reject continuous WGC sources.
 
-Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via NAudio CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. This isolates device/COM/driver exceptions from the main application, but it does not guarantee compatibility with every input endpoint: some Bluetooth Hands-Free devices may fail initialization or deliver discontinuous samples. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
+Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
 The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
 
@@ -439,7 +439,7 @@ GET /audio/devices
 
 Enumerates real microphone input devices via FFmpeg dshow and enriches each entry with fresh read-only CoreAudio state. Returns `status: "ready"` when devices are found, `"no_devices"` when enumeration succeeds but no device is present, and `"unavailable"` when enumeration fails. `microphone_supported` is `true`; `system_audio_supported` is `false`.
 
-When microphone audio is requested, Agent Recorder launches an isolated Windows WASAPI helper (`AgentRecorder.AudioHelper.exe`) to capture from the selected CoreAudio endpoint. The device `id` returned by this endpoint is still the FFmpeg dshow alternative name for API compatibility; Agent Recorder maps it to the matching CoreAudio endpoint ID internally. Device enumeration and an `active` CoreAudio state do not prove that the endpoint can be initialized by the helper; initialization or runtime sample failures are reported as recording failures. dshow capture remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`.
+When microphone audio is requested, Agent Recorder launches an isolated Windows WASAPI helper (`AgentRecorder.AudioHelper.exe`) to capture from the selected CoreAudio endpoint. The device `id` returned by this endpoint is still the FFmpeg dshow alternative name for API compatibility; Agent Recorder maps it to the matching CoreAudio endpoint ID internally. Bluetooth Hands-Free endpoints are transport-classified and can be paired automatically with their same-container render endpoint for duplex prime. Device enumeration and an `active` state still do not guarantee initialization on every driver; pairing, initialization, or runtime sample failures are reported as recording failures. dshow capture remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`.
 
 The device-enumeration parser recognizes both the bundled FFmpeg classic `[dshow]` / `[dshow @ ...] DirectShow audio devices` section and the FFmpeg 8.x tagged `[in#N @ ...] "Name" (audio)` format. Only these two trusted logger prefixes are accepted: classic lines must start with `[dshow]` or `[dshow @ identity]`, and tagged lines must start with `[in#N @ identity]` where `N` is one or more digits and `identity` is non-empty. Quoted friendly/alternative names are parsed with consumed-length validation, so extra text before or after the quoted value (e.g. `prefix "Name" (audio)` or `"Name" (audio) suffix`) is rejected. It decodes FFmpeg `\"` and `\\` escapes in quoted names while preserving ordinary backslashes (e.g. `\wave_{GUID}`). Any malformed or incomplete device record—such as an invalid logger prefix, a missing alternative name, an orphaned alternative, a candidate interrupted by another line, trailing junk after a quoted value, or a conflict between devices and the no-devices marker—causes the entire listing to be treated as unrecognized and reported as `status: "unavailable"`. Lines that lack a trusted logger prefix, including ordinary `warning:` or other logger output, are ignored and never create devices. A classic no-devices marker is only accepted inside a classic audio section that was opened by the trusted `DirectShow audio devices` header; a tagged no-devices marker is accepted directly from a trusted input logger. Complete tagged video records (`(video)` friendly name plus matching alternative) are safely ignored in any order and never interrupt audio enumeration. The parser never returns a partial audio device list. Recognized complete listings (with or without devices) accept normal listing exit-code differences across versions (`1`, `0`, `-2`); otherwise the endpoint returns `ready` or `no_devices`.
 
@@ -847,6 +847,20 @@ New fields:
 | `wait.timed_out` | Whether returned due to timeout (`false` = immediate or early return, `true` = timeout) |
 | `next_poll_hint_ms` | Suggested polling interval; `null` for terminal states, `500` for confirmation pending, `1000` for recording active |
 | `stop_reason` | Termination reason: `duration_reached` for natural completion, `floating_button`, `tray_menu`, `global_hotkey`, `user_requested`, etc. Meaningful in terminal states. |
+
+For microphone recordings, terminal responses include `audio.microphone` diagnostics:
+
+| Field | Description |
+| --- | --- |
+| `status` / `continuity_status` | Final audio presence and continuity result. |
+| `capture_strategy` | Selected helper path, such as `hfp-duplex-prime-classic` or ordinary direct capture. |
+| `pair_evidence` | Evidence used to pair capture/render endpoints, such as `same_container_id`. |
+| `auto_hfp_pair_status` / `auto_hfp_pair_result_code` | Automatic HFP discovery outcome. |
+| `auto_hfp_pair_transport_classification` | Passive transport classification (`hfp_candidate`, `not_hfp`, or an unavailable/unknown result). |
+| `render_prime_ready_ms` | Time required to establish the paired render stream, when applicable. |
+| `helper_failure_reason` / `helper_failure_stage` / `helper_failure_hresult` | Stable helper failure evidence; empty on success. |
+
+Detailed current/max gap, recovery, gap-fill, and discontinuity counters are written to the local audit event for the terminal recording. `EstimatedGapMs` is a current gauge and may decrease; `MaxEstimatedGapMs` is the monotonic historical maximum.
 
 `since_status` comparison is case-insensitive.
 

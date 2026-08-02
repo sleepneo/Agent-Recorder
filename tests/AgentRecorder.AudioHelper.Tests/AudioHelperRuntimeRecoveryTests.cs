@@ -303,6 +303,68 @@ public class AudioHelperRuntimeRecoveryTests
         Assert.Equal(1, input2.DisposeCount);
     }
 
+    [Fact]
+    public async Task Run_OneRecovery_MergesEachGenerationFinalDiscontinuityCountOnce()
+    {
+        var factory = new ScriptedInputFactory();
+        var input1 = new ScriptedAudioInput { DiscontinuityCount = 2 };
+        var input2 = new ScriptedAudioInput { DiscontinuityCount = 4 };
+        input1.OnStopRecording = input => input.DiscontinuityCount++;
+        input2.OnDispose = input => input.DiscontinuityCount++;
+        factory.EnqueueInput(input1);
+        factory.EnqueueInput(input2);
+
+        using var h = new SessionHarness("rec_discontinuity_recovery_once", factory,
+            stallThreshold: TimeSpan.FromMilliseconds(100));
+        var runTask = Task.Run(() => h.Session.Run());
+
+        Assert.True(SpinWait.SpinUntil(() => input1.Started, TimeSpan.FromSeconds(2)));
+        input1.InjectData(Zeros(320), 320);
+        Assert.True(SpinWait.SpinUntil(() => input2.Started, TimeSpan.FromSeconds(10)));
+        input2.InjectData(Zeros(320), 320);
+        h.SignalStop();
+
+        Assert.Equal(0, await runTask.WaitAsync(TimeSpan.FromSeconds(10)));
+        var terminal = h.Terminal;
+        Assert.Equal(AudioHelperEventResult.Stopped, terminal.Result);
+        Assert.Equal(8, terminal.DiscontinuityCount);
+        Assert.Equal(1, input1.DisposeCount);
+        Assert.Equal(1, input2.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Run_MultipleRecoveries_MergesEveryGenerationExactlyOnce()
+    {
+        var factory = new ScriptedInputFactory();
+        var input1 = new ScriptedAudioInput { DiscontinuityCount = 2 };
+        var input2 = new ScriptedAudioInput { DiscontinuityCount = 3 };
+        var input3 = new ScriptedAudioInput { DiscontinuityCount = 4 };
+        factory.EnqueueInput(input1);
+        factory.EnqueueInput(input2);
+        factory.EnqueueInput(input3);
+
+        using var h = new SessionHarness("rec_discontinuity_recovery_many", factory,
+            stallThreshold: TimeSpan.FromMilliseconds(100));
+        var runTask = Task.Run(() => h.Session.Run());
+
+        Assert.True(SpinWait.SpinUntil(() => input1.Started, TimeSpan.FromSeconds(2)));
+        input1.InjectData(Zeros(320), 320);
+        Assert.True(SpinWait.SpinUntil(() => input2.Started, TimeSpan.FromSeconds(10)));
+        input2.InjectData(Zeros(320), 320);
+        Assert.True(SpinWait.SpinUntil(() => input3.Started, TimeSpan.FromSeconds(10)));
+        input3.InjectData(Zeros(320), 320);
+        h.SignalStop();
+
+        Assert.Equal(0, await runTask.WaitAsync(TimeSpan.FromSeconds(10)));
+        var terminal = h.Terminal;
+        Assert.Equal(AudioHelperEventResult.Stopped, terminal.Result);
+        Assert.Equal(9, terminal.DiscontinuityCount);
+        Assert.Equal(2, terminal.RecoveryCount);
+        Assert.Equal(1, input1.DisposeCount);
+        Assert.Equal(1, input2.DisposeCount);
+        Assert.Equal(1, input3.DisposeCount);
+    }
+
     // -----------------------------------------------------------------
     // 2. Sporadic callbacks with growing gap -> recovery not bypassed by byte growth
     // -----------------------------------------------------------------
@@ -461,8 +523,8 @@ public class AudioHelperRuntimeRecoveryTests
     public async Task Run_RecoveryRacesUserStop_StopWins_NoRevive_SingleTerminal()
     {
         var factory = new ScriptedInputFactory();
-        var input1 = new ScriptedAudioInput();
-        var input2 = new ScriptedAudioInput();
+        var input1 = new ScriptedAudioInput { DiscontinuityCount = 5 };
+        var input2 = new ScriptedAudioInput { DiscontinuityCount = 7 };
         var factoryEntered = new ManualResetEventSlim(false);
         var factoryRelease = new ManualResetEventSlim(false);
         factory.EnqueueInput(input1);
@@ -497,6 +559,7 @@ public class AudioHelperRuntimeRecoveryTests
         var terminal = h.Terminal;
         Assert.Equal(AudioHelperEventResult.Stopped, terminal.Result);
         Assert.Equal("user_requested", terminal.StopReason);
+        Assert.Equal(12, terminal.DiscontinuityCount);
 
         h.Session.Dispose();
         Assert.Equal(1, input1.DisposeCount);
@@ -1332,7 +1395,7 @@ public class AudioHelperRuntimeRecoveryTests
         releaseStart.Set();
         var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Equal(0, callbackTimeouts);
+        Assert.True(callbackTimeouts == 0, $"{recordingId}: callbackTimeouts={callbackTimeouts}");
         Assert.Single(h.Events, e => e.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
         Assert.Equal(1, candidate.DisposeCount);
 

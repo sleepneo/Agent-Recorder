@@ -23,6 +23,22 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     }
 
     [Fact]
+    public void BuildArgs_ProductionAutoPairIsEnabledOnceAndIsAStandaloneSwitch()
+    {
+        var worker = new WasapiAudioCaptureWorker();
+        Assert.True(worker.EnableAutomaticHfpPairDiscovery);
+
+        var args = WasapiAudioCaptureWorker.BuildArgs(
+            "capture", "output.wav", "root", "stop.signal", "recording", "--auto-hfp-pair", true);
+
+        Assert.Equal(1, args.Count(arg => string.Equals(arg, "--auto-hfp-pair", StringComparison.OrdinalIgnoreCase)));
+        var index = args.FindIndex(arg => string.Equals(arg, "--auto-hfp-pair", StringComparison.OrdinalIgnoreCase));
+        Assert.True(index >= 0);
+        Assert.Equal("--recording-id", args[index - 2]);
+        Assert.Equal("recording", args[index - 1]);
+    }
+
+    [Fact]
     public void Start_FakeHelper_EmitsAudioReadyAndSetsAnchor()
     {
         var outputPath = Path.Combine(_tmpDir, "audio.wav");
@@ -67,6 +83,26 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         Assert.True(summary.State == AudioHelperSessionState.Success || summary.State == AudioHelperSessionState.Stopped,
             $"Expected success/stopped terminal state, got {summary.State}. ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
         Assert.True(File.Exists(outputPath), "Output WAV was not published");
+
+        worker.Dispose();
+    }
+
+    [Fact]
+    public void Start_FakeHelper_CurrentEstimatedGapDecrease_IsAcceptedAndKeepsHistoricalMax()
+    {
+        var outputPath = Path.Combine(_tmpDir, "current-gap-decrease.wav");
+        var worker = CreateWorker("--estimated-gap-decrease");
+
+        worker.Start(CaptureConfigWithMic(), outputPath);
+        Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(5)), "Worker did not exit");
+
+        var summary = worker.GetTerminalSummary();
+        Assert.NotNull(summary);
+        Assert.NotEqual("audio_helper_protocol_error", summary.ErrorCode);
+        Assert.True(summary.State == AudioHelperSessionState.Success || summary.State == AudioHelperSessionState.Stopped,
+            $"Current gap decrease should be valid. State={summary.State}; ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
+        Assert.Equal(0, summary.EstimatedGapMs);
+        Assert.Equal(100, summary.MaxEstimatedGapMs);
 
         worker.Dispose();
     }

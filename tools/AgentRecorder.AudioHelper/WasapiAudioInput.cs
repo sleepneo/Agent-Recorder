@@ -72,6 +72,18 @@ internal static class WasapiAudioInput
     }
 
     /// <summary>
+    /// Opens the exact endpoint with the classic HFP capture profile. This is
+    /// deliberately separate from <see cref="Open(string, TimeSpan)"/> so the
+    /// ordinary direct profile keeps its format candidates and conversion flags.
+    /// </summary>
+    internal static (IAudioInput? Input, string? ErrorCode, string? Reason) OpenClassic(
+        string endpointId, TimeSpan totalBudget)
+    {
+        using var enumerator = new NAudioDeviceEnumerator();
+        return Open(endpointId, enumerator, SystemClock.Instance, TryOpenOnceClassic, totalBudget);
+    }
+
+    /// <summary>
     /// Test seam: the same retry policy as <see cref="Open(string)"/> but the
     /// single-attempt opener, clock and enumerator can be substituted for
     /// deterministic unit tests.
@@ -182,6 +194,91 @@ internal static class WasapiAudioInput
             device?.Dispose();
             var (code, reason) = ClassifyFailure(ex);
             return (null, code, reason);
+        }
+    }
+
+    internal static (IAudioInput? Input, string? ErrorCode, string? Reason) TryOpenOnceClassic(
+        string endpointId,
+        IDeviceEnumerator enumerator)
+    {
+        IDevice? device = null;
+        try
+        {
+            device = enumerator.GetDevice(endpointId);
+            var endpointState = device.State;
+            if (endpointState != DeviceState.Active)
+            {
+                var code = endpointState == DeviceState.NotPresent
+                    ? "audio_endpoint_not_found"
+                    : "audio_endpoint_inactive";
+                device.Dispose();
+                return (null, code, $"Endpoint state is {endpointState}");
+            }
+
+            return TryInitializeClassicCapture(device, endpointId, endpointState);
+        }
+        catch (Exception ex)
+        {
+            device?.Dispose();
+            var (code, reason) = ClassifyFailure(ex);
+            return (null, code, reason);
+        }
+    }
+
+    /// <summary>
+    /// HFP classic profile: exact endpoint mix format, shared mode, event
+    /// callback, zero buffer duration/periodicity, and no auto conversion.
+    /// </summary>
+    internal static (IAudioInput? Input, string? ErrorCode, string? Reason) TryInitializeClassicCapture(
+        IDevice device,
+        string endpointId,
+        DeviceState endpointState)
+    {
+        IAudioClient? audioClientToDispose = null;
+        IAudioCaptureClient? captureClientToDispose = null;
+        IAudioClient? probeClient = null;
+        try
+        {
+            WaveFormat mixFormat;
+            try
+            {
+                probeClient = device.CreateAudioClient();
+                mixFormat = probeClient.MixFormat;
+            }
+            finally
+            {
+                try { probeClient?.Dispose(); } finally { probeClient = null; }
+            }
+
+            var audioClient = device.CreateAudioClient();
+            audioClientToDispose = audioClient;
+            if (audioClient is not IEventDrivenAudioClient)
+                throw new InvalidOperationException("HFP classic capture requires an event-capable AudioClient");
+
+            audioClient.Initialize(
+                AudioClientShareMode.Shared,
+                AudioClientStreamFlags.EventCallback,
+                0,
+                0,
+                mixFormat,
+                Guid.Empty);
+
+            var captureClient = audioClient.GetAudioCaptureClient();
+            captureClientToDispose = captureClient;
+            var input = new AudioClientAudioInput(
+                device, audioClient, captureClient, mixFormat, DefaultBufferMilliseconds,
+                eventDriven: true);
+            audioClientToDispose = null;
+            captureClientToDispose = null;
+            return (input, null, null);
+        }
+        catch (Exception ex)
+        {
+            captureClientToDispose?.Dispose();
+            audioClientToDispose?.Dispose();
+            device.Dispose();
+            var (code, reason) = ClassifyFailure(ex);
+            return (null, code, reason + $"\nEndpointId={endpointId}\nEndpointState={endpointState}\nCaptureProfile=hfp-classic\nStreamFlags={AudioClientStreamFlags.EventCallback} BufferDuration=0 Periodicity=0");
         }
     }
 

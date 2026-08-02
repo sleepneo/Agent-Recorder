@@ -38,6 +38,7 @@ internal sealed class AudioCaptureRuntimeException : Exception
 
     public string Stage { get; }
     public int Hresult { get; }
+    public string? ErrorCode { get; }
 
     /// <summary>
     /// Diagnostics of a secondary failure that occurred while the primary
@@ -62,11 +63,12 @@ internal sealed class AudioCaptureRuntimeException : Exception
         }
     }
 
-    public AudioCaptureRuntimeException(string stage, string message, Exception innerException, int hresult)
+    public AudioCaptureRuntimeException(string stage, string message, Exception innerException, int hresult, string? errorCode = null)
         : base(message, innerException)
     {
         Stage = stage;
         Hresult = hresult;
+        ErrorCode = errorCode;
     }
 
     /// <summary>
@@ -119,10 +121,15 @@ internal sealed class AudioCaptureRuntimeException : Exception
 internal sealed class AudioCaptureStartException : Exception
 {
     public int Hresult { get; }
+    public string? ErrorCode { get; }
+    public string Stage { get; }
 
-    public AudioCaptureStartException(string message, Exception innerException, int hresult)
+    public AudioCaptureStartException(string message, Exception innerException, int hresult,
+        string? errorCode = null, string stage = "AudioCaptureStart")
         : base(message, innerException)
     {
         Hresult = hresult;
+        ErrorCode = errorCode;
+        Stage = stage;
     }
 }

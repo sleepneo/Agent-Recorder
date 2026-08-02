@@ -57,6 +57,21 @@ public sealed class OutputMeta
     /// <summary>video media-start anchor availability: available or missing.</summary>
     public string? VideoAnchorStatus;
 
+    /// <summary>Monotonic FFmpeg process-start anchor used for A/V alignment.</summary>
+    public long? VideoLaunchAnchorTicks;
+
+    /// <summary>Diagnostic anchor estimated from FFmpeg progress delivery.</summary>
+    public long? VideoProgressAnchorTicks;
+
+    /// <summary>Progress-derived anchor minus launch anchor, in milliseconds.</summary>
+    public double? VideoProgressAnchorDeltaMs;
+
+    /// <summary>First credible FFmpeg progress frame number.</summary>
+    public long? VideoFirstProgressFrame;
+
+    /// <summary>First credible FFmpeg progress out_time_us value.</summary>
+    public long? VideoFirstProgressOutTimeUs;
+
     /// <summary>audio media-start anchor availability: available or missing.</summary>
     public string? AudioAnchorStatus;
 
@@ -98,6 +113,17 @@ public sealed class OutputMeta
 
     /// <summary>Audio capture method summary (e.g. "WASAPI_SHARED_CAPTURE").</summary>
     public string? AudioCaptureMethod;
+
+    /// <summary>Optional audio-helper capture profile evidence.</summary>
+    public string? AudioCaptureStrategy;
+    public string? AudioPairEvidence;
+    public string? AudioAutoHfpPairStatus;
+    public string? AudioAutoHfpPairResultCode;
+    public string? AudioAutoHfpPairTransportClassification;
+    public string? AudioHelperFailureReason;
+    public string? AudioHelperFailureStage;
+    public string? AudioHelperFailureHresult;
+    public long? AudioRenderPrimeReadyMs;
 
     /// <summary>Estimated cumulative audio gap reported by the helper, in milliseconds.</summary>
     public long? AudioEstimatedGapMs;

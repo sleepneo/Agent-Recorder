@@ -303,7 +303,7 @@ AgentRecorder.Cli.exe autostart disable --json
 }
 ```
 
-当前版本支持麦克风录制（`audio.microphone.enabled=true`），编码为 AAC。省略 `audio.microphone.device_id` 时优先自动选择唯一 CoreAudio 多媒体默认设备，否则选择唯一 active 设备；无法唯一确定时须从 `GET /api/v1/audio/devices` 获取 `id` 后显式指定。若选中设备被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`），应用不会自动取消系统静音；若设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`；状态未知时不阻断。未静音但音量低于 10% 时确认 UI 仅显示低音量警告，不阻断录制。系统声音暂未实现（`audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`）。
+当前版本支持麦克风录制（`audio.microphone.enabled=true`），编码为 AAC。省略 `audio.microphone.device_id` 时优先自动选择唯一 CoreAudio 多媒体默认设备，否则选择唯一 active 设备；无法唯一确定时须从 `GET /api/v1/audio/devices` 获取 `id` 后显式指定。蓝牙 Hands-Free 输入由 helper 自动识别并尝试配对同一设备的渲染端点，agent 不需要手工提供 render endpoint。若选中设备被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`），应用不会自动取消系统静音；若设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`；状态未知时不阻断。未静音但音量低于 10% 时确认 UI 仅显示低音量警告，不阻断录制。系统声音暂未实现（`audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`）。
 
 让用户选区并录制 1 分钟：
 

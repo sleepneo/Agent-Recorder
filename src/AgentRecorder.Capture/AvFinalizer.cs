@@ -419,6 +419,11 @@ public sealed class AvFinalizer
     private static void CopyTimelineDiagnostics(OutputMeta from, OutputMeta to)
     {
         to.VideoAnchorStatus = from.VideoAnchorStatus;
+        to.VideoLaunchAnchorTicks = from.VideoLaunchAnchorTicks;
+        to.VideoProgressAnchorTicks = from.VideoProgressAnchorTicks;
+        to.VideoProgressAnchorDeltaMs = from.VideoProgressAnchorDeltaMs;
+        to.VideoFirstProgressFrame = from.VideoFirstProgressFrame;
+        to.VideoFirstProgressOutTimeUs = from.VideoFirstProgressOutTimeUs;
         to.AudioAnchorStatus = from.AudioAnchorStatus;
         to.AudioPreRollMs = from.AudioPreRollMs;
         to.TempVideoDurationSeconds = from.TempVideoDurationSeconds;

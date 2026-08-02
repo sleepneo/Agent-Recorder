@@ -101,11 +101,12 @@ Context files are written using a random temp file in the same directory and ato
 - Microphone recording uses an isolated Windows WASAPI helper by default and is
   muxed into the final MP4 as AAC. The helper process and its capture stream do
   not start until after local user confirmation; FFmpeg dshow remains available
-  only as an explicit diagnostic fallback. Hardware compatibility is not yet
-  universal: some Bluetooth Hands-Free endpoints may fail initialization or
-  deliver discontinuous samples even when Windows reports them as active.
-  These failures must remain visible and must not be converted into a
-  successful silent video. System audio recording is not implemented; requests
+  only as an explicit diagnostic fallback. For Bluetooth Hands-Free inputs the
+  helper can pair and prime the matching render endpoint to establish a stable
+  duplex HFP link. AirPods Pro and Focal Bathys have passed supervised product
+  recording, but compatibility remains device/driver dependent. Initialization,
+  pairing, continuity, and runtime-recovery failures remain visible and are never
+  converted into a successful silent video. System audio recording is not implemented; requests
   that set `audio.system_audio.enabled=true` fail fast with
   `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.
 - Microphone discovery supports both the bundled FFmpeg classic dshow listing and the FFmpeg 8.x tagged format. The parser accepts only trusted logger prefixes and complete records; malformed, incomplete, or conflicting listings fail closed as `unavailable`, and partial device lists are never returned. See [API reference](api.md#get-audiodevices) for the exact grammar and response contract.

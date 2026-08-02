@@ -25,6 +25,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
     private readonly int _bufferMilliseconds;
     private readonly SynchronizationContext? _syncContext;
     private readonly TimeSpan _joinTimeout;
+    private readonly EventWaitHandle? _captureEvent;
 
     private byte[] _recordBuffer;
     private readonly int _bytesPerFrame;
@@ -76,7 +77,8 @@ internal sealed class AudioClientAudioInput : IAudioInput
         IAudioCaptureClient captureClient,
         WaveFormat waveFormat,
         int bufferMilliseconds,
-        TimeSpan? joinTimeout = null)
+        TimeSpan? joinTimeout = null,
+        bool eventDriven = false)
     {
         _device = device ?? throw new ArgumentNullException(nameof(device));
         _audioClient = audioClient ?? throw new ArgumentNullException(nameof(audioClient));
@@ -85,16 +87,29 @@ internal sealed class AudioClientAudioInput : IAudioInput
         _bufferMilliseconds = bufferMilliseconds;
         _syncContext = SynchronizationContext.Current;
         _joinTimeout = joinTimeout ?? DefaultThreadJoinTimeout;
+        if (eventDriven)
+        {
+            if (audioClient is not IEventDrivenAudioClient)
+                throw new ArgumentException("Event-driven capture requires an event-capable AudioClient", nameof(audioClient));
+        }
 
         int bufferFrameCount = audioClient.BufferSize;
         _bytesPerFrame = waveFormat.Channels * waveFormat.BitsPerSample / 8;
-        if (_bytesPerFrame == 0)
+        if (_bytesPerFrame <= 0)
             throw new ArgumentException("Wave format yields zero bytes per frame", nameof(waveFormat));
+        if (waveFormat.SampleRate <= 0)
+            throw new ArgumentException("Wave format has an invalid sample rate", nameof(waveFormat));
 
         _recordBuffer = new byte[Math.Max(1, bufferFrameCount) * _bytesPerFrame];
 
         long actualDuration = (long)((double)ReftimesPerSec * bufferFrameCount / waveFormat.SampleRate);
         _sleepMilliseconds = Math.Max(1, (int)(actualDuration / ReftimesPerMillisec / 2));
+
+        // Allocate the handle only after all validation, native property reads,
+        // and managed buffer allocation that can fail. A constructor failure
+        // therefore cannot strand a newly-created event handle.
+        if (eventDriven)
+            _captureEvent = new AutoResetEvent(false);
     }
 
     public StartRecordingResult StartRecording()
@@ -113,6 +128,10 @@ internal sealed class AudioClientAudioInput : IAudioInput
             // have historically failed with E_INVALIDARG; by performing it here
             // (rather than during construction) the failure can be retried by
             // the caller with a fresh device/client/format negotiation.
+            if (_captureEvent != null)
+            {
+                ((IEventDrivenAudioClient)_audioClient).SetEventHandle(_captureEvent.SafeWaitHandle.DangerousGetHandle());
+            }
             _audioClient.Start();
             audioClientStarted = true;
 
@@ -394,7 +413,10 @@ internal sealed class AudioClientAudioInput : IAudioInput
 
                 if (packetSize == 0)
                 {
-                    Thread.Sleep(_sleepMilliseconds);
+                    if (_captureEvent != null)
+                        _captureEvent.WaitOne(_sleepMilliseconds);
+                    else
+                        Thread.Sleep(_sleepMilliseconds);
                     continue;
                 }
 
@@ -516,6 +538,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
 
     private void StopAudioClient()
     {
+        try { _captureEvent?.Set(); } catch { }
         try
         {
             _audioClient.Stop();
@@ -574,6 +597,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
         try { _captureClient.Dispose(); } catch { }
         try { _audioClient.Dispose(); } catch { }
         try { _device.Dispose(); } catch { }
+        try { _captureEvent?.Dispose(); } catch { }
     }
 
     private static int HresultFrom(Exception ex)

@@ -576,6 +576,10 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             success = result.Success;
         }
 
+        // Preserve both the launch anchor used for A/V alignment and the
+        // progress-derived evidence on every success or failure path.
+        ApplyVideoAnchorDiagnostics(meta);
+
         // Propagate CoreAudio-detected microphone loss time into final metadata.
         var audioLostAtMs = _audioWorker?.RuntimeAudioLostAtMs;
         if (audioLostAtMs > 0)
@@ -652,6 +656,20 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 ["audio_gap_filled_ms"] = meta.AudioGapFilledMs,
                 ["audio_discontinuity_count"] = meta.AudioDiscontinuityCount,
                 ["audio_capture_method"] = meta.AudioCaptureMethod,
+                ["audio_capture_strategy"] = meta.AudioCaptureStrategy,
+                ["audio_pair_evidence"] = meta.AudioPairEvidence,
+                ["audio_auto_hfp_pair_status"] = meta.AudioAutoHfpPairStatus,
+                ["audio_auto_hfp_pair_result_code"] = meta.AudioAutoHfpPairResultCode,
+                ["audio_auto_hfp_pair_transport_classification"] = meta.AudioAutoHfpPairTransportClassification,
+                ["audio_helper_failure_reason"] = meta.AudioHelperFailureReason,
+                ["audio_helper_failure_stage"] = meta.AudioHelperFailureStage,
+                ["audio_helper_failure_hresult"] = meta.AudioHelperFailureHresult,
+                ["audio_render_prime_ready_ms"] = meta.AudioRenderPrimeReadyMs,
+                ["video_launch_anchor_ticks"] = meta.VideoLaunchAnchorTicks,
+                ["video_progress_anchor_ticks"] = meta.VideoProgressAnchorTicks,
+                ["video_progress_anchor_delta_ms"] = meta.VideoProgressAnchorDeltaMs,
+                ["video_first_progress_frame"] = meta.VideoFirstProgressFrame,
+                ["video_first_progress_out_time_us"] = meta.VideoFirstProgressOutTimeUs,
                 ["warnings"] = meta.Warnings ?? Array.Empty<string>(),
                 ["stderr_excerpt"] = stderrExcerpt
             };
@@ -734,6 +752,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             failedMeta.AudioHelperErrorCode = helperErrorCode;
             failedMeta.AudioCaptureBackend = _audioWorker is WasapiAudioCaptureWorker ? "wasapi-helper" : "dshow";
             failedMeta.AudioHelperProtocol = _audioWorker is WasapiAudioCaptureWorker ? "audio-helper-v1" : null;
+            failedMeta.AudioCaptureStrategy = helperSummary?.CaptureStrategy;
+            failedMeta.AudioPairEvidence = helperSummary?.PairEvidence;
+            failedMeta.AudioRenderPrimeReadyMs = helperSummary?.RenderPrimeReadyMs;
             if (helperSummary?.EstimatedGapMs.HasValue == true)
                 failedMeta.AudioEstimatedGapMs = helperSummary.EstimatedGapMs;
             ApplyHelperSummaryMetrics(failedMeta, helperSummary);
@@ -755,7 +776,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         // video frame, which is the normal case. If anchors are missing or the
         // audio appears to start at/after video, the finalizer will reject it.
         TimeSpan? audioPreRoll = null;
-        var videoAnchor = _videoWorker?.FirstFrameAnchorTicks ?? 0;
+        var videoAnchor = _videoWorker?.LaunchAnchorTicks ?? 0;
         var audioAnchor = _audioWorker?.MediaStartAnchorTicks ?? 0;
         if (videoAnchor > 0 && audioAnchor > 0)
         {
@@ -791,6 +812,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 meta.AudioChannels = summary.Channels;
                 meta.AudioBitsPerSample = summary.BitsPerSample;
                 meta.AudioCaptureMethod = summary.CaptureMethod;
+                meta.AudioCaptureStrategy = summary.CaptureStrategy;
+                meta.AudioPairEvidence = summary.PairEvidence;
+                meta.AudioRenderPrimeReadyMs = summary.RenderPrimeReadyMs;
                 meta.AudioEstimatedGapMs = summary.EstimatedGapMs;
                 meta.AudioHelperErrorCode = ResolveAudioHelperErrorCode(summary);
                 ApplyHelperSummaryMetrics(meta, summary);
@@ -814,6 +838,19 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
         bool success = !result.TimedOut && string.IsNullOrEmpty(result.Error) && File.Exists(_finalOutputPath) && meta.DurationSeconds > 0;
         return (meta, success);
+    }
+
+    private void ApplyVideoAnchorDiagnostics(OutputMeta meta)
+    {
+        var video = _videoWorker;
+        var launchAnchor = video?.LaunchAnchorTicks ?? 0;
+        var progressAnchor = video?.FirstFrameAnchorTicks ?? 0;
+        meta.VideoAnchorStatus = launchAnchor > 0 ? "available" : "missing";
+        meta.VideoLaunchAnchorTicks = launchAnchor > 0 ? launchAnchor : null;
+        meta.VideoProgressAnchorTicks = progressAnchor > 0 ? progressAnchor : null;
+        meta.VideoProgressAnchorDeltaMs = video?.ProgressAnchorDeltaMs;
+        meta.VideoFirstProgressFrame = video?.FirstProgressFrame;
+        meta.VideoFirstProgressOutTimeUs = video?.FirstProgressOutTimeUs;
     }
 
     /// <summary>
@@ -954,6 +991,19 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         if (summary == null)
             return;
 
+        meta.AudioCaptureStrategy = summary.CaptureStrategy;
+        meta.AudioPairEvidence = summary.PairEvidence;
+        meta.AudioAutoHfpPairStatus = summary.AutoHfpPairStatus;
+        meta.AudioAutoHfpPairResultCode = summary.AutoHfpPairResultCode;
+        meta.AudioAutoHfpPairTransportClassification = summary.AutoHfpPairTransportClassification;
+        meta.AudioHelperFailureReason = summary.Reason;
+        meta.AudioHelperFailureStage = summary.FailureStage;
+        meta.AudioHelperFailureHresult = summary.Hresult;
+        if (!string.IsNullOrEmpty(summary.FailureStage))
+            meta.Stage = summary.FailureStage;
+        if (!string.IsNullOrEmpty(summary.Hresult))
+            meta.Hresult = summary.Hresult;
+        meta.AudioRenderPrimeReadyMs = summary.RenderPrimeReadyMs;
         if (summary.EstimatedGapMs.HasValue)
             meta.AudioEstimatedGapMs = summary.EstimatedGapMs;
         if (summary.MaxEstimatedGapMs.HasValue)

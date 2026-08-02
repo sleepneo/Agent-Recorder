@@ -24,6 +24,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private const int ProtocolMaxEvents = 10000;
     private const int ProtocolMaxBlockLines = 64;
     private const int ProtocolMaxLineLength = 4096;
+    private const string AutoHfpPairArgument = "--auto-hfp-pair";
 
     private static readonly TimeSpan StdoutDrainTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan StderrDrainTimeout = TimeSpan.FromSeconds(2);
@@ -62,7 +63,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private long _lastProgressElapsedMs = -1;
     private long _lastProgressWallElapsedMs = -1;
     private long _lastProgressBytesWritten = -1;
-    private long _lastProgressEstimatedGapMs = -1;
+    private long _lastProgressMaxEstimatedGapMs = -1;
 
     private IMicrophoneStatusProvider? _microphoneStatusProvider;
     private CancellationTokenSource? _microphoneMonitorCts;
@@ -77,6 +78,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     internal string? AllowedRootOverride { get; set; }
     internal string? StopSignalPathOverride { get; set; }
     internal string? HelperArgumentsOverride { get; set; }
+    internal bool EnableAutomaticHfpPairDiscovery { get; set; } = true;
     internal bool SkipMicrophoneStatusMonitor { get; set; }
 
     public event Action? AudioReady;
@@ -135,7 +137,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         TryDelete(_stopSignalPath);
 
         var helperExe = HelperExePathOverride ?? AudioHelperExePathResolver.Resolve();
-        var args = BuildArgs(endpointId, outputPath, _allowedRoot, _stopSignalPath, recordingId, HelperArgumentsOverride);
+        var args = BuildArgs(endpointId, outputPath, _allowedRoot, _stopSignalPath, recordingId,
+            HelperArgumentsOverride, EnableAutomaticHfpPairDiscovery);
 
         _proc = new Process
         {
@@ -330,7 +333,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         }
     }
 
-    private static List<string> BuildArgs(string endpointId, string outputPath, string allowedRoot, string stopSignalPath, string recordingId, string? extraArgs)
+    internal static List<string> BuildArgs(string endpointId, string outputPath, string allowedRoot, string stopSignalPath,
+        string recordingId, string? extraArgs, bool enableAutomaticHfpPairDiscovery)
     {
         var args = new List<string>
         {
@@ -341,9 +345,17 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             "--recording-id", recordingId
         };
 
-        if (!string.IsNullOrWhiteSpace(extraArgs))
+        var extraTokens = string.IsNullOrWhiteSpace(extraArgs)
+            ? new List<string>()
+            : extraArgs.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+
+        if (enableAutomaticHfpPairDiscovery &&
+            !extraTokens.Any(token => string.Equals(token, AutoHfpPairArgument, StringComparison.OrdinalIgnoreCase)))
+            args.Add(AutoHfpPairArgument);
+
+        if (extraTokens.Count > 0)
         {
-            foreach (var token in extraArgs.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var token in extraTokens)
                 args.Add(token);
         }
 
@@ -488,8 +500,16 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         {
             if (!evt.EstimatedGapMs.HasValue || evt.EstimatedGapMs.Value < 0)
                 validationError = "PROGRESS event missing or negative EstimatedGapMs";
-            else if (evt.EstimatedGapMs.Value < Interlocked.Read(ref _lastProgressEstimatedGapMs))
-                validationError = "PROGRESS event EstimatedGapMs regressed";
+        }
+
+        if (validationError == null)
+        {
+            if (!evt.MaxEstimatedGapMs.HasValue || evt.MaxEstimatedGapMs.Value < 0)
+                validationError = "PROGRESS event missing or negative MaxEstimatedGapMs";
+            else if (evt.MaxEstimatedGapMs.Value < Interlocked.Read(ref _lastProgressMaxEstimatedGapMs))
+                validationError = "PROGRESS event MaxEstimatedGapMs regressed";
+            else if (evt.MaxEstimatedGapMs.Value < evt.EstimatedGapMs!.Value)
+                validationError = "PROGRESS event MaxEstimatedGapMs below EstimatedGapMs";
         }
 
         if (validationError != null)
@@ -501,7 +521,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         Interlocked.Exchange(ref _lastProgressElapsedMs, evt.ElapsedMs!.Value);
         Interlocked.Exchange(ref _lastProgressWallElapsedMs, evt.WallElapsedMs!.Value);
         Interlocked.Exchange(ref _lastProgressBytesWritten, evt.BytesWritten!.Value);
-        Interlocked.Exchange(ref _lastProgressEstimatedGapMs, evt.EstimatedGapMs!.Value);
+        Interlocked.Exchange(ref _lastProgressMaxEstimatedGapMs, evt.MaxEstimatedGapMs!.Value);
     }
 
     private void ProcessStartedEvent(AudioHelperEvent evt)
@@ -574,6 +594,27 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         if (Interlocked.Exchange(ref _terminalEventRaised, 1) != 0)
         {
             RaiseProtocolError("protocol_duplicate_terminal", $"Duplicate terminal event: {evt.Result}");
+            return;
+        }
+
+        string? gapValidationError = null;
+        if (evt.EstimatedGapMs.HasValue && evt.EstimatedGapMs.Value < 0)
+            gapValidationError = "Terminal event has negative EstimatedGapMs";
+        else if (!evt.MaxEstimatedGapMs.HasValue && Interlocked.Read(ref _lastProgressMaxEstimatedGapMs) >= 0)
+            gapValidationError = "Terminal event missing required field: MaxEstimatedGapMs";
+        else if (evt.MaxEstimatedGapMs.HasValue && evt.MaxEstimatedGapMs.Value < 0)
+            gapValidationError = "Terminal event has negative MaxEstimatedGapMs";
+        else if (evt.MaxEstimatedGapMs.HasValue && evt.EstimatedGapMs.HasValue &&
+                 evt.EstimatedGapMs.Value >= 0 &&
+                 evt.MaxEstimatedGapMs.Value < evt.EstimatedGapMs.Value)
+            gapValidationError = "Terminal event MaxEstimatedGapMs below EstimatedGapMs";
+        else if (evt.MaxEstimatedGapMs.HasValue &&
+                 evt.MaxEstimatedGapMs.Value < Interlocked.Read(ref _lastProgressMaxEstimatedGapMs))
+            gapValidationError = "Terminal MaxEstimatedGapMs below last PROGRESS historical max";
+
+        if (gapValidationError != null)
+        {
+            RaiseProtocolError(gapValidationError, gapValidationError);
             return;
         }
 
@@ -687,6 +728,12 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         target.TimestampFrequency = source.TimestampFrequency;
         target.CaptureMethod = source.CaptureMethod;
         target.CaptureEngine = source.CaptureEngine;
+        target.CaptureStrategy = source.CaptureStrategy;
+        target.PairEvidence = source.PairEvidence;
+        target.AutoHfpPairStatus = source.AutoHfpPairStatus;
+        target.AutoHfpPairResultCode = source.AutoHfpPairResultCode;
+        target.AutoHfpPairTransportClassification = source.AutoHfpPairTransportClassification;
+        target.RenderPrimeReadyMs = source.RenderPrimeReadyMs;
         target.FailureStage = source.FailureStage;
         target.EndpointId = source.EndpointId;
         target.PartialOutputPath = source.PartialOutputPath;
@@ -719,12 +766,26 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
                 sb.AppendLine($"ErrorCode: {summary.ErrorCode}");
             if (!string.IsNullOrEmpty(summary.Reason))
                 sb.AppendLine($"Reason: {summary.Reason}");
+            if (!string.IsNullOrEmpty(summary.CaptureStrategy))
+                sb.AppendLine($"CaptureStrategy: {summary.CaptureStrategy}");
+            if (!string.IsNullOrEmpty(summary.PairEvidence))
+                sb.AppendLine($"PairEvidence: {summary.PairEvidence}");
+            if (!string.IsNullOrEmpty(summary.AutoHfpPairStatus))
+                sb.AppendLine($"AutoHfpPairStatus: {summary.AutoHfpPairStatus}");
+            if (!string.IsNullOrEmpty(summary.AutoHfpPairResultCode))
+                sb.AppendLine($"AutoHfpPairResultCode: {summary.AutoHfpPairResultCode}");
+            if (!string.IsNullOrEmpty(summary.AutoHfpPairTransportClassification))
+                sb.AppendLine($"AutoHfpPairTransportClassification: {summary.AutoHfpPairTransportClassification}");
+            if (!string.IsNullOrEmpty(summary.FailureStage))
+                sb.AppendLine($"FailureStage: {summary.FailureStage}");
             if (summary.DurationMs.HasValue)
                 sb.AppendLine($"DurationMs: {summary.DurationMs.Value}");
             if (summary.BytesWritten.HasValue)
                 sb.AppendLine($"BytesWritten: {summary.BytesWritten.Value}");
             if (summary.EstimatedGapMs.HasValue)
                 sb.AppendLine($"EstimatedGapMs: {summary.EstimatedGapMs.Value}");
+            if (summary.MaxEstimatedGapMs.HasValue)
+                sb.AppendLine($"MaxEstimatedGapMs: {summary.MaxEstimatedGapMs.Value}");
             foreach (var err in summary.ValidationErrors)
                 sb.AppendLine($"ValidationError: {err}");
         }
