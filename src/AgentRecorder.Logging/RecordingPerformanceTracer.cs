@@ -15,7 +15,7 @@ namespace AgentRecorder.Logging;
 /// monotonic elapsed times and writes them as rolling JSONL under
 /// <c>&lt;data-dir&gt;\perf\recording-traces.jsonl</c>.
 /// </summary>
-public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
+public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer, IDisposable
 {
     private readonly RollingJsonlWriter _writer;
     private readonly ConcurrentDictionary<string, long> _intentStartTicks = new();
@@ -185,6 +185,28 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IDisposable
     {
         Write(traceId, "capture.backend_start_failed", recordingId: recordingId, backend: backendType,
             data: new Dictionary<string, object?> { ["error_code"] = errorCode, ["error_type"] = errorType });
+    }
+
+    public void CaptureBackendSelected(
+        string traceId,
+        string recordingId,
+        string requestedBackend,
+        string selectedBackend,
+        string selectionReasonCode,
+        string availabilitySource,
+        int? availabilityElapsedMs,
+        bool fallback)
+    {
+        Write(traceId, "capture.backend_selected", recordingId: recordingId, backend: selectedBackend,
+            data: new Dictionary<string, object?>
+            {
+                ["requested_backend"] = requestedBackend,
+                ["selected_backend"] = selectedBackend,
+                ["selection_reason_code"] = selectionReasonCode,
+                ["availability_source"] = availabilitySource,
+                ["availability_elapsed_ms"] = availabilityElapsedMs,
+                ["fallback"] = fallback
+            });
     }
 
     public void MicrophonePrepareStarted(string traceId, string recordingId)

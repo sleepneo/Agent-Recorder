@@ -164,6 +164,27 @@ Start-Sleep -Seconds 30
     }
 
     [Fact]
+    public void Run_ExcessiveOutput_IsBoundedAndMarkedTruncated()
+    {
+        var runner = new WgcHelperProcessRunner();
+        const string command =
+            "$s = 'x' * 70000; " +
+            "[Console]::Out.Write($s); " +
+            "[Console]::Error.Write($s)";
+
+        var result = runner.Run(
+            "powershell.exe",
+            new[] { "-NoProfile", "-Command", command },
+            timeoutMs: 5000);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(64 * 1024, result.StandardOutput.Length);
+        Assert.Equal(64 * 1024, result.StandardError.Length);
+        Assert.True(result.StandardOutputTruncated);
+        Assert.True(result.StandardErrorTruncated);
+    }
+
+    [Fact]
     public void Run_Cancellation_KillsProcessAndReturnsFailure()
     {
         var runner = new WgcHelperProcessRunner();

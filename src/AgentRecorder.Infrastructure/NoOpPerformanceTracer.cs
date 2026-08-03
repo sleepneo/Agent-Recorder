@@ -4,7 +4,7 @@ namespace AgentRecorder.Infrastructure;
 /// No-op performance tracer. Keeps tests and hosts that do not need perf
 /// diagnostics free of file I/O.
 /// </summary>
-public sealed class NoOpPerformanceTracer : IPerformanceTracer
+public sealed class NoOpPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer
 {
     public static IPerformanceTracer Instance { get; } = new NoOpPerformanceTracer();
 
@@ -33,4 +33,7 @@ public sealed class NoOpPerformanceTracer : IPerformanceTracer
     public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) { }
     public void Flush() { }
     public string? ResolveTraceId(string? recordingId = null, string? confirmationId = null) => null;
+    public void CaptureBackendSelected(string traceId, string recordingId, string requestedBackend,
+        string selectedBackend, string selectionReasonCode, string availabilitySource,
+        int? availabilityElapsedMs, bool fallback) { }
 }

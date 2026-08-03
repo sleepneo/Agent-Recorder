@@ -86,7 +86,7 @@ POST /api/v1/recordings/quick
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退；系统声音暂未实现 |
-| WGC 连续录制 | 实验性实现 | 原生 helper、托管会话和 backend 适配器已通过 scoped 自动化及一次受监督的 10 秒 4K 主屏真实录制；尚未接入 selector、公共 API 或 portable 产品链路 |
+| WGC 连续录制 | 实验性实现 | 已具备受控 selector、有限能力探测、短期成功缓存与 FFmpeg 自动回退，并通过一次受监督的 10 秒 4K 产品路径录制；默认关闭，未作为公共 API 能力开放，也尚未进入 portable 包 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 ## 项目结构

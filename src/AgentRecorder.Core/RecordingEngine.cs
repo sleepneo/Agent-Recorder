@@ -24,6 +24,8 @@ public sealed class RecordingEngine
     private readonly IRecordingBundleGenerator? _bundleGenerator;
     private readonly IMicrophoneDeviceProvider _microphoneProvider;
     private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
+    private Func<CaptureConfig, CaptureBackendSelection>? _backendSelectionFactory =
+        CaptureBackendSelector.SelectWithEvidence;
     private readonly object _lock = new();
     private ITrayContext? _tray;
 
@@ -37,8 +39,18 @@ public sealed class RecordingEngine
     /// Replaceable for tests (e.g. to inject a WgcWindowCaptureBackend
     /// wired to a fake process runner).
     /// </summary>
-    public Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> BackendFactory { get; set; }
-        = CaptureBackendSelector.Select;
+    public Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> BackendFactory
+    {
+        get => _backendFactory;
+        set
+        {
+            _backendFactory = value ?? throw new ArgumentNullException(nameof(value));
+            _backendSelectionFactory = null;
+        }
+    }
+
+    private Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> _backendFactory =
+        CaptureBackendSelector.Select;
 
     /// <summary>
     /// Legacy test seam: set a factory that only needs the source kind.
@@ -70,6 +82,16 @@ public sealed class RecordingEngine
     /// Production default is 10 seconds.
     /// </summary>
     internal TimeSpan FirstFrameTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Test seam for supplying a detailed selection result without replacing
+    /// the legacy tuple factory used by production composition roots.
+    /// </summary>
+    internal Func<CaptureConfig, CaptureBackendSelection>? BackendSelectionFactoryForTests
+    {
+        get => _backendSelectionFactory;
+        set => _backendSelectionFactory = value;
+    }
 
     public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null,
         IRecordingBundleGenerator? bundleGenerator = null,
@@ -694,9 +716,19 @@ public sealed class RecordingEngine
     {
         // Select backend FIRST, so WGC still-frame backends can signal
         // "I am synchronous and might complete during Start()".
-        var selection = BackendFactory(rec.Config);
+        var selectionEvidence = _backendSelectionFactory != null
+            ? _backendSelectionFactory(rec.Config)
+            : null;
+        var selection = selectionEvidence?.AsTuple() ?? BackendFactory(rec.Config);
         rec.Backend = selection.Backend;
         rec.BackendType = selection.BackendType;
+        var evidence = selectionEvidence?.Evidence ?? new CaptureBackendSelectionEvidence(
+            "default",
+            rec.BackendType,
+            "custom_backend_factory",
+            "not_run",
+            null,
+            false);
 
         // Inject the microphone status provider into backends that can use it
         // for runtime endpoint supervision.
@@ -705,12 +737,45 @@ public sealed class RecordingEngine
             consumer.MicrophoneStatusProvider = _microphoneStatusProvider;
         }
 
-        _audit.Log("recording.backend_selected", new
+        try
         {
-            recording_id = rec.Id,
-            source_type = rec.SourceType,
-            backend = rec.BackendType
-        });
+            _audit.Log("recording.backend_selected", new
+            {
+                recording_id = rec.Id,
+                source_type = rec.SourceType,
+                backend = rec.BackendType,
+                requested_backend = evidence.RequestedBackend,
+                selected_backend = evidence.SelectedBackend,
+                selection_reason_code = evidence.SelectionReasonCode,
+                availability_source = evidence.AvailabilitySource,
+                availability_elapsed_ms = evidence.AvailabilityElapsedMs,
+                fallback = evidence.Fallback
+            });
+        }
+        catch
+        {
+            // Backend-selection diagnostics must not block an approved start.
+        }
+
+        if (_tracer is IBackendSelectionPerformanceTracer selectionTracer)
+        {
+            try
+            {
+                selectionTracer.CaptureBackendSelected(
+                    traceId ?? "trace_unknown",
+                    rec.Id,
+                    evidence.RequestedBackend,
+                    evidence.SelectedBackend,
+                    evidence.SelectionReasonCode,
+                    evidence.AvailabilitySource,
+                    evidence.AvailabilityElapsedMs,
+                    evidence.Fallback);
+            }
+            catch
+            {
+                // Diagnostic tracing must never affect backend selection or start.
+            }
+        }
 
         // Hook natural exit BEFORE setting state and BEFORE calling
         // Backend.Start(). This way a synchronous backend (like WGC

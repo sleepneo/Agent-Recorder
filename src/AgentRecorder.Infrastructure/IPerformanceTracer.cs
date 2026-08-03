@@ -89,3 +89,21 @@ public interface IPerformanceTracer
     /// <summary>Resolve trace id from recording or confirmation id, if known.</summary>
     string? ResolveTraceId(string? recordingId = null, string? confirmationId = null);
 }
+
+/// <summary>
+/// Optional diagnostic extension for tracers that persist backend selection
+/// evidence. Keeping this separate preserves existing test and host tracer
+/// implementations of <see cref="IPerformanceTracer"/>.
+/// </summary>
+public interface IBackendSelectionPerformanceTracer
+{
+    void CaptureBackendSelected(
+        string traceId,
+        string recordingId,
+        string requestedBackend,
+        string selectedBackend,
+        string selectionReasonCode,
+        string availabilitySource,
+        int? availabilityElapsedMs,
+        bool fallback);
+}

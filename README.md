@@ -89,7 +89,7 @@ Agents should use the paths returned by `ensure-running` or
   and Focal Bathys have passed supervised product-path recording. Compatibility
   is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
   fallback, and system-audio capture is not implemented.
-- The source tree contains an experimental WGC continuous pipeline: the native helper, managed session, and capture-backend adapter have passed scoped automation and one supervised 10-second 4K desktop recording. It is not yet wired into backend selection, the public API, or the portable product path; the default FFmpeg backend is unchanged.
+- The experimental WGC continuous display pipeline now has a guarded backend-selector path with bounded availability probing, short-lived success caching, automatic FFmpeg fallback, and one supervised 10-second 4K product-path recording. It is still disabled by default, is not exposed as a public API capability, and is not yet included in the portable package.
 - Local audit log and MP4 output.
 
 ## Documentation

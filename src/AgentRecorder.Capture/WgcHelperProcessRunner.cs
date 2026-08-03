@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,6 +21,7 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
 {
+    private const int MaxOutputChars = 64 * 1024;
     private static readonly TimeSpan KillWaitTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ReaderDrainTimeout = TimeSpan.FromSeconds(2);
 
@@ -49,8 +51,8 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
 
         // Do not pass the caller's cancellation token to the reader tasks:
         // we want to drain whatever output was produced before/after the kill.
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput);
+        var stderrTask = ReadBoundedAsync(process.StandardError);
 
         // Wait for process exit, timeout, or caller cancellation concurrently.
         // This avoids the previous synchronous WaitForExit(Timeout.Infinite)
@@ -88,8 +90,10 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
             return new WgcHelperProcessResult
             {
                 ExitCode = exitCode,
-                StandardOutput = GetResultSafely(stdoutTask) ?? string.Empty,
-                StandardError = GetResultSafely(stderrTask) ?? string.Empty,
+                StandardOutput = GetResultSafely(stdoutTask)?.Text ?? string.Empty,
+                StandardError = GetResultSafely(stderrTask)?.Text ?? string.Empty,
+                StandardOutputTruncated = GetResultSafely(stdoutTask)?.Truncated ?? false,
+                StandardErrorTruncated = GetResultSafely(stderrTask)?.Truncated ?? false,
             };
         }
 
@@ -110,9 +114,13 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
             return new WgcHelperProcessResult
             {
                 ExitCode = -1,
-                StandardOutput = GetResultSafely(stdoutTask) ?? string.Empty,
-                StandardError = (GetResultSafely(stderrTask) ?? string.Empty)
+                StandardOutput = GetResultSafely(stdoutTask)?.Text ?? string.Empty,
+                StandardError = (GetResultSafely(stderrTask)?.Text ?? string.Empty)
                     + $"\n.NET-side: WgcHelperProcessRunner {(timedOut ? "timed out" : "was cancelled")}; process did not exit after kill; pid={pid}",
+                TimedOut = timedOut,
+                Cancelled = !timedOut,
+                StandardOutputTruncated = GetResultSafely(stdoutTask)?.Truncated ?? false,
+                StandardErrorTruncated = GetResultSafely(stderrTask)?.Truncated ?? false,
             };
         }
 
@@ -123,8 +131,12 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
         return new WgcHelperProcessResult
         {
             ExitCode = -1,
-            StandardOutput = GetResultSafely(stdoutTask) ?? string.Empty,
-            StandardError = (GetResultSafely(stderrTask) ?? string.Empty) + stderrNote,
+            StandardOutput = GetResultSafely(stdoutTask)?.Text ?? string.Empty,
+            StandardError = (GetResultSafely(stderrTask)?.Text ?? string.Empty) + stderrNote,
+            TimedOut = timedOut,
+            Cancelled = !timedOut,
+            StandardOutputTruncated = GetResultSafely(stdoutTask)?.Truncated ?? false,
+            StandardErrorTruncated = GetResultSafely(stderrTask)?.Truncated ?? false,
         };
     }
 
@@ -138,7 +150,31 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
         catch { /* best effort */ }
     }
 
-    private static void DrainReaders(Task<string> stdoutTask, Task<string> stderrTask)
+    private sealed record BoundedReadResult(string Text, bool Truncated);
+
+    private static async Task<BoundedReadResult> ReadBoundedAsync(StreamReader reader)
+    {
+        var builder = new StringBuilder(Math.Min(MaxOutputChars, 4096));
+        var buffer = new char[4096];
+        bool truncated = false;
+
+        while (true)
+        {
+            int read = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
+            if (read == 0)
+                break;
+
+            int remaining = MaxOutputChars - builder.Length;
+            if (remaining > 0)
+                builder.Append(buffer, 0, Math.Min(read, remaining));
+            if (read > remaining)
+                truncated = true;
+        }
+
+        return new BoundedReadResult(builder.ToString(), truncated);
+    }
+
+    private static void DrainReaders(Task<BoundedReadResult> stdoutTask, Task<BoundedReadResult> stderrTask)
     {
         try
         {
@@ -147,7 +183,7 @@ public sealed class WgcHelperProcessRunner : IWgcHelperProcessRunner
         catch { /* best effort */ }
     }
 
-    private static string? GetResultSafely(Task<string> task)
+    private static BoundedReadResult? GetResultSafely(Task<BoundedReadResult> task)
     {
         if (task == null) return null;
         if (task.IsCompletedSuccessfully) return task.Result;

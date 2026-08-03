@@ -1,7 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Windows.Forms;
 using AgentRecorder.Api;
 using AgentRecorder.Capture;
@@ -163,10 +165,25 @@ internal static class Program
         // Kick off FFmpeg prewarm in background - does not block readiness.
         ffmpegPrewarmer.Start(audit);
 
+        var wgcWarmupCts = new CancellationTokenSource();
+        _ = WgcContinuousWarmup.StartIfEnabled(
+            CaptureBackendSelector.ProductionDisplayProbe,
+            message => Debug.WriteLine(message),
+            wgcWarmupCts.Token);
+        int wgcWarmupStopped = 0;
+        void StopWgcWarmup()
+        {
+            if (Interlocked.Exchange(ref wgcWarmupStopped, 1) != 0)
+                return;
+            try { wgcWarmupCts.Cancel(); } catch { }
+            wgcWarmupCts.Dispose();
+        }
+
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {
             try
             {
+                StopWgcWarmup();
                 engine.StopAllSync("process_exit");
                 audit.Log("service.stopped", new { mode = "tray", reason = "process_exit", pid = Environment.ProcessId });
                 server.Stop();
@@ -180,6 +197,7 @@ internal static class Program
 
         Application.ApplicationExit += (_, _) =>
         {
+            StopWgcWarmup();
             engine.StopAllSync("application_exit");
             audit.Log("service.stopped", new { mode = "tray", reason = "application_exit", pid = Environment.ProcessId });
             server.Stop();
