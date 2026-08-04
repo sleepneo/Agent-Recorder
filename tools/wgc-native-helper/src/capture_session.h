@@ -55,6 +55,13 @@ CaptureOutcome NormalizeFailureEvidence(CaptureOutcome outcome,
 // Test-only seams for verifying production wiring without starting a real WGC
 // capture. When a hook is empty the production behavior is used unchanged.
 struct CaptureSessionTestHooks {
+    // Test-hook sessions use an instance-owned synthetic platform resource
+    // seam so orchestration tests do not require GraphicsCaptureItem to be
+    // available in the test host. Production sessions never set test hooks
+    // and always use the real WGC path. The real platform path remains covered
+    // by the bounded helper probe/integration tests.
+    bool useSyntheticPlatformResources = false;
+
     // Called instead of GraphicsCaptureSession::StartCapture(). Throwing here
     // must surface as a fast, bounded start_capture_failed outcome.
     std::function<void()> onStartCapture;

@@ -265,7 +265,8 @@ struct CapturePipelineState {
     }
 };
 
-void TeardownFramePool(const winrt::event_token& token,
+void TeardownFramePool(bool hasCaptureResources,
+                       const winrt::event_token& token,
                        GraphicsCaptureSession& session,
                        Direct3D11CaptureFramePool& framePool,
                        const std::shared_ptr<CapturePipelineState>& state,
@@ -273,19 +274,21 @@ void TeardownFramePool(const winrt::event_token& token,
     state->lifecycle.StopAccepting();
     // Revoke the subscription before closing so no new callbacks are scheduled
     // while we wait for in-flight callbacks to drain.
-    try {
-        framePool.FrameArrived(token);
-    } catch (...) {
-    }
-    // Close the frame pool first so the event source stops firing; the
-    // subscription token is released when the pool is destroyed.
-    try {
-        framePool.Close();
-    } catch (...) {
-    }
-    try {
-        session.Close();
-    } catch (...) {
+    if (hasCaptureResources) {
+        try {
+            framePool.FrameArrived(token);
+        } catch (...) {
+        }
+        // Close the frame pool first so the event source stops firing; the
+        // subscription token is released when the pool is destroyed.
+        try {
+            framePool.Close();
+        } catch (...) {
+        }
+        try {
+            session.Close();
+        } catch (...) {
+        }
     }
     *outCallbackDrainTimeout = !state->lifecycle.WaitForCallbacks(std::chrono::milliseconds(2000));
 }
@@ -386,6 +389,11 @@ CaptureSession::CaptureSession(const Options& options,
 
 void CaptureSession::SetTestHooks(const CaptureSessionTestHooks& hooks) {
     hooks_ = hooks;
+    // The test hook API is intentionally hermetic. A real WGC platform probe
+    // remains a separate bounded integration check, while these tests exercise
+    // the production coordinator, queue, encoder, teardown, and evidence
+    // paths without requiring GraphicsCaptureItem activation.
+    hooks_.useSyntheticPlatformResources = true;
 }
 
 CaptureOutcome CaptureSession::Run() {
@@ -399,61 +407,69 @@ CaptureOutcome CaptureSession::Run() {
         ~ComGuard() { if (needUninit) CoUninitialize(); }
     } comGuard{comInitialized};
 
-    MonitorEnumContext monitorCtx;
-    monitorCtx.target = options_.displayBounds;
-    ::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
-    if (monitorCtx.match == nullptr) {
-        return MakeEarlyFail("display_not_found", "No display exactly matches the requested bounds");
-    }
-    if (monitorCtx.matchCount > 1) {
-        return MakeEarlyFail("display_ambiguous", "Multiple displays match the requested bounds");
-    }
-
     Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3dContext;
-    hr = CreateD3D11Device(d3dDevice, d3dContext);
-    if (FAILED(hr)) {
-        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
-                               D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                               nullptr, 0, D3D11_SDK_VERSION,
-                               &d3dDevice, nullptr, &d3dContext);
-        if (FAILED(hr)) {
-            return MakeEarlyFail("d3d11_init_failed", "D3D11 device creation failed", HresultToString(hr));
-        }
-    }
-
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
-    hr = d3dDevice.As(&dxgiDevice);
-    if (FAILED(hr)) {
-        return MakeEarlyFail("dxgi_device_failed", "Failed to get DXGI device", HresultToString(hr));
-    }
-
-    IDirect3DDevice device{nullptr};
-    hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(),
-                                              reinterpret_cast<IInspectable**>(winrt::put_abi(device)));
-    if (FAILED(hr)) {
-        return MakeEarlyFail("direct3d_device_failed", "CreateDirect3D11DeviceFromDXGIDevice failed", HresultToString(hr));
-    }
-
     GraphicsCaptureItem item{nullptr};
-    {
-        auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-        if (!factory) {
-            return MakeEarlyFail("wgc_factory_failed", "Failed to get GraphicsCaptureItem factory");
-        }
-        winrt::Windows::Graphics::Capture::GraphicsCaptureItem abiItem{nullptr};
-        hr = factory->CreateForMonitor(monitorCtx.match,
-                                       winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
-                                       reinterpret_cast<void**>(winrt::put_abi(abiItem)));
-        if (FAILED(hr)) {
-            return MakeEarlyFail("wgc_item_failed", "CreateForMonitor failed", HresultToString(hr));
-        }
-        item = abiItem;
-    }
+    IDirect3DDevice device{nullptr};
+    Direct3D11CaptureFramePool framePool{nullptr};
+    GraphicsCaptureSession session{nullptr};
+    bool hasCaptureResources = false;
 
-    const auto displaySize = item.Size();
-    const int sourceWidth = displaySize.Width;
-    const int sourceHeight = displaySize.Height;
+    int sourceWidth = 64;
+    int sourceHeight = 64;
+    if (!hooks_.useSyntheticPlatformResources) {
+        MonitorEnumContext monitorCtx;
+        monitorCtx.target = options_.displayBounds;
+        ::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
+        if (monitorCtx.match == nullptr) {
+            return MakeEarlyFail("display_not_found", "No display exactly matches the requested bounds");
+        }
+        if (monitorCtx.matchCount > 1) {
+            return MakeEarlyFail("display_ambiguous", "Multiple displays match the requested bounds");
+        }
+
+        hr = CreateD3D11Device(d3dDevice, d3dContext);
+        if (FAILED(hr)) {
+            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                   nullptr, 0, D3D11_SDK_VERSION,
+                                   &d3dDevice, nullptr, &d3dContext);
+            if (FAILED(hr)) {
+                return MakeEarlyFail("d3d11_init_failed", "D3D11 device creation failed", HresultToString(hr));
+            }
+        }
+
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+        hr = d3dDevice.As(&dxgiDevice);
+        if (FAILED(hr)) {
+            return MakeEarlyFail("dxgi_device_failed", "Failed to get DXGI device", HresultToString(hr));
+        }
+
+        hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(),
+                                                  reinterpret_cast<IInspectable**>(winrt::put_abi(device)));
+        if (FAILED(hr)) {
+            return MakeEarlyFail("direct3d_device_failed", "CreateDirect3D11DeviceFromDXGIDevice failed", HresultToString(hr));
+        }
+
+        {
+            auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+            if (!factory) {
+                return MakeEarlyFail("wgc_factory_failed", "Failed to get GraphicsCaptureItem factory");
+            }
+            winrt::Windows::Graphics::Capture::GraphicsCaptureItem abiItem{nullptr};
+            hr = factory->CreateForMonitor(monitorCtx.match,
+                                           winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
+                                           reinterpret_cast<void**>(winrt::put_abi(abiItem)));
+            if (FAILED(hr)) {
+                return MakeEarlyFail("wgc_item_failed", "CreateForMonitor failed", HresultToString(hr));
+            }
+            item = abiItem;
+        }
+
+        const auto displaySize = item.Size();
+        sourceWidth = displaySize.Width;
+        sourceHeight = displaySize.Height;
+    }
 
     int captureWidth = 0;
     int captureHeight = 0;
@@ -463,10 +479,13 @@ CaptureOutcome CaptureSession::Run() {
     }
 
     constexpr int kFramePoolBufferCount = 2;
-    const auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-    Direct3D11CaptureFramePool framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-        device, pixelFormat, kFramePoolBufferCount, item.Size());
-    GraphicsCaptureSession session = framePool.CreateCaptureSession(item);
+    if (!hooks_.useSyntheticPlatformResources) {
+        const auto pixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+        framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            device, pixelFormat, kFramePoolBufferCount, item.Size());
+        session = framePool.CreateCaptureSession(item);
+        hasCaptureResources = true;
+    }
 
     // Leave the privacy border at its system-default value.
 
@@ -505,7 +524,9 @@ CaptureOutcome CaptureSession::Run() {
         return encoder.Finalize();
     };
 
-    winrt::event_token frameToken = framePool.FrameArrived(
+    winrt::event_token frameToken{};
+    if (hasCaptureResources) {
+        frameToken = framePool.FrameArrived(
         [state](Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
             CallbackGuard guard(state->lifecycle);
             if (!guard.Entered()) {
@@ -548,6 +569,7 @@ CaptureOutcome CaptureSession::Run() {
                 state->framesDropped.fetch_add(1);
             }
         });
+    }
 
     ScopedThread encoderThread{std::thread([&, state]() {
         // Wait for begin authorization before initializing anything that would
@@ -701,7 +723,7 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
 
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         if (callbackDrainTimeout) {
@@ -730,7 +752,7 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
 
         // Begin failures only produce an empty placeholder; do not report it.
         RemoveEmptyPartial(partialOutputPath_);
@@ -765,7 +787,7 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
 
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         return MakeFailWithEvidence("encoder_init_timeout",
@@ -851,7 +873,7 @@ CaptureOutcome CaptureSession::Run() {
 
     // Teardown: stop producing frames, wait for callbacks, then stop consuming.
     bool callbackDrainTimeout = false;
-    TeardownFramePool(frameToken, session, framePool, state, &callbackDrainTimeout);
+    TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
 
     state->captureEnded.store(true);
     state->queue.Shutdown();

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 
 namespace wgc {
 namespace test {
@@ -44,13 +45,18 @@ bool IsWatchdogTestName(const std::string& name) {
     return name.rfind("WATCHDOG_", 0) == 0;
 }
 
-int RunTestSuite(bool watchdogOnly) {
+int RunTestSuite(bool watchdogOnly, const std::string& filter) {
     const auto& tests = TestRegistry::Instance().Tests();
     int passed = 0;
     int failed = 0;
     int skipped = 0;
+    int selected = 0;
 
     for (const auto& test : tests) {
+        if (!filter.empty() && test.name.find(filter) == std::string::npos) {
+            skipped++;
+            continue;
+        }
         const bool isWatchdog = IsWatchdogTestName(test.name);
         if (watchdogOnly) {
             if (!isWatchdog) {
@@ -63,6 +69,7 @@ int RunTestSuite(bool watchdogOnly) {
                 continue;
             }
         }
+        selected++;
 
         std::cerr << "RUNALLTESTS_START " << test.name << "\n";
         g_currentTestFailed = false;
@@ -87,19 +94,25 @@ int RunTestSuite(bool watchdogOnly) {
     std::cerr << "RUNALLTESTS_DONE passed=" << passed
               << " failed=" << failed
               << " skipped=" << skipped
+              << " selected=" << selected
               << " total=" << tests.size() << "\n";
-    std::cout << "\n" << passed << " passed, " << failed << " failed (" << tests.size() << " total)\n";
+    std::cout << "\n" << passed << " passed, " << failed << " failed ("
+              << selected << " selected, " << tests.size() << " total)\n";
+    if (!filter.empty() && selected == 0) {
+        std::cerr << "[FILTER_NO_MATCH] " << filter << "\n";
+        return 2;
+    }
     return failed;
 }
 
 } // namespace
 
-int RunAllTests() {
-    return RunTestSuite(false);
+int RunAllTests(const std::string& filter) {
+    return RunTestSuite(false, filter);
 }
 
-int RunWatchdogTests() {
-    return RunTestSuite(true);
+int RunWatchdogTests(const std::string& filter) {
+    return RunTestSuite(true, filter);
 }
 
 } // namespace test

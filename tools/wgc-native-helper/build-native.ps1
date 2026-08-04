@@ -9,10 +9,22 @@ param(
     [string]$Platform = "x64",
     [switch]$SkipRunTests,
     [switch]$SkipTests, # deprecated alias for -SkipRunTests
-    [string]$OutputExeDir = ""
+    [string]$OutputExeDir = "",
+    [switch]$TestSynchronization,
+    [ValidateRange(1000, 600000)]
+    [int]$TestTimeoutMs = 600000
 )
 
 $ErrorActionPreference = "Stop"
+
+# Some hosted Windows shells expose both Path and PATH in the inherited
+# environment block. .NET Framework MSBuild treats those names as duplicate
+# dictionary keys when it starts CL.exe, so keep one canonical entry.
+$normalizedPath = [Environment]::GetEnvironmentVariable("Path")
+if ($null -ne $normalizedPath) {
+    Remove-Item Env:PATH -ErrorAction SilentlyContinue
+    $env:Path = $normalizedPath
+}
 
 # Resolve the project root robustly even if $PSScriptRoot is empty in some invocation contexts.
 $projectRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -66,6 +78,100 @@ function Get-FileSha256 {
     throw "Unable to compute SHA-256 for $Path"
 }
 
+function Sync-HelperExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $sourceFull = [System.IO.Path]::GetFullPath($SourcePath)
+    $destinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    if (-not (Test-Path -LiteralPath $sourceFull -PathType Leaf)) {
+        throw "Helper source is not a regular file: $sourceFull"
+    }
+
+    $sourceInfo = Get-Item -LiteralPath $sourceFull -Force
+    if (($sourceInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Helper source is a reparse point: $sourceFull"
+    }
+
+    $destinationParent = Split-Path -Parent $destinationFull
+    if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+    }
+
+    $sourceHash = Get-FileSha256 -Path $sourceFull
+    $temporaryPath = "$destinationFull.tmp.$([guid]::NewGuid().ToString('N'))"
+    $backupPath = "$destinationFull.backup.$([guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-Item -LiteralPath $sourceFull -Destination $temporaryPath -Force
+        $temporaryInfo = Get-Item -LiteralPath $temporaryPath -Force
+        $temporaryHash = Get-FileSha256 -Path $temporaryPath
+        if ($temporaryInfo.Length -ne $sourceInfo.Length -or $temporaryHash -cne $sourceHash) {
+            throw "Temporary helper copy did not match source: $sourceFull -> $destinationFull"
+        }
+
+        if (Test-Path -LiteralPath $destinationFull -PathType Leaf) {
+            # Windows PowerShell/.NET Framework requires a legal backup path
+            # for File.Replace; remove this unique backup only after the
+            # destination has been atomically swapped.
+            [System.IO.File]::Replace($temporaryPath, $destinationFull, $backupPath)
+            if (Test-Path -LiteralPath $backupPath) {
+                Remove-Item -LiteralPath $backupPath -Force
+            }
+        } else {
+            [System.IO.File]::Move($temporaryPath, $destinationFull)
+        }
+
+        $destinationInfo = Get-Item -LiteralPath $destinationFull -Force
+        $destinationHash = Get-FileSha256 -Path $destinationFull
+        if ($destinationInfo.Length -ne $sourceInfo.Length -or $destinationHash -cne $sourceHash) {
+            throw "Synchronized helper does not match source: $sourceFull -> $destinationFull"
+        }
+
+        return [pscustomobject]@{
+            Path = $destinationFull
+            Length = $destinationInfo.Length
+            Sha256 = $destinationHash
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+if ($TestSynchronization) {
+    $testRoot = Join-Path $env:TEMP ("agent-recorder-helper-sync-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+        $sourcePath = Join-Path $testRoot "fresh\wgc-native-helper.exe"
+        $canonicalPath = Join-Path $testRoot "canonical\wgc-native-helper.exe"
+        $externalPath = Join-Path $testRoot "external\wgc-native-helper.exe"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $sourcePath), (Split-Path -Parent $canonicalPath), (Split-Path -Parent $externalPath) -Force | Out-Null
+        [System.IO.File]::WriteAllBytes($sourcePath, [byte[]](0..255))
+        [System.IO.File]::WriteAllBytes($canonicalPath, [byte[]](255..0))
+        [System.IO.File]::WriteAllBytes($externalPath, [byte[]](1..8))
+
+        $canonicalResult = Sync-HelperExecutable -SourcePath $sourcePath -DestinationPath $canonicalPath
+        $externalResult = Sync-HelperExecutable -SourcePath $sourcePath -DestinationPath $externalPath
+        if ($canonicalResult.Length -ne $externalResult.Length -or $canonicalResult.Sha256 -cne $externalResult.Sha256) {
+            throw "Canonical and external helper synchronization diverged."
+        }
+        Write-Host "Helper synchronization tests passed (external OutputExeDir cannot leave canonical helper stale)."
+    }
+    finally {
+        if (Test-Path -LiteralPath $testRoot) {
+            Remove-Item -LiteralPath $testRoot -Recurse -Force
+        }
+    }
+    exit 0
+}
+
 $toolInfo = Find-MSBuild
 $msbuild = $toolInfo.MSBuild
 $installPath = $toolInfo.InstallPath
@@ -99,22 +205,37 @@ if (-not (Test-Path $testExe)) { throw "Test executable not found: $testExe" }
 $skipRun = $SkipRunTests -or $SkipTests
 if (-not $skipRun) {
     Write-Host "`nRunning native unit tests..."
-    & $testExe
+    & $testExe --supervisor-timeout-ms $TestTimeoutMs
     if ($LASTEXITCODE -ne 0) { throw "Native unit tests failed." }
 }
 
-# Copy Release exe to the resolver's expected location.
-if (-not (Test-Path $OutputExeDir)) {
-    New-Item -ItemType Directory -Path $OutputExeDir -Force | Out-Null
+# Always synchronize the canonical development helper, even when portable
+# packaging requests a separate destination. Each destination is replaced
+# through a verified sibling temporary file so a failed copy cannot truncate
+# the previous canonical helper.
+$canonicalExe = Join-Path $projectRoot "bin\wgc-native-helper.exe"
+$requestedExe = Join-Path ([System.IO.Path]::GetFullPath($OutputExeDir)) "wgc-native-helper.exe"
+$destinationPaths = @($canonicalExe)
+if (-not ([System.IO.Path]::GetFullPath($canonicalExe).Equals(
+        [System.IO.Path]::GetFullPath($requestedExe),
+        [System.StringComparison]::OrdinalIgnoreCase))) {
+    $destinationPaths += $requestedExe
 }
 
-$destExe = Join-Path $OutputExeDir "wgc-native-helper.exe"
-Copy-Item -Path $mainExe -Destination $destExe -Force
-Write-Host "`nCopied executable to: $destExe"
+$synchronized = @()
+foreach ($destinationPath in $destinationPaths) {
+    $synchronized += Sync-HelperExecutable -SourcePath $mainExe -DestinationPath $destinationPath
+}
 
-$size = (Get-Item $destExe).Length
-$sha256 = Get-FileSha256 -Path $destExe
-Write-Host "Size: $size bytes"
-Write-Host "SHA-256: $sha256"
+$sourceInfo = Get-Item -LiteralPath $mainExe -Force
+$sourceSha256 = Get-FileSha256 -Path $mainExe
+foreach ($result in $synchronized) {
+    if ($result.Length -ne $sourceInfo.Length -or $result.Sha256 -cne $sourceSha256) {
+        throw "Synchronized helper verification failed for $($result.Path)."
+    }
+    Write-Host "`nSynchronized executable to: $($result.Path)"
+    Write-Host "Size: $($result.Length) bytes"
+    Write-Host "SHA-256: $($result.Sha256)"
+}
 
 Write-Host "`nBuild completed successfully."

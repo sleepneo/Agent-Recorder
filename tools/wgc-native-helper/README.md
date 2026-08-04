@@ -218,7 +218,7 @@ BytesWritten: <bytes>
 - 本轮仅实现 **单个 display** 连续录制，不做 window、region、硬件编码、麦克风或系统声音。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
 - Windows 自带的 WGC 黄色边框是系统隐私提示，本 helper 不尝试绕过或隐藏。
-- 2026-07-22 已完成一次受监督的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出可由 FFprobe 解析的 H.264 MP4，`FramesDropped=0`。C# 托管会话与 `ICaptureBackend` 适配器已完成 scoped 自动化验收；公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变。下一步是接入 selector/API 实验开关、可用性探测和 FFmpeg 回退。
+- 2026-08-03 已完成受控 selector 产品路径的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出 300 帧、10.000 秒且可由 FFprobe 解析的 H.264 MP4。C# 托管会话、`ICaptureBackend`、非捕获可用性探测、短期缓存和 FFmpeg 回退均已接线；self-contained portable 包会在 `AgentRecorder.WgcHelper\wgc-native-helper.exe` 携带唯一生产 helper。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；下一步是完成 10/10 真实录制稳定性验收，而不是继续扩展公共能力。
 
 ## 测试
 

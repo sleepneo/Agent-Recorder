@@ -89,7 +89,7 @@ Agents should use the paths returned by `ensure-running` or
   and Focal Bathys have passed supervised product-path recording. Compatibility
   is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
   fallback, and system-audio capture is not implemented.
-- The experimental WGC continuous display pipeline now has a guarded backend-selector path with bounded availability probing, short-lived success caching, automatic FFmpeg fallback, and one supervised 10-second 4K product-path recording. It is still disabled by default, is not exposed as a public API capability, and is not yet included in the portable package.
+- The experimental WGC continuous display pipeline now has a guarded backend-selector path with bounded availability probing, short-lived success caching, and automatic FFmpeg fallback. The self-contained portable package has been build-tested and verified to include exactly one production `AgentRecorder.WgcHelper\wgc-native-helper.exe`; the pipeline remains disabled by default and is not exposed as a public API capability.
 - Local audit log and MP4 output.
 
 ## Documentation
@@ -115,7 +115,7 @@ tools/
   AgentRecorder.Cli            agent startup/autostart helper
   AgentRecorder.AudioHelper    isolated Windows WASAPI microphone helper
   ffmpeg/bin                   bundled FFmpeg/ffprobe
-  wgc-native-helper            experimental native WGC helper
+  wgc-native-helper            experimental native WGC helper source and build
 tests/
   AgentRecorder.Tests
   AgentRecorder.AudioHelper.Tests

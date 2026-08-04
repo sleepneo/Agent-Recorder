@@ -61,8 +61,8 @@ void AssertNeImpl(const A& a, const B& b, const char* aExpr, const char* bExpr, 
 #define ASSERT_LE(a, b) ::wgc::test::AssertTrue((a) <= (b), #a " <= " #b, __FILE__, __LINE__)
 #define ASSERT_LT(a, b) ::wgc::test::AssertTrue((a) < (b), #a " < " #b, __FILE__, __LINE__)
 
-int RunAllTests();
-int RunWatchdogTests();
+int RunAllTests(const std::string& filter = {});
+int RunWatchdogTests(const std::string& filter = {});
 
 } // namespace test
 } // namespace wgc

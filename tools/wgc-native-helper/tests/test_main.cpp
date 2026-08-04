@@ -63,6 +63,9 @@ struct ParsedArgs {
     bool supervise = false;
     bool runWatchdog = false;
     int supervisorTimeoutMs = 600000; // 10 minutes default for full suite.
+    bool filterSpecified = false;
+    std::string filter;
+    std::string parseError;
     int watchdogChildDepth = -1;      // -1 means "not a tree child".
     std::wstring watchdogPidFile;
     std::wstring watchdogReadyFile;
@@ -84,6 +87,16 @@ ParsedArgs ParseArgs(int argc, wchar_t* argv[]) {
                 result.supervisorTimeoutMs = std::stoi(argv[++i]);
             } catch (...) {
                 result.supervisorTimeoutMs = 600000;
+            }
+        } else if (arg == L"--filter") {
+            if (i + 1 >= argc || std::wstring(argv[i + 1]).rfind(L"--", 0) == 0) {
+                result.parseError = "--filter requires a non-empty value";
+                continue;
+            }
+            result.filterSpecified = true;
+            result.filter = wgc::WideToUtf8(argv[++i]);
+            if (result.filter.empty()) {
+                result.parseError = "--filter requires a non-empty value";
             }
         } else if (arg == L"--watchdog-child-depth" && i + 1 < argc) {
             try {
@@ -113,10 +126,14 @@ std::wstring GetSelfPath() {
 
 std::wstring BuildCommandLine(const std::wstring& selfPath,
                               const std::vector<std::wstring>& passthrough,
-                              bool runWatchdog) {
+                              bool runWatchdog,
+                              const std::string& filter) {
     std::wstring cmd = L"\"" + selfPath + L"\" --worker-mode";
     if (runWatchdog) {
         cmd += L" --run-watchdog";
+    }
+    if (!filter.empty()) {
+        cmd += L" --filter \"" + wgc::Utf8ToWide(filter) + L"\"";
     }
     for (const auto& a : passthrough) {
         cmd += L" \"" + a + L"\"";
@@ -230,7 +247,8 @@ std::string ExtractLastTestName(const std::string& stderrText) {
 
 int RunAsSupervisor(const std::vector<std::wstring>& passthrough,
                     int timeoutMs,
-                    bool runWatchdog) {
+                    bool runWatchdog,
+                    const std::string& filter) {
     const std::wstring selfPath = GetSelfPath();
     if (selfPath.empty()) {
         std::cerr << "[SUPERVISOR FATAL] cannot determine self path\n";
@@ -310,7 +328,7 @@ int RunAsSupervisor(const std::vector<std::wstring>& passthrough,
     si.hStdError = stderrWrite.Get();
 
     PROCESS_INFORMATION pi = {};
-    const std::wstring cmdLine = BuildCommandLine(selfPath, passthrough, runWatchdog);
+    const std::wstring cmdLine = BuildCommandLine(selfPath, passthrough, runWatchdog, filter);
 
     std::vector<wchar_t> cmdLineBuf(cmdLine.begin(), cmdLine.end());
     cmdLineBuf.push_back(L'\0');
@@ -440,15 +458,20 @@ int RunAsSupervisor(const std::vector<std::wstring>& passthrough,
 int wmain(int argc, wchar_t* argv[]) {
     const auto args = ParseArgs(argc, argv);
 
+    if (!args.parseError.empty()) {
+        std::cerr << "[TEST ARG ERROR] " << args.parseError << "\n";
+        return 2;
+    }
+
     if (args.supervise) {
-        return RunAsSupervisor(args.passthrough, args.supervisorTimeoutMs, args.runWatchdog);
+        return RunAsSupervisor(args.passthrough, args.supervisorTimeoutMs, args.runWatchdog, args.filter);
     }
 
     // Default behavior: supervise the worker so a hung test cannot block the
     // build forever. Explicit --worker-mode disables supervision (used by the
     // supervisor itself and for debugging).
     if (!args.worker) {
-        return RunAsSupervisor(args.passthrough, args.supervisorTimeoutMs, args.runWatchdog);
+        return RunAsSupervisor(args.passthrough, args.supervisorTimeoutMs, args.runWatchdog, args.filter);
     }
 
     // Worker mode: if this is a watchdog tree child, build the next layer and
@@ -467,8 +490,8 @@ int wmain(int argc, wchar_t* argv[]) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     std::cerr << "TEST_MAIN_ENTER\n";
     int result = args.runWatchdog
-        ? wgc::test::RunWatchdogTests()
-        : wgc::test::RunAllTests();
+        ? wgc::test::RunWatchdogTests(args.filter)
+        : wgc::test::RunAllTests(args.filter);
     std::cerr << "TEST_MAIN_EXIT " << result << "\n";
     winrt::uninit_apartment();
     return result;

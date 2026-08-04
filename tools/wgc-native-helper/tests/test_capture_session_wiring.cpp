@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -123,6 +124,44 @@ int64_t FileSize(const std::wstring& path) {
     return size.QuadPart;
 }
 
+const char* CaptureResultName(CaptureResult result) {
+    switch (result) {
+        case CaptureResult::Success: return "success";
+        case CaptureResult::Stopped: return "stopped";
+        case CaptureResult::Failed: return "failed";
+        default: return "unknown";
+    }
+}
+
+void PrintOutcomeDiagnostics(const char* testName, const CaptureOutcome& outcome,
+                            const std::wstring& partialPath) {
+    std::cerr << "[CAPTURE_OUTCOME] test=" << testName
+              << " result=" << CaptureResultName(outcome.result)
+              << " error_code=" << outcome.errorCode
+              << " reason=" << outcome.reason
+              << " hresult=" << outcome.hresult
+              << " frames=" << outcome.framesCaptured
+              << " dropped=" << outcome.framesDropped
+              << " duration_ms=" << outcome.durationMs
+              << " bytes=" << outcome.bytesWritten
+              << " width=" << outcome.width
+              << " height=" << outcome.height
+              << " partial_present=" << (FileExists(partialPath) ? "true" : "false")
+              << " partial_size=" << FileSize(partialPath)
+              << "\n";
+}
+
+void PrintReadyFutureOutcome(const char* testName, std::future<CaptureOutcome>& future,
+                             const std::wstring& partialPath) {
+    if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+        const CaptureOutcome outcome = future.get();
+        PrintOutcomeDiagnostics(testName, outcome, partialPath);
+    } else {
+        std::cerr << "[CAPTURE_OUTCOME] test=" << testName
+                  << " result=not_ready error_code=not_returned\n";
+    }
+}
+
 // Tests that bypass the real encoder with onWriteFrame/onFinalize hooks do not
 // create a partial file on disk. Because the production publish path moves the
 // partial file to the final output, these tests must seed a synthetic partial
@@ -138,10 +177,23 @@ struct ScopedJoiningThread {
 
     ~ScopedJoiningThread() {
         if (thread.joinable()) {
-            thread.join();
+            HANDLE nativeThread = reinterpret_cast<HANDLE>(thread.native_handle());
+            if (::WaitForSingleObject(nativeThread, 5000) == WAIT_OBJECT_0) {
+                thread.join();
+            } else {
+                std::cerr << "[TEST FATAL] runner thread did not exit within cleanup deadline\n";
+                ::TerminateProcess(::GetCurrentProcess(), 2);
+                std::abort();
+            }
         }
     }
 };
+
+[[noreturn]] void TerminateTestProcess(const char* reason) {
+    std::cerr << "[TEST FATAL] " << reason << "\n";
+    ::TerminateProcess(::GetCurrentProcess(), 2);
+    std::abort();
+}
 
 // Runs a CaptureSession with a timeout. If the timeout fires, the cancel
 // callback is invoked (e.g., writing the stop signal) and the runner is given
@@ -159,14 +211,7 @@ CaptureOutcome RunWithTimeout(CaptureSession& session,
         cancel();
         // Bounded cooperative shutdown window. Well-behaved tests exit here.
         if (future.wait_for(std::chrono::milliseconds(5000)) == std::future_status::timeout) {
-            std::cerr << "[TEST FATAL] RunWithTimeout: runner did not exit after cancel; "
-                         "waiting for outer supervisor to terminate this worker\n";
-            // Keep this function alive so the runner thread's captured references
-            // remain valid. The outer supervisor will kill the worker process if a
-            // production regression truly hangs here.
-            while (true) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
+            TerminateTestProcess("RunWithTimeout runner did not exit after cancel");
         }
     }
 
@@ -212,6 +257,7 @@ TEST_REGISTRAR(CaptureSessionStartCaptureExceptionReturnsFast, []() {
 
     const auto start = std::chrono::steady_clock::now();
     CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionStartCaptureExceptionReturnsFast", outcome, partialPath);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start).count();
 
@@ -297,6 +343,9 @@ TEST_REGISTRAR(CaptureSessionStopSignalWakesMainLoop, []() {
 
     {
         std::unique_lock<std::mutex> lock(startedMutex);
+        if (!started.load()) {
+            PrintReadyFutureOutcome("CaptureSessionStopSignalWakesMainLoop", future, partialPath);
+        }
         ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(5000),
                                        [&]() { return started.load(); }));
     }
@@ -399,6 +448,9 @@ TEST_REGISTRAR(CaptureSessionProgressEventIsWired, []() {
     while (!started.load() && std::chrono::steady_clock::now() < startedDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    if (!started.load()) {
+        PrintReadyFutureOutcome("CaptureSessionProgressEventIsWired", future, partialPath);
+    }
     ASSERT_TRUE(started.load());
 
     // Wait long enough for at least one PROGRESS event to be emitted by the
@@ -449,6 +501,7 @@ TEST_REGISTRAR(CaptureSessionEncoderInitFailedDistinctFromTimeout, []() {
     session.SetTestHooks(hooks);
 
     CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionEncoderInitFailedDistinctFromTimeout", outcome, partialPath);
 
     ASSERT_EQ(outcome.result, CaptureResult::Failed);
     ASSERT_EQ(outcome.errorCode, "encoder_init_failed");
@@ -517,6 +570,7 @@ TEST_REGISTRAR(CaptureSessionLateFailurePreservesEvidence, []() {
     WriteSyntheticPartial(partialPath);
 
     CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionLateFailurePreservesEvidence", outcome, partialPath);
 
     ASSERT_EQ(outcome.result, CaptureResult::Failed);
     ASSERT_EQ(outcome.errorCode, "d3d_copy_failed");
@@ -585,9 +639,11 @@ TEST_REGISTRAR(CaptureSessionStopPublishesFinalAndRemovesPartial, []() {
     ScopedJoiningThread runner{std::thread(std::move(task))};
 
     // Wait until some frames have been written, then stop.
-    while (writeCount.load() < 3) {
+    const auto writeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (writeCount.load() < 3 && std::chrono::steady_clock::now() < writeDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    ASSERT_GE(writeCount.load(), 3);
     WriteFile(stopPath, L"stop");
 
     ASSERT_EQ(future.wait_for(std::chrono::milliseconds(5000)), std::future_status::ready);
@@ -721,9 +777,11 @@ TEST_REGISTRAR(CaptureSessionStoppedPublishFailureRetainsEvidence, []() {
     auto future = task.get_future();
     ScopedJoiningThread runner{std::thread(std::move(task))};
 
-    while (writeCount.load() < 3) {
+    const auto writeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (writeCount.load() < 3 && std::chrono::steady_clock::now() < writeDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    ASSERT_GE(writeCount.load(), 3);
     WriteFile(stopPath, L"stop");
 
     ASSERT_EQ(future.wait_for(std::chrono::milliseconds(5000)), std::future_status::ready);
@@ -915,16 +973,23 @@ TEST_REGISTRAR(CaptureLifecycleSharedStateSurvivesDrainTimeout, []() {
         }
         entered.store(true);
         auto localRef = shared; // keep state alive during callback
-        while (!exitCallback.load()) {
+        const auto callbackDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+        while (!exitCallback.load() && std::chrono::steady_clock::now() < callbackDeadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         lifecycle.ExitCallback();
     });
 
     // Wait until the callback has definitely entered.
-    while (!entered.load()) {
+    const auto enteredDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (!entered.load() && std::chrono::steady_clock::now() < enteredDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    if (!entered.load()) {
+        exitCallback.store(true);
+        if (callback.joinable()) callback.join();
+    }
+    ASSERT_TRUE(entered.load());
 
     std::thread drainer([&]() {
         lifecycle.StopAccepting();
@@ -936,7 +1001,7 @@ TEST_REGISTRAR(CaptureLifecycleSharedStateSurvivesDrainTimeout, []() {
     ASSERT_FALSE(destroyed.load());
 
     exitCallback.store(true);
-    callback.join();
+    if (callback.joinable()) callback.join();
 
     // After the callback exits, the lifecycle and the test release their refs.
     shared.reset();
@@ -984,7 +1049,8 @@ TEST_REGISTRAR(CaptureSessionCallbackDrainTimeoutMapsToTerminal, []() {
                 return;
             }
             callbackEntered.store(true);
-            while (!releaseCallback.load()) {
+            const auto callbackDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10000);
+            while (!releaseCallback.load() && std::chrono::steady_clock::now() < callbackDeadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             lifecyclePtr->ExitCallback();
@@ -1013,6 +1079,10 @@ TEST_REGISTRAR(CaptureSessionCallbackDrainTimeoutMapsToTerminal, []() {
     while (!callbackEntered.load() &&
            std::chrono::steady_clock::now() < enteredDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!callbackEntered.load()) {
+        releaseCallback.store(true);
+        if (callbackThread.joinable()) callbackThread.join();
     }
     ASSERT_TRUE(callbackEntered.load());
 
@@ -1574,9 +1644,11 @@ TEST_REGISTRAR(CaptureSessionStdoutStoppedTerminalEvidence, []() {
     auto future = task.get_future();
     ScopedJoiningThread runner{std::thread(std::move(task))};
 
-    while (writeCount.load() < 3) {
+    const auto writeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (writeCount.load() < 3 && std::chrono::steady_clock::now() < writeDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    ASSERT_GE(writeCount.load(), 3);
     WriteFile(stopPath, L"stop");
 
     ASSERT_EQ(future.wait_for(std::chrono::milliseconds(5000)), std::future_status::ready);
