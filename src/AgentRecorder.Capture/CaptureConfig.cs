@@ -18,4 +18,13 @@ public sealed class CaptureConfig
     /// for x264/yuv420p compatibility. Value is (normalized_width, normalized_height).
     /// </summary>
     public (int w, int h)? RegionNormalizedBounds;
+
+    /// <summary>
+    /// Additive internal field (not settable from the public API): when true, a
+    /// backend implementing <see cref="IDeferredCaptureStartBackend"/> prepares
+    /// its capture session during Start without authorizing screen capture.
+    /// RecordingEngine sets this only for the no-microphone deferred countdown
+    /// path; the explicit capture start happens at countdown zero.
+    /// </summary>
+    public bool DeferCaptureStart;
 }

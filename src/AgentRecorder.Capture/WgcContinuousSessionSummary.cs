@@ -141,6 +141,23 @@ public sealed class WgcContinuousSessionSummary
     public bool HasMalformedSequence { get; set; }
 
     /// <summary>
+    /// Whether a valid explicit FIRST_FRAME event was observed after STARTED and
+    /// before the terminal event. This is source-frame evidence, intentionally
+    /// distinct from encoded-output FramesCaptured.
+    /// </summary>
+    public bool FirstFrameObserved { get; set; }
+
+    /// <summary>
+    /// The FrameNumber from the explicit FIRST_FRAME event (always 1 when present).
+    /// </summary>
+    public long? FirstFrameNumber { get; set; }
+
+    /// <summary>
+    /// The ElapsedMs from the explicit FIRST_FRAME event.
+    /// </summary>
+    public long? FirstFrameElapsedMs { get; set; }
+
+    /// <summary>
     /// Whether any event in the stream had a numeric field parse failure.
     /// </summary>
     public bool HasNumericParseError { get; set; }
@@ -154,7 +171,8 @@ public sealed class WgcContinuousSessionSummary
     /// Returns the evidence stop-reason value. STOPPED maps to user_requested,
     /// OK maps to duration_reached, and FAIL surfaces the specific failure
     /// category (timeout, cancelled, encoding_error, disk_full,
-    /// window_not_found, zero_frames, error) when possible.
+    /// window_not_found, window_minimized, window_unavailable, window_closed,
+    /// size_changed, zero_frames, error) when possible.
     /// </summary>
     public string GetStopReasonForEvidence()
     {
@@ -169,13 +187,19 @@ public sealed class WgcContinuousSessionSummary
         string[] allowedCategories = new[]
         {
             "timeout", "cancelled", "encoding_error", "disk_full",
-            "window_not_found", "zero_frames", "error"
+            "window_not_found", "window_minimized", "window_unavailable",
+            "window_factory_failed", "window_item_failed", "window_closed",
+            "invalid_window_handle", "window_size_unsupported", "size_changed",
+            "zero_frames", "error"
         };
 
         string[] preciseCategories = new[]
         {
             "timeout", "cancelled", "encoding_error", "disk_full",
-            "window_not_found", "zero_frames"
+            "window_not_found", "window_minimized", "window_unavailable",
+            "window_factory_failed", "window_item_failed", "window_closed",
+            "invalid_window_handle", "window_size_unsupported", "size_changed",
+            "zero_frames"
         };
 
         // Try explicit StopReason from the event (may come from the event

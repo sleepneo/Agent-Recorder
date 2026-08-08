@@ -96,6 +96,18 @@ Options MakeContinuousOptions(const Rect& bounds,
     return opts;
 }
 
+Options MakeContinuousWindowOptions(const Rect& bounds,
+                                    const std::wstring& outputPath,
+                                    const std::wstring& beginSignalPath,
+                                    const std::wstring& stopSignalPath,
+                                    int durationMs = 10000) {
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginSignalPath,
+                                         stopSignalPath, durationMs);
+    opts.mode = CaptureMode::ContinuousWindow;
+    opts.windowHwnd = 0x1234;
+    return opts;
+}
+
 std::wstring ValidateControlPathOrFail(const std::wstring& path) {
     PathPolicy policy = PathPolicy::CreateDefault();
     PathCheckResult result = ValidateControlPath(path, policy);
@@ -1801,6 +1813,953 @@ TEST_REGISTRAR(WriteTerminalOutcome_UnknownResultEmitsInternalError, []() {
     ASSERT_TRUE(failEvent.found);
     ASSERT_EQ(failEvent.errorCode, "internal_error");
     ASSERT_NE(failEvent.reason.find("unexpected"), std::string::npos);
+});
+
+TEST_REGISTRAR(CaptureSessionTargetCreationRoutesDisplayAndWindowRequests, []() {
+    TempDir dir(L"wgc-test-target-routing");
+
+    auto run = [&](CaptureMode mode, const Rect& bounds, std::uint64_t hwnd,
+                   CaptureSessionTestTargetRequest& observed) {
+        const std::wstring suffix = mode == CaptureMode::ContinuousWindow
+            ? L"window" : L"display";
+        const std::wstring outputPath = JoinPath(dir.path, suffix + L".mp4");
+        const std::wstring partialPath = JoinPath(dir.path, suffix + L".partial.mp4");
+        const std::wstring beginPath = JoinPath(dir.path, suffix + L".begin");
+        const std::wstring stopPath = JoinPath(dir.path, suffix + L".stop");
+
+        Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath, 1000);
+        opts.mode = mode;
+        opts.windowHwnd = hwnd;
+
+        EventWriter writer;
+        BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                       opts.stopSignalPath, opts.beginTimeoutMs);
+        CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                               partialPath, gate, writer);
+
+        CaptureSessionTestHooks hooks;
+        hooks.onCreateCaptureItem = [&](const CaptureSessionTestTargetRequest& request) {
+            observed = request;
+            return E_FAIL;
+        };
+        session.SetTestHooks(hooks);
+        CaptureOutcome outcome = session.Run();
+        ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    };
+
+    CaptureSessionTestTargetRequest displayRequest;
+    const Rect displayBounds{11, -22, 1920, 1080};
+    run(CaptureMode::ContinuousDisplay, displayBounds, 0, displayRequest);
+    ASSERT_EQ(displayRequest.mode, CaptureMode::ContinuousDisplay);
+    ASSERT_EQ(displayRequest.displayBounds.x, displayBounds.x);
+    ASSERT_EQ(displayRequest.displayBounds.y, displayBounds.y);
+    ASSERT_EQ(displayRequest.displayBounds.width, displayBounds.width);
+    ASSERT_EQ(displayRequest.displayBounds.height, displayBounds.height);
+    ASSERT_EQ(displayRequest.windowHwnd, 0u);
+
+    CaptureSessionTestTargetRequest windowRequest;
+    run(CaptureMode::ContinuousWindow, displayBounds, 0x1234, windowRequest);
+    ASSERT_EQ(windowRequest.mode, CaptureMode::ContinuousWindow);
+    ASSERT_EQ(windowRequest.windowHwnd, 0x1234u);
+});
+
+TEST_REGISTRAR(CaptureSessionWindowBeforeBegin_DoesNotStartCaptureOrWrite, []() {
+    TempDir dir(L"wgc-test-window-before-begin");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 1000);
+    opts.beginTimeoutMs = 100;
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> startCount{0};
+    std::atomic<int> writeCount{0};
+    CaptureSessionTestHooks hooks;
+    hooks.onStartCapture = [&]() { startCount.fetch_add(1); };
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onWriteFrame = [&](const std::vector<uint8_t>&, int64_t, int64_t) {
+        writeCount.fetch_add(1);
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = session.Run();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "timeout");
+    ASSERT_EQ(startCount.load(), 0);
+    ASSERT_EQ(writeCount.load(), 0);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+});
+
+TEST_REGISTRAR(CaptureSessionTimelineIntegrationBoundsSparseFinalSample, []() {
+    TempDir dir(L"wgc-test-timeline-integration");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousOptions({10, 20, 800, 600}, outputPath,
+                                          beginPath, stopPath, 1000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    struct WrittenSample {
+        int64_t mediaTimeHns = 0;
+        int64_t durationHns = 0;
+    };
+    std::mutex samplesMutex;
+    std::vector<WrittenSample> samples;
+    std::atomic<int> finalizeCount{0};
+
+    CaptureSessionTestHooks hooks;
+    hooks.useSyntheticPlatformResources = true;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x7A);
+        return true;
+    };
+    hooks.onWriteFrame = [&](const std::vector<uint8_t>&,
+                             int64_t mediaTimeHns,
+                             int64_t durationHns) {
+        std::lock_guard<std::mutex> lock(samplesMutex);
+        samples.push_back({mediaTimeHns, durationHns});
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = [&]() {
+        finalizeCount.fetch_add(1);
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        // The final queued timestamp is at the one-second boundary. The
+        // preceding 825 ms gap must close the previous sample, not become a
+        // second tail on the final sample.
+        const int64_t rawTimes[] = {
+            0,
+            333'333LL,
+            666'666LL,
+            8'350'000LL,
+            9'175'000LL,
+            10'000'000LL,
+        };
+        for (int64_t rawTime : rawTimes) {
+            QueuedFrame frame;
+            frame.systemRelativeTimeHns = rawTime;
+            frame.contentWidth = 64;
+            frame.contentHeight = 64;
+            ASSERT_TRUE(queue.Push(frame));
+            // The production queue intentionally has a one-frame capacity.
+            // Pace this synthetic producer so the integration test observes
+            // every accepted timestamp instead of testing queue overflow.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    CaptureOutcome outcome = session.Run();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Success);
+    ASSERT_EQ(outcome.errorCode, "");
+    ASSERT_EQ(finalizeCount.load(), 1);
+    ASSERT_TRUE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+    ASSERT_GT(outcome.bytesWritten, 0);
+
+    std::vector<WrittenSample> observed;
+    {
+        std::lock_guard<std::mutex> lock(samplesMutex);
+        observed = samples;
+    }
+    std::cerr << "[TIMELINE_INTEGRATION] duration_ms=" << outcome.durationMs
+              << " samples=";
+    for (const WrittenSample& sample : observed) {
+        std::cerr << sample.mediaTimeHns << "/" << sample.durationHns << ",";
+    }
+    std::cerr << " final_end_hns="
+              << (observed.empty() ? 0 : observed.back().mediaTimeHns +
+                  observed.back().durationHns) << std::endl;
+    ASSERT_GE(observed.size(), 5u);
+    ASSERT_LE(observed.size(), 6u);
+    ASSERT_EQ(observed.front().mediaTimeHns, 0LL);
+    bool foundSparseBoundary = false;
+    for (size_t i = 0; i < observed.size(); ++i) {
+        ASSERT_GT(observed[i].durationHns, 0LL);
+        if (i > 0) {
+            ASSERT_GT(observed[i].mediaTimeHns, observed[i - 1].mediaTimeHns);
+        }
+        if (observed[i].mediaTimeHns == 9'175'000LL) {
+            ASSERT_EQ(observed[i].durationHns, 825'000LL);
+            foundSparseBoundary = true;
+        }
+    }
+    ASSERT_TRUE(foundSparseBoundary);
+
+    const int64_t finalMediaEndHns = observed.back().mediaTimeHns +
+                                     observed.back().durationHns;
+    // CaptureSession's encoder worker polls the queue at most every 50 ms;
+    // 2 ms covers integer millisecond conversion on top of that bounded poll.
+    const int64_t sessionEndHns = outcome.durationMs * 10'000LL;
+    ASSERT_LE(finalMediaEndHns, sessionEndHns + 520'000LL);
+    ASSERT_GE(finalMediaEndHns, sessionEndHns - 520'000LL);
+    ASSERT_LE(observed.back().mediaTimeHns, 10'000'000LL);
+    if (observed.back().mediaTimeHns == 10'000'000LL) {
+        ASSERT_LE(observed.back().durationHns, 520'000LL);
+    }
+});
+
+TEST_REGISTRAR(CaptureSessionWindowClosedAfterStart_FailsWithPartialEvidence, []() {
+    TempDir dir(L"wgc-test-window-closed");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::function<void()> signalClosed;
+    std::atomic<bool> started{false};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() {
+        {
+            std::lock_guard<std::mutex> lock(startedMutex);
+            started.store(true);
+        }
+        startedCv.notify_all();
+    };
+    hooks.onTestSignalsCreated = [&](const CaptureSessionTestSignals& signals) {
+        signalClosed = signals.signalWindowClosed;
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x44);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+    ASSERT_TRUE(static_cast<bool>(signalClosed));
+    const auto stopStart = std::chrono::steady_clock::now();
+    signalClosed();
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopStart).count();
+    CaptureOutcome outcome = future.get();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "window_closed");
+    ASSERT_LT(elapsed, 2500);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_TRUE(FileExists(partialPath));
+    ASSERT_GT(FileSize(partialPath), 0);
+    ASSERT_GT(outcome.bytesWritten, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionWindowSizeChangedAfterStart_FailsClosedWithPartialEvidence, []() {
+    TempDir dir(L"wgc-test-window-size-changed");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::function<void()> signalSizeChanged;
+    std::atomic<bool> started{false};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() {
+        {
+            std::lock_guard<std::mutex> lock(startedMutex);
+            started.store(true);
+        }
+        startedCv.notify_all();
+    };
+    hooks.onTestSignalsCreated = [&](const CaptureSessionTestSignals& signals) {
+        signalSizeChanged = signals.signalSizeChanged;
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x55);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+    ASSERT_TRUE(static_cast<bool>(signalSizeChanged));
+    const auto stopStart = std::chrono::steady_clock::now();
+    signalSizeChanged();
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopStart).count();
+    CaptureOutcome outcome = future.get();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "size_changed");
+    ASSERT_LT(elapsed, 2500);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_TRUE(FileExists(partialPath));
+    ASSERT_GT(FileSize(partialPath), 0);
+    ASSERT_GT(outcome.bytesWritten, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionWindowClosedByHwndMonitor_FailsPromptly, []() {
+    TempDir dir(L"wgc-test-window-monitor-closed");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<bool> started{false};
+    std::atomic<bool> closed{false};
+    std::atomic<int> queryCount{0};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() {
+        started.store(true);
+        startedCv.notify_all();
+    };
+    hooks.onWindowStateQuery = [&](std::uint64_t hwnd) {
+        ASSERT_EQ(hwnd, opts.windowHwnd);
+        queryCount.fetch_add(1);
+        return CaptureSessionTestWindowState{!closed.load(), false};
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x61);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+
+    const auto stopStart = std::chrono::steady_clock::now();
+    closed.store(true);
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopStart).count();
+    CaptureOutcome outcome = future.get();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "window_closed");
+    ASSERT_GT(queryCount.load(), 0);
+    ASSERT_LT(elapsed, 2000);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_TRUE(FileExists(partialPath));
+    ASSERT_GT(outcome.bytesWritten, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionWindowMinimizedByHwndMonitor_FailsPromptly, []() {
+    TempDir dir(L"wgc-test-window-monitor-minimized");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<bool> started{false};
+    std::atomic<bool> minimized{false};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() {
+        started.store(true);
+        startedCv.notify_all();
+    };
+    hooks.onWindowStateQuery = [&](std::uint64_t hwnd) {
+        ASSERT_EQ(hwnd, opts.windowHwnd);
+        return CaptureSessionTestWindowState{true, minimized.load()};
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x62);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+
+    const auto stopStart = std::chrono::steady_clock::now();
+    minimized.store(true);
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopStart).count();
+    CaptureOutcome outcome = future.get();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "window_minimized");
+    ASSERT_LT(elapsed, 2000);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_TRUE(FileExists(partialPath));
+    ASSERT_GT(outcome.bytesWritten, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionDisplayDoesNotQueryHwndLifecycle, []() {
+    TempDir dir(L"wgc-test-display-no-hwnd-monitor");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousOptions({10, 20, 800, 600}, outputPath,
+                                          beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> queryCount{0};
+    std::atomic<bool> started{false};
+    CaptureSessionTestHooks hooks;
+    hooks.onWindowStateQuery = [&](std::uint64_t) {
+        queryCount.fetch_add(1);
+        return CaptureSessionTestWindowState{};
+    };
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() { started.store(true); };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x63);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+    const auto startedDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    while (!started.load() && std::chrono::steady_clock::now() < startedDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(started.load());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    WriteFile(stopPath, L"stop");
+
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    CaptureOutcome outcome = future.get();
+    ASSERT_EQ(outcome.result, CaptureResult::Stopped);
+    ASSERT_EQ(queryCount.load(), 0);
+    ASSERT_TRUE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+});
+
+TEST_REGISTRAR(CaptureSessionWindowMovementWithoutSizeChangeDoesNotFail, []() {
+    TempDir dir(L"wgc-test-window-movement");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Options opts = MakeContinuousWindowOptions({10, 20, 800, 600}, outputPath,
+                                                beginPath, stopPath, 5000);
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+    CaptureSessionTestHooks hooks;
+    hooks.onWindowStateQuery = [](std::uint64_t) {
+        return CaptureSessionTestWindowState{true, false};
+    };
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x64);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        for (int i = 0; i < 4; ++i) {
+            QueuedFrame frame;
+            frame.systemRelativeTimeHns = i * 333'333LL;
+            frame.contentWidth = 64;
+            frame.contentHeight = 64;
+            queue.Push(frame);
+        }
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    WriteFile(stopPath, L"stop");
+
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    CaptureOutcome outcome = future.get();
+    ASSERT_EQ(outcome.result, CaptureResult::Stopped);
+    ASSERT_TRUE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+});
+
+TEST_REGISTRAR(CaptureSessionFirstFrameEmittedPromptlyForStaticSingleFrame, []() {
+    TempDir dir(L"wgc-test-first-frame-static");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath, 1500);
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> writeCount{0};
+    std::atomic<int> firstFrameCalls{0};
+    std::atomic<int64_t> firstFrameNumber{0};
+    std::atomic<int64_t> firstFrameElapsedMs{-1};
+    // Number of encoder writes that had happened at the moment FIRST_FRAME was
+    // emitted. For a static single-frame source this must be zero: the explicit
+    // event fires while FramesCaptured is still 0.
+    std::atomic<int> writesAtFirstFrame{-1};
+    std::atomic<bool> sessionReturned{false};
+    std::atomic<bool> firstFrameBeforeReturn{false};
+
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x77);
+        return true;
+    };
+    hooks.onWriteFrame = [&](const std::vector<uint8_t>&, int64_t, int64_t) {
+        writeCount.fetch_add(1);
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onFirstFrame = [&](int64_t frameNumber, int64_t elapsedMs) {
+        firstFrameCalls.fetch_add(1);
+        firstFrameNumber.store(frameNumber);
+        firstFrameElapsedMs.store(elapsedMs);
+        writesAtFirstFrame.store(writeCount.load());
+        if (!sessionReturned.load()) {
+            firstFrameBeforeReturn.store(true);
+        }
+    };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        // A static WGC source delivers exactly one useful frame.
+        QueuedFrame qf;
+        qf.frame = nullptr;
+        qf.systemRelativeTimeHns = 0;
+        qf.contentWidth = 64;
+        qf.contentHeight = 64;
+        queue.Push(qf);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    // Let the session run to its natural duration end (no stop signal) so the
+    // single pending frame is only written during finalization.
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(8000)), std::future_status::ready);
+    CaptureOutcome outcome = future.get();
+    sessionReturned.store(true);
+    PrintOutcomeDiagnostics("CaptureSessionFirstFrameEmittedPromptlyForStaticSingleFrame", outcome, partialPath);
+
+    // Exactly one explicit FIRST_FRAME, emitted promptly (before the session
+    // returned) while the encoder had not yet written any sample.
+    ASSERT_EQ(firstFrameCalls.load(), 1);
+    ASSERT_EQ(firstFrameNumber.load(), 1);
+    ASSERT_GE(firstFrameElapsedMs.load(), 0);
+    ASSERT_EQ(writesAtFirstFrame.load(), 0);
+    ASSERT_TRUE(firstFrameBeforeReturn.load());
+
+    // The explicit event does not change encoded frame counts: the single
+    // static frame is committed exactly once at finalization.
+    ASSERT_EQ(outcome.result, CaptureResult::Success);
+    ASSERT_EQ(outcome.framesCaptured, 1);
+    ASSERT_EQ(writeCount.load(), 1);
+    ASSERT_GE(outcome.durationMs, 1000);
+    // The first-frame elapsed evidence must be bounded by the session duration.
+    ASSERT_LE(firstFrameElapsedMs.load(), outcome.durationMs);
+});
+
+TEST_REGISTRAR(CaptureSessionFirstFrameEmittedExactlyOnceWithMultipleFrames, []() {
+    TempDir dir(L"wgc-test-first-frame-multi");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath);
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> writeCount{0};
+    std::atomic<int> firstFrameCalls{0};
+
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x42);
+        return true;
+    };
+    hooks.onWriteFrame = [&](const std::vector<uint8_t>&, int64_t, int64_t) {
+        writeCount.fetch_add(1);
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onFirstFrame = [&](int64_t, int64_t) {
+        firstFrameCalls.fetch_add(1);
+    };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        int64_t timeHns = 0;
+        for (int i = 0; i < 8; ++i) {
+            QueuedFrame qf;
+            qf.frame = nullptr;
+            qf.systemRelativeTimeHns = timeHns;
+            qf.contentWidth = 64;
+            qf.contentHeight = 64;
+            if (queue.Push(qf)) {
+                timeHns += 333'333LL;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionFirstFrameEmittedExactlyOnceWithMultipleFrames", outcome, partialPath);
+
+    ASSERT_EQ(firstFrameCalls.load(), 1);
+    ASSERT_EQ(outcome.result, CaptureResult::Stopped);
+    ASSERT_GT(outcome.framesCaptured, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedOnCopyFailure, []() {
+    TempDir dir(L"wgc-test-first-frame-copy-fail");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath);
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> firstFrameCalls{0};
+
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int, int,
+                           std::vector<uint8_t>&) {
+        return false; // GPU copy fails on the very first frame
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onFirstFrame = [&](int64_t, int64_t) {
+        firstFrameCalls.fetch_add(1);
+    };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame qf;
+        qf.frame = nullptr;
+        qf.systemRelativeTimeHns = 0;
+        qf.contentWidth = 64;
+        qf.contentHeight = 64;
+        queue.Push(qf);
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionFirstFrameNotEmittedOnCopyFailure", outcome, partialPath);
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "d3d_copy_failed");
+    ASSERT_EQ(firstFrameCalls.load(), 0);
+});
+
+TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedOnTimelineRejection, []() {
+    TempDir dir(L"wgc-test-first-frame-timeline-reject");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath);
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> firstFrameCalls{0};
+
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x11);
+        return true;
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onFirstFrame = [&](int64_t, int64_t) {
+        firstFrameCalls.fetch_add(1);
+    };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        // A negative source timestamp is rejected by the timeline before any
+        // copy is attempted, so no first-frame evidence may be published.
+        QueuedFrame qf;
+        qf.frame = nullptr;
+        qf.systemRelativeTimeHns = -1;
+        qf.contentWidth = 64;
+        qf.contentHeight = 64;
+        queue.Push(qf);
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionFirstFrameNotEmittedOnTimelineRejection", outcome, partialPath);
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "zero_frames");
+    ASSERT_EQ(firstFrameCalls.load(), 0);
+});
+
+TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedWhenBeginTimesOut, []() {
+    TempDir dir(L"wgc-test-first-frame-no-begin");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    // No begin signal: authorization never happens.
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath);
+    opts.beginTimeoutMs = 200;
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> firstFrameCalls{0};
+
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onFirstFrame = [&](int64_t, int64_t) {
+        firstFrameCalls.fetch_add(1);
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+    PrintOutcomeDiagnostics("CaptureSessionFirstFrameNotEmittedWhenBeginTimesOut", outcome, partialPath);
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "timeout");
+    ASSERT_EQ(firstFrameCalls.load(), 0);
 });
 
 } // namespace

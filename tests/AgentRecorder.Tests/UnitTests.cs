@@ -11,6 +11,7 @@ using ApiException = AgentRecorder.Infrastructure.ApiException;
 
 namespace AgentRecorder.Tests;
 
+[Collection("NonParallel-AgentRecorderEnvVar")]
 public class FfmpegLocatorTests : IDisposable
 {
     private readonly string? _originalEnvDir;

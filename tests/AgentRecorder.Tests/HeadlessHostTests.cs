@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading;
 using AgentRecorder.Api;
 using AgentRecorder.Core;
@@ -33,10 +34,12 @@ public class HeadlessHostTests
         public CapturingAuditLogger() : base() { }
 
         public System.Collections.Generic.List<string> Events { get; } = new();
+        public System.Collections.Generic.List<(string Event, string Json)> Payloads { get; } = new();
 
         public override void Log(string evt, object payload)
         {
             Events.Add(evt);
+            Payloads.Add((evt, JsonSerializer.Serialize(payload)));
             base.Log(evt, payload);
         }
     }
@@ -81,6 +84,33 @@ public class HeadlessHostTests
             Assert.Contains("recording.headless_set_recording", audit.Events);
             Assert.Contains("recording.headless_set_idle", audit.Events);
             Assert.Contains("recording.headless_error", audit.Events);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
+        }
+    }
+
+    [Fact]
+    public void HeadlessTrayContext_ImplementsStructuredFailureNotifier()
+    {
+        using var tmp = new TempDirectory();
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", tmp.Path, EnvironmentVariableTarget.Process);
+        try
+        {
+            var audit = new CapturingAuditLogger();
+            var tray = new HeadlessTrayContext(audit);
+
+            var notifier = Assert.IsAssignableFrom<IRecordingFailureNotifier>(tray);
+            notifier.ShowRecordingFailure("rec-headless-195", "window_closed");
+
+            var request = Assert.Single(audit.Payloads, item => item.Event == "recording_failure_notification.requested");
+            using var payload = JsonDocument.Parse(request.Json);
+            Assert.Equal("rec-headless-195", payload.RootElement.GetProperty("recording_id").GetString());
+            Assert.Equal("window_closed", payload.RootElement.GetProperty("reason_code").GetString());
+            Assert.Equal("headless", payload.RootElement.GetProperty("host_mode").GetString());
+            Assert.Equal("audit_only", payload.RootElement.GetProperty("outcome").GetString());
+            Assert.DoesNotContain("recording_failure_notification.shown", audit.Events);
         }
         finally
         {

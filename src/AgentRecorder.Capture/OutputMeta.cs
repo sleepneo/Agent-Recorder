@@ -26,6 +26,12 @@ public sealed class OutputMeta
     /// <summary>WGC helper stage string (e.g. "Complete" or "FrameArrived(timeout)").</summary>
     public string? Stage;
 
+    /// <summary>
+    /// Stable backend terminal reason. WGC lifecycle failures use values such
+    /// as window_closed, window_minimized, or size_changed.
+    /// </summary>
+    public string? StopReason;
+
     /// <summary>WGC helper HRESULT on failure (e.g. "0x800705B4").</summary>
     public string? Hresult;
 

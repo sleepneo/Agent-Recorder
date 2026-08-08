@@ -14,7 +14,7 @@ namespace AgentRecorder.Capture;
 /// ICaptureBackend adapter for the WGC continuous recording session managed by
 /// <see cref="WgcContinuousManagedSession"/>.
 /// </summary>
-public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend
+public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IDeferredCaptureStartBackend
 {
     private readonly Func<WgcContinuousSessionOptions, IWgcContinuousBackendSession> _sessionFactory;
     private readonly IStagingToFinalPublisher _publisher;
@@ -99,6 +99,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
     private Task? _authorizeTask;
     private Action<int, OutputMeta>? _onNaturalExit;
+    private bool _deferCaptureStart;
+    private int _captureStartRequested;
 
     /// <summary>
     /// Single atomic arbiter for the natural-exit notification.
@@ -163,6 +165,69 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     public event Action<FirstFrameObservation>? FirstFrameObserved;
 
     /// <inheritdoc />
+    public event Action<bool>? CaptureAuthorizationCompleted;
+
+    /// <inheritdoc />
+    public bool IsAwaitingCaptureStart
+    {
+        get
+        {
+            return _deferCaptureStart &&
+                   _captureStartRequested == 0 &&
+                   _lifecycleState == (int)LifecycleState.Running;
+        }
+    }
+
+    /// <inheritdoc />
+    public void StartCapture()
+    {
+        // Exactly-once authorization gate: duplicate countdown completion,
+        // stop, natural exit, or shutdown races must never authorize twice.
+        if (Interlocked.Exchange(ref _captureStartRequested, 1) != 0)
+            return;
+
+        IWgcContinuousBackendSession? session;
+        lock (_lifecycleLock) session = _session;
+
+        if (session == null || _lifecycleState != (int)LifecycleState.Running)
+        {
+            NotifyCaptureAuthorizationCompleted(false);
+            return;
+        }
+
+        _authorizeTask = AuthorizeSessionWithNotificationAsync(session);
+    }
+
+    private async Task AuthorizeSessionWithNotificationAsync(IWgcContinuousBackendSession session)
+    {
+        bool authorized = false;
+        try
+        {
+            authorized = await session.AuthorizeCapture().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Authorization failures are surfaced through the session completion
+            // path so that StartCapture never has to block waiting for a result.
+            authorized = false;
+        }
+
+        NotifyCaptureAuthorizationCompleted(authorized);
+    }
+
+    private void NotifyCaptureAuthorizationCompleted(bool authorized)
+    {
+        try
+        {
+            CaptureAuthorizationCompleted?.Invoke(authorized);
+        }
+        catch
+        {
+            // Observers must not affect the recording flow.
+        }
+    }
+
+    /// <inheritdoc />
     public int ExitCode
     {
         get
@@ -225,6 +290,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                 _cfg = cfg;
                 _stagingDir = stagingDir;
                 _stagingOutputPath = stagingOutput;
+                _deferCaptureStart = cfg.DeferCaptureStart;
             }
 
             session.FirstFrameObserved += OnSessionFirstFrame;
@@ -284,7 +350,9 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                 }
             }
 
-            _authorizeTask = AuthorizeSessionAsync(session);
+            _authorizeTask = _deferCaptureStart
+                ? null
+                : AuthorizeSessionAsync(session);
         }
         catch (Exception ex)
         {
@@ -672,17 +740,26 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
     private static void ValidateConfig(CaptureConfig cfg)
     {
-        if (!string.Equals(cfg.SourceKind, "display", StringComparison.Ordinal))
+        bool isDisplay = string.Equals(cfg.SourceKind, "display", StringComparison.Ordinal);
+        bool isWindow = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal);
+        if (!isDisplay && !isWindow)
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
-                $"WGC continuous backend only supports source_kind='display' (got '{cfg.SourceKind}').");
+                $"WGC continuous backend only supports source_kind='display' or 'window' (got '{cfg.SourceKind}').");
         }
 
         var (_, _, w, h) = cfg.Bounds;
         if (w <= 0 || h <= 0)
         {
+            throw new ApiException(400, "INVALID_ARGUMENT", isWindow
+                ? "WGC continuous window backend requires positive target bounds."
+                : "WGC continuous backend requires positive capture width and height.");
+        }
+
+        if (isWindow && cfg.WindowHandle == nint.Zero)
+        {
             throw new ApiException(400, "INVALID_ARGUMENT",
-                "WGC continuous backend requires positive capture width and height.");
+                "WGC continuous window backend requires a non-zero HWND.");
         }
 
         if (!cfg.DurationSeconds.HasValue)
@@ -757,10 +834,14 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         {
             HelperExePath = helperExePath,
             RecordingId = "wgc-c-" + Guid.NewGuid().ToString("N")[..16],
+            TargetKind = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal)
+                ? WgcContinuousTargetKind.Window
+                : WgcContinuousTargetKind.Display,
             DisplayX = cfg.Bounds.x,
             DisplayY = cfg.Bounds.y,
             DisplayWidth = cfg.Bounds.w,
             DisplayHeight = cfg.Bounds.h,
+            WindowHandle = cfg.WindowHandle,
             OutputPath = stagingOutput,
             DurationMs = durationMs,
             Fps = cfg.Fps,
@@ -777,9 +858,24 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     {
         var args = new List<string>
         {
-            "--capture-continuous-display",
-            "--display-bounds",
-            FormattableString.Invariant($"{options.DisplayX},{options.DisplayY},{options.DisplayWidth},{options.DisplayHeight}"),
+            options.TargetKind == WgcContinuousTargetKind.Window
+                ? "--capture-continuous-window"
+                : "--capture-continuous-display"
+        };
+
+        if (options.TargetKind == WgcContinuousTargetKind.Window)
+        {
+            args.Add("--window-hwnd");
+            args.Add($"0x{unchecked((ulong)options.WindowHandle.ToInt64()):X}");
+        }
+        else
+        {
+            args.Add("--display-bounds");
+            args.Add(FormattableString.Invariant($"{options.DisplayX},{options.DisplayY},{options.DisplayWidth},{options.DisplayHeight}"));
+        }
+
+        args.AddRange(new[]
+        {
             "--recording-id",
             options.RecordingId,
             "--output",
@@ -797,7 +893,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             "--stop-signal",
             options.StopSignalPath,
             "--i-understand-this-captures-screen"
-        };
+        });
 
         string rendered = FfmpegCaptureBackend.RenderCommandArgs(args);
         return rendered.Replace(token, "<redacted>", StringComparison.Ordinal);
@@ -931,9 +1027,17 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                 meta = BuildFailureMeta(result, cfg);
             }
 
+            // Preserve the authenticated helper/process exit code even when
+            // post-capture probing rejects the bytes. Output validation is a
+            // distinct terminal category, not evidence that the process exited
+            // abnormally.
             int finalExitCode = result.ExitCode;
-            if (!IsSuccessMeta(meta) && finalExitCode == 0)
+            if (!IsSuccessMeta(meta) &&
+                finalExitCode == 0 &&
+                !string.Equals(meta.StopReason, "output_validation_failed", StringComparison.Ordinal))
+            {
                 finalExitCode = -1;
+            }
 
             lock (_lifecycleLock)
             {
@@ -1038,7 +1142,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
         _finalizationCts.Token.ThrowIfCancellationRequested();
 
-        var validationWarnings = ValidateProbeAndSummary(probeMeta, result.Summary, stagingSize);
+        var validationWarnings = ValidateProbeAndSummary(probeMeta, result.Summary, stagingSize, cfg);
         if (validationWarnings.Count > 0)
         {
             var context = CopyOutputMeta(probeMeta);
@@ -1104,6 +1208,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             Codec = source.Codec,
             CaptureMethod = source.CaptureMethod,
             Stage = source.Stage,
+            StopReason = source.StopReason,
             Hresult = source.Hresult,
             OutputFileExists = source.OutputFileExists,
             IsValidPngSignature = source.IsValidPngSignature,
@@ -1114,9 +1219,25 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         };
     }
 
-    private static List<string> ValidateProbeAndSummary(OutputMeta probe, WgcContinuousSessionSummary? summary, long stagingSize)
+    private static List<string> ValidateProbeAndSummary(
+        OutputMeta probe,
+        WgcContinuousSessionSummary? summary,
+        long stagingSize,
+        CaptureConfig cfg)
     {
         var warnings = new List<string>();
+        string expectedCaptureMethod = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal)
+            ? "WGC_D3D11_WINDOW_FRAME_STREAM"
+            : "WGC_D3D11_FRAME_STREAM";
+
+        // The media probe validates the bytes and usually has no knowledge of
+        // which capture source produced them. The authenticated helper STARTED
+        // event is the source-of-truth for the target-specific method.
+        if (!string.IsNullOrEmpty(probe.CaptureMethod) &&
+            !string.Equals(probe.CaptureMethod, expectedCaptureMethod, StringComparison.Ordinal))
+        {
+            warnings.Add($"capture_method_mismatch: expected={expectedCaptureMethod} actual={probe.CaptureMethod}");
+        }
 
         if (probe.SizeBytes != stagingSize)
         {
@@ -1150,6 +1271,10 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
         if (summary != null)
         {
+            if (!string.Equals(summary.CaptureMethod, expectedCaptureMethod, StringComparison.Ordinal))
+            {
+                warnings.Add($"summary_capture_method_mismatch: expected={expectedCaptureMethod} actual={summary.CaptureMethod}");
+            }
             if (summary.Width.HasValue && probe.Width > 0 && summary.Width.Value != probe.Width)
             {
                 warnings.Add($"width_mismatch: probe={probe.Width} summary={summary.Width.Value}");
@@ -1201,9 +1326,19 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             warnings.AddRange(context.Warnings);
         }
 
+        bool authenticatedTerminal = result.State is
+            WgcContinuousManagedSessionState.Success or
+            WgcContinuousManagedSessionState.Stopped;
         string category;
 
-        if (result.State == WgcContinuousManagedSessionState.Cancelled)
+        if (authenticatedTerminal && !string.IsNullOrEmpty(extraCategory))
+        {
+            // A helper that authenticated Success/Stopped did not terminate
+            // unexpectedly; the post-capture stage that rejected its bytes is
+            // the primary terminal category.
+            category = extraCategory;
+        }
+        else if (result.State == WgcContinuousManagedSessionState.Cancelled)
         {
             category = "cancelled";
         }
@@ -1220,8 +1355,17 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             category = "unexpected_terminal_state";
         }
 
+        // Keep the exact helper terminal category as structured metadata. The
+        // warning prefix remains diagnostic-only; RecordingEngine uses this
+        // field for the public stop_reason/error contract.
+        meta.StopReason = result.State is WgcContinuousManagedSessionState.Success
+            or WgcContinuousManagedSessionState.Stopped
+            ? (extraCategory ?? category)
+            : category;
+
         warnings.Add($"wgc_continuous_{category}");
-        if (!string.IsNullOrEmpty(extraCategory))
+        if (!string.IsNullOrEmpty(extraCategory) &&
+            !string.Equals(category, extraCategory, StringComparison.Ordinal))
         {
             warnings.Add($"wgc_continuous_{extraCategory}");
         }

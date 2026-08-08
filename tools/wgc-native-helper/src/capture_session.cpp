@@ -31,8 +31,10 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace wgc {
@@ -237,7 +239,17 @@ struct CapturePipelineState {
     std::atomic<bool> userStopped{false};
     std::atomic<bool> captureEnded{false};
     std::atomic<bool> sizeChanged{false};
+    std::atomic<bool> targetClosed{false};
+    std::atomic<bool> targetMinimized{false};
     std::atomic<bool> captureFailed{false};
+    enum class RuntimeSignal : int {
+        None = 0,
+        WindowClosed,
+        WindowMinimized,
+        SizeChanged,
+        CaptureFailed
+    };
+    std::atomic<RuntimeSignal> runtimeSignal{RuntimeSignal::None};
     std::atomic<HRESULT> copyFailedHr{S_OK};
     std::atomic<int64_t> framesDropped{0};
     // Written only by the encoder worker; read by the main/progress thread.
@@ -263,9 +275,118 @@ struct CapturePipelineState {
         coordinator.RequestStop();
         loopCv.notify_all();
     }
+
+    bool SignalRuntime(RuntimeSignal signal) {
+        // A single first-writer decision keeps close/minimize/resize and
+        // encoder failures deterministic when callbacks race with teardown.
+        if (stopRequested.load()) {
+            return false;
+        }
+        RuntimeSignal expected = RuntimeSignal::None;
+        if (!runtimeSignal.compare_exchange_strong(expected, signal)) {
+            return false;
+        }
+        if (signal == RuntimeSignal::WindowClosed) {
+            targetClosed.store(true);
+        } else if (signal == RuntimeSignal::WindowMinimized) {
+            targetMinimized.store(true);
+        } else if (signal == RuntimeSignal::SizeChanged) {
+            sizeChanged.store(true);
+        } else if (signal == RuntimeSignal::CaptureFailed) {
+            captureFailed.store(true);
+        }
+        RequestStop(false);
+        return true;
+    }
+
+    void SignalWindowClosed() { SignalRuntime(RuntimeSignal::WindowClosed); }
+    void SignalWindowMinimized() { SignalRuntime(RuntimeSignal::WindowMinimized); }
+    void SignalSizeChanged() { SignalRuntime(RuntimeSignal::SizeChanged); }
+    void SignalCaptureFailure() {
+        captureFailed.store(true);
+        if (runtimeSignal.load() == RuntimeSignal::None) {
+            SignalRuntime(RuntimeSignal::CaptureFailed);
+        } else {
+            RequestStop(false);
+        }
+    }
+};
+
+// Polls only the canonical HWND for active window captures. The condition
+// variable bounds the interval and lets teardown stop/join the monitor without
+// a busy loop or a detached thread.
+class WindowLifecycleMonitor {
+public:
+    using Query = std::function<CaptureSessionTestWindowState(std::uint64_t)>;
+
+    WindowLifecycleMonitor(std::uint64_t hwnd,
+                           Query query,
+                           std::function<void()> onClosed,
+                           std::function<void()> onMinimized)
+        : hwnd_(hwnd),
+          query_(std::move(query)),
+          onClosed_(std::move(onClosed)),
+          onMinimized_(std::move(onMinimized)) {}
+
+    ~WindowLifecycleMonitor() { Stop(); }
+
+    void Start() {
+        if (thread_.joinable()) return;
+        thread_ = std::thread([this]() { Run(); });
+    }
+
+    void Stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    void Run() {
+        constexpr auto kPollInterval = std::chrono::milliseconds(50);
+        for (;;) {
+            CaptureSessionTestWindowState state;
+            try {
+                state = query_(hwnd_);
+            } catch (...) {
+                state.isWindow = false;
+            }
+
+            if (!state.isWindow) {
+                onClosed_();
+                return;
+            }
+            if (state.isIconic) {
+                onMinimized_();
+                return;
+            }
+
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (cv_.wait_for(lock, kPollInterval, [this]() { return stop_; })) {
+                return;
+            }
+        }
+    }
+
+    std::uint64_t hwnd_;
+    Query query_;
+    std::function<void()> onClosed_;
+    std::function<void()> onMinimized_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    std::thread thread_;
 };
 
 void TeardownFramePool(bool hasCaptureResources,
+                       GraphicsCaptureItem& item,
+                       bool hasItemClosedSubscription,
+                       const winrt::event_token& itemClosedToken,
                        const winrt::event_token& token,
                        GraphicsCaptureSession& session,
                        Direct3D11CaptureFramePool& framePool,
@@ -275,6 +396,12 @@ void TeardownFramePool(bool hasCaptureResources,
     // Revoke the subscription before closing so no new callbacks are scheduled
     // while we wait for in-flight callbacks to drain.
     if (hasCaptureResources) {
+        if (hasItemClosedSubscription) {
+            try {
+                item.Closed(itemClosedToken);
+            } catch (...) {
+            }
+        }
         try {
             framePool.FrameArrived(token);
         } catch (...) {
@@ -414,18 +541,43 @@ CaptureOutcome CaptureSession::Run() {
     Direct3D11CaptureFramePool framePool{nullptr};
     GraphicsCaptureSession session{nullptr};
     bool hasCaptureResources = false;
+    bool hasItemClosedSubscription = false;
+    winrt::event_token itemClosedToken{};
+
+    if (options_.mode != CaptureMode::ContinuousDisplay &&
+        options_.mode != CaptureMode::ContinuousWindow) {
+        return MakeEarlyFail("invalid_target", "Unsupported continuous capture target");
+    }
 
     int sourceWidth = 64;
     int sourceHeight = 64;
+    MonitorEnumContext monitorCtx;
     if (!hooks_.useSyntheticPlatformResources) {
-        MonitorEnumContext monitorCtx;
-        monitorCtx.target = options_.displayBounds;
-        ::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
-        if (monitorCtx.match == nullptr) {
-            return MakeEarlyFail("display_not_found", "No display exactly matches the requested bounds");
-        }
-        if (monitorCtx.matchCount > 1) {
-            return MakeEarlyFail("display_ambiguous", "Multiple displays match the requested bounds");
+        if (options_.mode == CaptureMode::ContinuousDisplay) {
+            monitorCtx.target = options_.displayBounds;
+            ::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
+            if (monitorCtx.match == nullptr) {
+                return MakeEarlyFail("display_not_found", "No display exactly matches the requested bounds");
+            }
+            if (monitorCtx.matchCount > 1) {
+                return MakeEarlyFail("display_ambiguous", "Multiple displays match the requested bounds");
+            }
+        } else {
+            if (options_.windowHwnd > static_cast<std::uint64_t>(std::numeric_limits<ULONG_PTR>::max())) {
+                return MakeEarlyFail("invalid_window_handle", "HWND exceeds the native pointer width");
+            }
+            HWND hwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(options_.windowHwnd));
+            if (!::IsWindow(hwnd)) {
+                return MakeEarlyFail("window_not_found", "The target window no longer exists");
+            }
+            if (::IsIconic(hwnd)) {
+                return MakeEarlyFail("window_minimized", "The target window is minimized");
+            }
+            RECT windowRect = {};
+            if (!::GetWindowRect(hwnd, &windowRect) ||
+                windowRect.right <= windowRect.left || windowRect.bottom <= windowRect.top) {
+                return MakeEarlyFail("window_unavailable", "The target window has no capturable bounds");
+            }
         }
 
         hr = CreateD3D11Device(d3dDevice, d3dContext);
@@ -454,14 +606,32 @@ CaptureOutcome CaptureSession::Run() {
         {
             auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
             if (!factory) {
-                return MakeEarlyFail("wgc_factory_failed", "Failed to get GraphicsCaptureItem factory");
+                return MakeEarlyFail(options_.mode == CaptureMode::ContinuousWindow
+                                         ? "window_factory_failed"
+                                         : "wgc_factory_failed",
+                                     "Failed to get GraphicsCaptureItem factory");
             }
             winrt::Windows::Graphics::Capture::GraphicsCaptureItem abiItem{nullptr};
-            hr = factory->CreateForMonitor(monitorCtx.match,
-                                           winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
-                                           reinterpret_cast<void**>(winrt::put_abi(abiItem)));
+            if (options_.mode == CaptureMode::ContinuousDisplay) {
+                hr = factory->CreateForMonitor(
+                    monitorCtx.match,
+                    winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
+                    reinterpret_cast<void**>(winrt::put_abi(abiItem)));
+            } else {
+                HWND hwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(options_.windowHwnd));
+                hr = factory->CreateForWindow(
+                    hwnd,
+                    winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
+                    reinterpret_cast<void**>(winrt::put_abi(abiItem)));
+            }
             if (FAILED(hr)) {
-                return MakeEarlyFail("wgc_item_failed", "CreateForMonitor failed", HresultToString(hr));
+                return MakeEarlyFail(options_.mode == CaptureMode::ContinuousWindow
+                                         ? "window_item_failed"
+                                         : "wgc_item_failed",
+                                     options_.mode == CaptureMode::ContinuousWindow
+                                         ? "CreateForWindow failed"
+                                         : "CreateForMonitor failed",
+                                     HresultToString(hr));
             }
             item = abiItem;
         }
@@ -469,13 +639,34 @@ CaptureOutcome CaptureSession::Run() {
         const auto displaySize = item.Size();
         sourceWidth = displaySize.Width;
         sourceHeight = displaySize.Height;
+    } else if (hooks_.onCreateCaptureItem) {
+        CaptureSessionTestTargetRequest request;
+        request.mode = options_.mode;
+        request.displayBounds = options_.displayBounds;
+        request.windowHwnd = options_.windowHwnd;
+        try {
+            hr = hooks_.onCreateCaptureItem(request);
+        } catch (...) {
+            hr = E_FAIL;
+        }
+        if (FAILED(hr)) {
+            return MakeEarlyFail(options_.mode == CaptureMode::ContinuousWindow
+                                     ? "window_item_failed"
+                                     : "wgc_item_failed",
+                                 options_.mode == CaptureMode::ContinuousWindow
+                                     ? "CreateForWindow test seam failed"
+                                     : "CreateForMonitor test seam failed",
+                                 HresultToString(hr));
+        }
     }
 
     int captureWidth = 0;
     int captureHeight = 0;
     if (!ComputeCaptureDimensions(sourceWidth, sourceHeight, captureWidth, captureHeight)) {
-        return MakeEarlyFail("display_size_unsupported",
-                             std::format("Display size {}x{} is too small for capture", sourceWidth, sourceHeight));
+        return MakeEarlyFail(options_.mode == CaptureMode::ContinuousWindow
+                                 ? "window_size_unsupported"
+                                 : "display_size_unsupported",
+                             std::format("Capture target size {}x{} is too small for capture", sourceWidth, sourceHeight));
     }
 
     constexpr int kFramePoolBufferCount = 2;
@@ -495,6 +686,53 @@ CaptureOutcome CaptureSession::Run() {
 
     if (hooks_.onStateCreated) {
         hooks_.onStateCreated(&state->lifecycle, state);
+    }
+    if (hooks_.onTestSignalsCreated) {
+        CaptureSessionTestSignals signals;
+        signals.signalWindowClosed = [state]() {
+            state->SignalWindowClosed();
+        };
+        signals.signalWindowMinimized = [state]() {
+            state->SignalWindowMinimized();
+        };
+        signals.signalSizeChanged = [state]() {
+            state->SignalSizeChanged();
+        };
+        hooks_.onTestSignalsCreated(signals);
+    }
+
+    std::unique_ptr<WindowLifecycleMonitor> windowMonitor;
+    if (options_.mode == CaptureMode::ContinuousWindow) {
+        auto queryWindowState = [this](std::uint64_t hwndValue) {
+            if (hooks_.useSyntheticPlatformResources) {
+                if (hooks_.onWindowStateQuery) {
+                    return hooks_.onWindowStateQuery(hwndValue);
+                }
+                return CaptureSessionTestWindowState{};
+            }
+
+            CaptureSessionTestWindowState state;
+            if (hwndValue > static_cast<std::uint64_t>(std::numeric_limits<ULONG_PTR>::max())) {
+                state.isWindow = false;
+                return state;
+            }
+            HWND hwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(hwndValue));
+            state.isWindow = ::IsWindow(hwnd) != FALSE;
+            state.isIconic = state.isWindow && (::IsIconic(hwnd) != FALSE);
+            return state;
+        };
+        windowMonitor = std::make_unique<WindowLifecycleMonitor>(
+            options_.windowHwnd,
+            std::move(queryWindowState),
+            [state]() { state->SignalWindowClosed(); },
+            [state]() { state->SignalWindowMinimized(); });
+    }
+
+    if (hasCaptureResources && options_.mode == CaptureMode::ContinuousWindow) {
+        itemClosedToken = item.Closed([state](GraphicsCaptureItem const&, winrt::Windows::Foundation::IInspectable const&) {
+            state->SignalWindowClosed();
+        });
+        hasItemClosedSubscription = true;
     }
 
     FrameTimeline timeline(options_.fps);
@@ -524,6 +762,59 @@ CaptureOutcome CaptureSession::Run() {
         return encoder.Finalize();
     };
 
+    // Media Foundation sample duration belongs to the sample that starts at
+    // the timestamp. The next accepted frame is the first trustworthy end of
+    // the current frame, so retain one copied frame and close it on the next
+    // timestamp or at the authorized capture end.
+    struct PendingFrame {
+        std::vector<uint8_t> pixels;
+        int64_t mediaTimeHns = 0;
+    };
+    std::optional<PendingFrame> pendingFrame;
+    int64_t captureEndMediaHns = 0;
+
+    auto writePendingAt = [&](int64_t endMediaHns) -> bool {
+        if (!pendingFrame) {
+            return true;
+        }
+        if (endMediaHns <= pendingFrame->mediaTimeHns) {
+            pendingFrame.reset();
+            return true;
+        }
+
+        EncoderResult result = writeFrame(
+            pendingFrame->pixels,
+            pendingFrame->mediaTimeHns,
+            endMediaHns - pendingFrame->mediaTimeHns);
+        pendingFrame.reset();
+        if (result.status == EncoderStatus::Ok) {
+            return true;
+        }
+
+        encoderError = result.error;
+        encoderHresult = result.hresult;
+        state->SignalCaptureFailure();
+        return false;
+    };
+
+    auto writePendingUntil = [&](int64_t endMediaHns) -> bool {
+        if (!pendingFrame) {
+            return true;
+        }
+
+        int64_t mediaTimeHns = 0;
+        int64_t durationHns = 0;
+        if (!timeline.FinalizeAt(endMediaHns, &mediaTimeHns, &durationHns) ||
+            mediaTimeHns != pendingFrame->mediaTimeHns) {
+            // The final accepted frame was at or after the capture end and is
+            // not a playable interval. Do not extend the media past the end.
+            pendingFrame.reset();
+            return true;
+        }
+
+        return writePendingAt(mediaTimeHns + durationHns);
+    };
+
     winrt::event_token frameToken{};
     if (hasCaptureResources) {
         frameToken = framePool.FrameArrived(
@@ -545,8 +836,7 @@ CaptureOutcome CaptureSession::Run() {
                 const auto contentSize = frame.ContentSize();
                 if (IsContentSizeChanged(state->sourceWidth, state->sourceHeight,
                                          contentSize.Width, contentSize.Height)) {
-                    state->sizeChanged.store(true);
-                    state->RequestStop(false);
+                    state->SignalSizeChanged();
                     return;
                 }
 
@@ -612,11 +902,19 @@ CaptureOutcome CaptureSession::Run() {
         const int64_t beginTimeMs = state->coordinator.BeginTimeMs();
         const int64_t endTimeMs = beginTimeMs + options_.durationMs;
 
+        // Explicit first-frame evidence is published exactly once by this
+        // worker thread, promptly after the first source frame has been
+        // accepted by the timeline and copied/staged successfully. It never
+        // waits for encoder finalization and never falsifies framesCaptured.
+        bool firstFramePublished = false;
+
         while (!state->captureEnded.load()) {
             QueuedFrame qf;
             bool gotFrame = state->queue.Pop(qf, std::chrono::milliseconds(50));
 
             const auto nowMs = SteadyMs(std::chrono::steady_clock::now());
+            captureEndMediaHns = std::max<int64_t>(
+                0, (nowMs - beginTimeMs) * 10'000LL);
             if (nowMs >= endTimeMs || state->stopRequested.load() ||
                 state->coordinator.State() == StartupState::Stopping ||
                 state->coordinator.State() == StartupState::Stopped) {
@@ -629,7 +927,13 @@ CaptureOutcome CaptureSession::Run() {
             if (gotFrame && (qf.frame || hooks_.onCopyFrame)) {
                 int64_t mediaTimeHns = 0;
                 int64_t durationHns = 0;
-                if (!timeline.SubmitFrame(qf.systemRelativeTimeHns, &mediaTimeHns, &durationHns)) {
+                if (!timeline.SubmitFrame(
+                        qf.systemRelativeTimeHns,
+                        &mediaTimeHns,
+                        &durationHns,
+                        !hooks_.useSyntheticPlatformResources && captureEndMediaHns > 0
+                            ? captureEndMediaHns
+                            : -1)) {
                     state->framesDropped.fetch_add(1);
                     if (qf.frame) {
                         try { qf.frame.Close(); } catch (...) {}
@@ -652,21 +956,48 @@ CaptureOutcome CaptureSession::Run() {
                 }
 
                 if (FAILED(copyHr)) {
+                    // The accepted timestamp still supplies a trustworthy
+                    // boundary for the previous copied sample. Preserve that
+                    // sample before reporting the GPU copy failure.
+                    writePendingAt(mediaTimeHns);
                     state->copyFailedHr.store(copyHr);
-                    state->captureFailed.store(true);
-                    state->RequestStop(false);
+                    state->SignalCaptureFailure();
                     break;
                 }
 
-                EncoderResult writeResult = writeFrame(pixels, mediaTimeHns, durationHns);
-                if (writeResult.status != EncoderStatus::Ok) {
-                    encoderError = writeResult.error;
-                    encoderHresult = writeResult.hresult;
-                    state->captureFailed.store(true);
-                    state->RequestStop(false);
+                if (!firstFramePublished) {
+                    // At this point the session has passed authenticated begin,
+                    // StartCapture has succeeded, a source frame has arrived,
+                    // the timeline has accepted it, and the GPU-to-BGRA copy has
+                    // succeeded. This is the only place FIRST_FRAME may fire.
+                    firstFramePublished = true;
+                    const int64_t firstFrameElapsedMs = std::max<int64_t>(
+                        0, SteadyMs(std::chrono::steady_clock::now()) - beginTimeMs);
+                    writer_.FirstFrame(1, firstFrameElapsedMs);
+                    if (hooks_.onFirstFrame) {
+                        hooks_.onFirstFrame(1, firstFrameElapsedMs);
+                    }
+                }
+
+                if (pendingFrame) {
+                    if (!writePendingAt(mediaTimeHns)) {
+                        state->SignalCaptureFailure();
+                        break;
+                    }
+                }
+
+                pendingFrame = PendingFrame{std::move(pixels), mediaTimeHns};
+                if (state->captureFailed.load()) {
                     break;
                 }
             }
+        }
+
+        if (captureEndMediaHns <= 0) {
+            captureEndMediaHns = static_cast<int64_t>(options_.durationMs) * 10'000LL;
+        }
+        if (!state->captureFailed.load()) {
+            writePendingUntil(captureEndMediaHns);
         }
 
         state->queue.Shutdown();
@@ -674,7 +1005,7 @@ CaptureOutcome CaptureSession::Run() {
         if (finalizeResult.status != EncoderStatus::Ok && encoderError.empty()) {
             encoderError = finalizeResult.error;
             encoderHresult = finalizeResult.hresult;
-            state->captureFailed.store(true);
+            state->SignalCaptureFailure();
         }
     })};
 
@@ -723,7 +1054,8 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, item, hasItemClosedSubscription, itemClosedToken,
+                          frameToken, session, framePool, state, &callbackDrainTimeout);
 
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         if (callbackDrainTimeout) {
@@ -752,7 +1084,8 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, item, hasItemClosedSubscription, itemClosedToken,
+                          frameToken, session, framePool, state, &callbackDrainTimeout);
 
         // Begin failures only produce an empty placeholder; do not report it.
         RemoveEmptyPartial(partialOutputPath_);
@@ -787,7 +1120,8 @@ CaptureOutcome CaptureSession::Run() {
         encoderThread.Join();
 
         bool callbackDrainTimeout = false;
-        TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
+        TeardownFramePool(hasCaptureResources, item, hasItemClosedSubscription, itemClosedToken,
+                          frameToken, session, framePool, state, &callbackDrainTimeout);
 
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         return MakeFailWithEvidence("encoder_init_timeout",
@@ -800,6 +1134,32 @@ CaptureOutcome CaptureSession::Run() {
     }
     if (initResult.status == EncoderInitStatus::Stopped) {
         return FailAndTeardown("stopped_before_capture", "Capture was stopped before capture became active");
+    }
+
+    // Revalidate the HWND immediately before StartCapture. A target can be
+    // minimized or destroyed while consent and encoder initialization are in
+    // flight; fail with target-specific evidence instead of starting a stale
+    // item and waiting for a generic watchdog.
+    if (!hooks_.useSyntheticPlatformResources &&
+        options_.mode == CaptureMode::ContinuousWindow) {
+        if (state->targetClosed.load()) {
+            return FailAndTeardown("window_closed", "The target window closed before capture started");
+        }
+        if (options_.windowHwnd > static_cast<std::uint64_t>(std::numeric_limits<ULONG_PTR>::max())) {
+            return FailAndTeardown("invalid_window_handle", "HWND exceeds the native pointer width");
+        }
+        HWND hwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(options_.windowHwnd));
+        if (!::IsWindow(hwnd)) {
+            return FailAndTeardown("window_not_found", "The target window no longer exists");
+        }
+        if (::IsIconic(hwnd)) {
+            return FailAndTeardown("window_minimized", "The target window is minimized");
+        }
+        RECT windowRect = {};
+        if (!::GetWindowRect(hwnd, &windowRect) ||
+            windowRect.right <= windowRect.left || windowRect.bottom <= windowRect.top) {
+            return FailAndTeardown("window_unavailable", "The target window has no capturable bounds");
+        }
     }
 
     // Single clock: record begin time, start capture, then publish active state.
@@ -819,11 +1179,20 @@ CaptureOutcome CaptureSession::Run() {
     const auto deadline = beginTime + std::chrono::milliseconds(options_.durationMs);
 
     writer_.Started(WideToUtf8(options_.recordingId), outputPath_, options_.fps,
-                    captureWidth, captureHeight);
+                    captureWidth, captureHeight,
+                    options_.mode == CaptureMode::ContinuousWindow
+                        ? "WGC_D3D11_WINDOW_FRAME_STREAM"
+                        : "WGC_D3D11_FRAME_STREAM");
     if (hooks_.onStarted) {
         hooks_.onStarted();
     }
     state->coordinator.SignalCaptureStarted(beginTimeMs);
+
+    // The HWND lifecycle monitor starts only after authenticated begin,
+    // encoder readiness, and StartCapture have all succeeded.
+    if (windowMonitor) {
+        windowMonitor->Start();
+    }
 
     if (hooks_.onCaptureActive) {
         hooks_.onCaptureActive(state->queue);
@@ -858,7 +1227,9 @@ CaptureOutcome CaptureSession::Run() {
             const auto waitUntil = std::min(deadline, scheduler.NextProgressTime());
             state->loopCv.wait_until(lock, waitUntil, [&] {
                 return state->stopRequested.load() || state->captureFailed.load() ||
-                       state->sizeChanged.load() || std::chrono::steady_clock::now() >= waitUntil;
+                       state->sizeChanged.load() || state->targetClosed.load() ||
+                       state->targetMinimized.load() ||
+                       std::chrono::steady_clock::now() >= waitUntil;
             });
         }
     }
@@ -866,6 +1237,9 @@ CaptureOutcome CaptureSession::Run() {
     const auto stopDecisionTime = std::chrono::steady_clock::now();
     const int64_t durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(stopDecisionTime - beginTime).count();
 
+    if (windowMonitor) {
+        windowMonitor->Stop();
+    }
     stopWatcher.Stop();
     scheduler.Stop();
     state->RequestStop(false);
@@ -873,11 +1247,25 @@ CaptureOutcome CaptureSession::Run() {
 
     // Teardown: stop producing frames, wait for callbacks, then stop consuming.
     bool callbackDrainTimeout = false;
-    TeardownFramePool(hasCaptureResources, frameToken, session, framePool, state, &callbackDrainTimeout);
+    TeardownFramePool(hasCaptureResources, item, hasItemClosedSubscription, itemClosedToken,
+                      frameToken, session, framePool, state, &callbackDrainTimeout);
 
     state->captureEnded.store(true);
     state->queue.Shutdown();
     encoderThread.Join();
+
+    ProgressSnapshot finalSnapshot;
+    finalSnapshot.framesCaptured = state->framesCaptured.load();
+    finalSnapshot.framesDropped = state->framesDropped.load() + state->queue.Dropped();
+    finalSnapshot.elapsedMs = durationMs;
+    finalSnapshot.bytesWritten = GetOutputBytes();
+    writer_.Progress(finalSnapshot.framesCaptured,
+                     finalSnapshot.framesDropped,
+                     finalSnapshot.elapsedMs,
+                     finalSnapshot.bytesWritten);
+    if (hooks_.onProgressSnapshot) {
+        hooks_.onProgressSnapshot(finalSnapshot);
+    }
 
     const int64_t framesCaptured = state->framesCaptured.load();
     const int64_t framesDropped = state->framesDropped.load() + state->queue.Dropped();
@@ -891,7 +1279,20 @@ CaptureOutcome CaptureSession::Run() {
                                        "", partialPath,
                                        framesCaptured, framesDropped, durationMs, bytesWritten,
                                        captureWidth, captureHeight);
-    } else if (state->sizeChanged.load()) {
+    } else if (state->runtimeSignal.load() == CapturePipelineState::RuntimeSignal::WindowClosed ||
+               state->targetClosed.load()) {
+        auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
+        outcome = MakeFailWithEvidence("window_closed", "The target window closed during capture", "",
+                                       partialPath, framesCaptured, framesDropped, durationMs,
+                                       bytesWritten, captureWidth, captureHeight);
+    } else if (state->runtimeSignal.load() == CapturePipelineState::RuntimeSignal::WindowMinimized ||
+               state->targetMinimized.load()) {
+        auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
+        outcome = MakeFailWithEvidence("window_minimized", "The target window was minimized during capture", "",
+                                       partialPath, framesCaptured, framesDropped, durationMs,
+                                       bytesWritten, captureWidth, captureHeight);
+    } else if (state->runtimeSignal.load() == CapturePipelineState::RuntimeSignal::SizeChanged ||
+               state->sizeChanged.load()) {
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         outcome = MakeFailWithEvidence("size_changed", "Frame content size changed during capture", "",
                                        partialPath, framesCaptured, framesDropped, durationMs,

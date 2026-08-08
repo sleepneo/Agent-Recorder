@@ -26,6 +26,7 @@ namespace AgentRecorder.Tests;
 ///
 /// Evidence classification: code_contract
 /// </summary>
+[Collection("NonParallel-AgentRecorderEnvVar")]
 public class NestedRecordingContractTests
 {
     private sealed class NoOpTrayContext : ITrayContext

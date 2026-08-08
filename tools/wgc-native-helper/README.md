@@ -1,6 +1,6 @@
 # wgc-native-helper
 
-`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation 软件 H.264 编码，对单个显示器进行短时连续录制，输出标准 MP4。
+`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation 软件 H.264 编码，对单个显示器或窗口进行短时连续录制，输出标准 MP4。
 
 本 helper 不直接对外提供 HTTP API，而是由主进程通过命令行启动并通过 stdout 上的 IPC v2 事件流监督生命周期。
 
@@ -44,6 +44,8 @@
 wgc-native-helper.exe
   --capture-continuous-display
   --display-bounds <x,y,width,height>
+  --capture-continuous-window
+  --window-hwnd <non-zero-64-bit-hwnd>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
   --duration-ms <1000..10000>
@@ -103,7 +105,29 @@ Monitor[1]: x=3840 y=0 width=1920 height=1080 primary=false
 WgcSupported: true
 D3d11Initialized: true
 EncoderCreated: true
+WindowCaptureSupported: true
 ```
+
+### 连续 window 录制模式（helper 0.2.0）
+
+托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–10 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；`AGENT_RECORDER_WINDOW_BACKEND=wgc` 继续保留 legacy 单帧 WGC 行为。
+
+```text
+wgc-native-helper.exe
+  --capture-continuous-window
+  --window-hwnd <non-zero-64-bit-hwnd>
+  --recording-id <safe-id>
+  --output <absolute-mp4-path>
+  --duration-ms <1000..10000>
+  --fps <1..60>
+  --begin-signal <absolute-path>
+  --begin-token <unguessable-token>
+  --begin-timeout-ms <100..300000>
+  --stop-signal <absolute-path>
+  --i-understand-this-captures-screen
+```
+
+窗口目标使用 `IGraphicsCaptureItemInterop::CreateForWindow`，输出事件的 `CaptureMethod` 为 `WGC_D3D11_WINDOW_FRAME_STREAM`。目标 HWND 失效、窗口最小化或不可用、窗口关闭、首次采集尺寸变化和 item 创建失败都会以目标专用错误终止；不会伪装成 display 失败，也不会等待通用 watchdog 超时。真实桌面已确认窗口捕获会显示 Windows 隐私边框和 Agent Recorder REC 指示；关闭/最小化/尺寸变化的最终失败语义由自动化覆盖，仍需在不同应用、GPU 和 Windows 版本上持续复验。
 
 ## Consent Invariant
 
@@ -152,6 +176,24 @@ ElapsedMs: <ms>
 BytesWritten: <bytes>
 ```
 
+### FIRST_FRAME
+
+```text
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: <non-negative monotonic ms>
+```
+
+显式首帧证据。语义与 `FramesCaptured` 严格区分：
+
+- **FIRST_FRAME**：一个源帧已经到达、被时间线接受、并且 GPU→BGRA 拷贝/暂存成功。它在首次拷贝成功后立即发射（不等编码器 finalize，也不等下一秒 PROGRESS tick），每个会话恰好一次——包括静态单帧源（整个会话只有一帧、编码写入只发生在 finalize 时）也会及时发射。
+- **FramesCaptured**：已提交到编码器的样本数，保持编码输出语义不变；FIRST_FRAME 不会提前或伪造该计数。
+
+发射条件（缺一不可）：已通过 begin 授权、`StartCapture` 成功、收到源帧、时间线接受、拷贝成功。仅写出 `STARTED`、帧回调触发或帧入队都不构成本事件；拷贝失败或时间线拒绝时不发射；begin 授权之前出现本事件属于协议违规。
+
+所有事件块在写出侧按整块串行化：FIRST_FRAME 由编码 worker 线程发射，PROGRESS/终态事件由主线程发射，单个互斥锁保证块与块之间不会逐行交错。
+
 ### OK
 
 ```text
@@ -193,6 +235,7 @@ BytesWritten: <bytes>
 ## 架构要点
 
 - **显示器匹配**：helper 通过嵌入的 Per-Monitor V2 manifest 将进程设置为物理像素坐标空间，再由 `wmain` 入口调用 `SetProcessDpiAwarenessContext`（manifest 已固定时返回 `ERROR_ACCESS_DENIED`，随后验证当前上下文）做二次确认；之后根据 `--display-bounds` 枚举 `HMONITOR` 并做完整矩形精确匹配。找不到或多匹配时失败。`--display-bounds` 始终表示虚拟桌面的物理像素，与 Agent Recorder API 的 `/api/v1/displays[].bounds` 一致。
+- **窗口匹配**：window 模式严格解析非零 64 位 HWND，使用 `IsWindow`、`IsIconic`、`GetWindowRect` 做启动前与 `StartCapture` 前的 Win32 元数据复核，再通过 `IGraphicsCaptureItemInterop::CreateForWindow` 创建 capture item；不把窗口边界伪装成 monitor bounds。
 - **D3D/WGC**：使用 BGRA-capable D3D11 设备，通过 `IGraphicsCaptureItemInterop::CreateForMonitor` 创建 capture item，`Direct3D11CaptureFramePool::CreateFreeThreaded` 接收帧。保留系统默认 WGC 隐私边框，不关闭 `IsBorderRequired`。
 - **帧背压**：有界帧队列（最大 3 帧），队列满时按策略丢旧帧或拒绝新帧并累计 `FramesDropped`。`FrameArrived` 回调只做 `TryGetNextFrame`、最小校验和有界入队；GPU->CPU 拷贝与编码在 worker 线程执行。
 - **编码**：Media Foundation Sink Writer，输入 `RGB32`（top-down，BGRA 内存布局直接映射），输出 `H.264`/`MFVideoFormat_H264`，软件编码优先（`MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS=FALSE`）。
@@ -215,10 +258,10 @@ BytesWritten: <bytes>
 
 ## 已知限制
 
-- 本轮仅实现 **单个 display** 连续录制，不做 window、region、硬件编码、麦克风或系统声音。
+- 本轮实现单个 display 与单个 window 的连续 WGC 视频切片；不做 region、硬件编码、麦克风或系统声音。display 已完成 10/10 真实验收；window 已完成真实基础捕获，最新倒计时与关闭/最小化/尺寸变化提示仍需一次检查点复验。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
 - Windows 自带的 WGC 黄色边框是系统隐私提示，本 helper 不尝试绕过或隐藏。
-- 2026-08-03 已完成受控 selector 产品路径的主屏 `3840x2160`、30 FPS、10 秒真实录制，产出 300 帧、10.000 秒且可由 FFprobe 解析的 H.264 MP4。C# 托管会话、`ICaptureBackend`、非捕获可用性探测、短期缓存和 FFmpeg 回退均已接线；self-contained portable 包会在 `AgentRecorder.WgcHelper\wgc-native-helper.exe` 携带唯一生产 helper。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；下一步是完成 10/10 真实录制稳定性验收，而不是继续扩展公共能力。
+- 2026-08-04 已完成受控 selector 产品路径的 10/10 真实稳定性验收。10 次主屏录制均由本地用户确认后进入 `wgc-continuous`，产出 `3840x2160`、30 FPS、298-300 帧、9.933-10.000 秒且可完整解码的 H.264 MP4；审计顺序、终态、helper 退出和 partial/staging 清理均通过。C# 托管会话、`ICaptureBackend`、非捕获可用性探测、短期缓存和 FFmpeg 回退均已接线；self-contained portable 包会在 `AgentRecorder.WgcHelper\wgc-native-helper.exe` 携带唯一生产 helper。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；后续能力继续按 window、region、硬编、系统声音的顺序独立验收。
 
 ## 测试
 

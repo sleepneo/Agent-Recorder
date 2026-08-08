@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -23,6 +24,7 @@ namespace AgentRecorder.Tests;
 /// in a separate non-parallel collection verifies Dispose cleans up a live
 /// subprocess tree.
 /// </summary>
+[Collection("NonParallel-WindowBackend")]
 public sealed class WgcContinuousCaptureBackendTests : IDisposable
 {
     private readonly string _tempDir;
@@ -171,7 +173,10 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             throw new TimeoutException(message ?? "Condition was not met within the allotted timeout.");
     }
 
-    private string[] Started(string recordingId, string outputPath) => new[]
+    private string[] Started(
+        string recordingId,
+        string outputPath,
+        string captureMethod = "WGC_D3D11_FRAME_STREAM") => new[]
     {
         "RESULT: STARTED",
         $"RecordingId: {recordingId}",
@@ -181,7 +186,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         "Fps: 30",
         "Width: 1920",
         "Height: 1080",
-        "CaptureMethod: WGC_D3D11_FRAME_STREAM",
+        $"CaptureMethod: {captureMethod}",
         ""
     };
 
@@ -329,7 +334,39 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     // -----------------------------------------------------------------
 
     [Fact]
-    public void Start_InvalidSourceKind_Window_RejectedBeforeHelperStart()
+    public async Task Start_ValidWindow_UsesWindowTargetAndArguments()
+    {
+        string outputPath = Path.Combine(_finalDir, "window.mp4");
+        CreatePlaceholderMp4(outputPath, 1024);
+        var process = new FakeWgcContinuousProcess(
+            Started("r-window", outputPath, "WGC_D3D11_WINDOW_FRAME_STREAM")
+                .Concat(Ok(fileSize: 1024)).ToArray(),
+            createOutputFile: true,
+            outputFilePath: outputPath,
+            outputFileSize: 1024);
+        var backend = CreateBackend(process, out _, out _);
+
+        var cfg = CreateValidConfig(outputPath);
+        cfg.SourceKind = "window";
+        cfg.WindowHandle = (nint)0x1234;
+
+        backend.Start(cfg);
+
+        Assert.NotNull(_lastHarness);
+        Assert.Equal(WgcContinuousTargetKind.Window, _lastHarness!.Options.TargetKind);
+        Assert.Equal((nint)0x1234, _lastHarness.Options.WindowHandle);
+        var args = _lastHarness.Process.CapturedArguments!;
+        Assert.Equal("--capture-continuous-window", args[0]);
+        Assert.Equal("--window-hwnd", args[1]);
+        Assert.Equal("0x1234", args[2]);
+        Assert.DoesNotContain("--display-bounds", args);
+
+        await process.BeginSignalObservedTask.WaitAsync(TimeSpan.FromSeconds(5));
+        backend.Dispose();
+    }
+
+    [Fact]
+    public void Start_WindowWithoutHwnd_RejectedBeforeHelperStart()
     {
         var process = new FakeWgcContinuousProcess(Array.Empty<string>());
         var backend = CreateBackend(process, out _, out _);
@@ -340,7 +377,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
-        Assert.Contains("display", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HWND", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(0, process.StartInvocationCount);
     }
 
@@ -709,6 +746,28 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         Assert.False(meta.OutputFileExists);
         Assert.Contains("wgc_continuous", string.Join(" ", meta.Warnings), StringComparison.Ordinal);
         Assert.NotEqual(0, backend.ExitCode);
+    }
+
+    [Theory]
+    [InlineData("window_closed")]
+    [InlineData("window_minimized")]
+    [InlineData("size_changed")]
+    public void HelperLifecycleFailure_OutputMetaKeepsSpecificStopReason(string reason)
+    {
+        string outputPath = Path.Combine(_finalDir, $"{reason}.mp4");
+        var process = new FakeWgcContinuousProcess(
+            initialStdout: Fail(reason, reason),
+            exitCode: 1);
+
+        var backend = CreateBackend(process, out var publisher, out _);
+        backend.Start(CreateValidConfig(outputPath));
+        var meta = backend.Stop();
+
+        Assert.Equal(reason, meta.StopReason);
+        Assert.Contains($"wgc_continuous_{reason}", string.Join(" ", meta.Warnings));
+        Assert.False(meta.OutputFileExists);
+        Assert.Equal(0, publisher.CallCount);
+        Assert.False(File.Exists(outputPath));
     }
 
     // -----------------------------------------------------------------
@@ -1336,6 +1395,83 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         Assert.Equal(0, publisher.CallCount);
         Assert.Contains("wgc_continuous_output_validation_failed", string.Join(" ", meta.Warnings));
         Assert.False(Directory.Exists(Path.GetDirectoryName(_lastHarness!.Options.OutputPath)!));
+    }
+
+    [Fact]
+    public void CorrectedNearTenSecondMedia_PassesStrictValidationAndPublishes()
+    {
+        string outputPath = Path.Combine(_finalDir, "corrected-near-ten-second.mp4");
+        const long stagingSize = 1340075;
+        var process = new FakeWgcContinuousProcess(
+            initialStdout: Started("r-corrected-near-ten", outputPath).ToArray(),
+            finalStdout: Ok(frames: 300, durationMs: 10008, fileSize: stagingSize).ToArray(),
+            createOutputFile: true,
+            outputFilePath: outputPath,
+            outputFileSize: stagingSize,
+            exitCode: 0);
+
+        var backend = CreateBackend(process, out var publisher, out var probe);
+        probe.OnProbe = _ => new OutputMeta
+        {
+            Container = "mp4",
+            Codec = "h264",
+            Width = 1920,
+            Height = 1080,
+            Fps = 30,
+            DurationSeconds = 10.008,
+            SizeBytes = stagingSize
+        };
+
+        backend.Start(CreateValidConfig(outputPath, durationSeconds: 10));
+        var meta = backend.Stop();
+
+        Assert.True(meta.OutputFileExists);
+        Assert.Equal(outputPath, meta.OutputPath);
+        Assert.Equal(1, publisher.CallCount);
+        Assert.Equal(0, backend.ExitCode);
+        Assert.Empty(meta.Warnings);
+        Assert.True(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void OutputValidationFailure_PreservesHelperExitCodeAndStructuredCategory()
+    {
+        string outputPath = Path.Combine(_finalDir, "probe-duration-mismatch.mp4");
+        const long stagingSize = 1340075;
+        var process = new FakeWgcContinuousProcess(
+            initialStdout: Started("r-duration-mismatch", outputPath).ToArray(),
+            finalStdout: Ok(frames: 300, durationMs: 10008, fileSize: stagingSize).ToArray(),
+            createOutputFile: true,
+            outputFilePath: outputPath,
+            outputFileSize: stagingSize,
+            exitCode: 0);
+
+        var backend = CreateBackend(process, out var publisher, out var probe);
+        probe.OnProbe = _ => new OutputMeta
+        {
+            Container = "mp4",
+            Codec = "h264",
+            Width = 1920,
+            Height = 1080,
+            Fps = 30,
+            DurationSeconds = 10.833,
+            SizeBytes = stagingSize
+        };
+
+        backend.Start(CreateValidConfig(outputPath, durationSeconds: 10));
+        var meta = backend.Stop();
+
+        Assert.False(meta.OutputFileExists);
+        Assert.Equal(0, publisher.CallCount);
+        Assert.Equal(0, backend.ExitCode);
+        Assert.Equal("output_validation_failed", meta.StopReason);
+        Assert.Contains("duration_mismatch: probe=10833ms summary=10008ms", meta.Warnings);
+        Assert.Contains("wgc_continuous_output_validation_failed", meta.Warnings);
+        string warnings = string.Join(" ", meta.Warnings);
+        Assert.DoesNotContain("wgc_continuous_unexpected_terminal_state", warnings);
+        Assert.DoesNotContain("unexpected_exit", warnings);
+        Assert.DoesNotContain("non_zero_exit", warnings);
+        Assert.False(File.Exists(outputPath));
     }
 
     [Theory]
@@ -2073,7 +2209,14 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             string outputPath = Path.Combine(_finalDir, $"concurrent-race-{i}.mp4");
             CreatePlaceholderMp4(outputPath, 1024);
 
-            var session = new FakeSession(CreateOptionsWithHelperPath());
+            // Use a synchronous-completion fake so the backend completion continuation
+            // runs directly on the dedicated LongRunning thread that calls
+            // TrySetResult, instead of being reposted to the thread pool where xUnit
+            // parallel tests can delay it. Together with OnBeforeCallbackArbiterForTests
+            // this makes the arbiter-CAS ordering fully deterministic.
+            var session = new FakeSession(
+                CreateOptionsWithHelperPath(),
+                runCompletionContinuationsAsynchronously: false);
             session.AuthorizeTcs.TrySetResult(true);
 
             var backend = CreateBackend(_ => session, out _, out _);
@@ -2087,42 +2230,142 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
             backend.Start(CreateValidConfig(outputPath));
 
-            if (i % 2 == 0)
-            {
-                // Race 1: Start Dispose exactly after the completion owner claims
-                // Completing, while the callback is still arbitrated.
-                var disposeTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                backend.OnCompletingForTests = () =>
-                {
-                    completingEntered.TrySetResult();
-                    _ = Task.Run(() =>
-                    {
-                        backend.Dispose();
-                        disposeTask.TrySetResult();
-                    });
-                };
+            Task? completionOwnerTask = null;
+            Task? disposeOwnerTask = null;
+            TaskCompletionSource? releaseBeforeCallbackArbiter = null;
 
-                _ = Task.Run(() => session.CompletionTcs.TrySetResult(session.DefaultResult));
-                await completingEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await WaitForConditionAsync(
-                    () => backend.NotificationStateNameForTests == "DisposeClaimed",
-                    TimeSpan.FromSeconds(5),
-                    $"Iteration {i}: Dispose should claim the notification arbiter.");
-                callbackBarrier.TrySetResult();
-                await disposeTask.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            }
-            else
+            // Wrap each iteration so any early-exit exception still releases the
+            // completion-owner thread's wait at the callback barrier. Without this,
+            // a timeout on WaitForConditionAsync would leave a thread pool worker
+            // blocked for up to 10s, and accumulated blocked workers across 20
+            // iterations starve the xUnit parallel scheduler in full-suite runs.
+            try
             {
-                // Race 2: Natural completion wins before Dispose starts.
-                backend.OnCompletingForTests = () => completingEntered.TrySetResult();
-                _ = Task.Run(() => session.CompletionTcs.TrySetResult(session.DefaultResult));
-                await completingEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (i % 2 == 0)
+                {
+                    // Race 1: Dispose must claim the single atomic notification
+                    // arbiter BEFORE the completion owner runs its CAS in the
+                    // callback-claim path.
+                    //
+                    // We pause the completion owner after publish/probe at the
+                    // OnBeforeCallbackArbiterForTests seam (the exact code point
+                    // just before it calls Interlocked.CompareExchange to claim
+                    // CallbackClaimed on the shared arbiter word). Dispose is
+                    // then launched with the arbiter still "Open", so its
+                    // ClaimDisposeNotification CAS wins deterministically.
+                    var beforeCallbackArbiterReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    releaseBeforeCallbackArbiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                    // Overwrite seams set earlier for this iteration's path.
+                    backend.OnCompletingForTests = () => completingEntered.TrySetResult();
+                    backend.OnBeforeCallbackArbiterForTests = () =>
+                    {
+                        beforeCallbackArbiterReached.TrySetResult();
+                        releaseBeforeCallbackArbiter.Task.Wait(TimeSpan.FromSeconds(10));
+                    };
+
+                    // Launch the completion owner on a dedicated LongRunning thread
+                    // so the synchronous continuation runs there and blocks at the
+                    // callback-arbiter seam (no thread-pool repost).
+                    completionOwnerTask = Task.Factory.StartNew(
+                        () => session.CompletionTcs.TrySetResult(session.DefaultResult),
+                        CancellationToken.None,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default);
+
+                    // Wait for the completion owner to:
+                    //   (a) win the lifecycle CAS to Completing (completingEntered)
+                    //   (b) finish publish/probe and block at the pre-arbiter seam
+                    //       (beforeCallbackArbiterReached)
+                    // At this point the shared notification arbiter is still "Open"
+                    // because the completion thread is paused one instruction before
+                    // its CallbackClaimed CAS.
+                    await completingEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    await beforeCallbackArbiterReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                    // Now Dispose on the thread pool; ClaimDisposeNotification sees
+                    // "Open" and sets it to DisposeClaimed before the completion
+                    // owner can resume.
+                    disposeOwnerTask = Task.Factory.StartNew(
+                        () =>
+                        {
+                            backend.Dispose();
+                        },
+                        CancellationToken.None,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default);
+
+                    await WaitForConditionAsync(
+                        () => backend.NotificationStateNameForTests == "DisposeClaimed",
+                        TimeSpan.FromSeconds(5),
+                        $"Iteration {i}: Dispose should claim the notification arbiter.");
+
+                    // Only after Dispose owns the arbiter do we release the
+                    // completion owner to attempt its (now doomed) CallbackClaimed
+                    // CAS and reach the callback-dispatch wait.
+                    releaseBeforeCallbackArbiter.TrySetResult();
+                    callbackBarrier.TrySetResult();
+                    await disposeOwnerTask.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                else
+                {
+                    // Race 2: Natural completion wins the notification arbiter
+                    // before Dispose is ever invoked. Determinism here comes from
+                    // waiting for NaturalExitCallbackCount==1 (evidence of
+                    // CallbackClaimed + dispatch start) before calling Dispose.
+                    backend.OnCompletingForTests = () => completingEntered.TrySetResult();
+                    completionOwnerTask = Task.Factory.StartNew(
+                        () => session.CompletionTcs.TrySetResult(session.DefaultResult),
+                        CancellationToken.None,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default);
+                    await completingEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    callbackBarrier.TrySetResult();
+                    await WaitForConditionAsync(
+                        () => backend.NaturalExitCallbackCountForTests == 1,
+                        TimeSpan.FromSeconds(5),
+                        $"Iteration {i}: Natural callback should fire exactly once.");
+                    backend.Dispose();
+                }
+            }
+            finally
+            {
+                // Release both Race 1 seams before joining either owner. This must
+                // run on every path so a failed assertion cannot strand a thread.
+                releaseBeforeCallbackArbiter?.TrySetResult();
                 callbackBarrier.TrySetResult();
-                await WaitForConditionAsync(
-                    () => backend.NaturalExitCallbackCountForTests == 1,
-                    TimeSpan.FromSeconds(5),
-                    $"Iteration {i}: Natural callback should fire exactly once.");
-                backend.Dispose();
+
+                // Observe both owned tasks and continue joining after the first
+                // failure so no owner leaks into the next iteration.
+                Exception? cleanupFailure = null;
+                if (completionOwnerTask is not null)
+                {
+                    try
+                    {
+                        await completionOwnerTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupFailure ??= new InvalidOperationException(
+                            $"Iteration {i}: completion owner did not exit cleanly.", ex);
+                    }
+                }
+
+                if (disposeOwnerTask is not null)
+                {
+                    try
+                    {
+                        await disposeOwnerTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupFailure ??= new InvalidOperationException(
+                            $"Iteration {i}: Dispose owner did not exit cleanly.", ex);
+                    }
+                }
+
+                if (cleanupFailure is not null)
+                    throw cleanupFailure;
             }
 
             Assert.True(
@@ -2135,6 +2378,167 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             Assert.True(backend.NaturalExitCallbackCountForTests <= 1, $"Iteration {i}: callback fired more than once.");
             Assert.Equal(1, session.DisposeCount);
         }
+
+        for (int cleanupIteration = 0; cleanupIteration < 20; cleanupIteration++)
+        {
+            await RunEarlyCancellationCleanupRegressionAsync(cleanupIteration, forceSetupFailure: false);
+            await RunEarlyCancellationCleanupRegressionAsync(cleanupIteration, forceSetupFailure: true);
+        }
+    }
+
+    private async Task RunEarlyCancellationCleanupRegressionAsync(int iteration, bool forceSetupFailure)
+    {
+        string pathKind = forceSetupFailure ? "setup-failure" : "early-cancellation";
+        string outputPath = Path.Combine(_finalDir, $"concurrent-race-{pathKind}-{iteration}.mp4");
+        CreatePlaceholderMp4(outputPath, 1024);
+
+        var session = new FakeSession(
+            CreateOptionsWithHelperPath(),
+            runCompletionContinuationsAsynchronously: false);
+        session.AuthorizeTcs.TrySetResult(true);
+
+        var backend = CreateBackend(_ => session, out _, out _);
+        var beforeCallbackArbiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBeforeCallbackArbiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDispose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var forcedSetupFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        backend.OnBeforeCallbackArbiterForTests = () =>
+        {
+            beforeCallbackArbiter.TrySetResult();
+            releaseBeforeCallbackArbiter.Task.Wait(TimeSpan.FromSeconds(10));
+        };
+        backend.OnDisposeAfterCompletingCasForTests = () =>
+        {
+            if (forceSetupFailure)
+            {
+                forcedSetupFailure.TrySetException(new InvalidOperationException(
+                    $"Iteration {iteration}: synthetic setup failure before Dispose seam notification."));
+            }
+            else
+            {
+                disposeEntered.TrySetResult();
+            }
+            releaseDispose.Task.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        Task? completionOwner = null;
+        Task? disposeOwner = null;
+        Exception? primaryFailure = null;
+        bool cancellationObserved = false;
+        var cleanupFailures = new List<Exception>();
+        try
+        {
+            // The outer try begins before Start and before either setup wait, so
+            // setup failures use the same release-and-join path as body failures.
+            backend.Start(CreateValidConfig(outputPath));
+            File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
+
+            completionOwner = Task.Factory.StartNew(
+                () => session.CompletionTcs.TrySetResult(session.DefaultResult),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            await beforeCallbackArbiter.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            disposeOwner = Task.Factory.StartNew(
+                backend.Dispose,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+            if (forceSetupFailure)
+            {
+                // The callback deliberately does not complete disposeEntered;
+                // this fails the setup wait immediately while Dispose is paused.
+                await forcedSetupFailure.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            else
+            {
+                await disposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                using var cancellation = new CancellationTokenSource();
+                cancellation.Cancel();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!forceSetupFailure)
+        {
+            cancellationObserved = true;
+            try
+            {
+                releaseDispose.TrySetResult();
+                await WaitForConditionAsync(
+                    () => backend.NotificationStateNameForTests == "DisposeClaimed",
+                    TimeSpan.FromSeconds(5),
+                    "Dispose owner should claim the arbiter during early cleanup.");
+                releaseBeforeCallbackArbiter.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                primaryFailure = ex;
+            }
+        }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+        }
+        finally
+        {
+            // Release all armed seams even when Start or either setup wait fails.
+            releaseDispose.TrySetResult();
+            releaseBeforeCallbackArbiter.TrySetResult();
+
+            foreach ((Task? task, string label) in new[]
+            {
+                (completionOwner, "completion owner"),
+                (disposeOwner, "Dispose owner")
+            })
+            {
+                if (task is null)
+                    continue;
+
+                try
+                {
+                    await task.WaitAsync(TimeSpan.FromSeconds(5));
+                }
+                catch (Exception ex)
+                {
+                    cleanupFailures.Add(new InvalidOperationException(
+                        $"Iteration {iteration} ({pathKind}): {label} did not exit cleanly.", ex));
+                }
+            }
+        }
+
+        if (primaryFailure is not null && cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                $"Iteration {iteration} ({pathKind}) failed during setup/body and cleanup.",
+                new[] { primaryFailure }.Concat(cleanupFailures));
+        }
+
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException(
+                $"Iteration {iteration} ({pathKind}) owned-task cleanup failed.",
+                cleanupFailures);
+
+        if (forceSetupFailure)
+        {
+            Assert.NotNull(primaryFailure);
+            Assert.IsType<InvalidOperationException>(primaryFailure);
+            Assert.False(disposeEntered.Task.IsCompleted);
+            Assert.True(completionOwner?.IsCompleted == true);
+            Assert.True(disposeOwner?.IsCompleted == true);
+            return;
+        }
+
+        if (primaryFailure is not null)
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+
+        Assert.True(cancellationObserved);
+        Assert.Equal("Disposed", backend.LifecycleStateNameForTests);
+        Assert.Equal(0, backend.NaturalExitCallbackCountForTests);
+        Assert.Equal(1, session.DisposeCount);
     }
 
     [Fact]
@@ -2171,22 +2575,84 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         CreatePlaceholderMp4(outputPath, 1024);
         byte[] existingBytes = File.ReadAllBytes(outputPath);
 
-        var session = new FakeSession(CreateOptionsWithHelperPath());
-        session.AuthorizeTcs.TrySetResult(true);
-
-        var backend = CreateBackend(_ => session, out var publisher, out _);
+        // Run the completion continuation on the owned LongRunning task below so
+        // the test has a handle for the completion owner it deliberately parks.
+        // Construct the session from the backend-supplied options so the staging
+        // file written below is the same path the completion owner will publish.
+        FakeSession? session = null;
+        var backend = CreateBackend(options =>
+        {
+            session = new FakeSession(options, runCompletionContinuationsAsynchronously: false);
+            session.AuthorizeTcs.TrySetResult(true);
+            return session;
+        }, out var publisher, out _);
         backend.DisposeGraceTimeoutForTests = TimeSpan.FromMilliseconds(50);
         backend.DisposeDrainTimeoutForTests = TimeSpan.FromMilliseconds(50);
 
         var lifecycleCasObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var secondDisposeEnteredDisposing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondDisposeEnteredDisposing = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirstDispose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var allowPublish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var firstDisposeCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publishEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstDisposeStarted = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ownedTasks = new List<(Task Task, string Label)>();
+        var taskGate = new object();
+        var cleanupFailures = new List<Exception>();
+        Exception? primaryFailure = null;
+
+        void Track(Task task, string label)
+        {
+            lock (taskGate)
+                ownedTasks.Add((task, label));
+        }
+
+        async Task JoinOwnedTasksAsync()
+        {
+            // The completion owner can create the first Dispose owner from its
+            // callback. Join in bounded passes so that owner is observed after
+            // the completion task has been released, even on a setup failure.
+            for (int pass = 0; pass < 3; pass++)
+            {
+                (Task Task, string Label)[] snapshot;
+                lock (taskGate)
+                    snapshot = ownedTasks.ToArray();
+
+                foreach (var entry in snapshot)
+                {
+                    try
+                    {
+                        await entry.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupFailures.Add(new InvalidOperationException(
+                            $"Dispose-wins cleanup could not join {entry.Label}.", ex));
+                    }
+                }
+
+                lock (taskGate)
+                {
+                    if (ownedTasks.All(entry => entry.Task.IsCompleted))
+                        return;
+                }
+            }
+
+            lock (taskGate)
+            {
+                foreach (var entry in ownedTasks.Where(entry => !entry.Task.IsCompleted))
+                {
+                    cleanupFailures.Add(new TimeoutException(
+                        $"Dispose-wins cleanup left {entry.Label} incomplete."));
+                }
+            }
+        }
 
         publisher.OnPublishAsync = (staging, final, ct, gate) =>
         {
-            allowPublish.Task.Wait(TimeSpan.FromSeconds(10));
+            // This event proves the completion owner is parked before any
+            // notification callback can win the arbiter.
+            publishEntered.TrySetResult();
+            allowPublish.Task.GetAwaiter().GetResult();
             long size = 0;
             try
             {
@@ -2199,56 +2665,102 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         backend.OnCompletingForTests = () =>
         {
-            _ = Task.Factory.StartNew(() =>
-            {
-                backend.Dispose();
-                firstDisposeCompleted.TrySetResult();
-            }, TaskCreationOptions.LongRunning);
+            var firstDisposeTask = Task.Factory.StartNew(
+                () => backend.Dispose(),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Track(firstDisposeTask, "first Dispose owner");
+            firstDisposeStarted.TrySetResult(firstDisposeTask);
         };
 
         backend.OnDisposeAfterCompletingCasForTests = () =>
         {
             lifecycleCasObserved.TrySetResult();
-            releaseFirstDispose.Task.Wait(TimeSpan.FromSeconds(10));
+            releaseFirstDispose.Task.GetAwaiter().GetResult();
         };
 
-        backend.OnDisposeDisposingWaitForTests = () => secondDisposeEnteredDisposing.TrySetResult();
+        backend.OnDisposeDisposingWaitForTests = () =>
+            secondDisposeEnteredDisposing.TrySetResult(backend.NotificationStateNameForTests);
 
-        backend.Start(CreateValidConfig(outputPath));
-        File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
+        try
+        {
+            backend.Start(CreateValidConfig(outputPath));
+            // Match FakeSession.DefaultResult.Summary.FileSize and FakeProbe so
+            // validation reaches the publisher gate instead of bypassing it.
+            File.WriteAllBytes(session!.Options.OutputPath, new byte[10000]);
 
-        // Use a long-running task for the synchronous completion continuation so
-        // the dedicated thread blocks at the publisher boundary instead of
-        // starving the thread pool that runs the Dispose tasks.
-        _ = Task.Factory.StartNew(() => session.CompletionTcs.TrySetResult(session.DefaultResult), TaskCreationOptions.LongRunning);
+            // With synchronous fake continuations this task is the completion
+            // owner and remains joinable while the publisher gate is held.
+            var completionOwnerTask = Task.Factory.StartNew(
+                () => session!.CompletionTcs.TrySetResult(session.DefaultResult),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Track(completionOwnerTask, "completion owner");
 
-        await lifecycleCasObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await lifecycleCasObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await publishEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var secondDisposeTask = Task.Factory.StartNew(() => backend.Dispose(), TaskCreationOptions.LongRunning);
-        await secondDisposeEnteredDisposing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // The existing post-claim seam is the ordering proof: once this
+            // event fires, the second Dispose has already CASed DisposeClaimed.
+            var secondDisposeTask = Task.Factory.StartNew(
+                () => backend.Dispose(),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Track(secondDisposeTask, "second Dispose owner");
 
-        // The second Dispose must be able to close the notification arbiter
-        // independently while the first Dispose is still paused before its own
-        // ClaimDisposeNotification call.
-        await WaitForConditionAsync(
-            () => backend.NotificationStateNameForTests == "DisposeClaimed",
-            TimeSpan.FromSeconds(5),
-            "Second Dispose should close the single atomic notification arbiter while the first is paused.");
+            string secondDisposeState = await secondDisposeEnteredDisposing.Task
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("DisposeClaimed", secondDisposeState);
 
-        // Release the first Dispose only after the arbiter is closed.
-        releaseFirstDispose.TrySetResult();
+            // Release the first Dispose only after the second Dispose has
+            // directly proved ownership of the notification arbiter.
+            releaseFirstDispose.TrySetResult();
+            var firstDisposeTask = await firstDisposeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstDisposeTask.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // Now allow ProcessResult to continue; its callback CAS must fail.
-        allowPublish.TrySetResult();
+            // First Dispose has now closed the commit gate; only then release
+            // the parked publisher so it can prove no final-file replacement.
+            allowPublish.TrySetResult();
+            await completionOwnerTask.WaitAsync(TimeSpan.FromSeconds(5));
+            await secondDisposeTask.WaitAsync(TimeSpan.FromSeconds(5));
 
-        await firstDisposeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await secondDisposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("Disposed", backend.LifecycleStateNameForTests);
+            Assert.Equal("DisposeClaimed", backend.NotificationStateNameForTests);
+            Assert.Equal(0, backend.NaturalExitCallbackCountForTests);
+            Assert.Equal(1, session!.DisposeCount);
+            Assert.Equal(existingBytes, File.ReadAllBytes(outputPath));
+        }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+        }
+        finally
+        {
+            // Detach all test seams first, then release every gate regardless of
+            // which setup/assertion step failed.
+            backend.OnCompletingForTests = null;
+            backend.OnDisposeAfterCompletingCasForTests = null;
+            backend.OnDisposeDisposingWaitForTests = null;
+            releaseFirstDispose.TrySetResult();
+            allowPublish.TrySetResult();
+            await JoinOwnedTasksAsync();
+        }
 
-        Assert.Equal("Disposed", backend.LifecycleStateNameForTests);
-        Assert.Equal("DisposeClaimed", backend.NotificationStateNameForTests);
-        Assert.Equal(0, backend.NaturalExitCallbackCountForTests);
-        Assert.Equal(1, session.DisposeCount);
-        Assert.Equal(existingBytes, File.ReadAllBytes(outputPath));
+        if (primaryFailure is not null && cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                "Dispose-wins race failed and worker cleanup also failed.",
+                new[] { primaryFailure }.Concat(cleanupFailures));
+        }
+
+        if (primaryFailure is not null)
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException("Dispose-wins worker cleanup failed.", cleanupFailures);
     }
 
     [Fact]

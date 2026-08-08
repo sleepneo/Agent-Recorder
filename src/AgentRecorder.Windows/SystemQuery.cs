@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 namespace AgentRecorder.Windows;
 
 public static class SystemQuery
@@ -31,26 +32,32 @@ public static class SystemQuery
     /// Injectable display provider for testing. When set, EnumDisplays() returns
     /// displays from this provider instead of the real Win32 API.
     /// </summary>
-    private static Func<List<DisplayInfo>>? _displayProvider;
+    // Test overrides are scoped to the current async execution context. With
+    // no override configured these values are null and the production Win32
+    // enumeration path is unchanged. AsyncLocal prevents an unrelated test
+    // from observing a provider installed by a sibling test while preserving
+    // the intended flow into child tasks/UI work created by that test.
+    private static readonly AsyncLocal<Func<List<DisplayInfo>>?> _displayProvider = new();
 
     /// <summary>
     /// Injectable detail provider for tests that need to control DPI/handle values
     /// consumed by <see cref="DisplayDpiResolver"/>.
     /// </summary>
-    private static Func<List<DisplayDetail>>? _displayDetailProvider;
+    private static readonly AsyncLocal<Func<List<DisplayDetail>>?> _displayDetailProvider = new();
 
-    private static Func<WindowInfo?>? _activeWindowProvider;
-    private static Func<bool, bool, List<WindowInfo>>? _windowProvider;
+    private static readonly AsyncLocal<Func<WindowInfo?>?> _activeWindowProvider = new();
+    private static readonly AsyncLocal<Func<bool, bool, List<WindowInfo>>?> _windowProvider = new();
 
-    public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider) => _displayProvider = provider;
-    internal static void SetDisplayDetailProvider(Func<List<DisplayDetail>>? provider) => _displayDetailProvider = provider;
-    public static void SetActiveWindowProvider(Func<WindowInfo?>? provider) => _activeWindowProvider = provider;
-    public static void SetWindowProvider(Func<bool, bool, List<WindowInfo>>? provider) => _windowProvider = provider;
+    public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider) => _displayProvider.Value = provider;
+    internal static void SetDisplayDetailProvider(Func<List<DisplayDetail>>? provider) => _displayDetailProvider.Value = provider;
+    public static void SetActiveWindowProvider(Func<WindowInfo?>? provider) => _activeWindowProvider.Value = provider;
+    public static void SetWindowProvider(Func<bool, bool, List<WindowInfo>>? provider) => _windowProvider.Value = provider;
 
     public static List<DisplayInfo> EnumDisplays()
     {
-        if (_displayProvider != null)
-            return _displayProvider();
+        var displayProvider = _displayProvider.Value;
+        if (displayProvider != null)
+            return displayProvider();
 
         return EnumDisplayDetails().Select(d => new DisplayInfo(d.id, d.name, d.is_primary, d.bounds, d.scale_factor)).ToList();
     }
@@ -61,12 +68,14 @@ public static class SystemQuery
     /// </summary>
     internal static List<DisplayDetail> EnumDisplayDetails()
     {
-        if (_displayDetailProvider != null)
-            return _displayDetailProvider();
+        var displayDetailProvider = _displayDetailProvider.Value;
+        if (displayDetailProvider != null)
+            return displayDetailProvider();
 
-        if (_displayProvider != null)
+        var displayProvider = _displayProvider.Value;
+        if (displayProvider != null)
         {
-            return _displayProvider()
+            return displayProvider()
                 .Select(d => new DisplayDetail(d.id, d.name, d.is_primary, d.bounds, d.scale_factor, 96, 96, IntPtr.Zero))
                 .ToList();
         }
@@ -137,8 +146,9 @@ public static class SystemQuery
 
     public static List<WindowInfo> EnumWindows(bool includeMinimized, bool includeSystem)
     {
-        if (_windowProvider != null)
-            return _windowProvider(includeMinimized, includeSystem);
+        var windowProvider = _windowProvider.Value;
+        if (windowProvider != null)
+            return windowProvider(includeMinimized, includeSystem);
 
         var list = new List<WindowInfo>();
         var fg = GetForegroundWindow();
@@ -197,8 +207,9 @@ public static class SystemQuery
 
     public static WindowInfo? ActiveWindow()
     {
-        if (_activeWindowProvider != null)
-            return _activeWindowProvider();
+        var activeWindowProvider = _activeWindowProvider.Value;
+        if (activeWindowProvider != null)
+            return activeWindowProvider();
 
         var fg = GetForegroundWindow();
         return EnumWindows(false, false).FirstOrDefault(w => w.id == $"window_{fg.ToInt64()}");

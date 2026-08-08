@@ -50,17 +50,19 @@ public class WgcContinuousPublicBoundaryTests
         AssertUnsupported(ex, "recording_mode", "continuous");
     }
 
-    [Fact]
-    public void ConfigParser_Build_CaptureMethodWgcStream_ThrowsUnsupportedFeature()
+    [Theory]
+    [InlineData("WGC_D3D11_FRAME_STREAM")]
+    [InlineData("WGC_D3D11_WINDOW_FRAME_STREAM")]
+    public void ConfigParser_Build_WgcCaptureMethod_ThrowsUnsupportedFeature(string captureMethod)
     {
         var cfg = Cfg(new
         {
-            capture_method = "WGC_D3D11_FRAME_STREAM",
+            capture_method = captureMethod,
             source = new { type = "display", display_id = "DISPLAY_1" }
         });
 
         var ex = Assert.Throws<ApiException>(() => ConfigParser.Build(cfg, "test", out _));
-        AssertUnsupported(ex, "capture_method", "WGC_D3D11_FRAME_STREAM");
+        AssertUnsupported(ex, "capture_method", captureMethod);
     }
 
     [Theory]

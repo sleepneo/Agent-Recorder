@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <format>
+#include <limits>
 #include <string>
 
 namespace wgc {
@@ -39,6 +40,43 @@ bool ParseDisplayBounds(std::wstring_view text, Rect& out) {
     return true;
 }
 
+bool ParseWindowHwndStrict(std::wstring_view text, std::uint64_t& out) {
+    if (text.empty() || text.front() == L'+' || text.front() == L'-') {
+        return false;
+    }
+
+    std::size_t index = 0;
+    int base = 10;
+    if (text.size() >= 2 && text[0] == L'0' && (text[1] == L'x' || text[1] == L'X')) {
+        base = 16;
+        index = 2;
+    }
+    if (index == text.size()) return false;
+
+    std::uint64_t value = 0;
+    for (; index < text.size(); ++index) {
+        const wchar_t c = text[index];
+        int digit = -1;
+        if (c >= L'0' && c <= L'9') {
+            digit = static_cast<int>(c - L'0');
+        } else if (base == 16 && c >= L'a' && c <= L'f') {
+            digit = static_cast<int>(c - L'a') + 10;
+        } else if (base == 16 && c >= L'A' && c <= L'F') {
+            digit = static_cast<int>(c - L'A') + 10;
+        }
+        if (digit < 0 || digit >= base) return false;
+        if (value > (std::numeric_limits<std::uint64_t>::max() - static_cast<std::uint64_t>(digit)) /
+                        static_cast<std::uint64_t>(base)) {
+            return false;
+        }
+        value = value * static_cast<std::uint64_t>(base) + static_cast<std::uint64_t>(digit);
+    }
+
+    if (value == 0) return false;
+    out = value;
+    return true;
+}
+
 std::string WError(std::wstring_view msg) {
     return WideToUtf8(msg);
 }
@@ -53,6 +91,10 @@ bool IsValidRecordingId(std::wstring_view id) {
         if (!ok) return false;
     }
     return true;
+}
+
+bool ParseWindowHwnd(std::wstring_view text, std::uint64_t& out) {
+    return ParseWindowHwndStrict(text, out);
 }
 
 ParseResult ParseArguments(int argc, wchar_t* argv[]) {
@@ -78,6 +120,10 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             opts.mode = CaptureMode::ContinuousDisplay;
             continue;
         }
+        if (EqualsArg(arg, L"capture-continuous-window")) {
+            opts.mode = CaptureMode::ContinuousWindow;
+            continue;
+        }
         if (EqualsArg(arg, L"i-understand-this-captures-screen")) {
             opts.hasConsentFlag = true;
             continue;
@@ -97,6 +143,13 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             if (!takeNext(value, L"display-bounds")) return result;
             if (!ParseDisplayBounds(value, opts.displayBounds)) {
                 result.error = "Invalid display-bounds format; expected x,y,width,height";
+                return result;
+            }
+        } else if (EqualsArg(arg, L"window-hwnd")) {
+            std::wstring value;
+            if (!takeNext(value, L"window-hwnd")) return result;
+            if (!ParseWindowHwnd(value, opts.windowHwnd)) {
+                result.error = "Invalid window-hwnd; expected a non-zero 64-bit HWND";
                 return result;
             }
         } else if (EqualsArg(arg, L"recording-id")) {

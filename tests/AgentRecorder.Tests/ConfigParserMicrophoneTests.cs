@@ -13,6 +13,7 @@ namespace AgentRecorder.Tests;
 /// Unit tests for microphone device resolution in <see cref="ConfigParser"/>.
 /// These tests exercise the request-parsing path without starting a real recording.
 /// </summary>
+[Collection("NonParallel-AgentRecorderEnvVar")]
 public class ConfigParserMicrophoneTests : IDisposable
 {
     private const string TestModeVar = "AGENT_RECORDER_TEST_MODE";

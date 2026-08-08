@@ -119,6 +119,12 @@ public static class WgcContinuousEventStreamParser
                     else
                         evt.FramesCapturedParseFailed = true;
                     break;
+                case "FrameNumber":
+                    if (long.TryParse(value, out var fn))
+                        evt.FrameNumber = fn;
+                    else
+                        evt.FrameNumberParseFailed = true;
+                    break;
                 case "FramesDropped":
                     if (long.TryParse(value, out var fd))
                         evt.FramesDropped = fd;
@@ -184,6 +190,7 @@ public static class WgcContinuousEventStreamParser
         {
             "STARTED" => ContinuousEventResult.Started,
             "PROGRESS" => ContinuousEventResult.Progress,
+            "FIRST_FRAME" => ContinuousEventResult.FirstFrame,
             "OK" => ContinuousEventResult.Ok,
             "STOPPED" => ContinuousEventResult.Stopped,
             "FAIL" => ContinuousEventResult.Fail,
@@ -243,6 +250,7 @@ public static class WgcContinuousEventStreamParser
 
         // Track state machine state
         bool seenStarted = false;
+        bool seenFirstFrame = false;
         bool seenTerminalEvent = false;
         bool hasMalformedSequence = false;
         string? firstRecordingId = null;
@@ -351,6 +359,50 @@ public static class WgcContinuousEventStreamParser
                         lastElapsedMs = evt.ElapsedMs.Value;
                     break;
 
+                case ContinuousEventResult.FirstFrame:
+                    // FIRST_FRAME is explicit first-source-frame evidence. It is
+                    // only valid after STARTED (and, by the session-level consent
+                    // gate, after authorization) and before any terminal event.
+                    if (!seenStarted)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("FIRST_FRAME event before STARTED");
+                    }
+                    if (seenTerminalEvent)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("FIRST_FRAME event after terminal event");
+                    }
+                    if (seenFirstFrame)
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Duplicate FIRST_FRAME event");
+                    }
+
+                    // Required FIRST_FRAME fields: FrameNumber (positive), ElapsedMs (non-negative)
+                    if (evt.FrameNumberParseFailed)
+                        summary.ValidationErrors.Add("FIRST_FRAME event failed to parse FrameNumber as integer");
+                    else if (!evt.FrameNumber.HasValue || evt.FrameNumber <= 0)
+                        summary.ValidationErrors.Add("FIRST_FRAME event missing required field: FrameNumber (positive integer)");
+
+                    if (evt.ElapsedMsParseFailed)
+                        summary.ValidationErrors.Add("FIRST_FRAME event failed to parse ElapsedMs as integer");
+                    else if (!evt.ElapsedMs.HasValue)
+                        summary.ValidationErrors.Add("FIRST_FRAME event missing required field: ElapsedMs");
+                    else if (evt.ElapsedMs < 0)
+                        summary.ValidationErrors.Add("FIRST_FRAME event ElapsedMs must be non-negative");
+
+                    if (!seenFirstFrame && seenStarted && !seenTerminalEvent
+                        && evt.FrameNumber.HasValue && evt.FrameNumber > 0
+                        && evt.ElapsedMs.HasValue && evt.ElapsedMs >= 0)
+                    {
+                        summary.FirstFrameObserved = true;
+                        summary.FirstFrameNumber = evt.FrameNumber;
+                        summary.FirstFrameElapsedMs = evt.ElapsedMs;
+                    }
+                    seenFirstFrame = true;
+                    break;
+
                 case ContinuousEventResult.Ok:
                     if (!seenStarted)
                     {
@@ -438,7 +490,10 @@ public static class WgcContinuousEventStreamParser
                     string[] failureStopReasons = new[]
                     {
                         "timeout", "cancelled", "encoding_error", "disk_full",
-                        "window_not_found", "zero_frames", "error"
+                        "window_not_found", "window_minimized", "window_unavailable",
+                        "window_factory_failed", "window_item_failed", "window_closed",
+                        "invalid_window_handle", "window_size_unsupported", "size_changed",
+                        "zero_frames", "error"
                     };
 
                     if (string.IsNullOrEmpty(evt.StopReason))

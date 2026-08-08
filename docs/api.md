@@ -89,7 +89,15 @@ This identifier is also written to the local performance trace file (`<data-dir>
 
 `capture.backend_start_returned` only means the capture backend's `Start()` call returned; it is **not** evidence that the first frame has been encoded or written.
 
-`capture.first_frame_observed` is only emitted for the default FFmpeg video path (`display`/`window`/`region`). It is produced exactly once when FFmpeg's `-nostats -progress pipe:1` output reports `frame >= 1`, `total_size > 0`, and the progress group ends normally (`progress=continue` or `progress=end`). It proves that FFmpeg has reported processing at least one video frame and that the output stream has positive bytes, giving an upper-bound latency from local user approval to first observable encoding/muxing progress. It is **not** the exact screen-capture first-frame delivery time, not a physical disk-flush guarantee, and not evidence that the MP4 is playable or has passed output validation. If FFmpeg never emits a qualifying progress group, this event may be absent.
+`capture.first_frame_observed` is emitted only after backend-specific credible
+evidence. On the default FFmpeg video path (`display`/`window`/`region`), it is
+produced once when `-progress pipe:1` reports `frame >= 1`, `total_size > 0`,
+and a normally completed progress group. This is an upper bound to observable
+encoding/muxing progress, not the exact physical capture or disk-flush time. On
+the experimental WGC continuous path, it is produced from the authenticated
+`FIRST_FRAME` IPC event after a source frame is accepted and copied
+successfully. Neither form proves that the final MP4 is playable or has passed
+output validation.
 
 The current trace events cover the request-to-backend-start and first-frame-progress path. Model thinking time is not measured by the server. Cold/warm grouped P50/P95 summaries are exposed via `/capabilities.perf_summary` (see the Capabilities section below).
 
@@ -156,7 +164,17 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 
-A native `wgc-native-helper.exe`, managed continuous session, and capture-backend adapter are present in the repository. A guarded selector can use this pipeline for an eligible display request only when the local experiment is explicitly enabled; availability is checked without capture, successful evidence is cached briefly, and failures fall back to FFmpeg. One supervised 10-second 3840x2160 product-path recording has passed, and the self-contained portable package has been verified to contain exactly one production helper. **WGC continuous display recording is still not exposed as a public API capability** and remains disabled by default. Public request fields that try to select continuous WGC directly remain rejected.
+A native `wgc-native-helper.exe`, managed continuous session, and
+capture-backend adapter are present in the repository. Guarded selectors can
+use this pipeline for eligible short, silent display or window requests only
+when the corresponding local experiment is explicitly enabled. Availability
+is checked without capture, successful evidence is cached briefly, and an
+ineligible or unavailable request falls back to FFmpeg. Window mode uses the
+actual HWND and reports stable lifecycle failures when the target closes,
+minimizes, or changes size. The self-contained portable package contains one
+production helper. **WGC continuous recording is not exposed as a public API
+capability**, remains disabled by default, and cannot be selected through
+public request fields.
 
 Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
@@ -734,6 +752,12 @@ If this preflight fails, the API returns 400 immediately and no confirmation is 
 
 After the user approves and before `StartCapture`, a **before-start** preflight re-runs the same checks and also verifies the target window/display is still available. If the re-check fails, the recording transitions to `failed`, `warnings` includes `preflight_failed: <ERROR_CODE>`, the audit log records `recording.preflight_failed`, and the tray shows a local error balloon. This prevents empty recordings when the target window is closed or minimized during confirmation.
 
+For the experimental WGC continuous window backend, target loss after capture
+starts is also terminal and explicit: `window_closed`, `window_minimized`, or
+`size_changed` is preserved as the recording failure reason and shown through
+the local failure notification. These are recording terminal reasons rather
+than HTTP request error codes.
+
 Common preflight error codes:
 
 | error_code | scenario | suggested_action |
@@ -951,7 +975,7 @@ Bundle status values:
 | `generating` | Main video passed validation; the five files are being produced. |
 | `ready` | All five files were generated and atomically published. `path` points to the bundle directory. |
 | `failed` | Bundle generation failed after the recording succeeded. `error_code` contains a stable code. |
-| `not_applicable` | Recording failed, is a WGC still-frame PNG, or no bundle generator is enabled. |
+| `not_applicable` | Recording failed, used a WGC backend, or no bundle generator is enabled. |
 
 Stable bundle error codes:
 

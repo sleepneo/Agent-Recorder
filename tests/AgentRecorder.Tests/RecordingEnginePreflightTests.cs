@@ -137,14 +137,18 @@ public class RecordingEnginePreflightTests : IDisposable
     {
         var field = typeof(SystemQuery).GetField("_windowProvider",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (Func<bool, bool, List<SystemQuery.WindowInfo>>?)field?.GetValue(null);
+        var scoped = field?.GetValue(null);
+        return scoped?.GetType().GetProperty("Value")?.GetValue(scoped)
+            as Func<bool, bool, List<SystemQuery.WindowInfo>>;
     }
 
     private static Func<List<SystemQuery.DisplayInfo>>? GetDisplayProviderField()
     {
         var field = typeof(SystemQuery).GetField("_displayProvider",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (Func<List<SystemQuery.DisplayInfo>>?)field?.GetValue(null);
+        var scoped = field?.GetValue(null);
+        return scoped?.GetType().GetProperty("Value")?.GetValue(scoped)
+            as Func<List<SystemQuery.DisplayInfo>>;
     }
 
     private static RecordingEngine MakeEngine(AuditLogger audit, ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null)

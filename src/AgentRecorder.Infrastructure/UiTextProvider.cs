@@ -139,6 +139,16 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Tray_Balloon_RecordingTitle"] = "Agent Recorder",
             ["Tray_Balloon_RecordingBody"] = "开始录制",
             ["Tray_Balloon_ErrorTitle"] = "录制失败",
+            ["Tray_Balloon_WindowClosedBody"] = "目标窗口已关闭，录制已停止。",
+            ["Tray_Balloon_WindowMinimizedBody"] = "目标窗口已最小化，录制已停止。",
+            ["Tray_Balloon_WindowResizedBody"] = "目标窗口尺寸已改变，录制已停止。",
+            ["Tray_Balloon_GenericFailureBody"] = "录制已停止：{0}",
+            ["Tray_RecordingFailure_Title"] = "录制未保存",
+            ["Tray_RecordingFailure_WindowClosedBody"] = "目标窗口已关闭；录制已停止，未保存最终视频。",
+            ["Tray_RecordingFailure_WindowMinimizedBody"] = "目标窗口已最小化；录制已停止，未保存最终视频。",
+            ["Tray_RecordingFailure_SizeChangedBody"] = "目标窗口尺寸已改变；录制已停止，未保存最终视频。",
+            ["Tray_RecordingFailure_GenericBody"] = "录制已停止，未保存最终视频。",
+            ["Tray_RecordingFailure_Close"] = "关闭",
 
             // Recording stop control form
             ["StopControl_Button_Stop"] = "■ 停止",
@@ -249,6 +259,16 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Tray_Balloon_RecordingTitle"] = "Agent Recorder",
             ["Tray_Balloon_RecordingBody"] = "Recording started",
             ["Tray_Balloon_ErrorTitle"] = "Recording failed",
+            ["Tray_Balloon_WindowClosedBody"] = "The target window closed; recording stopped.",
+            ["Tray_Balloon_WindowMinimizedBody"] = "The target window was minimized; recording stopped.",
+            ["Tray_Balloon_WindowResizedBody"] = "The target window changed size; recording stopped.",
+            ["Tray_Balloon_GenericFailureBody"] = "Recording stopped: {0}",
+            ["Tray_RecordingFailure_Title"] = "Recording not saved",
+            ["Tray_RecordingFailure_WindowClosedBody"] = "The target window was closed; recording stopped and no final video was saved.",
+            ["Tray_RecordingFailure_WindowMinimizedBody"] = "The target window was minimized; recording stopped and no final video was saved.",
+            ["Tray_RecordingFailure_SizeChangedBody"] = "The target window changed size; recording stopped and no final video was saved.",
+            ["Tray_RecordingFailure_GenericBody"] = "Recording stopped and no final video was saved.",
+            ["Tray_RecordingFailure_Close"] = "Close",
 
             // Recording stop control form
             ["StopControl_Button_Stop"] = "■ Stop",

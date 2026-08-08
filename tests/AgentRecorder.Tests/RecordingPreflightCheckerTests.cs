@@ -72,17 +72,21 @@ public class RecordingPreflightCheckerTests : IDisposable
 
     private static Func<bool, bool, System.Collections.Generic.List<SystemQuery.WindowInfo>>? GetWindowProviderField()
     {
-        // Access private static field via reflection to allow restoration.
+        // Access the current async-scoped value via reflection to allow restoration.
         var field = typeof(SystemQuery).GetField("_windowProvider",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (Func<bool, bool, System.Collections.Generic.List<SystemQuery.WindowInfo>>?)field?.GetValue(null);
+        var scoped = field?.GetValue(null);
+        return scoped?.GetType().GetProperty("Value")?.GetValue(scoped)
+            as Func<bool, bool, System.Collections.Generic.List<SystemQuery.WindowInfo>>;
     }
 
     private static Func<System.Collections.Generic.List<SystemQuery.DisplayInfo>>? GetDisplayProviderField()
     {
         var field = typeof(SystemQuery).GetField("_displayProvider",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (Func<System.Collections.Generic.List<SystemQuery.DisplayInfo>>?)field?.GetValue(null);
+        var scoped = field?.GetValue(null);
+        return scoped?.GetType().GetProperty("Value")?.GetValue(scoped)
+            as Func<System.Collections.Generic.List<SystemQuery.DisplayInfo>>;
     }
 
     private static Recording DisplayRecording(string outputPath, int? durationSeconds = null)

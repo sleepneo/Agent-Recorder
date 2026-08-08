@@ -26,6 +26,8 @@ void PrintHelp() {
         "wgc-native-helper.exe\n"
         "  --capture-continuous-display\n"
         "  --display-bounds <x,y,width,height>\n"
+        "  --capture-continuous-window\n"
+        "  --window-hwnd <non-zero-64-bit-hwnd>\n"
         "  --recording-id <safe-id>\n"
         "  --output <absolute-mp4-path>\n"
         "  --duration-ms <1000..10000>\n"
@@ -43,7 +45,7 @@ void PrintHelp() {
 }
 
 void PrintVersion() {
-    std::cout << "wgc-native-helper 0.1.0\n";
+    std::cout << "wgc-native-helper 0.2.0\n";
 }
 
 void PrintProbeResult(const ProbeResult& result) {
@@ -61,6 +63,7 @@ void PrintProbeResult(const ProbeResult& result) {
     std::cout << "WgcSupported: " << (result.wgcSupported ? "true" : "false") << "\n";
     std::cout << "D3d11Initialized: " << (result.d3d11Initialized ? "true" : "false") << "\n";
     std::cout << "EncoderCreated: " << (result.encoderCreated ? "true" : "false") << "\n";
+    std::cout << "WindowCaptureSupported: " << (result.windowCaptureSupported ? "true" : "false") << "\n";
     if (!result.error.empty()) {
         std::cout << "Reason: " << result.error << "\n";
     }
@@ -71,8 +74,8 @@ std::string HresultToString(HRESULT hr) {
 }
 
 bool ValidateContinuousOptions(const Options& opts, std::string& error) {
-    if (opts.mode != CaptureMode::ContinuousDisplay) {
-        error = "Expected --capture-continuous-display";
+    if (opts.mode != CaptureMode::ContinuousDisplay && opts.mode != CaptureMode::ContinuousWindow) {
+        error = "Expected --capture-continuous-display or --capture-continuous-window";
         return false;
     }
     if (!opts.hasConsentFlag) {
@@ -87,8 +90,13 @@ bool ValidateContinuousOptions(const Options& opts, std::string& error) {
         error = "Missing --output";
         return false;
     }
-    if (opts.displayBounds.width <= 0 || opts.displayBounds.height <= 0) {
+    if (opts.mode == CaptureMode::ContinuousDisplay &&
+        (opts.displayBounds.width <= 0 || opts.displayBounds.height <= 0)) {
         error = "Invalid display-bounds; width and height must be positive";
+        return false;
+    }
+    if (opts.mode == CaptureMode::ContinuousWindow && opts.windowHwnd == 0) {
+        error = "Invalid window-hwnd; expected a non-zero 64-bit HWND";
         return false;
     }
     if (opts.durationMs < 1000 || opts.durationMs > 10000) {
@@ -262,6 +270,15 @@ int wmain(int argc, wchar_t* argv[]) {
                 return result.ok ? kExitSuccess : kExitFailure;
             }
             case CaptureMode::ContinuousDisplay: {
+                std::string error;
+                if (!ValidateContinuousOptions(opts, error)) {
+                    EventWriter writer;
+                    writer.Fail("invalid_arguments", error, "", {}, 0, 0);
+                    return kExitFailure;
+                }
+                return RunContinuous(opts);
+            }
+            case CaptureMode::ContinuousWindow: {
                 std::string error;
                 if (!ValidateContinuousOptions(opts, error)) {
                     EventWriter writer;

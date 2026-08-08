@@ -18,7 +18,35 @@ public sealed class RecordingEngine
 {
     internal readonly ConcurrentDictionary<string, Recording> _recs = new();
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _countdownCts = new();
+
+    /// <summary>
+    /// Owns one complete countdown-plus-first-frame-wait operation for a
+    /// recording. The single CTS spans both phases. The owning
+    /// <see cref="RunCountdownAsync"/> is the sole disposer: it detaches its
+    /// local first-frame handler and disposes the CTS in a finally block after
+    /// the operation's final consumer exits. <see cref="CancelCountdown"/> only
+    /// cancels (never disposes) operations it can still see in the registry,
+    /// and audits <c>recording.countdown_cancelled</c> only when the visible
+    /// countdown phase was truly in flight, at most once per operation.
+    /// </summary>
+    private sealed class CountdownOperation
+    {
+        public const int PhaseVisibleCountdown = 0;
+        public const int PhaseFirstFrameWait = 1;
+        public const int PhaseRetired = 2;
+
+        public CancellationTokenSource Cts { get; } = new();
+        public int Phase = PhaseVisibleCountdown;
+        public int CancelAuditEmitted;
+    }
+
+    private readonly ConcurrentDictionary<string, CountdownOperation> _countdownOps = new();
+
+    /// <summary>
+    /// Diagnostic seam for resource-lifecycle tests: number of countdown
+    /// operations still registered (not yet retired and disposed).
+    /// </summary>
+    internal int ActiveCountdownOperationCountForTests => _countdownOps.Count;
     private readonly AuditLogger _audit;
     private readonly IPerformanceTracer _tracer;
     private readonly IRecordingBundleGenerator? _bundleGenerator;
@@ -200,11 +228,22 @@ public sealed class RecordingEngine
     /// terminal recording. Never returns free-text messages, paths, or ffmpeg args.
     /// </summary>
     private static string ResolveTerminalErrorCode(string? backendType, bool microphoneRequested, OutputMeta meta, int exitCode,
-        bool fileOk, bool durationOk, bool rangeOk, bool exitOk)
+        bool fileOk, bool durationOk, bool rangeOk, bool exitOk, bool allowWgcLifecycleReason)
     {
         bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
                                string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
         bool isWgc = string.Equals(backendType, "wgc", StringComparison.OrdinalIgnoreCase);
+
+        // Native WGC lifecycle reasons are already authenticated by the
+        // helper and must outrank generic exit/file heuristics.
+        if (IsWgcContinuousBackend(backendType) &&
+            IsWgcContinuousOutputValidationFailure(meta.StopReason))
+            return meta.StopReason!;
+
+        if (allowWgcLifecycleReason &&
+            IsWgcContinuousBackend(backendType) &&
+            IsWgcLifecycleFailure(meta.StopReason))
+            return meta.StopReason!;
 
         // WASAPI helper failures: if a stable, normalized helper error code was
         // captured and a microphone was requested, prioritize it over generic
@@ -808,6 +847,18 @@ public sealed class RecordingEngine
             audioReady.AudioReady += () => OnAudioReady(rec, traceId, tray);
         }
 
+        // No-microphone backends capable of deferred capture start (WGC
+        // continuous) take the 3-2-1 countdown path: the helper process is
+        // launched now but capture authorization is withheld until the
+        // countdown reaches zero, so nothing is captured during the countdown.
+        // The authorization completion is pure audit; failures surface through
+        // the normal first-frame timeout / natural-exit paths.
+        bool useDeferredCountdown = !rec.Microphone && rec.Backend is IDeferredCaptureStartBackend;
+        if (rec.Backend is IDeferredCaptureStartBackend deferredObservable)
+        {
+            deferredObservable.CaptureAuthorizationCompleted += ok => OnCaptureAuthorizationCompleted(rec, ok);
+        }
+
         // Enter preparing: backend initialization (including microphone warmup)
         // has begun, but no REC UI, no elapsed timer, and no user-visible start
         // until credible first-frame evidence arrives.
@@ -819,6 +870,13 @@ public sealed class RecordingEngine
         // THEN record audit with the actual ffmpeg_args.
         try
         {
+            if (useDeferredCountdown)
+            {
+                // Engine-internal switch (not API-settable): withhold capture
+                // authorization until the countdown reaches zero.
+                rec.Config.DeferCaptureStart = true;
+            }
+
             _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
             rec.Backend.Start(rec.Config);
             _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
@@ -838,9 +896,24 @@ public sealed class RecordingEngine
                 OnAudioReady(rec, traceId, tray);
             }
 
+            // No-microphone deferred-start backends (WGC continuous): the helper
+            // process is prepared but not yet authorized to capture. Show
+            // preparing UI and run the 3-2-1 countdown; authorization happens
+            // when the countdown reaches zero.
+            if (useDeferredCountdown && !rec.IsFinalized)
+            {
+                _audit.Log("recording.capture_backend_prepared", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    awaiting_authorization = true
+                });
+                tray.SetPreparing(rec);
+                BeginDeferredCountdown(rec, traceId, tray);
+            }
             // Split A/V backends with a microphone: show preparing UI and wait
             // for AudioReady before the 3-2-1 countdown.
-            if (rec.Backend is IAudioReadyBackend && rec.Microphone)
+            else if (rec.Backend is IAudioReadyBackend && rec.Microphone)
             {
                 _tracer.MicrophonePrepareStarted(traceId ?? "trace_unknown", rec.Id);
                 _audit.Log("recording.microphone_prepare_started", new
@@ -1068,12 +1141,69 @@ public sealed class RecordingEngine
         _audit.Log("recording.countdown_started", new
         {
             recording_id = rec.Id,
+            trigger = "microphone_ready",
             microphone_ready_at = Iso(rec.CountdownStartedAtUtc.Value)
         });
 
-        var cts = new CancellationTokenSource();
-        _countdownCts[rec.Id] = cts;
-        _ = RunCountdownAsync(rec, traceId, tray, cts.Token);
+        var op = new CountdownOperation();
+        _countdownOps[rec.Id] = op;
+        _ = RunCountdownAsync(rec, traceId, tray, op);
+    }
+
+    /// <summary>
+    /// Starts the 3-2-1 countdown for a no-microphone deferred-start backend
+    /// (WGC continuous). The backend process is already prepared but has not
+    /// been authorized to capture; authorization is requested when the
+    /// countdown reaches zero inside <see cref="RunCountdownAsync"/>.
+    /// </summary>
+    private void BeginDeferredCountdown(Recording rec, string? traceId, ITrayContext tray)
+    {
+        lock (rec)
+        {
+            if (rec.State != RecState.preparing || rec.IsFinalized)
+                return;
+
+            rec.State = RecState.countdown;
+            rec.CountdownStartedAtUtc = DateTime.UtcNow;
+            BumpStateVersion();
+        }
+
+        _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
+        _audit.Log("recording.countdown_started", new
+        {
+            recording_id = rec.Id,
+            trigger = "deferred_capture_start",
+            countdown_started_at = Iso(rec.CountdownStartedAtUtc.Value)
+        });
+
+        var op = new CountdownOperation();
+        _countdownOps[rec.Id] = op;
+        _ = RunCountdownAsync(rec, traceId, tray, op);
+    }
+
+    /// <summary>
+    /// Pure-audit observer for deferred capture authorization completion. The
+    /// recording state machine is driven by first-frame evidence, terminal
+    /// session events, and the bounded first-frame timeout; this callback must
+    /// never change recording state.
+    /// </summary>
+    private void OnCaptureAuthorizationCompleted(Recording rec, bool authorized)
+    {
+        try
+        {
+            _audit.Log(authorized
+                    ? "recording.capture_authorization_succeeded"
+                    : "recording.capture_authorization_failed",
+                new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType
+                });
+        }
+        catch
+        {
+            // Audit must never affect the recording flow.
+        }
     }
 
     /// <summary>
@@ -1081,119 +1211,238 @@ public sealed class RecordingEngine
     /// Keeps the recording in the countdown state until real first-frame evidence is
     /// observed. Uses Task.Delay so the UI thread is never blocked.
     /// </summary>
-    private async Task RunCountdownAsync(Recording rec, string? traceId, ITrayContext tray, CancellationToken ct)
+    private async Task RunCountdownAsync(Recording rec, string? traceId, ITrayContext tray, CountdownOperation op)
     {
+        var ct = op.Cts.Token;
+        Action<FirstFrameObservation>? firstFrameHandler = null;
+        IFirstFrameObservableCaptureBackend? subscribedObservable = null;
+
         try
-        {
-            for (int remaining = CountdownSteps; remaining >= 1; remaining--)
-            {
-                tray.SetCountdown(rec, remaining);
-                await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
-        lock (rec)
-        {
-            if (rec.State != RecState.countdown || rec.IsFinalized)
-                return;
-        }
-
-        tray.SetCountdown(rec, null);
-
-        if (rec.Backend is IAudioReadyBackend audioReady)
         {
             try
             {
-                audioReady.StartVideo();
+                for (int remaining = CountdownSteps; remaining >= 1; remaining--)
+                {
+                    tray.SetCountdown(rec, remaining);
+                    await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
+                }
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
-                    rec.BackendType ?? "unknown", "video_start_failed", ex.GetType().Name);
+                return;
+            }
+
+            lock (rec)
+            {
+                if (rec.State != RecState.countdown || rec.IsFinalized)
+                    return;
+
+                // The visible countdown has completed normally. Transition the
+                // operation into the first-frame-wait phase atomically with the
+                // state check: a Stop from here on cancels the wait promptly
+                // but must not report the visible countdown as cancelled.
+                Volatile.Write(ref op.Phase, CountdownOperation.PhaseFirstFrameWait);
+            }
+
+            _audit.Log("recording.countdown_completed", new
+            {
+                recording_id = rec.Id,
+                backend = rec.BackendType
+            });
+
+            tray.SetCountdown(rec, null);
+
+            // Late-terminal guard: a stop/finalize that won the race after the
+            // phase transition must not trigger a late StartVideo/StartCapture
+            // or further UI updates from this operation.
+            lock (rec)
+            {
+                if (rec.State != RecState.countdown || rec.IsFinalized)
+                    return;
+            }
+
+            if (rec.Backend is IAudioReadyBackend audioReady)
+            {
+                try
+                {
+                    audioReady.StartVideo();
+                }
+                catch (Exception ex)
+                {
+                    _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+                        rec.BackendType ?? "unknown", "video_start_failed", ex.GetType().Name);
+                    lock (rec)
+                    {
+                        MarkBundleNotApplicable(rec);
+                        rec.CompletedAtUtc = DateTime.UtcNow;
+                        rec.Error = "Failed to start video capture: " + ex.Message;
+                        rec.Warnings.Add("video_start_failed: " + ex.Message);
+                        rec.State = RecState.failed;
+                        BumpStateVersion();
+                    }
+                    _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+                        stopReason: "video_start_failed", errorCode: "video_start_failed");
+                    _audit.Log("recording.failed", new
+                    {
+                        recording_id = rec.Id,
+                        backend = rec.BackendType,
+                        error = rec.Error,
+                        stage = "video_start"
+                    });
+                    tray.SetIdle(rec);
+                    tray.ShowError(rec.Error);
+                    return;
+                }
+            }
+            else if (rec.Backend is IDeferredCaptureStartBackend deferred)
+            {
+                // Countdown reached zero: authorize the prepared helper to start
+                // capturing now. Nothing was captured during the countdown.
+                _audit.Log("recording.capture_authorization_requested", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType
+                });
+                try
+                {
+                    deferred.StartCapture();
+                }
+                catch (Exception ex)
+                {
+                    _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+                        rec.BackendType ?? "unknown", "capture_start_failed", ex.GetType().Name);
+                    lock (rec)
+                    {
+                        MarkBundleNotApplicable(rec);
+                        rec.CompletedAtUtc = DateTime.UtcNow;
+                        rec.Error = "Failed to authorize capture start: " + ex.Message;
+                        rec.Warnings.Add("capture_start_failed: " + ex.Message);
+                        rec.State = RecState.failed;
+                        BumpStateVersion();
+                    }
+                    _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+                        stopReason: "capture_start_failed", errorCode: "capture_start_failed");
+                    _audit.Log("recording.failed", new
+                    {
+                        recording_id = rec.Id,
+                        backend = rec.BackendType,
+                        error = rec.Error,
+                        stage = "capture_start"
+                    });
+                    tray.SetIdle(rec);
+                    tray.ShowError(rec.Error);
+                    return;
+                }
+            }
+
+            // Wait for real first-frame evidence before showing REC. If no first frame
+            // arrives within the bounded timeout, the recording has failed.
+            var firstFrameTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            firstFrameHandler = _ =>
+            {
+                if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
+                    observable.FirstFrameObserved -= firstFrameHandler;
+                firstFrameTcs.TrySetResult(true);
+            };
+
+            if (rec.Backend is IFirstFrameObservableCaptureBackend frameObservable)
+            {
+                frameObservable.FirstFrameObserved += firstFrameHandler;
+                subscribedObservable = frameObservable;
+            }
+
+            // If the first frame was already observed synchronously during StartVideo,
+            // we are already recording.
+            lock (rec)
+            {
+                if (rec.State == RecState.recording)
+                    firstFrameTcs.TrySetResult(true);
+            }
+
+            Task timeoutTask;
+            try
+            {
+                timeoutTask = Task.Delay(FirstFrameTimeout, ct);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The operation token was concurrently cancelled and disposed by
+                // a stop that won the race. The stop path owns terminal handling.
+                return;
+            }
+            Task completed;
+            try
+            {
+                completed = await Task.WhenAny(firstFrameTcs.Task, timeoutTask).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            if (completed == timeoutTask)
+            {
+                // A cancelled timeout task means a stop/finalize cancelled the
+                // wait promptly; that path owns the terminal state and this
+                // operation must not emit a timeout failure, audit, or UI update.
+                if (timeoutTask.IsCanceled || ct.IsCancellationRequested)
+                    return;
+
+                // Timeout: clean up and fail the recording.
                 lock (rec)
                 {
+                    if (rec.IsFinalized || rec.State != RecState.countdown)
+                        return;
+
                     MarkBundleNotApplicable(rec);
                     rec.CompletedAtUtc = DateTime.UtcNow;
-                    rec.Error = "Failed to start video capture: " + ex.Message;
-                    rec.Warnings.Add("video_start_failed: " + ex.Message);
+                    rec.Error = "First video frame was not observed within the timeout.";
+                    rec.Warnings.Add("first_frame_timeout");
                     rec.State = RecState.failed;
                     BumpStateVersion();
                 }
                 _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
-                    stopReason: "video_start_failed", errorCode: "video_start_failed");
+                    stopReason: "first_frame_timeout", errorCode: "first_frame_timeout");
                 _audit.Log("recording.failed", new
                 {
                     recording_id = rec.Id,
                     backend = rec.BackendType,
                     error = rec.Error,
-                    stage = "video_start"
+                    stage = "first_frame_wait"
                 });
+                try { rec.Backend?.Cancel(); } catch { }
                 tray.SetIdle(rec);
                 tray.ShowError(rec.Error);
                 return;
             }
+
+            // First frame observed; OnFirstFrameObserved has already transitioned to recording.
         }
-
-        // Wait for real first-frame evidence before showing REC. If no first frame
-        // arrives within the bounded timeout, the recording has failed.
-        var firstFrameTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Action<FirstFrameObservation>? firstFrameHandler = null;
-        firstFrameHandler = _ =>
+        finally
         {
-            if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
-                observable.FirstFrameObserved -= firstFrameHandler;
-            firstFrameTcs.TrySetResult(true);
-        };
-
-        if (rec.Backend is IFirstFrameObservableCaptureBackend frameObservable)
-            frameObservable.FirstFrameObserved += firstFrameHandler;
-
-        // If the first frame was already observed synchronously during StartVideo,
-        // we are already recording.
-        lock (rec)
-        {
-            if (rec.State == RecState.recording)
-                firstFrameTcs.TrySetResult(true);
-        }
-
-        var timeoutTask = Task.Delay(FirstFrameTimeout, ct);
-        var completed = await Task.WhenAny(firstFrameTcs.Task, timeoutTask).ConfigureAwait(false);
-
-        if (completed == timeoutTask)
-        {
-            // Timeout: clean up and fail the recording.
-            lock (rec)
+            // Sole-owner cleanup, executed on EVERY exit path (success,
+            // synchronous first-frame catch-up, timeout, authorization failure,
+            // stop, natural terminal, start exception, disposal):
+            // 1. detach the local first-frame handler (idempotent),
+            // 2. mark the operation retired and unregister it so no later
+            //    CancelCountdown can reach the CTS,
+            // 3. dispose the CTS exactly once. Cancellation paths only ever
+            //    call Cancel on an operation they found in the registry and
+            //    tolerate ObjectDisposedException, so this ownership protocol
+            //    never disposes a CTS under an active canceller's feet.
+            if (firstFrameHandler != null && subscribedObservable != null)
             {
-                if (rec.IsFinalized || rec.State != RecState.countdown)
-                    return;
-
-                MarkBundleNotApplicable(rec);
-                rec.CompletedAtUtc = DateTime.UtcNow;
-                rec.Error = "First video frame was not observed within the timeout.";
-                rec.Warnings.Add("first_frame_timeout");
-                rec.State = RecState.failed;
-                BumpStateVersion();
+                try { subscribedObservable.FirstFrameObserved -= firstFrameHandler; } catch { }
             }
-            _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
-                stopReason: "first_frame_timeout", errorCode: "first_frame_timeout");
-            _audit.Log("recording.failed", new
-            {
-                recording_id = rec.Id,
-                backend = rec.BackendType,
-                error = rec.Error,
-                stage = "first_frame_wait"
-            });
-            try { rec.Backend?.Cancel(); } catch { }
-            tray.SetIdle(rec);
-            tray.ShowError(rec.Error);
-            return;
-        }
 
-        // First frame observed; OnFirstFrameObserved has already transitioned to recording.
+            Volatile.Write(ref op.Phase, CountdownOperation.PhaseRetired);
+            _countdownOps.TryRemove(rec.Id, out _);
+            try { op.Cts.Dispose(); } catch { }
+        }
     }
 
     /// <summary>
@@ -1271,6 +1520,9 @@ public sealed class RecordingEngine
             bool audioOk = !microphoneRequested ||
                            string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
                            string.Equals(meta.AudioStatus, "lost", StringComparison.OrdinalIgnoreCase);
+            bool wgcContinuousOutputValidationFailed =
+                IsWgcContinuousBackend(rec.BackendType) &&
+                IsWgcContinuousOutputValidationFailure(meta.StopReason);
 
             // A stable helper-declared audio failure can never be a successful
             // recording, even when the probed temp files look healthy and the
@@ -1305,7 +1557,8 @@ public sealed class RecordingEngine
             }
             else
             {
-                success = fileOk && durationOk && exitOk && rangeOk && audioOk;
+                success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
+                          !wgcContinuousOutputValidationFailed;
                 if (!success)
                 {
                     if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
@@ -1380,8 +1633,14 @@ public sealed class RecordingEngine
             else
             {
                 if (natural)
-                    rec.StopReason = "unexpected_exit";
-                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.Microphone, meta, exitCode, fileOk, durationOk, rangeOk, exitOk);
+                {
+                    rec.StopReason = IsWgcContinuousBackend(rec.BackendType) &&
+                                      (IsWgcLifecycleFailure(meta.StopReason) ||
+                                       IsWgcContinuousOutputValidationFailure(meta.StopReason))
+                        ? meta.StopReason
+                        : "unexpected_exit";
+                }
+                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.Microphone, meta, exitCode, fileOk, durationOk, rangeOk, exitOk, natural);
                 rec.Error = stableErrorCode;
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 rec.State = RecState.failed;
@@ -1432,18 +1691,69 @@ public sealed class RecordingEngine
         }
 
         tray.SetIdle(rec);
+
+        // The idle transition closes the REC/floating controls first. The
+        // notifier then applies the tray host's language and bubble policy,
+        // producing exactly one local message for native lifecycle failures.
+        if (!finalizationSuccess &&
+            IsWgcContinuousBackend(rec.BackendType) &&
+            IsWgcLifecycleFailure(rec.StopReason) &&
+            string.Equals(rec.StopReason, meta.StopReason, StringComparison.Ordinal))
+        {
+            if (tray is IRecordingFailureNotifier notifier)
+                notifier.ShowRecordingFailure(rec.Id, meta.StopReason!);
+            else
+                tray.ShowError("Recording failed: " + meta.StopReason);
+        }
     }
+
+    private static bool IsWgcLifecycleFailure(string? reason) => reason is
+        "window_closed" or "window_minimized" or "size_changed";
+
+    private static bool IsWgcContinuousOutputValidationFailure(string? reason) =>
+        string.Equals(reason, "output_validation_failed", StringComparison.Ordinal);
+
+    private static bool IsWgcContinuousBackend(string? backendType) =>
+        string.Equals(backendType, "wgc-continuous", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Cancels and disposes the countdown timer for a recording, if one is running.
     /// Called on stop, failure, or terminal finalization to prevent late StartVideo calls.
     /// </summary>
+    /// <summary>
+    /// Cancels the countdown-plus-first-frame-wait operation for a recording, if
+    /// one is still registered. Called on stop, failure, or terminal
+    /// finalization. Audits <c>recording.countdown_cancelled</c> at most once
+    /// per operation and only when the visible 3-2-1 countdown was truly in
+    /// flight; cancelling the post-zero first-frame wait is prompt but silent.
+    /// Never disposes the CTS: the owning <see cref="RunCountdownAsync"/>
+    /// disposes it after its final consumer exits.
+    /// </summary>
     private void CancelCountdown(string recordingId)
     {
-        if (_countdownCts.TryRemove(recordingId, out var cts))
+        if (!_countdownOps.TryGetValue(recordingId, out var op))
+            return;
+
+        // Snapshot the phase before cancelling. The phase transition to
+        // first-frame-wait happens under the recording lock together with the
+        // countdown-state check, so a Stop can never observe a stale
+        // visible-countdown phase for an already-completed countdown.
+        bool wasVisibleCountdown =
+            Volatile.Read(ref op.Phase) == CountdownOperation.PhaseVisibleCountdown;
+
+        try { op.Cts.Cancel(); }
+        catch (ObjectDisposedException)
         {
-            try { cts.Cancel(); } catch { }
-            try { cts.Dispose(); } catch { }
+            // The owning operation retired and disposed the source between our
+            // registry lookup and the cancel; nothing left to do.
+            return;
+        }
+        catch { /* best effort */ }
+
+        if (wasVisibleCountdown &&
+            Interlocked.CompareExchange(ref op.CancelAuditEmitted, 1, 0) == 0)
+        {
+            _audit.Log("recording.countdown_cancelled", new { recording_id = recordingId });
         }
     }
 

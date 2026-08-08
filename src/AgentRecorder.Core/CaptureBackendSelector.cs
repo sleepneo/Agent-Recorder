@@ -78,16 +78,85 @@ public static class CaptureBackendSelector
             return DetermineDisplay(cfg, displayProbe);
 
         if (string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal))
-        {
-            var flag = Environment.GetEnvironmentVariable(WgcEnvVar)?.Trim() ?? "";
-            string backendType = string.Equals(flag, "wgc", StringComparison.OrdinalIgnoreCase)
-                ? "wgc"
-                : cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
-            return DefaultDecision(backendType, "window_backend_selected");
-        }
+            return DetermineWindow(cfg, displayProbe);
 
         string regionBackend = cfg.Microphone ? "ffmpeg-region-av-split" : "ffmpeg-region";
         return DefaultDecision(regionBackend, "default_backend");
+    }
+
+    private static BackendDecision DetermineWindow(
+        CaptureConfig cfg,
+        IWgcContinuousAvailabilityProbe probe)
+    {
+        var flag = Environment.GetEnvironmentVariable(WgcEnvVar)?.Trim() ?? "";
+        if (string.Equals(flag, "wgc", StringComparison.OrdinalIgnoreCase))
+        {
+            // Preserve the legacy prototype exactly. Its microphone behavior
+            // is intentionally outside the continuous-window experiment.
+            return DefaultDecision("wgc", "window_backend_selected");
+        }
+
+        if (!string.Equals(flag, "wgc-continuous", StringComparison.OrdinalIgnoreCase))
+        {
+            string backendType = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
+            return DefaultDecision(backendType, "window_backend_selected");
+        }
+
+        const string requestedBackend = "wgc-continuous";
+        string fallbackBackend = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
+        if (cfg.Microphone)
+            return FallbackDecision(fallbackBackend, requestedBackend, "microphone_not_eligible");
+        if (cfg.WindowHandle == nint.Zero)
+            return FallbackDecision(fallbackBackend, requestedBackend, "window_handle_not_eligible");
+        if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
+            return FallbackDecision(fallbackBackend, requestedBackend, "duration_not_eligible");
+        if (cfg.Fps is < 1 or > 60)
+            return FallbackDecision(fallbackBackend, requestedBackend, "fps_not_eligible");
+        if (cfg.Bounds.w <= 0 || cfg.Bounds.h <= 0)
+            return FallbackDecision(fallbackBackend, requestedBackend, "bounds_not_eligible");
+
+        WgcContinuousAvailabilityResult availability;
+        try
+        {
+            availability = probe.Check(cfg);
+        }
+        catch
+        {
+            availability = new WgcContinuousAvailabilityResult(false, "probe_exception", "fresh_probe", 0);
+        }
+
+        string source = NormalizeAvailabilitySource(availability.AvailabilitySource);
+        string reason = availability.Available
+            ? source switch
+            {
+                "cache_hit" => "wgc_cache_hit",
+                "single_flight" => "wgc_single_flight",
+                _ => "wgc_probe_success"
+            }
+            : NormalizeProbeReason(availability.ReasonCode);
+
+        if (availability.Available)
+        {
+            return new BackendDecision(
+                "wgc-continuous",
+                new CaptureBackendSelectionEvidence(
+                    requestedBackend,
+                    "wgc-continuous",
+                    reason,
+                    source,
+                    availability.ElapsedMs,
+                    false));
+        }
+
+        return new BackendDecision(
+            fallbackBackend,
+            new CaptureBackendSelectionEvidence(
+                requestedBackend,
+                fallbackBackend,
+                reason,
+                source,
+                availability.ElapsedMs,
+                true));
     }
 
     private static BackendDecision DetermineDisplay(
@@ -224,7 +293,8 @@ public static class CaptureBackendSelector
             or "probe_start_failed" or "probe_timeout" or "probe_cancelled"
             or "probe_output_invalid" or "probe_dpi_mismatch" or "probe_wgc_unsupported"
             or "probe_d3d11_uninitialized" or "probe_encoder_unavailable"
-            or "probe_bounds_mismatch" or "probe_exception"
+            or "probe_bounds_mismatch" or "probe_window_unsupported" or "probe_exception"
+            or "window_handle_not_eligible" or "bounds_not_eligible"
             => reason,
         _ => "probe_unavailable"
     };

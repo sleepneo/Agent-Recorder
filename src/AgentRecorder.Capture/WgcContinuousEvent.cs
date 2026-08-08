@@ -8,6 +8,7 @@ public enum ContinuousEventResult
     Unknown = 0,
     Started,
     Progress,
+    FirstFrame,
     Ok,
     Stopped,
     Fail
@@ -68,6 +69,12 @@ public sealed class WgcContinuousEvent
     /// The FramesCaptured field value.
     /// </summary>
     public long? FramesCaptured { get; set; }
+
+    /// <summary>
+    /// The FrameNumber field value (FIRST_FRAME events: always 1 for the first
+    /// successfully copied source frame).
+    /// </summary>
+    public long? FrameNumber { get; set; }
 
     /// <summary>
     /// The FramesDropped field value.
@@ -145,6 +152,11 @@ public sealed class WgcContinuousEvent
     public bool FramesCapturedParseFailed { get; set; }
 
     /// <summary>
+    /// Whether FrameNumber was present but failed to parse as a number.
+    /// </summary>
+    public bool FrameNumberParseFailed { get; set; }
+
+    /// <summary>
     /// Whether FramesDropped was present but failed to parse as a number.
     /// </summary>
     public bool FramesDroppedParseFailed { get; set; }
@@ -177,6 +189,7 @@ public sealed class WgcContinuousEvent
         WidthParseFailed ||
         HeightParseFailed ||
         FramesCapturedParseFailed ||
+        FrameNumberParseFailed ||
         FramesDroppedParseFailed ||
         ElapsedMsParseFailed ||
         DurationMsParseFailed ||

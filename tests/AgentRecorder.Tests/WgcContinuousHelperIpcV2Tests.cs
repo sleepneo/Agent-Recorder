@@ -932,6 +932,9 @@ Stage: wat";
     [InlineData("encoding_error")]
     [InlineData("disk_full")]
     [InlineData("window_not_found")]
+    [InlineData("window_minimized")]
+    [InlineData("window_closed")]
+    [InlineData("size_changed")]
     [InlineData("zero_frames")]
     [InlineData("timeout")]
     [InlineData("cancelled")]
@@ -1360,6 +1363,310 @@ Height: tall";
 
         Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
         Assert.Contains(summary.ValidationErrors, e => e.Contains("Height") && e.Contains("failed to parse"));
+    }
+
+    // -----------------------------------------------------------------
+    // FIRST_FRAME explicit first-source-frame event tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void ParseEvents_FirstFrameEvent_ParsesCorrectly()
+    {
+        var stdout = @"RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 42";
+
+        var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
+
+        Assert.Single(events);
+        var evt = events[0];
+        Assert.Equal(ContinuousEventResult.FirstFrame, evt.Result);
+        Assert.Equal("Capturing", evt.Stage);
+        Assert.Equal(1, evt.FrameNumber);
+        Assert.False(evt.FrameNumberParseFailed);
+        Assert.Equal(42, evt.ElapsedMs);
+        Assert.False(evt.ElapsedMsParseFailed);
+        Assert.False(evt.HasNumericParseError);
+    }
+
+    [Fact]
+    public void ParseEvents_FirstFrameNonNumericFrameNumber_FlagsParseFailure()
+    {
+        var stdout = @"RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: one
+ElapsedMs: 42";
+
+        var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
+
+        Assert.Single(events);
+        Assert.True(events[0].FrameNumberParseFailed);
+        Assert.True(events[0].HasNumericParseError);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameAfterStarted_IsValidAndRecordedInSummary()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-01
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 17
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.Success, summary.State);
+        Assert.True(summary.FirstFrameObserved);
+        Assert.Equal(1, summary.FirstFrameNumber);
+        Assert.Equal(17, summary.FirstFrameElapsedMs);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameBeforeStarted_IsMalformed()
+    {
+        var stdout = @"RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 0
+
+RESULT: STARTED
+RecordingId: test-ff-02
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.False(summary.FirstFrameObserved);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("FIRST_FRAME") && e.Contains("STARTED"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameAfterTerminal_IsMalformed()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-03
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 0";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.False(summary.FirstFrameObserved);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("FIRST_FRAME") && e.Contains("terminal"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_DuplicateFirstFrame_IsMalformedAndKeepsFirst()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-04
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 10
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 2
+ElapsedMs: 20
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("Duplicate FIRST_FRAME"));
+        // The first valid event was recorded before the duplicate was seen.
+        Assert.True(summary.FirstFrameObserved);
+        Assert.Equal(1, summary.FirstFrameNumber);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameMissingFrameNumber_IsMalformed()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-05
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+ElapsedMs: 10
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.False(summary.FirstFrameObserved);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("FrameNumber"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameZeroFrameNumber_IsMalformed()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-06
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 0
+ElapsedMs: 10
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.False(summary.FirstFrameObserved);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameNegativeElapsed_IsMalformed()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-07
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: -5
+
+RESULT: OK
+FramesCaptured: 300
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.False(summary.FirstFrameObserved);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("ElapsedMs") && e.Contains("non-negative"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_FirstFrameZeroElapsed_IsValid()
+    {
+        // A static window can produce its first copied frame immediately at
+        // the begin timestamp; ElapsedMs = 0 is truthful and must be accepted.
+        var stdout = @"RESULT: STARTED
+RecordingId: test-ff-08
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+
+RESULT: FIRST_FRAME
+Stage: Capturing
+FrameNumber: 1
+ElapsedMs: 0
+
+RESULT: OK
+FramesCaptured: 1
+DurationMs: 10000
+FileSize: 15000000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.Success, summary.State);
+        Assert.True(summary.FirstFrameObserved);
+        Assert.Equal(0, summary.FirstFrameElapsedMs);
     }
 }
 

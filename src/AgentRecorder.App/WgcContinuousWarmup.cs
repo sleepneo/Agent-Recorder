@@ -42,8 +42,10 @@ internal static class WgcContinuousWarmup
 
     private static bool IsEnabled()
     {
-        var flag = Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar)?.Trim() ?? "";
-        return string.Equals(flag, "wgc-continuous", StringComparison.OrdinalIgnoreCase);
+        var displayFlag = Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar)?.Trim() ?? "";
+        var windowFlag = Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar)?.Trim() ?? "";
+        return string.Equals(displayFlag, "wgc-continuous", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(windowFlag, "wgc-continuous", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void TryDiagnostic(Action<string>? diagnostic, string message)

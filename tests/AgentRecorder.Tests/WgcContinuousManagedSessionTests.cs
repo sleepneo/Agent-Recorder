@@ -10,8 +10,11 @@ namespace AgentRecorder.Tests;
 /// <summary>
 /// Tests for <see cref="WgcContinuousManagedSession"/> using a fake process
 /// transport. No real WGC capture or GUI is exercised, except the dedicated
-/// real-process-tree fixture test.
+/// real-process-tree fixture test. The class joins the shared
+/// NonParallel-RealProcess collection so its real PowerShell/ping fixture
+/// never runs concurrently with other real process-tree fixtures.
 /// </summary>
+[Collection("NonParallel-RealProcess")]
 public sealed class WgcContinuousManagedSessionTests : IDisposable
 {
     private readonly string _tempDir;
@@ -600,7 +603,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         public void Start(string fileName, IReadOnlyList<string> argumentList)
         {
-            var stdoutText = $"RESULT: STARTED\nRecordingId: r\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC\n\nRESULT: OK\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
+            var stdoutText = $"RESULT: STARTED\nRecordingId: r\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\n\nRESULT: OK\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
             var stdout = new MemoryStream(Encoding.UTF8.GetBytes(stdoutText));
             var stderr = new RepeatingByteStream(_stderrByteLength, (byte)'y');
 
@@ -822,7 +825,14 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
                 try
                 {
                     if (File.Exists(_childPidFilePath))
-                        return int.Parse(File.ReadAllText(_childPidFilePath).Trim());
+                    {
+                        // BOM-tolerant read: the writer now emits plain ASCII
+                        // digits with no BOM and no newline, but tolerate a BOM
+                        // so a stale file from an older writer still parses.
+                        var text = File.ReadAllText(_childPidFilePath).Trim().TrimStart('\uFEFF');
+                        if (int.TryParse(text, out var pid))
+                            return pid;
+                    }
                 }
                 catch { }
                 return null;
@@ -831,9 +841,14 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         public void Start(string fileName, IReadOnlyList<string> argumentList)
         {
+            // Deterministic encoding: write bare ASCII digits via
+            // [System.IO.File]::WriteAllText (no BOM, no newline). The previous
+            // Out-File -Encoding utf8 form emits a BOM on Windows PowerShell
+            // 5.1 but not on PowerShell 7+, making the PID boundary depend on
+            // whichever powershell.exe is resolved and on runtime BOM detection.
             File.WriteAllText(_scriptPath,
                 "$child = Start-Process -FilePath 'ping.exe' -ArgumentList '-n 30 127.0.0.1' -PassThru -NoNewWindow; " +
-                "$child.Id | Out-File -FilePath '" + _childPidFilePath.Replace("'", "''") + "' -Encoding utf8; " +
+                "[System.IO.File]::WriteAllText('" + _childPidFilePath.Replace("'", "''") + "', \"$($child.Id)\"); " +
                 "$child.WaitForExit()");
 
             var psi = new ProcessStartInfo
@@ -862,11 +877,43 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             catch { /* best effort */ }
         }
 
+        /// <summary>
+        /// Kills every process this fixture owns: the child ping recorded in
+        /// the PID file first, then the powershell root. The child is only
+        /// killed when the live process image name is still "ping", so a
+        /// recycled PID belonging to an unrelated process is never touched.
+        /// </summary>
+        public void KillOwnedProcessTree()
+        {
+            var childPid = ChildPid;
+            if (childPid.HasValue)
+            {
+                try
+                {
+                    using var child = Process.GetProcessById(childPid.Value);
+                    child.Refresh();
+                    if (!child.HasExited &&
+                        string.Equals(child.ProcessName, "ping", StringComparison.OrdinalIgnoreCase))
+                    {
+                        child.Kill(entireProcessTree: true);
+                        child.WaitForExit(5000);
+                    }
+                }
+                catch { /* already gone or access denied — best effort */ }
+            }
+
+            try { _process?.Kill(entireProcessTree: true); }
+            catch { /* best effort */ }
+        }
+
         public Task WaitForExitAsync(CancellationToken cancellationToken)
             => _exitTcs.Task.WaitAsync(cancellationToken);
 
         public void Dispose()
         {
+            // Never leave the fixture's real processes behind, even when the
+            // owning test failed before its own cleanup assertions ran.
+            KillOwnedProcessTree();
             try { _process?.Dispose(); } catch { }
             try { File.Delete(_scriptPath); } catch { }
             try { File.Delete(_childPidFilePath); } catch { }
@@ -1943,6 +1990,51 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     // Failure reasons / lifecycle
     // -----------------------------------------------------------------
 
+    [Theory]
+    [InlineData("window_closed")]
+    [InlineData("window_minimized")]
+    [InlineData("size_changed")]
+    public async Task HelperLifecycleFail_PreservesSpecificReasonAcrossExitArbitration(string reason)
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var stdout = new[]
+        {
+            "RESULT: STARTED",
+            $"RecordingId: {recId}",
+            $"Output: {opts.OutputPath}",
+            "Container: mp4",
+            "Codec: h264",
+            "Fps: 30",
+            "Width: 1920",
+            "Height: 1080",
+            "CaptureMethod: WGC_D3D11_FRAME_STREAM",
+            "",
+            "RESULT: FAIL",
+            $"ErrorCode: {reason}",
+            $"Reason: {reason}",
+            "FramesCaptured: 8",
+            "BytesWritten: 1024",
+            ""
+        };
+        var fake = new FakeWgcContinuousProcess(
+            stdout,
+            exitCode: 1,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal(ContinuousSessionState.Failed, result.Summary!.State);
+        Assert.Equal(reason, result.Summary.ErrorCode);
+        Assert.Equal(reason, result.Summary.GetStopReasonForEvidence());
+        Assert.Equal(reason, result.FailureCategory);
+    }
+
     [Fact]
     public async Task Helper_NonZeroExit_NoTerminal_Fails()
     {
@@ -2331,6 +2423,66 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [Fact]
+    public async Task WindowTarget_BuildsWindowArgumentAndPreservesHwndToken()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+            o.DisplayWidth = 0;
+            o.DisplayHeight = 0;
+            o.DurationMs = 2000;
+        });
+        var stdout = Started(recId, opts.OutputPath)
+            .Select(line => line.Replace(
+                "WGC_D3D11_FRAME_STREAM",
+                "WGC_D3D11_WINDOW_FRAME_STREAM",
+                StringComparison.Ordinal))
+            .Concat(Ok(fileSize: 15000000L))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: 15000000L,
+            outputFilePath: opts.OutputPath);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+
+        var args = fake.CapturedArguments!.ToList();
+        Assert.Equal("--capture-continuous-window", args[0]);
+        Assert.Equal("--window-hwnd", args[1]);
+        Assert.Equal("0x1234", args[2]);
+        Assert.DoesNotContain("--display-bounds", args);
+
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(
+            result.State == WgcContinuousManagedSessionState.Success,
+            $"state={result.State}; phase={result.FailurePhase}; category={result.FailureCategory}; reason={result.Summary?.Reason}; errors={string.Join(" | ", result.Summary?.ValidationErrors ?? new List<string>())}");
+        Assert.Equal("WGC_D3D11_WINDOW_FRAME_STREAM", result.Summary!.CaptureMethod);
+    }
+
+    [Fact]
+    public void WindowTarget_ZeroHwndRejectedBeforeProcessStart()
+    {
+        var opts = CreateOptions($"rec_{Guid.NewGuid():N}", o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = nint.Zero;
+        });
+        var fake = new FakeWgcContinuousProcess(Array.Empty<string>());
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        var ex = Assert.Throws<ArgumentException>(() => session.StartAsync().GetAwaiter().GetResult());
+        Assert.Contains("Window handle", ex.Message);
+        Assert.Equal(0, fake.StartInvocationCount);
+    }
+
     [Theory]
     [InlineData(500)]
     [InlineData(15000)]
@@ -2376,62 +2528,100 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         _disposables.Add(session);
         _disposables.Add(fixture);
 
-        await session.StartAsync();
-
-        // Prove both the fixture root process and its child ping were alive
-        // before the session timeout fired. This ensures the post-timeout
-        // "process is gone" assertions actually validate a kill, not a
-        // never-started process.
-        var aliveSw = Stopwatch.StartNew();
-        while (fixture.ChildPid == null && aliveSw.Elapsed < TimeSpan.FromSeconds(5))
-            await Task.Delay(50);
-
-        Assert.NotNull(fixture.ChildPid);
-        Assert.NotEqual(0, fixture.Id);
-
+        int? observedChildPid = null;
         try
         {
-            var root = Process.GetProcessById(fixture.Id);
-            root.Refresh();
-            Assert.False(root.HasExited, "Root process must be alive before timeout");
+            await session.StartAsync();
+
+            // Prove both the fixture root process and its child ping were alive
+            // before the session timeout fired. This ensures the post-timeout
+            // "process is gone" assertions actually validate a kill, not a
+            // never-started process.
+            var aliveSw = Stopwatch.StartNew();
+            while (fixture.ChildPid == null && aliveSw.Elapsed < TimeSpan.FromSeconds(5))
+                await Task.Delay(50);
+
+            Assert.NotNull(fixture.ChildPid);
+            Assert.NotEqual(0, fixture.Id);
+            observedChildPid = fixture.ChildPid;
+
+            try
+            {
+                var root = Process.GetProcessById(fixture.Id);
+                root.Refresh();
+                Assert.False(root.HasExited, "Root process must be alive before timeout");
+            }
+            catch (ArgumentException)
+            {
+                Assert.Fail("Root process missing before timeout");
+            }
+
+            try
+            {
+                var child = Process.GetProcessById(fixture.ChildPid.Value);
+                child.Refresh();
+                Assert.False(child.HasExited, "Child ping must be alive before timeout");
+            }
+            catch (ArgumentException)
+            {
+                Assert.Fail("Child ping missing before timeout");
+            }
+
+            var sw = Stopwatch.StartNew();
+            var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(15));
+            sw.Stop();
+
+            _output.WriteLine($"Real process timeout test elapsed: {sw.Elapsed}, state: {result.State}, exit: {result.ExitCode}");
+
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(8), "Timeout must kill the process well before the fixture finishes");
+            Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+            Assert.Equal("lifecycle", result.FailurePhase);
+            Assert.Equal("process_timeout", result.FailureCategory);
+            Assert.False(File.Exists(opts.BeginSignalPath));
+            Assert.False(File.Exists(opts.StopSignalPath));
+
+            // The fixture root process must be gone.
+            if (fixture.Id != 0)
+            {
+                try
+                {
+                    var root = Process.GetProcessById(fixture.Id);
+                    root.Refresh();
+                    Assert.True(root.HasExited, "Root process must be dead after timeout");
+                }
+                catch (ArgumentException)
+                {
+                    // Already gone.
+                }
+            }
+
+            // The child ping process must also be gone.
+            try
+            {
+                var child = Process.GetProcessById(observedChildPid.Value);
+                child.Refresh();
+                Assert.True(child.HasExited, "Child process must be dead after timeout");
+            }
+            catch (ArgumentException)
+            {
+                // Already gone.
+            }
         }
-        catch (ArgumentException)
+        finally
         {
-            Assert.Fail("Root process missing before timeout");
+            // Whatever the session did or failed to do, the fixture must not
+            // leak real powershell/ping processes into later test runs.
+            fixture.KillOwnedProcessTree();
         }
 
-        try
-        {
-            var child = Process.GetProcessById(fixture.ChildPid.Value);
-            child.Refresh();
-            Assert.False(child.HasExited, "Child ping must be alive before timeout");
-        }
-        catch (ArgumentException)
-        {
-            Assert.Fail("Child ping missing before timeout");
-        }
-
-        var sw = Stopwatch.StartNew();
-        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(15));
-        sw.Stop();
-
-        _output.WriteLine($"Real process timeout test elapsed: {sw.Elapsed}, state: {result.State}, exit: {result.ExitCode}");
-
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(8), "Timeout must kill the process well before the fixture finishes");
-        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
-        Assert.Equal("lifecycle", result.FailurePhase);
-        Assert.Equal("process_timeout", result.FailureCategory);
-        Assert.False(File.Exists(opts.BeginSignalPath));
-        Assert.False(File.Exists(opts.StopSignalPath));
-
-        // The fixture root process must be gone.
+        // Final leak guard: no fixture-owned process may survive the test.
         if (fixture.Id != 0)
         {
             try
             {
                 var root = Process.GetProcessById(fixture.Id);
                 root.Refresh();
-                Assert.True(root.HasExited, "Root process must be dead after timeout");
+                Assert.True(root.HasExited, "Root process must not survive the test");
             }
             catch (ArgumentException)
             {
@@ -2439,18 +2629,334 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             }
         }
 
-        // The child ping process must also be gone.
-        var childPid = fixture.ChildPid;
-        Assert.NotNull(childPid);
-        try
+        if (observedChildPid.HasValue)
         {
-            var child = Process.GetProcessById(childPid.Value);
-            child.Refresh();
-            Assert.True(child.HasExited, "Child process must be dead after timeout");
+            try
+            {
+                var child = Process.GetProcessById(observedChildPid.Value);
+                child.Refresh();
+                Assert.True(child.HasExited, "Child ping must not survive the test");
+            }
+            catch (ArgumentException)
+            {
+                // Already gone.
+            }
         }
-        catch (ArgumentException)
+    }
+
+    // -----------------------------------------------------------------
+    // Explicit FIRST_FRAME event tests
+    // -----------------------------------------------------------------
+
+    private static string[] FirstFrame(long frameNumber, long elapsedMs) => new[]
+    {
+        "RESULT: FIRST_FRAME",
+        "Stage: Capturing",
+        $"FrameNumber: {frameNumber}",
+        $"ElapsedMs: {elapsedMs}",
+        "" // blank-line event separator
+    };
+
+    [Fact]
+    public async Task ExplicitFirstFrame_RaisesExactlyOnce_AndSuppressesProgressFallback()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var fileSize = 15000000L;
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrame(1, 17))
+            .Concat(Progress(1, 100, 50000))
+            .Concat(Progress(150, 2500, 7500000))
+            .Concat(Ok(300, 5000, fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        FirstFrameObservation? observed = null;
+        session.FirstFrameObserved += ffo =>
         {
-            // Already gone.
+            Interlocked.Increment(ref firstFrameCount);
+            observed = ffo;
+        };
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.True(result.FirstFrameObserved);
+        Assert.Equal(1, firstFrameCount);
+        Assert.NotNull(observed);
+        // The explicit event must win over the legacy progress fallback and
+        // must carry truthful, non-fabricated evidence.
+        Assert.Equal("wgc_continuous_first_frame", observed!.EvidenceKind);
+        Assert.Equal(1, observed.FrameNumber);
+        Assert.Equal(17_000, observed.OutTimeUs);
+        Assert.Equal(0, observed.TotalSizeBytes);
+        Assert.NotNull(result.Summary);
+        Assert.True(result.Summary!.FirstFrameObserved);
+        Assert.Equal(1, result.Summary.FirstFrameNumber);
+        Assert.Equal(17, result.Summary.FirstFrameElapsedMs);
+        // The explicit event must not change encoded frame counts.
+        Assert.Equal(300, result.Summary.FramesCaptured);
+    }
+
+    [Fact]
+    public async Task ExplicitFirstFrame_ImmediatelyAfterStarted_IsPublishedBeforeProgressTick()
+    {
+        // Static single-frame case: FIRST_FRAME fires while FramesCaptured is
+        // still zero and the final outcome encodes exactly one frame.
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var fileSize = 900000L;
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrame(1, 0))
+            .Concat(Ok(1, 10000, fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.Equal(1, firstFrameCount);
+        Assert.Equal(1, result.Summary!.FramesCaptured);
+        Assert.Equal(0, result.Summary.FirstFrameElapsedMs);
+    }
+
+    [Fact]
+    public async Task LegacyProgressFallback_RaisesExactlyOnce_WithLegacyEvidenceKind()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var fileSize = 15000000L;
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(Progress(1, 100, 50000))
+            .Concat(Progress(150, 2500, 7500000))
+            .Concat(Ok(300, 5000, fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        FirstFrameObservation? observed = null;
+        session.FirstFrameObserved += ffo =>
+        {
+            Interlocked.Increment(ref firstFrameCount);
+            observed = ffo;
+        };
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.Equal(1, firstFrameCount);
+        Assert.NotNull(observed);
+        Assert.Equal("wgc_continuous_progress", observed!.EvidenceKind);
+        Assert.False(result.Summary!.FirstFrameObserved,
+            "legacy fallback must not be recorded as explicit FIRST_FRAME evidence");
+    }
+
+    [Fact]
+    public async Task FirstFrameBeforeAuthorization_IsProtocolViolation_NoObservation()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrame(1, 5))
+            .Concat(Ok())
+            .ToArray();
+
+        var fake = new FakeWgcContinuousProcess(stdout);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
+
+        await session.StartAsync();
+        // Deliberately do not authorize: any capture event before authorization
+        // is a consent-gate protocol violation, including FIRST_FRAME.
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("event_before_authorization", result.FailureCategory);
+        Assert.Equal(0, firstFrameCount);
+    }
+
+    // -----------------------------------------------------------------
+    // Malformed live FIRST_FRAME trust-boundary tests (Task 196B)
+    // -----------------------------------------------------------------
+
+    private static string[] FirstFrameRaw(params string[] fieldLines)
+    {
+        var lines = new List<string> { "RESULT: FIRST_FRAME" };
+        lines.AddRange(fieldLines);
+        lines.Add(""); // blank-line event separator
+        return lines.ToArray();
+    }
+
+    [Theory]
+    [InlineData("missing_frame_number", new[] { "Stage: Capturing", "ElapsedMs: 10" })]
+    [InlineData("nonnumeric_frame_number", new[] { "Stage: Capturing", "FrameNumber: one", "ElapsedMs: 10" })]
+    [InlineData("zero_frame_number", new[] { "Stage: Capturing", "FrameNumber: 0", "ElapsedMs: 10" })]
+    [InlineData("negative_frame_number", new[] { "Stage: Capturing", "FrameNumber: -1", "ElapsedMs: 10" })]
+    [InlineData("missing_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1" })]
+    [InlineData("nonnumeric_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: soon" })]
+    [InlineData("negative_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: -5" })]
+    [InlineData("invalid_stage", new[] { "Stage: Finalizing", "FrameNumber: 1", "ElapsedMs: 10" })]
+    [InlineData("missing_stage", new[] { "FrameNumber: 1", "ElapsedMs: 10" })]
+    public async Task MalformedFirstFrame_LiveSession_ProtocolFailure_NoObservation_NoFallbackRescue(
+        string caseName, string[] firstFrameFields)
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrameRaw(firstFrameFields))
+            // A later PROGRESS with FramesCaptured > 0 must NOT rescue the
+            // session or produce a fallback observation after the malformed
+            // explicit event failed the trust boundary.
+            .Concat(Progress(1, 100, 50000))
+            .Concat(Ok())
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.State == WgcContinuousManagedSessionState.Failed,
+            $"{caseName}: malformed FIRST_FRAME must fail the session, got {result.State}");
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("first_frame_invalid", result.FailureCategory);
+        Assert.Equal(0, firstFrameCount);
+        Assert.False(result.FirstFrameObserved,
+            $"{caseName}: malformed FIRST_FRAME must not produce a public first-frame result");
+    }
+
+    [Fact]
+    public async Task FirstFrameBeforeStarted_LiveSession_ProtocolFailure_NoObservation()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        // FIRST_FRAME arrives after authorization but before STARTED.
+        var stdout = FirstFrame(1, 5)
+            .Concat(Started(recId, opts.OutputPath))
+            .Concat(Ok())
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("first_frame_before_started", result.FailureCategory);
+        Assert.Equal(0, firstFrameCount);
+        Assert.False(result.FirstFrameObserved);
+    }
+
+    [Fact]
+    public async Task FirstFrameAfterTerminal_LiveSession_ProtocolFailure_NoNewObservation()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var fileSize = 15000000L;
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrame(1, 10))
+            .Concat(Ok(300, 5000, fileSize))
+            // A FIRST_FRAME after the terminal event must be rejected, and the
+            // already-published evidence must not be re-published.
+            .Concat(FirstFrame(2, 4000))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        int firstFrameCount = 0;
+        session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("first_frame_after_terminal", result.FailureCategory);
+        // The valid pre-terminal event was published exactly once; the
+        // post-terminal duplicate added nothing.
+        Assert.Equal(1, firstFrameCount);
+    }
+
+    [Fact]
+    public async Task DuplicateFirstFrame_LiveSession_ProtocolFailure_PublishedExactlyOnce()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrame(1, 10))
+            .Concat(FirstFrame(2, 20))
+            .Concat(Ok())
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        var observed = new List<FirstFrameObservation>();
+        session.FirstFrameObserved += ffo => { lock (observed) observed.Add(ffo); };
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("duplicate_first_frame", result.FailureCategory);
+        lock (observed)
+        {
+            Assert.Single(observed);
+            Assert.Equal(1, observed[0].FrameNumber);
         }
     }
 

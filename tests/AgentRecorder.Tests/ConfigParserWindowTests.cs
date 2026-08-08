@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 using AgentRecorder.Core;
 using AgentRecorder.Capture;
@@ -319,10 +321,54 @@ public class ConfigParserWindowTests : IDisposable
     }
 
     [Fact]
-    public void EnumWindows_AfterReset_DoesNotReturnInjectedData()
+    public async Task EnumWindows_AfterReset_DoesNotReturnInjectedData()
     {
         SystemQuery.SetWindowProvider(null);
+        SystemQuery.SetDisplayProvider(null);
         var result = SystemQuery.EnumWindows(false, false);
         Assert.DoesNotContain(result, w => w.id == "window_1234");
+
+        await RunSystemQueryCrossTestLeakageStressAsync();
+    }
+
+    private static async Task RunSystemQueryCrossTestLeakageStressAsync()
+    {
+        for (int iteration = 0; iteration < 100; iteration++)
+        {
+            var providerHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseProvider = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Task holder = Task.Run(() =>
+            {
+                try
+                {
+                    SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+                    {
+                        new("held-display", "Held fake", true,
+                            new SystemQuery.Bounds(1, 2, 3, 4), 1.0)
+                    });
+                    providerHeld.TrySetResult(true);
+                    releaseProvider.Task.GetAwaiter().GetResult();
+                }
+                finally
+                {
+                    SystemQuery.SetDisplayProvider(null);
+                }
+            });
+
+            await providerHeld.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+            Task<List<SystemQuery.DisplayInfo>> unrelatedReader;
+            using (ExecutionContext.SuppressFlow())
+            {
+                unrelatedReader = Task.Run(() => SystemQuery.EnumDisplays());
+            }
+
+            var displays = await unrelatedReader.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.DoesNotContain(displays, display => display.id == "held-display");
+
+            releaseProvider.TrySetResult(true);
+            await holder.WaitAsync(TimeSpan.FromSeconds(3));
+        }
     }
 }

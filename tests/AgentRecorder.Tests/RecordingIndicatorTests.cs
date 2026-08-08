@@ -714,6 +714,42 @@ public class RecordingIndicatorTests
         });
     }
 
+    [Fact]
+    public void TrayContext_SetCountdownNull_RemovesDigitOverlay_KeepsAmberPreparingPhase()
+    {
+        RunOnSta(() =>
+        {
+            var audit = new CaptureAuditLogger();
+            var engine = new RecordingEngine(audit);
+            using var ctx = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create());
+            var rec = MakeRecording((100, 100, 800, 600), 30);
+
+            ctx.SetPreparing(rec);
+            ctx.SetCountdown(rec, 3);
+
+            var mgr = GetPrivateField<RecordingIndicatorManager>(ctx, "_indicatorManager");
+            var indicator = mgr.IndicatorsForTests[rec.Id];
+            Assert.Equal(RecordingIndicatorPhase.Countdown, indicator.PhaseForTests);
+            var overlays = GetPrivateField<Dictionary<string, CountdownOverlayForm>>(mgr, "_countdownOverlays");
+            Assert.Single(overlays);
+
+            // Countdown zero: the large digit overlay must disappear, but the
+            // indicator must stay in the amber preparing phase. The red
+            // recording phase is reserved for real first-frame evidence.
+            ctx.SetCountdown(rec, null);
+
+            Assert.Empty(overlays);
+            Assert.Equal(RecordingIndicatorPhase.Preparing, indicator.PhaseForTests);
+            Assert.NotEqual(RecordingIndicatorPhase.Recording, indicator.PhaseForTests);
+
+            // Sanity: the genuine first-frame path still turns red.
+            ctx.SetRecording(rec);
+            Assert.Equal(RecordingIndicatorPhase.Recording, indicator.PhaseForTests);
+
+            ctx.SetIdle(rec);
+        });
+    }
+
     // =====================================================================
     // No-window helper process tests
     // =====================================================================

@@ -125,6 +125,8 @@ ProcessResult RunHelper(const std::vector<std::wstring>& args,
 
 struct ParsedProbe {
     bool ok = false;
+    bool windowCaptureSupportedPresent = false;
+    bool windowCaptureSupported = false;
     std::string dpiAwareness;
     size_t monitorCount = 0;
     std::vector<ProbeMonitorInfo> monitors;
@@ -147,6 +149,9 @@ ParsedProbe ParseProbeOutput(const std::string& text) {
                 result.monitorCount = static_cast<size_t>(std::stoull(line.substr(14)));
             } catch (...) {
             }
+        } else if (line.rfind("WindowCaptureSupported: ", 0) == 0) {
+            result.windowCaptureSupportedPresent = true;
+            result.windowCaptureSupported = line == "WindowCaptureSupported: true";
         } else if (line.rfind("Monitor[", 0) == 0) {
             // Format: Monitor[i]: x=... y=... width=... height=... primary=...
             ProbeMonitorInfo info;
@@ -329,6 +334,7 @@ TEST_REGISTRAR(Probe_OutputContainsDpiAwarenessAndMonitors, []() {
 
     const ParsedProbe probe = ParseProbeOutput(result.stdoutText);
     ASSERT_TRUE(probe.ok);
+    ASSERT_TRUE(probe.windowCaptureSupportedPresent);
     ASSERT_EQ(probe.dpiAwareness, "per_monitor_v2");
     ASSERT_GE(probe.monitorCount, 1u);
     ASSERT_EQ(probe.monitors.size(), probe.monitorCount);
@@ -342,6 +348,17 @@ TEST_REGISTRAR(Probe_OutputContainsDpiAwarenessAndMonitors, []() {
         }
     }
     ASSERT_EQ(primaryCount, 1);
+});
+
+TEST_REGISTRAR(ProbeResult_WindowCapabilityFalseKeepsDisplayPrerequisitesReady, []() {
+    ProbeResult result;
+    result.wgcSupported = true;
+    result.d3d11Initialized = true;
+    result.encoderCreated = true;
+    result.windowCaptureSupported = false;
+
+    ASSERT_TRUE(HasSharedCaptureCapabilities(result));
+    ASSERT_FALSE(result.windowCaptureSupported);
 });
 
 TEST_REGISTRAR(Probe_PrimaryMonitorBoundsMatchWin32Physical, []() {

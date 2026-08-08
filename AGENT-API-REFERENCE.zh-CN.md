@@ -61,7 +61,7 @@ X-Agent-Sent-At: 2026-07-15T00:00:00.000Z
 
 `capture.backend_start_returned` 仅表示后端 `Start()` 调用已返回，**不是**首帧已编码或已写入的证据。
 
-`capture.first_frame_observed` 仅覆盖默认 FFmpeg 视频链路（`display`/`window`/`region`）。它会在 FFmpeg `-nostats -progress pipe:1` 输出报告 `frame >= 1`、`total_size > 0` 且进度组正常结束（`progress=continue` 或 `progress=end`）时产生一次。该事件证明“FFmpeg 已报告至少处理一个视频帧且输出流已有正字节数”，是“本地用户批准 → 首个可观测编码/复用进度”的时延上界，**不是**屏幕采集精确交付第一帧的时间、不是物理磁盘首帧写入时间、也不是 MP4 可播放或输出校验通过的证据。如果 FFmpeg 没有产生满足条件的 progress 组，该事件可能缺失。
+`capture.first_frame_observed` 只在后端产生可信证据后发出。默认 FFmpeg 视频链路（`display`/`window`/`region`）要求 `-progress pipe:1` 报告 `frame >= 1`、`total_size > 0` 且进度组正常结束；它表示首个可观测编码/复用进度的保守上界。实验性 WGC continuous 链路则使用经过协议认证的 `FIRST_FRAME` 事件，要求源帧已被时间线接受并成功完成 GPU 到 BGRA 的复制。两者都不是物理磁盘刷写完成或最终 MP4 已通过校验的证据。
 
 当前追踪覆盖“请求受理 → 本地确认 → 后端启动返回 → 首帧进度证据”路径。模型思考耗时不在服务端测量；cold/warm 分组的 P50/P95 聚合已通过 `/capabilities.perf_summary` 暴露（详见下文“检查能力”一节）。
 
@@ -255,7 +255,7 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通，并通过一次受监督的 10 秒 3840×2160 产品路径录制。self-contained portable 包已验证包含唯一生产 helper，但 **WGC 连续显示器录制仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定 WGC continuous；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
+**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的短时无麦克风 display/window 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
 
 **音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
@@ -1034,6 +1034,8 @@ AI agent 必须等待本地用户确认。
 
 用户批准之后、真正启动 FFmpeg 之前会再次执行 **before-start** preflight，复查上述项目并额外检查目标窗口/显示器是否仍然可用。如果复查失败，录制状态会变为 `failed`，`warnings` 包含 `preflight_failed: <ERROR_CODE>`，审计日志记录 `recording.preflight_failed`，本地托盘弹出错误提示。这能避免"用户已确认但窗口已关闭"导致的空录制。
 
+若本机显式启用了实验性 WGC continuous window 后端，录制开始后的目标窗口关闭、最小化或尺寸变化也会明确失败，终态原因分别为 `window_closed`、`window_minimized`、`size_changed`，并通过本地失败提示告知用户。这三个值属于 recording 终态原因，不是 HTTP 请求错误码。
+
 常见 preflight 错误码：
 
 | error_code | 场景 | suggested_action |
@@ -1345,7 +1347,7 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
 | `generating` | 主视频已通过校验，正在生成五件套。 |
 | `ready` | 五件套已生成并原子发布。`path` 指向 bundle 目录。 |
 | `failed` | 录制成功后 bundle 生成失败。`error_code` 为稳定错误码。 |
-| `not_applicable` | 录制失败、是 WGC still-frame PNG，或未启用 bundle generator。 |
+| `not_applicable` | 录制失败、使用 WGC 后端，或未启用 bundle generator。 |
 
 稳定错误码：
 

@@ -22,8 +22,10 @@ recording starts.
 1. Agent calls `POST /api/v1/recordings/quick` or `POST /api/v1/recordings`.
 2. Agent Recorder creates a pending confirmation.
 3. The local user approves or rejects through local UI.
-4. Recording starts only after approval.
-5. The agent polls status and reports the result.
+4. Any required preparation and 3-2-1 countdown runs after approval; capture
+   authorization remains withheld during the countdown.
+5. Recording starts only after credible first-frame evidence.
+6. The agent polls status and reports the result.
 
 The agent must not say "recording has started" while the state is still
 `pending_confirmation`.
@@ -76,7 +78,11 @@ Local performance traces are written separately from audit logs:
 
 These traces are local diagnostic data only. They record stage events such as `intent.accepted`, `confirmation.shown`, `capture.start_requested`, `capture.backend_start_returned`, and `capture.first_frame_observed` to help diagnose latency between the agent's request and capture backend startup. They are **not** a recording audit, do not contain API keys, full output paths, window titles, the full FFmpeg command line, or raw progress text, and do not affect the confirmation or recording state machines.
 
-`capture.first_frame_observed` is only emitted for the default FFmpeg video capture path. It reports non-sensitive numeric progress evidence (`frame_number`, `total_size_bytes`, optional `out_time_us`) and is produced at most once per trace. It is not evidence of physical disk flush, screen-capture exact delivery, or output-file validity.
+`capture.first_frame_observed` is produced at most once per trace from
+backend-specific credible evidence. FFmpeg uses non-sensitive progress values;
+experimental WGC continuous capture uses an authenticated `FIRST_FRAME` event
+after a source frame has been accepted and copied. It is not evidence of
+physical disk flush or final output validity.
 
 The optional `X-Agent-Sent-At` header is treated as an untrusted client hint and is isolated from server-side latency percentiles.
 

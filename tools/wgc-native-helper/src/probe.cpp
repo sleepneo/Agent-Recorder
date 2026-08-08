@@ -3,12 +3,15 @@
 #include "dpi_context.h"
 
 #include <windows.h>
+#include <windows.graphics.capture.interop.h>
 #include <d3d11.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mftransform.h>
 #include <codecapi.h>
 #include <wrl/client.h>
+
+#include <winrt/Windows.Graphics.Capture.h>
 
 #include <format>
 #include <string>
@@ -37,6 +40,17 @@ bool IsWgcSupported() {
     if (osi.dwMajorVersion > 10) return true;
     if (osi.dwMajorVersion == 10 && osi.dwMinorVersion == 0 && osi.dwBuildNumber >= 18362) return true;
     return false;
+}
+
+bool IsWindowCaptureSupported() {
+    try {
+        auto factory = winrt::get_activation_factory<
+            winrt::Windows::Graphics::Capture::GraphicsCaptureItem,
+            IGraphicsCaptureItemInterop>();
+        return static_cast<bool>(factory);
+    } catch (...) {
+        return false;
+    }
 }
 
 HRESULT CreateD3D11Device(Microsoft::WRL::ComPtr<ID3D11Device>& device) {
@@ -165,6 +179,11 @@ ProbeResult RunProbe() {
     }
     result.wgcSupported = true;
 
+    result.windowCaptureSupported = IsWindowCaptureSupported();
+    // Window interop is target-specific evidence. Keep probing the shared
+    // display prerequisites so a healthy display path remains available when
+    // CreateForWindow is unavailable.
+
     hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
         result.error = std::format("MFStartup failed: {}", HresultToString(hr));
@@ -199,7 +218,7 @@ ProbeResult RunProbe() {
 
     mfGuard.needShutdown = false;
     MFShutdown();
-    result.ok = true;
+    result.ok = HasSharedCaptureCapabilities(result);
     return result;
 }
 

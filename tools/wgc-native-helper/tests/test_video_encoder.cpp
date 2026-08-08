@@ -4,6 +4,7 @@
 #include "pixel_utils.h"
 #include "string_utils.h"
 #include "path_policy.h"
+#include "timeline.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -609,6 +610,71 @@ TEST_REGISTRAR(VideoEncoderSyntheticAsymmetricPatternVerifiedByFfprobe, []() {
     ASSERT_GT(bottomBlue[0], 200u); // B
     ASSERT_LT(bottomBlue[1], 40u);  // G
     ASSERT_LT(bottomBlue[2], 40u);  // R
+});
+
+TEST_REGISTRAR(VideoEncoderBoundedIrregularTimelineEndsAtCaptureDeadline, []() {
+    ComGuard com;
+
+    std::wstring path = MakeTempMp4Path(L"_bounded_timeline.mp4");
+    TempFileGuard guard({ path });
+
+    VideoEncoder encoder;
+    auto initResult = encoder.Initialize(64, 64, 30, path);
+    ASSERT_EQ(initResult.status, EncoderStatus::Ok);
+
+    constexpr int64_t kCaptureEndHns = 100'080'000LL;
+    std::vector<int64_t> rawTimes;
+    for (int i = 0; i <= 250; ++i) {
+        rawTimes.push_back(static_cast<int64_t>(i) * 333'333LL);
+    }
+    rawTimes.push_back(83'500'000LL);
+    rawTimes.push_back(91'750'000LL);
+    rawTimes.push_back(kCaptureEndHns);
+    const auto testFrame = MakeAsymmetricTestFrame(64, 64);
+    FrameTimeline timeline(30);
+    int64_t pendingMediaTimeHns = 0;
+    bool hasPending = false;
+
+    for (int64_t rawTime : rawTimes) {
+        int64_t mediaTimeHns = 0;
+        int64_t nominalDurationHns = 0;
+        if (!timeline.SubmitFrame(rawTime, &mediaTimeHns, &nominalDurationHns, kCaptureEndHns)) {
+            continue;
+        }
+
+        if (hasPending) {
+            auto writeResult = encoder.WriteFrame(
+                testFrame,
+                pendingMediaTimeHns,
+                mediaTimeHns - pendingMediaTimeHns);
+            ASSERT_EQ(writeResult.status, EncoderStatus::Ok);
+        }
+        pendingMediaTimeHns = mediaTimeHns;
+        hasPending = true;
+    }
+
+    ASSERT_TRUE(hasPending);
+    int64_t finalMediaTimeHns = 0;
+    int64_t finalDurationHns = 0;
+    ASSERT_TRUE(timeline.FinalizeAt(
+        kCaptureEndHns, &finalMediaTimeHns, &finalDurationHns));
+    ASSERT_EQ(finalMediaTimeHns, pendingMediaTimeHns);
+    ASSERT_EQ(finalDurationHns, 8'330'000LL);
+
+    auto finalWriteResult = encoder.WriteFrame(
+        testFrame, finalMediaTimeHns, finalDurationHns);
+    ASSERT_EQ(finalWriteResult.status, EncoderStatus::Ok);
+    auto finalizeResult = encoder.Finalize();
+    ASSERT_EQ(finalizeResult.status, EncoderStatus::Ok);
+    ASSERT_TRUE(FileExists(path));
+
+    CommandResult durationResult = RunFfprobe(
+        path,
+        L"-show_entries format=duration -of default=noprint_wrappers=1:nokey=1");
+    ThrowIfCommandFailed(durationResult, "ffprobe bounded timeline duration");
+    const double duration = ParseFirstDouble(durationResult.stdoutText);
+    ASSERT_GE(duration, 9.80);
+    ASSERT_LE(duration, 10.20);
 });
 
 // --- Subprocess failure-classification tests ---------------------------------

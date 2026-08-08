@@ -364,6 +364,25 @@ internal sealed class RecordingIndicatorManager
     }
 
     /// <summary>
+    /// Hides the countdown overlay but keeps the indicator in the amber preparing
+    /// phase. Used when the countdown reaches zero: the red REC phase is shown
+    /// only when real first-frame evidence arrives, never at countdown zero.
+    /// </summary>
+    public void HideCountdownOverlay(Recording recording)
+    {
+        if (_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        {
+            _countdownOverlays.Remove(recording.Id);
+            try { overlay.CloseWithoutResult(); } catch { }
+        }
+
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        {
+            indicator.SetPhase(RecordingIndicatorPhase.Preparing);
+        }
+    }
+
+    /// <summary>
     /// Switches an existing indicator to the finalizing phase (gray border + saving label).
     /// Does not close the indicator; the engine closes it after terminal state.
     /// </summary>

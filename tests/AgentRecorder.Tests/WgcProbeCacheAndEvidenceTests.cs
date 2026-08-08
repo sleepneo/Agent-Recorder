@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using AgentRecorder.App;
 using AgentRecorder.Capture;
@@ -192,31 +193,171 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
     [InlineData("timeout")]
     public async Task ConcurrentFailure_ReleasesSingleFlight_AndNextCallRetries(string failureKind)
     {
+        for (int iteration = 0; iteration < 100; iteration++)
+            await AssertJoinedFailureIterationAsync(failureKind, iteration);
+
+        for (int iteration = 0; iteration < 50; iteration++)
+            AssertLateCallerCanBecomeFreshOwner(failureKind, iteration);
+
+        // Keep the forced-cleanup regression inside this existing theory so the
+        // exact project test count remains stable while exercising both failure
+        // kinds across 20 deterministic harness failures.
+        if (failureKind == "exception")
+        {
+            for (int iteration = 0; iteration < 20; iteration++)
+            {
+                string forcedFailureKind = iteration % 2 == 0 ? "exception" : "timeout";
+                var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => AssertJoinedFailureIterationAsync(
+                        forcedFailureKind,
+                        iteration,
+                        forceHarnessFailure: true));
+
+                Assert.Contains("forced harness failure after all callers joined", failure.Message);
+            }
+        }
+    }
+
+    private static async Task AssertJoinedFailureIterationAsync(
+        string failureKind,
+        int iteration,
+        bool forceHarnessFailure = false)
+    {
         const int count = 12;
         var state = new ProbeState { IdentityTarget = count };
         var runner = new BlockingFailureProcessRunner(failureKind, HealthyResults(PrimaryBounds));
         var probe = CreateProbe(state, runner, TimeSpan.FromMinutes(1));
         var start = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allJoined = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseJoined = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int ready = 0;
+        int joined = 0;
+        var tasks = new List<Task<WgcContinuousAvailabilityResult>>(count);
+        Exception? primaryFailure = null;
+        var cleanupFailures = new List<Exception>();
 
-        var tasks = Enumerable.Range(0, count)
-            .Select(_ => Task.Run(async () =>
+        probe.AfterInflightJoinForTests = () =>
+        {
+            if (Interlocked.Increment(ref joined) == count)
+                allJoined.TrySetResult(true);
+            releaseJoined.Task.GetAwaiter().GetResult();
+        };
+
+        try
+        {
+            // Cleanup is armed before the first caller can enter the seam. Every
+            // task is recorded as it is created so a partial setup failure still
+            // joins all callers that were actually started.
+            for (int caller = 0; caller < count; caller++)
             {
-                if (Interlocked.Increment(ref ready) == count)
-                    start.TrySetResult(true);
-                await start.Task.ConfigureAwait(false);
-                return probe.Check(Config(PrimaryBounds));
-            }))
-            .ToArray();
+                tasks.Add(Task.Run(async () =>
+                {
+                    if (Interlocked.Increment(ref ready) == count)
+                        start.TrySetResult(true);
+                    await start.Task.ConfigureAwait(false);
+                    return probe.Check(Config(PrimaryBounds));
+                }));
+            }
 
-        await state.IdentityTargetReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        await runner.FirstCallEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await state.IdentityTargetReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await allJoined.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(count, Volatile.Read(ref joined));
+            Assert.Equal(0, runner.CallCount);
+
+            if (forceHarnessFailure)
+            {
+                // Leave every caller blocked at the join seam. The outer
+                // finally must release both the membership seam and runner,
+                // then observe all 12 tasks before this primary failure returns.
+                throw new InvalidOperationException(
+                    $"Iteration {iteration} forced harness failure after all callers joined ({failureKind}).");
+            }
+
+            // Every intended caller has already selected the same local Lazy.
+            // The owner may now run and fail; no delayed caller can become a new owner.
+            releaseJoined.TrySetResult(true);
+            await runner.FirstCallEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            runner.Release.TrySetResult(true);
+
+            var failures = await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(3));
+            string expectedReason = failureKind == "exception" ? "version_start_failed" : "version_timeout";
+            Assert.All(failures, result =>
+            {
+                Assert.False(result.Available);
+                Assert.Equal(expectedReason, result.ReasonCode);
+            });
+            Assert.Equal(1, failures.Count(result => result.AvailabilitySource == "fresh_probe"));
+            Assert.Equal(count - 1, failures.Count(result => result.AvailabilitySource == "single_flight"));
+            Assert.Equal(1, runner.CallCount);
+
+            var retry = probe.Check(Config(PrimaryBounds));
+            Assert.True(retry.Available);
+            Assert.Equal("fresh_probe", retry.AvailabilitySource);
+            Assert.Equal(3, runner.CallCount);
+        }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+        }
+        finally
+        {
+            // Detach first so a late continuation cannot re-arm the seam, then
+            // release every gate unconditionally on both success and failure.
+            probe.AfterInflightJoinForTests = null;
+            releaseJoined.TrySetResult(true);
+            runner.Release.TrySetResult(true);
+
+            for (int caller = 0; caller < tasks.Count; caller++)
+            {
+                try
+                {
+                    await tasks[caller].WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                catch (Exception ex)
+                {
+                    cleanupFailures.Add(new InvalidOperationException(
+                        $"Iteration {iteration} ({failureKind}) caller {caller} did not terminate during harness cleanup.",
+                        ex));
+                }
+            }
+
+            if (tasks.Any(task => !task.IsCompleted))
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    $"Iteration {iteration} ({failureKind}) left a probe caller incomplete after cleanup."));
+            }
+        }
+
+        if (primaryFailure is not null && cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                $"Probe harness iteration {iteration} ({failureKind}) failed and cleanup also failed.",
+                new[] { primaryFailure }.Concat(cleanupFailures));
+        }
+
+        if (primaryFailure is not null)
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+
+        if (cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                $"Probe harness cleanup failed for iteration {iteration} ({failureKind}).",
+                cleanupFailures);
+        }
+    }
+
+    private static void AssertLateCallerCanBecomeFreshOwner(string failureKind, int iteration)
+    {
+        var runner = new BlockingFailureProcessRunner(failureKind, HealthyResults(PrimaryBounds));
+        var probe = CreateProbe(new ProbeState(), runner, TimeSpan.FromMinutes(1));
         runner.Release.TrySetResult(true);
 
-        var failures = await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(3));
-        Assert.All(failures, result => Assert.False(result.Available));
-        Assert.Equal(1, runner.CallCount);
+        var failure = probe.Check(Config(PrimaryBounds));
+        Assert.False(failure.Available);
+        Assert.Equal(failureKind == "exception" ? "version_start_failed" : "version_timeout", failure.ReasonCode);
 
+        // This call arrives after the failed Lazy has been removed. It must be
+        // allowed to become a fresh owner; failed results must not be cached.
         var retry = probe.Check(Config(PrimaryBounds));
         Assert.True(retry.Available);
         Assert.Equal("fresh_probe", retry.AvailabilitySource);
@@ -263,6 +404,20 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
         probe.Release.TrySetResult(true);
         await enabled.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Contains(diagnostics, message => message.Contains("wgc_probe_warmup_unavailable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AppWarmup_IsEnabledForWindowExperimentFlag()
+    {
+        var probe = new ControlledWarmupProbe();
+        var diagnostics = new List<string>();
+
+        var enabled = WithWindowFlag("wgc-continuous", () =>
+            WgcContinuousWarmup.StartIfEnabled(probe, diagnostics.Add));
+
+        await probe.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        probe.Release.TrySetResult(true);
+        await enabled.WaitAsync(TimeSpan.FromSeconds(3));
     }
 
     [Theory]
@@ -444,7 +599,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.1.0\n"
+                StandardOutput = "wgc-native-helper 0.2.0\n"
             },
             new WgcHelperProcessResult
             {
@@ -456,7 +611,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
     private static string HealthyOutput((int x, int y, int w, int h) bounds) =>
         $"RESULT: OK\nDpiAwareness: per_monitor_v2\nMonitorCount: 1\n" +
         $"Monitor[0]: x={bounds.x} y={bounds.y} width={bounds.w} height={bounds.h} primary=true\n" +
-        "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\n";
+        "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\n";
 
     private static CaptureConfig Config((int x, int y, int w, int h) bounds) => new()
     {
@@ -478,6 +633,20 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
         finally
         {
             Environment.SetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar, previous);
+        }
+    }
+
+    private static T WithWindowFlag<T>(string? value, Func<T> action)
+    {
+        string? previous = Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar, value);
+            return action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar, previous);
         }
     }
 

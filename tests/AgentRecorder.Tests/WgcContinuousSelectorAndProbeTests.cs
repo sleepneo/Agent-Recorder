@@ -49,6 +49,76 @@ public sealed class WgcContinuousSelectorTests
     }
 
     [Fact]
+    public void WindowContinuousFlagAndHealthyProbe_UsesWgcContinuous()
+    {
+        var probe = new FakeAvailabilityProbe(true);
+        var result = WithWindowFlag("wgc-continuous", () =>
+            CaptureBackendSelector.Select(EligibleWindowConfig(), probe));
+
+        Assert.Equal("wgc-continuous", result.BackendType);
+        Assert.IsType<WgcContinuousCaptureBackend>(result.Backend);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowLegacyWgcFlag_PreservesOneFrameBackendWithoutProbe()
+    {
+        var probe = new FakeAvailabilityProbe(true);
+        var result = WithWindowFlag("wgc", () =>
+            CaptureBackendSelector.Select(EligibleWindowConfig(), probe));
+
+        Assert.Equal("wgc", result.BackendType);
+        Assert.IsType<WgcWindowCaptureBackend>(result.Backend);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowLegacyWgcFlag_WithMicrophone_PreservesOneFrameBackendWithoutProbe()
+    {
+        var config = EligibleWindowConfig();
+        config.Microphone = true;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag("  WGC  ", () =>
+            CaptureBackendSelector.Select(config, probe));
+
+        Assert.Equal("wgc", result.BackendType);
+        Assert.IsType<WgcWindowCaptureBackend>(result.Backend);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowContinuousIneligibleHandle_FallsBackWithoutProbe()
+    {
+        var config = EligibleWindowConfig();
+        config.WindowHandle = nint.Zero;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag("wgc-continuous", () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal("ffmpeg-window-region", result.BackendType);
+        Assert.Equal("window_handle_not_eligible", result.Evidence.SelectionReasonCode);
+        Assert.True(result.Evidence.Fallback);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowContinuousMicrophone_FallsBackToAudioSplitWithoutProbe()
+    {
+        var config = EligibleWindowConfig();
+        config.Microphone = true;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag("wgc-continuous", () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal("ffmpeg-window-region-av-split", result.BackendType);
+        Assert.Equal("microphone_not_eligible", result.Evidence.SelectionReasonCode);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
     public void DisplayWithMicrophone_UsesAvSplit_WithoutProbe()
     {
         var config = EligibleConfig();
@@ -146,6 +216,16 @@ public sealed class WgcContinuousSelectorTests
 
     private static CaptureConfig EligibleConfig() => ConfigWith();
 
+    private static CaptureConfig EligibleWindowConfig() => new()
+    {
+        SourceKind = "window",
+        WindowHandle = (nint)0x1234,
+        Bounds = (75, 125, 1280, 720),
+        DurationSeconds = 5,
+        Fps = 30,
+        OutputPath = "C:\\temp\\recording.mp4",
+    };
+
     private static CaptureConfig ConfigWith(
         int? duration = 5,
         int fps = 30,
@@ -169,6 +249,20 @@ public sealed class WgcContinuousSelectorTests
         finally
         {
             Environment.SetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar, previous);
+        }
+    }
+
+    private static T WithWindowFlag<T>(string? value, Func<T> action)
+    {
+        string? previous = Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar, value);
+            return action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar, previous);
         }
     }
 
@@ -206,7 +300,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.1.0\n",
+                StandardOutput = "wgc-native-helper 0.2.0\n",
             },
             new WgcHelperProcessResult
             {
@@ -225,6 +319,77 @@ public sealed class WgcContinuousAvailabilityProbeTests
         Assert.Equal(WgcContinuousAvailabilityProbe.VersionTimeoutMs, runner.Calls[0].TimeoutMs);
         Assert.Equal(new[] { "--probe" }, runner.Calls[1].Arguments);
         Assert.Equal(WgcContinuousAvailabilityProbe.ProbeTimeoutMs, runner.Calls[1].TimeoutMs);
+    }
+
+    [Fact]
+    public void WindowTarget_DoesNotRequireExactMonitorBoundsMatch()
+    {
+        var runner = new FakeProbeProcessRunner(
+            new WgcHelperProcessResult
+            {
+                ExitCode = 0,
+                StandardOutput = "wgc-native-helper 0.2.0\n",
+            },
+            new WgcHelperProcessResult
+            {
+                ExitCode = 0,
+                StandardOutput = HealthyProbeOutput(),
+            });
+        var config = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = (nint)0x1234,
+            Bounds = (701, 811, 1280, 720),
+            DurationSeconds = 5,
+            Fps = 30,
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.True(result.Available);
+        Assert.True(result.Evidence!.WindowCaptureSupported);
+    }
+
+    [Fact]
+    public void WindowTarget_RequiresExplicitWindowCapabilityEvidence()
+    {
+        string output = HealthyProbeOutput().Replace(
+            "WindowCaptureSupported: true",
+            "WindowCaptureSupported: false",
+            StringComparison.Ordinal);
+        var runner = new FakeProbeProcessRunner(
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
+        var config = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = (nint)0x1234,
+            Bounds = (701, 811, 1280, 720),
+            DurationSeconds = 5,
+            Fps = 30,
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.False(result.Available);
+        Assert.Equal("probe_window_unsupported", result.ReasonCode);
+    }
+
+    [Fact]
+    public void DisplayTarget_DoesNotRequireWindowCapabilityEvidence()
+    {
+        string output = HealthyProbeOutput().Replace(
+            "WindowCaptureSupported: true",
+            "WindowCaptureSupported: false",
+            StringComparison.Ordinal);
+        var runner = new FakeProbeProcessRunner(
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
+
+        var result = CreateProbe(runner).Check(EligibleConfig());
+
+        Assert.True(result.Available);
+        Assert.False(result.Evidence!.WindowCaptureSupported);
     }
 
     [Fact]
@@ -249,7 +414,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     {
         WgcHelperProcessResult version = expectedReason switch
         {
-            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.1.0\n" },
+            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.2.0\n" },
             "version_timeout" => new() { ExitCode = -1, TimedOut = true },
             _ => new() { ExitCode = 0, StandardOutputTruncated = true },
         };
@@ -292,7 +457,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             _ => new WgcHelperProcessResult { ExitCode = 0, StandardOutput = HealthyProbeOutput((0, 0, 800, 600)) },
         };
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.1.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
             probeResult);
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -317,7 +482,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             field + ": " + value,
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.1.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -330,7 +495,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     public void RunnerException_IsolatedAsUnavailableWithoutLeakingException()
     {
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.1.0\n" })
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" })
         {
             ThrowOnCall = 2,
         };
@@ -365,7 +530,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
         var b = bounds ?? Bounds;
         return $"RESULT: OK\nDpiAwareness: per_monitor_v2\nMonitorCount: 1\n" +
                $"Monitor[0]: x={b.x} y={b.y} width={b.w} height={b.h} primary=true\n" +
-               "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\n";
+               "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\n";
     }
 
     private sealed class FakeProbeProcessRunner : IWgcHelperProcessRunner

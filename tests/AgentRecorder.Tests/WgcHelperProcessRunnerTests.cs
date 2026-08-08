@@ -17,6 +17,7 @@ namespace AgentRecorder.Tests;
 /// These tests do not call WGC or capture the screen; they exercise the
 /// generic process-runner timeout / kill-tree-and-wait contract.
 /// </summary>
+[Collection("NonParallel-RealProcess")]
 public sealed class WgcHelperProcessRunnerTests : IDisposable
 {
     private readonly List<Process> _cleanup = new();
@@ -34,7 +35,12 @@ public sealed class WgcHelperProcessRunnerTests : IDisposable
             try
             {
                 if (!proc.HasExited)
+                {
                     proc.Kill(entireProcessTree: true);
+                    // Bounded wait: a stuck kill must not block or contaminate
+                    // later tests in the shared real-process collection.
+                    proc.WaitForExit(5000);
+                }
             }
             catch { /* best effort */ }
             finally
@@ -62,83 +68,107 @@ public sealed class WgcHelperProcessRunnerTests : IDisposable
     }
 
     [Fact]
-    public void Run_Timeout_KillsProcessTreeAndReportsFailure()
+    public async Task Run_Timeout_KillsProcessTreeAndReportsFailure()
     {
         var runner = new WgcHelperProcessRunner();
 
-        // Use a repo-style recursive PowerShell fixture generated at runtime.
-        // The fixture writes parent, child and grandchild PIDs to a single file,
-        // then creates a ready signal before sleeping. This avoids the variable
-        // scoping problems of inline -Command scripts.
+        // Deterministic three-level fixture: the repository's compiled
+        // offline helper (WgcRealProcessFixture) with --tree-depth 3. It
+        // starts in milliseconds (no nested PowerShell cold-start timing),
+        // publishes parent/child and grandchild PIDs via ASCII JSON signal
+        // files, and blocks until an external kill -- so the runner's timeout
+        // path must be the outcome that wins (Task 196D, Finding B).
         var tempDir = Path.Combine(Path.GetTempPath(), $"wgc-tree-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
-        var pidFile = Path.Combine(tempDir, "pids.txt");
-        var readyFile = Path.Combine(tempDir, "ready.signal");
-        var scriptPath = Path.Combine(tempDir, "hang.ps1");
+        var helperExe = Path.Combine(tempDir, $"wgc-runner-tree-{Guid.NewGuid():N}.exe");
+        var beginSignalPath = Path.Combine(tempDir, "begin.signal");
+        var beginToken = Guid.NewGuid().ToString("N");
+        var outputPath = Path.Combine(tempDir, "out.bin");
+        var readyFile = Path.Combine(tempDir, "wgc-helper-ready.signal");
+        var grandchildFile = Path.Combine(tempDir, "wgc-helper-grandchild.signal");
 
         try
         {
-            var script = $@"
-param(
-    [string]$PidFile,
-    [string]$ReadyFile,
-    [int]$Depth = 0
-)
-$ErrorActionPreference = 'Stop'
-Add-Content -Path $PidFile -Value $PID -Encoding ASCII
-if ($Depth -lt 2) {{
-    Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,$PidFile,$ReadyFile,($Depth+1) -NoNewWindow -PassThru | Out-Null
-}} else {{
-    New-Item -Path $ReadyFile -ItemType File -Force | Out-Null
-}}
-Start-Sleep -Seconds 30
-";
-            File.WriteAllText(scriptPath, script);
+            var helperSourceExe = await WgcRealProcessFixture.GetHelperExePathAsync();
+            File.Copy(helperSourceExe, helperExe, overwrite: true);
+
+            // Pre-arm the begin signal so the tree builds immediately and is
+            // fully alive long before the runner timeout fires.
+            File.WriteAllText(beginSignalPath, beginToken);
 
             var sw = Stopwatch.StartNew();
-            // Give PowerShell enough time to cold-start and build the three-level
-            // process tree before the runner timeout fires, so the test can verify
-            // both the ready-signal creation and the kill-tree behavior.
             var result = runner.Run(
-                "powershell.exe",
-                new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, pidFile, readyFile, "0" },
-                timeoutMs: 8000);
+                helperExe,
+                new[] { "--begin-signal", beginSignalPath, "--begin-token", beginToken, "--output", outputPath, "--tree-depth", "3" },
+                timeoutMs: 5000);
             sw.Stop();
 
             var report = new StringBuilder();
             report.AppendLine($"Runner elapsed: {sw.Elapsed}");
             report.AppendLine($"Exit code: {result.ExitCode}");
-            report.AppendLine($"Stderr tail: {result.StandardError}");
+            report.AppendLine($"TimedOut: {result.TimedOut}");
+            report.AppendLine($"Stdout: {result.StandardOutput}");
+            report.AppendLine($"Stderr: {result.StandardError}");
+            report.AppendLine($"Ready file exists: {File.Exists(readyFile)}");
+            report.AppendLine($"Grandchild file exists: {File.Exists(grandchildFile)}");
 
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"Runner returned too slowly: {sw.Elapsed}");
+            // The runner must return within its documented bound: timeout
+            // (5s) + kill wait (5s) + reader drain slack.
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(13), $"Runner returned too slowly: {sw.Elapsed}{Environment.NewLine}{report}");
+
+            // The timeout path must win explicitly -- an early normal exit
+            // must never be silently reinterpreted as a timeout.
+            Assert.True(result.TimedOut, $"The configured timeout must win.{Environment.NewLine}{report}");
             Assert.Equal(-1, result.ExitCode);
             Assert.Contains("timed out", result.StandardError, StringComparison.OrdinalIgnoreCase);
 
-            // The fixture must have reached the grandchild before the runner timed out.
+            // The expected three-level tree must have existed BEFORE the
+            // timeout fired; missing evidence fails with full diagnostics.
             Assert.True(File.Exists(readyFile), $"Ready signal was not written before the runner timed out.{Environment.NewLine}{report}");
+            Assert.True(File.Exists(grandchildFile), $"Grandchild signal was not written before the runner timed out.{Environment.NewLine}{report}");
 
-            var pids = ReadDistinctPids(pidFile);
+            int parentPid = ReadJsonIntProperty(readyFile, "parentPid");
+            int childPid = ReadJsonIntProperty(readyFile, "childPid");
+            int grandchildPid = ReadJsonIntProperty(grandchildFile, "grandchildPid");
+
+            var pids = new List<int> { parentPid, childPid, grandchildPid };
             foreach (var pid in pids)
                 RegisterForCleanup(pid);
 
-            Assert.Equal(3, pids.Count);
-            Assert.True(pids.All(p => p > 0), $"All three PIDs must be positive. Found: {string.Join(", ", pids)}");
+            Assert.True(parentPid > 0 && childPid > 0 && grandchildPid > 0,
+                $"All three PIDs must be positive. Found: {string.Join(", ", pids)}{Environment.NewLine}{report}");
+            Assert.Equal(3, pids.Distinct().Count());
 
-            report.AppendLine($"PIDs: parent={pids[0]}, child={pids[1]}, grandchild={pids[2]}");
-            _output.WriteLine($"C# runner tree PIDs: parent={pids[0]}, child={pids[1]}, grandchild={pids[2]}");
+            report.AppendLine($"PIDs: parent={parentPid}, child={childPid}, grandchild={grandchildPid}");
+            _output.WriteLine($"Runner tree PIDs: parent={parentPid}, child={childPid}, grandchild={grandchildPid}");
 
-            // Unconditional evidence: every captured PID must be gone after kill-tree.
-            for (int i = 0; i < pids.Count; i++)
+            // Unconditional evidence: root, child, and grandchild are gone
+            // after the runner's kill-tree.
+            var labels = new[] { "parent", "child", "grandchild" };
+            for (int k = 0; k < pids.Count; k++)
             {
-                string label = i == 0 ? "parent" : i == 1 ? "child" : "grandchild";
-                bool running = IsProcessRunning(pids[i]);
-                report.AppendLine($"{label} PID {pids[i]} running={running}");
-                _output.WriteLine($"C# runner tree {label} PID {pids[i]} running={running}");
-                Assert.False(running, $"{label} process {pids[i]} is still alive.{Environment.NewLine}{report}");
+                bool running = IsProcessRunning(pids[k]);
+                report.AppendLine($"{labels[k]} PID {pids[k]} running={running}");
+                Assert.False(running, $"{labels[k]} process {pids[k]} is still alive.{Environment.NewLine}{report}");
             }
         }
         finally
         {
+            // Bounded cleanup: kill any fixture-owned PID that survived a
+            // failed assertion before deleting the directory. Only PIDs
+            // published by this fixture are ever touched (never by image name).
+            foreach (var proc in _cleanup)
+            {
+                try
+                {
+                    if (!proc.HasExited)
+                    {
+                        proc.Kill(entireProcessTree: true);
+                        proc.WaitForExit(5000);
+                    }
+                }
+                catch { /* best effort */ }
+            }
             try { Directory.Delete(tempDir, recursive: true); } catch { /* best effort */ }
         }
     }
@@ -291,19 +321,19 @@ exit 0
         }
     }
 
-    private static List<int> ReadDistinctPids(string pidFile)
+    /// <summary>
+    /// Reads one integer property from a fixture-published ASCII JSON signal
+    /// file. Returns -1 when the file or property is missing so callers fail
+    /// with their own diagnostics instead of a parse exception.
+    /// </summary>
+    private static int ReadJsonIntProperty(string path, string property)
     {
-        var pids = new List<int>();
-        if (!File.Exists(pidFile))
-            return pids;
-
-        foreach (var line in File.ReadAllLines(pidFile))
+        try
         {
-            if (int.TryParse(line.Trim(), out var pid) && pid > 0 && !pids.Contains(pid))
-                pids.Add(pid);
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.TryGetProperty(property, out var el) && el.TryGetInt32(out var v) ? v : -1;
         }
-
-        return pids;
+        catch { return -1; }
     }
 
     private void RegisterForCleanup(int pid)

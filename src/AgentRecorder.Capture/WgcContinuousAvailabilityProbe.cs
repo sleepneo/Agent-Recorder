@@ -25,13 +25,15 @@ public sealed class WgcContinuousCapabilityEvidence
         bool wgcSupported,
         bool d3d11Initialized,
         bool encoderCreated,
-        IReadOnlyList<WgcMonitorBounds> monitors)
+        IReadOnlyList<WgcMonitorBounds> monitors,
+        bool windowCaptureSupported = false)
     {
         HelperVersion = helperVersion ?? "";
         DpiAwareness = dpiAwareness ?? "";
         WgcSupported = wgcSupported;
         D3d11Initialized = d3d11Initialized;
         EncoderCreated = encoderCreated;
+        WindowCaptureSupported = windowCaptureSupported;
         Monitors = Array.AsReadOnly((monitors ?? Array.Empty<WgcMonitorBounds>()).ToArray());
     }
 
@@ -40,6 +42,7 @@ public sealed class WgcContinuousCapabilityEvidence
     public bool WgcSupported { get; }
     public bool D3d11Initialized { get; }
     public bool EncoderCreated { get; }
+    public bool WindowCaptureSupported { get; }
     public IReadOnlyList<WgcMonitorBounds> Monitors { get; }
 }
 
@@ -75,7 +78,7 @@ public sealed class WgcContinuousAvailabilityProbe :
     IWgcContinuousAvailabilityProbe,
     IWgcContinuousAvailabilityWarmupProbe
 {
-    public const string SupportedHelperVersion = "0.1.0";
+    public const string SupportedHelperVersion = "0.2.0";
     public const int VersionTimeoutMs = 1500;
     public const int ProbeTimeoutMs = 3000;
     public static readonly TimeSpan DefaultCacheTtl = TimeSpan.FromSeconds(30);
@@ -100,6 +103,13 @@ public sealed class WgcContinuousAvailabilityProbe :
         new(HelperIdentityComparer.Instance);
     private readonly ConcurrentDictionary<HelperIdentity, Lazy<Task<RawAvailabilityResult>>> _inflight =
         new(HelperIdentityComparer.Instance);
+
+    /// <summary>
+    /// Test-only seam invoked after a caller has selected an inflight entry and
+    /// before it evaluates the shared Lazy. It is intentionally inert unless a
+    /// test explicitly configures it; production callers never observe it.
+    /// </summary>
+    internal Action? AfterInflightJoinForTests { get; set; }
 
     public WgcContinuousAvailabilityProbe()
         : this(WgcHelperExePathResolver.Resolve, new WgcHelperProcessRunner())
@@ -213,6 +223,7 @@ public sealed class WgcContinuousAvailabilityProbe :
 
         try
         {
+            AfterInflightJoinForTests?.Invoke();
             sharedTask = shared.Value;
             if (owner)
             {
@@ -337,16 +348,31 @@ public sealed class WgcContinuousAvailabilityProbe :
                 lookup.Source,
                 elapsedMs);
 
-        var bounds = config.Bounds;
-        if (!lookup.Result.Evidence.Monitors.Contains(
-                new WgcMonitorBounds(bounds.x, bounds.y, bounds.w, bounds.h)))
+        if (string.Equals(config.SourceKind, "window", StringComparison.Ordinal))
         {
-            return new WgcContinuousAvailabilityResult(
-                false,
-                "probe_bounds_mismatch",
-                lookup.Source,
-                elapsedMs,
-                lookup.Result.Evidence);
+            if (!lookup.Result.Evidence.WindowCaptureSupported)
+            {
+                return new WgcContinuousAvailabilityResult(
+                    false,
+                    "probe_window_unsupported",
+                    lookup.Source,
+                    elapsedMs,
+                    lookup.Result.Evidence);
+            }
+        }
+        else
+        {
+            var bounds = config.Bounds;
+            if (!lookup.Result.Evidence.Monitors.Contains(
+                    new WgcMonitorBounds(bounds.x, bounds.y, bounds.w, bounds.h)))
+            {
+                return new WgcContinuousAvailabilityResult(
+                    false,
+                    "probe_bounds_mismatch",
+                    lookup.Source,
+                    elapsedMs,
+                    lookup.Result.Evidence);
+            }
         }
 
         return MapRawResult(lookup, elapsedMs);
@@ -466,7 +492,9 @@ public sealed class WgcContinuousAvailabilityProbe :
 
     private static bool IsProbeCandidate(CaptureConfig? config)
     {
-        if (config == null || !string.Equals(config.SourceKind, "display", StringComparison.Ordinal))
+        if (config == null ||
+            (!string.Equals(config.SourceKind, "display", StringComparison.Ordinal) &&
+             !string.Equals(config.SourceKind, "window", StringComparison.Ordinal)))
             return false;
         if (config.Microphone || !config.DurationSeconds.HasValue)
             return false;
@@ -474,7 +502,10 @@ public sealed class WgcContinuousAvailabilityProbe :
             return false;
         if (config.Fps is < 1 or > 60)
             return false;
-        return config.Bounds.w > 0 && config.Bounds.h > 0;
+        if (config.Bounds.w <= 0 || config.Bounds.h <= 0)
+            return false;
+        return !string.Equals(config.SourceKind, "window", StringComparison.Ordinal)
+            || config.WindowHandle != nint.Zero;
     }
 
     private static bool TryParseCompatibleVersion(string stdout)
@@ -510,6 +541,7 @@ public sealed class WgcContinuousAvailabilityProbe :
         bool? wgcSupported = null;
         bool? d3d11Initialized = null;
         bool? encoderCreated = null;
+        bool? windowCaptureSupported = null;
         var monitors = new List<WgcMonitorBounds>();
 
         foreach (string line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
@@ -530,6 +562,8 @@ public sealed class WgcContinuousAvailabilityProbe :
                     d3d11Initialized = ParseBoolean(value);
                 else if (string.Equals(key, "EncoderCreated", StringComparison.OrdinalIgnoreCase))
                     encoderCreated = ParseBoolean(value);
+                else if (string.Equals(key, "WindowCaptureSupported", StringComparison.OrdinalIgnoreCase))
+                    windowCaptureSupported = ParseBoolean(value);
             }
 
             Match monitor = MonitorLine.Match(trimmed);
@@ -548,6 +582,7 @@ public sealed class WgcContinuousAvailabilityProbe :
             || !wgcSupported.HasValue
             || !d3d11Initialized.HasValue
             || !encoderCreated.HasValue
+            || !windowCaptureSupported.HasValue
             || monitors.Count == 0)
             return false;
 
@@ -557,7 +592,8 @@ public sealed class WgcContinuousAvailabilityProbe :
             wgcSupported.Value,
             d3d11Initialized.Value,
             encoderCreated.Value,
-            monitors);
+            monitors,
+            windowCaptureSupported.Value);
         return true;
     }
 

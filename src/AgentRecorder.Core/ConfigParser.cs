@@ -455,8 +455,8 @@ public static class ConfigParser
         if (MatchesAny(cfg["recording_mode"], "continuous"))
             throw ContinuousUnsupported("recording_mode", "continuous");
 
-        if (MatchesAny(cfg["capture_method"], "WGC_D3D11_FRAME_STREAM"))
-            throw ContinuousUnsupported("capture_method", "WGC_D3D11_FRAME_STREAM");
+        if (MatchesAny(cfg["capture_method"], "WGC_D3D11_FRAME_STREAM", "WGC_D3D11_WINDOW_FRAME_STREAM"))
+            throw ContinuousUnsupported("capture_method", Str(cfg["capture_method"]) ?? "WGC_D3D11_FRAME_STREAM");
 
         if (MatchesAny(cfg["backend"], "wgc_continuous", "wgc-continuous"))
             throw ContinuousUnsupported("backend", Str(cfg["backend"]) ?? "wgc_continuous");

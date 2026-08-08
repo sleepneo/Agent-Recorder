@@ -64,6 +64,36 @@ TEST_REGISTRAR(OptionsContinuousDisplayParsesAllFields, []() {
     ASSERT_TRUE(result.options.hasConsentFlag);
 });
 
+TEST_REGISTRAR(OptionsContinuousWindowParsesStrictHwnd, []() {
+    auto result = ParseArgs({
+        L"--capture-continuous-window",
+        L"--window-hwnd", L"0x0000000000001234",
+        L"--recording-id", L"window-recording",
+        L"--output", L"C:\\temp\\out.mp4",
+        L"--duration-ms", L"5000",
+        L"--fps", L"30",
+        L"--begin-signal", L"C:\\temp\\begin.txt",
+        L"--begin-token", L"token-123",
+        L"--begin-timeout-ms", L"10000",
+        L"--stop-signal", L"C:\\temp\\stop.txt",
+        L"--i-understand-this-captures-screen"
+    });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.mode, CaptureMode::ContinuousWindow);
+    ASSERT_EQ(result.options.windowHwnd, static_cast<std::uint64_t>(0x1234));
+});
+
+TEST_REGISTRAR(OptionsWindowHwndRejectsMalformedSignedOverflowAndZero, []() {
+    const wchar_t* invalid[] = {
+        L"0", L"-1", L"+1", L"0x", L"0x12trailing",
+        L"0x10000000000000000", L" 0x1234", L"0x1234 "
+    };
+    for (const auto* value : invalid) {
+        auto result = ParseArgs({ L"--window-hwnd", value });
+        ASSERT_FALSE(result.error.empty());
+    }
+});
+
 TEST_REGISTRAR(OptionsMissingValueReportsError, []() {
     auto result = ParseArgs({ L"--capture-continuous-display", L"--duration-ms" });
     ASSERT_FALSE(result.error.empty());

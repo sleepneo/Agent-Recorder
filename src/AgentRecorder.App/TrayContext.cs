@@ -17,7 +17,7 @@ using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
 
-internal sealed class TrayContext : ApplicationContext, ITrayContext
+internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecordingFailureNotifier
 {
     public string HostMode => "tray";
     public bool SupportsRegionSelectionUi => true;
@@ -51,6 +51,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     private readonly ITrayBubblePolicy _bubblePolicy;
     private readonly ITrayBalloonTip _balloonTip;
     private readonly IIndicatorPresenter _indicatorPresenter;
+    private readonly RecordingFailureNotificationManager _failureNotificationManager;
     private IUiTextProvider _uiText;
 
     // Confirmation queue
@@ -63,7 +64,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     {
     }
 
-    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null)
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null, IRecordingFailureNotificationPresenter? failureNotificationPresenter = null)
     {
         _engine = engine; _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -135,6 +136,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         _bubblePolicy = bubblePolicy ?? new TrayBubblePolicy();
         _balloonTip = balloonTip ?? new NotifyIconBalloonTip(_icon);
         _indicatorPresenter = indicatorPresenter ?? new DefaultIndicatorPresenter(_indicatorManager);
+        _failureNotificationManager = new RecordingFailureNotificationManager(
+            _audit,
+            () => _uiText,
+            () => _activeRecordings.Count,
+            failureNotificationPresenter);
 
         // Register global stop hotkey on the UI thread. Failure is logged but non-fatal.
         try
@@ -576,8 +582,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
             }
             else
             {
-                // Hide overlay but keep indicator in countdown phase (e.g. cancellation).
-                _indicatorManager.HideCountdownAndShowRecording(recording);
+                // Countdown reached zero: hide the digit overlay but keep the
+                // amber preparing phase. The red REC phase is switched on only
+                // by real first-frame evidence via SetRecording.
+                _indicatorManager.HideCountdownOverlay(recording);
             }
             UpdateRecordingUi();
         });
@@ -651,6 +659,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
                 SetAllIdleUi();
             else
                 UpdateRecordingUi();
+            _failureNotificationManager.ActiveRecordingCountChanged();
         });
     }
 
@@ -662,6 +671,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         _confirmationQueue.Clear(invokeCallbacks: false); // Don't invoke callbacks, engine manages expiration
         HideConfirmationForm();
         SetAllIdleUi();
+        _failureNotificationManager.ActiveRecordingCountChanged();
     });
 
     private void OnFloatingStopRequested(string recordingId)
@@ -862,6 +872,9 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
     public void ShowError(string text) =>
         RunOnUi(() => ShowBalloonTipIfAllowed(BubbleType.Error, 4000,
             _uiText.Get("Tray_Balloon_ErrorTitle"), text, ToolTipIcon.Error));
+
+    public void ShowRecordingFailure(string recordingId, string reasonCode) =>
+        RunOnUi(() => _failureNotificationManager.Request(recordingId, reasonCode));
 
     /// <summary>
     /// Request local user to select a region. Shows full-screen selection window.
@@ -1105,6 +1118,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext
         _disposed = true;
 
         try { _globalStopHotkey?.Dispose(); } catch { }
+        try { _failureNotificationManager.Dispose(); } catch { }
         _indicatorManager.CloseAll("recording.app_exit");
         _confirmationQueue.Clear(invokeCallbacks: false);
         HideConfirmationForm("app_exit");

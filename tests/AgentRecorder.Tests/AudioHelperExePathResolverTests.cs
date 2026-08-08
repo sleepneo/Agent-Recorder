@@ -5,6 +5,7 @@ using Xunit;
 
 namespace AgentRecorder.Tests;
 
+[Collection("NonParallel-AgentRecorderEnvVar")]
 public class AudioHelperExePathResolverTests : IDisposable
 {
     private readonly string? _originalEnv;

@@ -39,6 +39,23 @@ struct CaptureOutcome {
     std::wstring partialOutputPath;
 };
 
+struct CaptureSessionTestTargetRequest {
+    CaptureMode mode = CaptureMode::ContinuousDisplay;
+    Rect displayBounds;
+    std::uint64_t windowHwnd = 0;
+};
+
+struct CaptureSessionTestSignals {
+    std::function<void()> signalWindowClosed;
+    std::function<void()> signalWindowMinimized;
+    std::function<void()> signalSizeChanged;
+};
+
+struct CaptureSessionTestWindowState {
+    bool isWindow = true;
+    bool isIconic = false;
+};
+
 // Emit the terminal IPC event (OK / STOPPED / FAIL) from a complete outcome.
 // This is the single production mapping from CaptureOutcome to EventWriter;
 // it is shared by main.cpp (the terminal owner) and by tests that drive
@@ -61,6 +78,16 @@ struct CaptureSessionTestHooks {
     // and always use the real WGC path. The real platform path remains covered
     // by the bounded helper probe/integration tests.
     bool useSyntheticPlatformResources = false;
+
+    // Called by synthetic sessions at the same target-creation boundary used
+    // by production. The production path still calls CreateForMonitor or
+    // CreateForWindow when this hook is empty.
+    std::function<HRESULT(const CaptureSessionTestTargetRequest&)> onCreateCaptureItem;
+
+    // Exposes synthetic equivalents of the production Closed and content-size
+    // change callbacks. These signals only update the same shared state and
+    // wake the same capture loop used by production callbacks.
+    std::function<void(const CaptureSessionTestSignals&)> onTestSignalsCreated;
 
     // Called instead of GraphicsCaptureSession::StartCapture(). Throwing here
     // must surface as a fast, bounded start_capture_failed outcome.
@@ -102,6 +129,13 @@ struct CaptureSessionTestHooks {
     // to know when capture is active without parsing redirected stdout.
     std::function<void()> onStarted;
 
+    // Called immediately after the explicit FIRST_FRAME IPC event is emitted.
+    // The event fires exactly once, promptly after the first source frame has
+    // been accepted by the timeline and copied/staged successfully, while
+    // FramesCaptured may still be zero. Tests can use this to verify ordering
+    // and exactly-once semantics without parsing redirected stdout.
+    std::function<void(int64_t frameNumber, int64_t elapsedMs)> onFirstFrame;
+
     // Production code reads the partial file size for progress and failure
     // evidence. Tests that do not use a real encoder can supply a deterministic
     // value, but it must still represent "current file size" semantics.
@@ -117,9 +151,13 @@ struct CaptureSessionTestHooks {
     // to hold an active callback during teardown without depending on real WGC
     // events.
     std::function<void(CaptureLifecycle*, const std::shared_ptr<void>&)> onStateCreated;
+
+    // Synthetic window-state query used by lifecycle tests. Production uses
+    // IsWindow/IsIconic for the exact configured HWND and never calls this hook.
+    std::function<CaptureSessionTestWindowState(std::uint64_t)> onWindowStateQuery;
 };
 
-// Encapsulates a single display continuous capture session.
+// Encapsulates a single display or window continuous capture session.
 // The caller must create the BeginGate and pass it in; StartCapture is only
 // called after the gate has authorized begin.
 class CaptureSession {

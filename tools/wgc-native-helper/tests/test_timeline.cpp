@@ -29,6 +29,19 @@ TEST_REGISTRAR(FrameTimelinePreservesIntervals, []() {
     ASSERT_EQ(duration, 333'333LL);
 });
 
+TEST_REGISTRAR(FrameTimelineFinalizesLastSampleAtCaptureEnd, []() {
+    FrameTimeline timeline(30);
+    int64_t mediaTime = 0;
+    int64_t duration = 0;
+    ASSERT_TRUE(timeline.SubmitFrame(kHnsPerSecond, &mediaTime, &duration));
+    ASSERT_TRUE(timeline.SubmitFrame(kHnsPerSecond + 91'750'000LL, &mediaTime, &duration));
+
+    ASSERT_TRUE(timeline.FinalizeAt(100'080'000LL, &mediaTime, &duration));
+    ASSERT_EQ(mediaTime, 91'750'000LL);
+    ASSERT_EQ(duration, 8'330'000LL);
+    ASSERT_EQ(mediaTime + duration, 100'080'000LL);
+});
+
 TEST_REGISTRAR(FrameTimelineDropsNonMonotonic, []() {
     FrameTimeline timeline(30);
     int64_t mediaTime = 0;
@@ -48,14 +61,33 @@ TEST_REGISTRAR(FrameTimelineDropsNegativeTime, []() {
     ASSERT_EQ(timeline.FramesDropped(), 1);
 });
 
-TEST_REGISTRAR(FrameTimelineCapsLongDuration, []() {
+TEST_REGISTRAR(FrameTimelinePreservesLargeGapForBoundedFinalize, []() {
     FrameTimeline timeline(30);
     int64_t mediaTime = 0;
     int64_t duration = 0;
     ASSERT_TRUE(timeline.SubmitFrame(0, &mediaTime, &duration));
     ASSERT_TRUE(timeline.SubmitFrame(kHnsPerSecond + kHnsPerSecond / 2, &mediaTime, &duration));
     ASSERT_EQ(mediaTime, kHnsPerSecond + kHnsPerSecond / 2);
-    ASSERT_EQ(duration, kHnsPerSecond); // capped to 1 second
+    ASSERT_EQ(duration, kHnsPerSecond + kHnsPerSecond / 2);
+    ASSERT_TRUE(timeline.FinalizeAt(2 * kHnsPerSecond, &mediaTime, &duration));
+    ASSERT_EQ(mediaTime, kHnsPerSecond + kHnsPerSecond / 2);
+    ASSERT_EQ(duration, kHnsPerSecond / 2);
+});
+
+TEST_REGISTRAR(FrameTimelineRejectsCaptureEndWithoutAdvancingLastSample, []() {
+    FrameTimeline timeline(30);
+    int64_t mediaTime = 0;
+    int64_t duration = 0;
+    constexpr int64_t captureEnd = 100'080'000LL;
+
+    ASSERT_TRUE(timeline.SubmitFrame(0, &mediaTime, &duration, captureEnd));
+    ASSERT_TRUE(timeline.SubmitFrame(91'750'000LL, &mediaTime, &duration, captureEnd));
+    ASSERT_FALSE(timeline.SubmitFrame(captureEnd, &mediaTime, &duration, captureEnd));
+
+    ASSERT_EQ(timeline.FramesDropped(), 1);
+    ASSERT_TRUE(timeline.FinalizeAt(captureEnd, &mediaTime, &duration));
+    ASSERT_EQ(mediaTime, 91'750'000LL);
+    ASSERT_EQ(duration, 8'330'000LL);
 });
 
 TEST_REGISTRAR(FrameTimelineResetClearsState, []() {

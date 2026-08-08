@@ -69,10 +69,10 @@ POST /api/v1/recordings/quick
 | --- | --- | --- |
 | quick API | 已实现 | 一次请求表达常见录制意图 |
 | 显示器录制 | 已实现 | 录制整个显示器 |
-| 窗口录制 | 已实现 | 解析窗口可见边界并通过 `ffmpeg-window-region` 连续录制 |
+| 窗口录制 | 已实现 | 默认解析窗口可见边界并通过 `ffmpeg-window-region` 连续录制；符合条件的短时无麦克风请求可通过本地实验开关使用 WGC continuous |
 | 选区录制 | 已实现 | 支持拖拽、精确坐标、尺寸预设、边缘/窗口吸附、点击窗口选区和双屏可靠置顶 |
 | 嵌套录制 | 已实现 | 外层录制过程中可以启动内层录制 |
-| 本地确认 | 已实现 | 每次录制均需人类用户确认 |
+| 本地确认 | 已实现 | 每次录制均需人类用户确认；麦克风与延迟授权 WGC 路径在批准后显示不采集画面的 3-2-1 倒计时 |
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示红色边框和计时标签，支持 outer/inner |
 | 本地停止控制 | 已实现 | 每条录制有独立悬浮停止按钮；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |
@@ -86,7 +86,7 @@ POST /api/v1/recordings/quick
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退；系统声音暂未实现 |
-| WGC 连续录制 | 实验性实现 | 已具备受控 selector、有限能力探测、短期成功缓存与 FFmpeg 自动回退；self-contained portable 包已完成 build/zip 验证，确认恰好包含一个生产 `AgentRecorder.WgcHelper\wgc-native-helper.exe`；默认关闭，未作为公共 API 能力开放 |
+| WGC 连续录制 | 实验性实现 | 已支持符合条件的 display/window 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败和 FFmpeg 自动回退；self-contained portable 包包含唯一生产 helper；默认关闭，未作为公共 API 能力开放 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 ## 项目结构

@@ -8,8 +8,6 @@ namespace wgc {
 namespace {
 
 constexpr int64_t kHnsPerSecond = 10'000'000LL;
-constexpr int64_t kMaxReasonableFrameDurationHns = kHnsPerSecond; // 1 second
-
 } // namespace
 
 FrameTimeline::FrameTimeline(int fps) : fps_(fps) {
@@ -20,7 +18,8 @@ FrameTimeline::FrameTimeline(int fps) : fps_(fps) {
 
 bool FrameTimeline::SubmitFrame(int64_t systemRelativeTimeHns,
                                 int64_t* mediaTimeHns,
-                                int64_t* durationHns) {
+                                int64_t* durationHns,
+                                int64_t maxMediaTimeHns) {
     ++submitted_;
 
     if (systemRelativeTimeHns < 0) {
@@ -34,6 +33,13 @@ bool FrameTimeline::SubmitFrame(int64_t systemRelativeTimeHns,
         lastMediaTimeHns_ = 0;
         *mediaTimeHns = 0;
         *durationHns = nominalDurationHns_;
+        if (maxMediaTimeHns >= 0 && *mediaTimeHns >= maxMediaTimeHns) {
+            hasAnchor_ = false;
+            anchorHns_ = 0;
+            lastMediaTimeHns_ = 0;
+            ++dropped_;
+            return false;
+        }
         return true;
     }
 
@@ -44,16 +50,30 @@ bool FrameTimeline::SubmitFrame(int64_t systemRelativeTimeHns,
         return false;
     }
 
-    int64_t frameDuration = candidate - lastMediaTimeHns_;
-    if (frameDuration > kMaxReasonableFrameDurationHns) {
-        // Cap duration to avoid writer stalls; this is a defensive limit.
-        frameDuration = kMaxReasonableFrameDurationHns;
+    if (maxMediaTimeHns >= 0 && candidate >= maxMediaTimeHns) {
+        // Do not advance lastMediaTimeHns_ for a frame outside the authorized
+        // media window; a pending final sample must remain finalizable.
+        ++dropped_;
+        return false;
     }
 
+    int64_t frameDuration = candidate - lastMediaTimeHns_;
     lastMediaTimeHns_ = candidate;
     *mediaTimeHns = candidate;
     *durationHns = frameDuration;
     return true;
+}
+
+bool FrameTimeline::FinalizeAt(int64_t captureEndHns,
+                               int64_t* mediaTimeHns,
+                               int64_t* durationHns) const {
+    if (!hasAnchor_ || captureEndHns <= lastMediaTimeHns_) {
+        return false;
+    }
+
+    *mediaTimeHns = lastMediaTimeHns_;
+    *durationHns = captureEndHns - lastMediaTimeHns_;
+    return *durationHns > 0;
 }
 
 void FrameTimeline::Reset() {

@@ -22,7 +22,9 @@ void EventWriter::Started(const std::string& recordingId,
                           const std::wstring& outputPath,
                           int fps,
                           int width,
-                          int height) {
+                          int height,
+                          const std::string& captureMethod) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "STARTED");
     WriteLine("Stage", "SessionStarted");
     WriteLine("RecordingId", recordingId);
@@ -32,7 +34,17 @@ void EventWriter::Started(const std::string& recordingId,
     WriteLine("Fps", fps);
     WriteLine("Width", width);
     WriteLine("Height", height);
-    WriteLine("CaptureMethod", "WGC_D3D11_FRAME_STREAM");
+    WriteLine("CaptureMethod", captureMethod);
+    EndBlock();
+}
+
+void EventWriter::FirstFrame(int64_t frameNumber,
+                             int64_t elapsedMs) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    WriteLine("RESULT", "FIRST_FRAME");
+    WriteLine("Stage", "Capturing");
+    WriteLine("FrameNumber", frameNumber);
+    WriteLine("ElapsedMs", elapsedMs);
     EndBlock();
 }
 
@@ -40,6 +52,7 @@ void EventWriter::Progress(int64_t framesCaptured,
                            int64_t framesDropped,
                            int64_t elapsedMs,
                            int64_t bytesWritten) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "PROGRESS");
     WriteLine("Stage", "Capturing");
     WriteLine("FramesCaptured", framesCaptured);
@@ -55,6 +68,7 @@ void EventWriter::Ok(int64_t framesCaptured,
                      int64_t fileSize,
                      int width,
                      int height) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "OK");
     WriteLine("Stage", "Complete");
     WriteLine("FramesCaptured", framesCaptured);
@@ -72,6 +86,7 @@ void EventWriter::Stopped(int64_t framesCaptured,
                           int64_t fileSize,
                           int width,
                           int height) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "STOPPED");
     WriteLine("StopReason", "user_requested");
     WriteLine("FramesCaptured", framesCaptured);
@@ -89,6 +104,7 @@ void EventWriter::Fail(const std::string& errorCode,
                        const std::wstring& partialOutputPath,
                        int64_t framesCaptured,
                        int64_t bytesWritten) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "FAIL");
     if (!errorCode.empty()) {
         WriteLine("ErrorCode", errorCode);
@@ -112,6 +128,7 @@ void EventWriter::Fail(const std::string& errorCode,
 }
 
 void EventWriter::WriteRaw(const std::string& text) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
     std::cout << text;
     Flush();
 }

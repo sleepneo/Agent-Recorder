@@ -54,6 +54,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     private Task? _watcher;
     private int _firstFrameObserved;
     private FirstFrameObservation? _firstFrameObservation;
+    private bool _seenTerminalEvent;
     private int _exitCode = -1;
     private string? _failureReason;
     private string? _protocolViolation;
@@ -74,7 +75,10 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     public event Action<WgcContinuousEvent>? EventReceived;
 
     /// <summary>
-    /// Raised exactly once when a PROGRESS event with FramesCaptured > 0 is observed.
+    /// Raised exactly once when credible first-frame evidence is observed:
+    /// either the explicit FIRST_FRAME event (preferred, source-frame evidence)
+    /// or, as a bounded compatibility fallback for older helpers, a PROGRESS
+    /// event with FramesCaptured &gt; 0.
     /// </summary>
     public event Action<FirstFrameObservation>? FirstFrameObserved;
 
@@ -420,8 +424,20 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                 throw new ArgumentException($"Recording id contains invalid character: {c}", nameof(_options));
         }
 
-        if (_options.DisplayWidth <= 0 || _options.DisplayHeight <= 0)
-            throw new ArgumentException("Display width and height must be positive.", nameof(_options));
+        if (_options.TargetKind == WgcContinuousTargetKind.Display)
+        {
+            if (_options.DisplayWidth <= 0 || _options.DisplayHeight <= 0)
+                throw new ArgumentException("Display width and height must be positive.", nameof(_options));
+        }
+        else if (_options.TargetKind == WgcContinuousTargetKind.Window)
+        {
+            if (_options.WindowHandle == nint.Zero)
+                throw new ArgumentException("Window handle must be non-zero.", nameof(_options));
+        }
+        else
+        {
+            throw new ArgumentException("Unknown WGC continuous target kind.", nameof(_options));
+        }
 
         if (string.IsNullOrWhiteSpace(_options.OutputPath))
             throw new ArgumentException("Output path must be provided.", nameof(_options));
@@ -466,11 +482,26 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
     private List<string> BuildArgumentList()
     {
-        return new List<string>
+        var args = new List<string>
         {
-            "--capture-continuous-display",
-            "--display-bounds",
-            FormattableString.Invariant($"{_options.DisplayX},{_options.DisplayY},{_options.DisplayWidth},{_options.DisplayHeight}"),
+            _options.TargetKind == WgcContinuousTargetKind.Window
+                ? "--capture-continuous-window"
+                : "--capture-continuous-display"
+        };
+
+        if (_options.TargetKind == WgcContinuousTargetKind.Window)
+        {
+            args.Add("--window-hwnd");
+            args.Add($"0x{unchecked((ulong)_options.WindowHandle.ToInt64()):X}");
+        }
+        else
+        {
+            args.Add("--display-bounds");
+            args.Add(FormattableString.Invariant($"{_options.DisplayX},{_options.DisplayY},{_options.DisplayWidth},{_options.DisplayHeight}"));
+        }
+
+        args.AddRange(new[]
+        {
             "--recording-id",
             _options.RecordingId,
             "--output",
@@ -488,7 +519,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             "--stop-signal",
             _options.StopSignalPath,
             "--i-understand-this-captures-screen"
-        };
+        });
+        return args;
     }
 
     private async Task RunAuthorizationOnceAsync(
@@ -647,6 +679,9 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             case ContinuousEventResult.Progress:
                 OnProgressEvent(evt);
                 break;
+            case ContinuousEventResult.FirstFrame:
+                OnFirstFrameEvent(evt);
+                break;
             case ContinuousEventResult.Ok:
             case ContinuousEventResult.Stopped:
             case ContinuousEventResult.Fail:
@@ -657,7 +692,10 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
     private void OnProtocolViolation(string category)
     {
-        _protocolViolation = category;
+        lock (_lock)
+        {
+            _protocolViolation = category;
+        }
         _ = TriggerCompletionAsync(WgcContinuousManagedSessionState.Failed, category);
     }
 
@@ -681,6 +719,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
     private void OnStartedEvent(WgcContinuousEvent evt)
     {
+        bool methodMismatch = false;
         lock (_lock)
         {
             // STARTED is only valid after successful authorization. The
@@ -689,9 +728,102 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             // violation that we ignore for state-machine purposes.
             if (_state == WgcContinuousManagedSessionState.Authorized)
             {
-                _state = WgcContinuousManagedSessionState.Started;
+                string expectedMethod = _options.TargetKind == WgcContinuousTargetKind.Window
+                    ? "WGC_D3D11_WINDOW_FRAME_STREAM"
+                    : "WGC_D3D11_FRAME_STREAM";
+                if (!string.Equals(evt.CaptureMethod, expectedMethod, StringComparison.Ordinal))
+                    methodMismatch = true;
+                else
+                    _state = WgcContinuousManagedSessionState.Started;
             }
         }
+
+        if (methodMismatch)
+            OnProtocolViolation("capture_method_mismatch");
+    }
+
+    private void OnFirstFrameEvent(WgcContinuousEvent evt)
+    {
+        string? violation = null;
+        FirstFrameObservation? observation = null;
+
+        lock (_lock)
+        {
+            // Trust-boundary validation happens BEFORE the exactly-once gate is
+            // consumed and before any observer runs. A malformed, out-of-order,
+            // or duplicate FIRST_FRAME is a protocol violation that fails the
+            // session closed; it must never become credible recording evidence.
+            if (_state != WgcContinuousManagedSessionState.Started)
+            {
+                // FIRST_FRAME is only valid after the helper declared STARTED.
+                // The OnBlockParsed gate already rejects pre-authorization
+                // events; reaching here in a terminal/completing state is an
+                // ordering violation as well.
+                violation = "first_frame_before_started";
+            }
+            else if (_completed || _seenTerminalEvent)
+            {
+                violation = "first_frame_after_terminal";
+            }
+            else if (!IsValidFirstFrameEvent(evt))
+            {
+                violation = "first_frame_invalid";
+            }
+            else if (_firstFrameObserved != 0)
+            {
+                // A second explicit FIRST_FRAME (valid or not) is a protocol
+                // anomaly: fail closed rather than silently accepting it.
+                violation = "duplicate_first_frame";
+            }
+            else
+            {
+                // Exactly-once gate shared with the legacy progress fallback:
+                // once explicit evidence is published, a later PROGRESS with
+                // FramesCaptured > 0 must not publish a second observation.
+                Interlocked.Exchange(ref _firstFrameObserved, 1);
+                observation = new FirstFrameObservation
+                {
+                    EvidenceKind = "wgc_continuous_first_frame",
+                    FrameNumber = evt.FrameNumber!.Value,
+                    // No encoded bytes exist yet at source-frame time; bytes
+                    // evidence stays zero rather than fabricating a value.
+                    TotalSizeBytes = 0,
+                    OutTimeUs = evt.ElapsedMs!.Value * 1000
+                };
+                _firstFrameObservation = observation;
+            }
+        }
+
+        if (violation != null)
+        {
+            OnProtocolViolation(violation);
+            return;
+        }
+
+        if (observation != null)
+        {
+            try { FirstFrameObserved?.Invoke(observation); }
+            catch { /* observers must not affect flow */ }
+        }
+    }
+
+    /// <summary>
+    /// Strict live validation of a FIRST_FRAME block at the trust boundary.
+    /// Mirrors the parser's documented field rules and the session's strict
+    /// CaptureMethod-style policy for the authenticated Stage field: the frame
+    /// number must be a parsed positive integer, the elapsed time a parsed
+    /// non-negative integer, and Stage must be the documented capturing stage.
+    /// No defaults are fabricated for missing or unparsable values.
+    /// </summary>
+    private static bool IsValidFirstFrameEvent(WgcContinuousEvent evt)
+    {
+        if (evt.FrameNumberParseFailed || !evt.FrameNumber.HasValue || evt.FrameNumber.Value <= 0)
+            return false;
+        if (evt.ElapsedMsParseFailed || !evt.ElapsedMs.HasValue || evt.ElapsedMs.Value < 0)
+            return false;
+        if (!string.Equals(evt.Stage, "Capturing", StringComparison.Ordinal))
+            return false;
+        return true;
     }
 
     private void OnProgressEvent(WgcContinuousEvent evt)
@@ -702,8 +834,13 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         lock (_lock)
         {
             // First-frame evidence must only be published after the helper has
-            // declared STARTED and the session has left the authorization states.
-            if (_state != WgcContinuousManagedSessionState.Started)
+            // declared STARTED and the session has left the authorization
+            // states. A completed/completing session (e.g. failed by a
+            // malformed explicit FIRST_FRAME) must never be rescued by a later
+            // legacy progress fallback.
+            if (_state != WgcContinuousManagedSessionState.Started ||
+                _completed ||
+                _seenTerminalEvent)
                 return;
         }
 
@@ -724,11 +861,26 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
     private void OnTerminalEvent(WgcContinuousEvent evt)
     {
+        lock (_lock)
+        {
+            // Any terminal event (OK/STOPPED/FAIL) closes the window in which
+            // first-frame evidence may be accepted.
+            _seenTerminalEvent = true;
+        }
+
         if (evt.Result == ContinuousEventResult.Fail)
         {
             lock (_lock)
             {
-                _failureReason = "helper_reported_failure";
+                // Preserve the helper's authenticated terminal category. A
+                // later process-exit/timeout race may only add context; it
+                // must not replace window lifecycle evidence with a generic
+                // session or exit reason.
+                _failureReason = !string.IsNullOrEmpty(evt.ErrorCode)
+                    ? evt.ErrorCode
+                    : !string.IsNullOrEmpty(evt.StopReason)
+                        ? evt.StopReason
+                        : "helper_reported_failure";
             }
         }
 
@@ -846,7 +998,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             if (_completed)
                 return false;
             _completed = true;
-            _failureReason = failureReason;
+            if (!string.IsNullOrEmpty(failureReason) && string.IsNullOrEmpty(_failureReason))
+                _failureReason = failureReason;
             return true;
         }
     }
@@ -979,6 +1132,17 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         //    parsed.
         // 3. Only when no higher-priority failure exists do we trust Success/Stopped
         //    IPC and apply output authenticity checks.
+        // A parsed helper FAIL is stronger than a generic cancellation or
+        // process-exit race. The summary is available only after stdout drain,
+        // so this check must precede the suggested-state shortcut.
+        if (summary.State == ContinuousSessionState.Failed &&
+            (!string.IsNullOrEmpty(summary.ErrorCode) ||
+             !string.IsNullOrEmpty(summary.StopReason) ||
+             !string.IsNullOrEmpty(summary.Reason)))
+        {
+            return WgcContinuousManagedSessionState.Failed;
+        }
+
         if (suggested == WgcContinuousManagedSessionState.Cancelled)
             return WgcContinuousManagedSessionState.Cancelled;
 
@@ -1143,6 +1307,15 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     {
         if (!string.IsNullOrEmpty(_protocolViolation))
             return ("protocol", _protocolViolation);
+
+        // Prefer a specific helper FAIL category over a timeout, non-zero
+        // exit, or other generic reason captured by the watcher.
+        if (summary.State == ContinuousSessionState.Failed)
+        {
+            string helperCategory = summary.GetStopReasonForEvidence();
+            if (!string.Equals(helperCategory, "error", StringComparison.Ordinal))
+                return ("helper_reported_failure", helperCategory);
+        }
 
         var lifecycleCategories = new HashSet<string>(StringComparer.Ordinal)
         {

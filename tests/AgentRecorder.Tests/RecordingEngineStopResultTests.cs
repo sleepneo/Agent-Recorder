@@ -34,6 +34,72 @@ public class RecordingEngineStopResultTests
         public void ShowError(string text) { }
     }
 
+    private sealed class FailureTray : ITrayContext, IRecordingFailureNotifier
+    {
+        public string HostMode => "tray";
+        public bool SupportsRegionSelectionUi => true;
+        public int SetIdleCallCount { get; private set; }
+        public List<string> FailureReasons { get; } = new();
+        public List<string> CallOrder { get; } = new();
+
+        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestRegionSelection(int timeoutSeconds,
+            Action<string, int, int, int, int, string, string> callback) { }
+        public void SetRecording(object rec) { }
+        public void SetIdle(object rec)
+        {
+            SetIdleCallCount++;
+            CallOrder.Add("idle");
+        }
+        public void SetAllIdle() { }
+        public void ShowError(string text) { }
+        public void ShowRecordingFailure(string recordingId, string reasonCode)
+        {
+            FailureRecordingIds.Add(recordingId);
+            FailureReasons.Add(reasonCode);
+            CallOrder.Add("notify");
+        }
+        public List<string> FailureRecordingIds { get; } = new();
+    }
+
+    private sealed class TerminalTracer : IPerformanceTracer
+    {
+        public string? Status { get; private set; }
+        public string? StopReason { get; private set; }
+        public string? ErrorCode { get; private set; }
+
+        public void RecordingTerminal(string traceId, string recordingId, string status,
+            string? stopReason = null, string? errorCode = null)
+        {
+            Status = status;
+            StopReason = stopReason;
+            ErrorCode = errorCode;
+        }
+
+        public void IntentAccepted(string traceId, string endpoint, string? clientSentAtUtc = null) { }
+        public void SetEnsureContextAssociation(string traceId, EnsureContextAssociation association) { }
+        public void IntentValidated(string traceId, string endpoint, bool success, string? errorCode = null) { }
+        public void CorrelationSet(string traceId, string recordingId, string? confirmationId = null, string? sourceType = null) { }
+        public bool HasValidationResult(string traceId) => false;
+        public void ConfirmationCreated(string traceId, string recordingId, string confirmationId) { }
+        public void ConfirmationShown(string traceId, string recordingId, string confirmationId) { }
+        public void ConfirmationApproved(string traceId, string recordingId, string confirmationId) { }
+        public void ConfirmationRejected(string traceId, string recordingId, string confirmationId) { }
+        public void ConfirmationExpired(string traceId, string recordingId, string confirmationId) { }
+        public void CaptureStartRequested(string traceId, string recordingId, string backendType) { }
+        public void CaptureBackendStartReturned(string traceId, string recordingId, string backendType) { }
+        public void CaptureBackendStartFailed(string traceId, string recordingId, string backendType, string errorCode, string errorType) { }
+        public void MicrophonePrepareStarted(string traceId, string recordingId) { }
+        public void MicrophoneReady(string traceId, string recordingId) { }
+        public void CountdownStarted(string traceId, string recordingId) { }
+        public void CaptureFirstFrameObserved(string traceId, string recordingId, FirstFrameEvidence evidence) { }
+        public void CaptureEnded(string traceId, string recordingId) { }
+        public void FinalizationCompleted(string traceId, string recordingId, bool success) { }
+        public void LongPollCompleted(string traceId, string kind, int requestedWaitMs, int actualWaitMs, bool changed, string? recordingId = null, string? confirmationId = null) { }
+        public void Flush() { }
+        public string? ResolveTraceId(string? recordingId = null, string? confirmationId = null) => null;
+    }
+
     private sealed class FakeCaptureBackend : ICaptureBackend
     {
         public OutputMeta StopResult { get; set; } = new();
@@ -83,18 +149,21 @@ public class RecordingEngineStopResultTests
 
     private static (RecordingEngine engine, Recording rec, FakeCaptureBackend backend, CaptureAuditLogger audit) Setup(
         int durationSeconds = 30,
-        OutputMeta? stopMeta = null)
+        OutputMeta? stopMeta = null,
+        string backendType = "fake",
+        ITrayContext? tray = null,
+        IPerformanceTracer? tracer = null)
     {
         var audit = new CaptureAuditLogger();
-        var tray = new NoOpTray();
-        var engine = new RecordingEngine(audit);
-        engine.SetTray(tray);
+        var chosenTray = tray ?? new NoOpTray();
+        var engine = new RecordingEngine(audit, tracer);
+        engine.SetTray(chosenTray);
 
         var backend = new FakeCaptureBackend
         {
             StopResult = stopMeta ?? new OutputMeta { DurationSeconds = 4.4, SizeBytes = 263781 }
         };
-        engine.BackendFactory = _ => (backend, "fake");
+        engine.BackendFactory = _ => (backend, backendType);
 
         var outputPath = Path.Combine(Path.GetTempPath(), $"test-stop-{Guid.NewGuid():N}.mp4");
         var rec = new Recording
@@ -111,7 +180,7 @@ public class RecordingEngineStopResultTests
             }
         };
 
-        engine.StartCaptureForTests(rec, tray);
+        engine.StartCaptureForTests(rec, chosenTray);
         return (engine, rec, backend, audit);
     }
 
@@ -228,6 +297,232 @@ public class RecordingEngineStopResultTests
         Assert.Equal("duration_reached", rec.StopReason);
         Assert.Contains(audit.Events, e => e.evt == "recording.completed");
         Assert.DoesNotContain(audit.Events, e => e.evt == "recording.failed");
+    }
+
+    [Theory]
+    [InlineData("window_closed")]
+    [InlineData("window_minimized")]
+    [InlineData("size_changed")]
+    public void WgcLifecycleFailure_PropagatesPublicEvidenceAndNotifiesOnce(string reason)
+    {
+        var tray = new FailureTray();
+        var tracer = new TerminalTracer();
+        string outputPath = Path.Combine(Path.GetTempPath(), $"wgc-lifecycle-{Guid.NewGuid():N}.mp4");
+        var meta = new OutputMeta
+        {
+            DurationSeconds = 2.4,
+            SizeBytes = 263781,
+            StopReason = reason,
+            OutputPath = outputPath,
+            OutputFileExists = false,
+            Warnings = new[] { "wgc_continuous_" + reason }
+        };
+        var (engine, rec, backend, audit) = Setup(
+            30, meta, backendType: "wgc-continuous", tray: tray, tracer: tracer);
+
+        backend.FireNaturalExit(0, meta);
+
+        Assert.Equal("wgc-continuous", rec.BackendType);
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal(reason, rec.StopReason);
+        Assert.Equal(reason, rec.Error);
+        Assert.Equal(1, tray.SetIdleCallCount);
+        Assert.Single(tray.FailureReasons, reason);
+        Assert.Single(tray.FailureRecordingIds, rec.Id);
+        Assert.Equal(new[] { "idle", "notify" }, tray.CallOrder);
+        Assert.Equal("failed", tracer.Status);
+        Assert.Equal(reason, tracer.StopReason);
+        Assert.Equal(reason, tracer.ErrorCode);
+
+        var statusJson = JsonSerializer.Serialize(engine.GetStatus(rec.Id));
+        var waitJson = JsonSerializer.Serialize(engine.GetStatusWait(rec.Id, "recording", 100));
+        var outputJson = JsonSerializer.Serialize(engine.GetOutput(rec.Id));
+        Assert.Equal(reason, JsonDocument.Parse(statusJson).RootElement.GetProperty("stop_reason").GetString());
+        Assert.Equal(reason, JsonDocument.Parse(waitJson).RootElement.GetProperty("stop_reason").GetString());
+        Assert.Equal(reason, JsonDocument.Parse(outputJson).RootElement.GetProperty("stop_reason").GetString());
+        Assert.Contains(audit.Events, e => e.evt == "recording.failed" && e.json.Contains($"\"error\":\"{reason}\""));
+        Assert.Contains(audit.Events, e => e.evt == "recording.failed" && e.json.Contains($"\"stop_reason\":\"{reason}\""));
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void WgcContinuous_OutputValidationFailure_IsPublicCategoryWithoutProcessFailure()
+    {
+        var tray = new FailureTray();
+        var tracer = new TerminalTracer();
+        string outputPath = Path.Combine(Path.GetTempPath(), $"wgc-validation-{Guid.NewGuid():N}.mp4");
+        var meta = new OutputMeta
+        {
+            DurationSeconds = 10.833,
+            SizeBytes = 1340075,
+            StopReason = "output_validation_failed",
+            OutputPath = outputPath,
+            OutputFileExists = false,
+            Warnings = new[]
+            {
+                "duration_mismatch: probe=10833ms summary=10008ms",
+                "wgc_continuous_output_validation_failed"
+            }
+        };
+        var (engine, rec, backend, audit) = Setup(
+            30, meta, backendType: "wgc-continuous", tray: tray, tracer: tracer);
+
+        backend.FireNaturalExit(0, meta);
+
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal(0, rec.ExitCode);
+        Assert.Equal("output_validation_failed", rec.StopReason);
+        Assert.Equal("output_validation_failed", rec.Error);
+        Assert.Equal(1, tray.SetIdleCallCount);
+        Assert.Empty(tray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, tray.CallOrder);
+        Assert.Equal("output_validation_failed", tracer.ErrorCode);
+        Assert.DoesNotContain(rec.Warnings, warning =>
+            warning.Contains("unexpected_exit", StringComparison.Ordinal) ||
+            warning.Contains("non_zero_exit", StringComparison.Ordinal) ||
+            warning.Contains("unexpected_terminal_state", StringComparison.Ordinal));
+        Assert.Contains(audit.Events, e => e.evt == "recording.failed" &&
+                                           e.json.Contains("\"error\":\"output_validation_failed\""));
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Theory]
+    [InlineData("window_closed")]
+    [InlineData("window_minimized")]
+    [InlineData("size_changed")]
+    public void LegacyWgc_DoesNotAcquireContinuousLifecycleMapping(string reason)
+    {
+        var tray = new FailureTray();
+        var outputPath = Path.Combine(Path.GetTempPath(), $"legacy-wgc-{Guid.NewGuid():N}.mp4");
+        var (engine, rec, backend, audit) = Setup(
+            30,
+            new OutputMeta
+            {
+                DurationSeconds = 2.4,
+                SizeBytes = 263781,
+                StopReason = reason,
+                OutputPath = outputPath,
+                OutputFileExists = false
+            },
+            backendType: "wgc",
+            tray: tray);
+
+        backend.FireNaturalExit(0, backend.StopResult);
+
+        Assert.Equal("wgc", rec.BackendType);
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("unexpected_exit", rec.StopReason);
+        Assert.NotEqual(reason, rec.Error);
+        Assert.Empty(tray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, tray.CallOrder);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void UnrelatedBackend_DoesNotAcquireWgcLifecycleNotificationOrErrorMapping()
+    {
+        var tray = new FailureTray();
+        var outputPath = Path.Combine(Path.GetTempPath(), $"fake-lifecycle-{Guid.NewGuid():N}.mp4");
+        var (engine, rec, backend, audit) = Setup(
+            30,
+            new OutputMeta
+            {
+                DurationSeconds = 2.4,
+                SizeBytes = 263781,
+                StopReason = "window_closed",
+                OutputPath = outputPath,
+                OutputFileExists = false
+            },
+            backendType: "fake",
+            tray: tray);
+
+        backend.FireNaturalExit(0, backend.StopResult);
+
+        Assert.Equal("fake", rec.BackendType);
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("unexpected_exit", rec.StopReason);
+        Assert.NotEqual("window_closed", rec.Error);
+        Assert.Empty(tray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, tray.CallOrder);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void WgcContinuous_UnknownStopReasonDoesNotBecomeStablePublicErrorCode()
+    {
+        var tray = new FailureTray();
+        var outputPath = Path.Combine(Path.GetTempPath(), $"wgc-unknown-{Guid.NewGuid():N}.mp4");
+        var (engine, rec, backend, audit) = Setup(
+            30,
+            new OutputMeta
+            {
+                DurationSeconds = 2.4,
+                SizeBytes = 263781,
+                StopReason = "private_native_detail",
+                OutputPath = outputPath,
+                OutputFileExists = false
+            },
+            backendType: "wgc-continuous",
+            tray: tray);
+
+        backend.FireNaturalExit(0, backend.StopResult);
+
+        Assert.Equal("wgc-continuous", rec.BackendType);
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("unexpected_exit", rec.StopReason);
+        Assert.NotEqual("private_native_detail", rec.Error);
+        Assert.Empty(tray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, tray.CallOrder);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void WgcContinuous_NaturalCompletionAndUserStopRemainUnchanged()
+    {
+        var completionTray = new FailureTray();
+        var (completionEngine, completionRec, completionBackend, _) = Setup(
+            30,
+            new OutputMeta { DurationSeconds = 30, SizeBytes = 263781 },
+            backendType: "wgc-continuous",
+            tray: completionTray);
+        completionBackend.FireNaturalExit(0, completionBackend.StopResult);
+
+        Assert.Equal("wgc-continuous", completionRec.BackendType);
+        Assert.Equal(RecState.completed, completionRec.State);
+        Assert.Equal("duration_reached", completionRec.StopReason);
+        Assert.Null(completionRec.Error);
+        Assert.Empty(completionTray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, completionTray.CallOrder);
+
+        var stopTray = new FailureTray();
+        var (stopEngine, stopRec, stopBackend, _) = Setup(
+            30,
+            new OutputMeta { DurationSeconds = 4.4, SizeBytes = 263781, StopReason = "window_closed" },
+            backendType: "wgc-continuous",
+            tray: stopTray);
+        stopBackend.ExitCodeValue = 0;
+        stopEngine.Stop(stopRec.Id, "user_requested");
+
+        Assert.Equal("wgc-continuous", stopRec.BackendType);
+        Assert.Equal(RecState.completed, stopRec.State);
+        Assert.Equal("user_requested", stopRec.StopReason);
+        Assert.Null(stopRec.Error);
+        Assert.Empty(stopTray.FailureReasons);
+        Assert.Equal(new[] { "idle" }, stopTray.CallOrder);
+    }
+
+    [Fact]
+    public void WgcLifecycleFailureText_IsLocalizedInChineseAndEnglish()
+    {
+        var zh = new UiTextProvider(UiLanguage.ZhCn);
+        var en = new UiTextProvider(UiLanguage.EnUs);
+
+        Assert.Contains("目标窗口已关闭", zh.Get("Tray_Balloon_WindowClosedBody"));
+        Assert.Contains("target window closed", en.Get("Tray_Balloon_WindowClosedBody"), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("目标窗口已最小化", zh.Get("Tray_Balloon_WindowMinimizedBody"));
+        Assert.Contains("target window", en.Get("Tray_Balloon_WindowMinimizedBody"), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("尺寸已改变", zh.Get("Tray_Balloon_WindowResizedBody"));
+        Assert.Contains("changed size", en.Get("Tray_Balloon_WindowResizedBody"), StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

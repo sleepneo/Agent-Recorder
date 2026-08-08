@@ -8,7 +8,7 @@ namespace AgentRecorder.Headless;
 /// Headless 模式下的 ITrayContext 实现：不提供本地 UI，因此不能代表本地用户批准录屏请求。
 /// 所有确认请求都会被立即拒绝，并记录 audit event 说明 headless 模式无法完成本地用户确认。
 /// </summary>
-public sealed class HeadlessTrayContext : ITrayContext
+public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifier
 {
     public string HostMode => "headless";
     public bool SupportsRegionSelectionUi => false;
@@ -63,5 +63,16 @@ public sealed class HeadlessTrayContext : ITrayContext
     public void ShowError(string text)
     {
         _audit.Log("recording.headless_error", new { error = text });
+    }
+
+    public void ShowRecordingFailure(string recordingId, string reasonCode)
+    {
+        _audit.Log("recording_failure_notification.requested", new
+        {
+            recording_id = recordingId,
+            reason_code = reasonCode,
+            host_mode = "headless",
+            outcome = "audit_only"
+        });
     }
 }

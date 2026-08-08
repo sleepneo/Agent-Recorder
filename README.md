@@ -56,13 +56,16 @@ Agents should use the paths returned by `ensure-running` or
 
 - Quick intent API for primary display, active window, and selected region.
 - Lower-level display, window, and region recording APIs.
-- Active-window recording uses visible window bounds clipped to the virtual
-  desktop, then records via the FFmpeg `ffmpeg-window-region` backend.
+- Active-window recording defaults to visible window bounds clipped to the
+  virtual desktop and the FFmpeg `ffmpeg-window-region` backend. A guarded
+  local experiment can instead use native WGC continuous window capture for
+  eligible short, silent recordings.
 - Interactive selected-region UI with precise coordinates, size presets, edge/window
   snapping, click-to-pick visible windows, and resilient top-most behavior across
   multi-monitor desktops.
 - Mandatory local user confirmation before recording starts, with target preview,
-  a safe countdown, and an optional local save-directory choice.
+  an optional local save-directory choice, and a no-capture 3-2-1 countdown on
+  microphone and deferred-start WGC paths.
 - Before-confirmation and before-start preflight checks for output paths, free
   space, capture bounds, encoders, and source availability.
 - A click-through red recording border and timer around the captured region.
@@ -89,7 +92,13 @@ Agents should use the paths returned by `ensure-running` or
   and Focal Bathys have passed supervised product-path recording. Compatibility
   is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
   fallback, and system-audio capture is not implemented.
-- The experimental WGC continuous display pipeline now has a guarded backend-selector path with bounded availability probing, short-lived success caching, and automatic FFmpeg fallback. The self-contained portable package has been build-tested and verified to include exactly one production `AgentRecorder.WgcHelper\wgc-native-helper.exe`; the pipeline remains disabled by default and is not exposed as a public API capability.
+- The experimental native WGC continuous pipeline supports eligible display and
+  window targets behind separate local environment switches. It provides
+  non-capturing availability probes, short-lived success caching, authenticated
+  first-frame evidence, explicit window lifecycle failures, and automatic
+  FFmpeg fallback. The self-contained portable package includes exactly one
+  production `AgentRecorder.WgcHelper\wgc-native-helper.exe`. The pipeline
+  remains disabled by default and is not exposed as a public API capability.
 - Local audit log and MP4 output.
 
 ## Documentation

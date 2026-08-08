@@ -1,5 +1,11 @@
 namespace AgentRecorder.Capture;
 
+public enum WgcContinuousTargetKind
+{
+    Display,
+    Window
+}
+
 /// <summary>
 /// Options for a single WGC continuous recording session managed by
 /// <see cref="WgcContinuousManagedSession"/>.
@@ -12,6 +18,9 @@ public sealed class WgcContinuousSessionOptions
     /// <summary>1-64 character safe recording identifier.</summary>
     public string RecordingId { get; set; } = "";
 
+    /// <summary>Capture target selected after local approval.</summary>
+    public WgcContinuousTargetKind TargetKind { get; set; } = WgcContinuousTargetKind.Display;
+
     /// <summary>Target display left coordinate in physical pixels.</summary>
     public int DisplayX { get; set; }
 
@@ -23,6 +32,9 @@ public sealed class WgcContinuousSessionOptions
 
     /// <summary>Target display height in physical pixels.</summary>
     public int DisplayHeight { get; set; }
+
+    /// <summary>Target window HWND. Required only for the Window target.</summary>
+    public nint WindowHandle { get; set; }
 
     /// <summary>Absolute output MP4 path.</summary>
     public string OutputPath { get; set; } = "";
