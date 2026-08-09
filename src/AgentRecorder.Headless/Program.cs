@@ -223,6 +223,14 @@ internal static class Program
 
     private static void ApplyEnvironment(HeadlessOptions opts)
     {
+        // Keep headless startup and the tray process on the same normalized
+        // hidden encoder policy. Empty/unset is explicit software; invalid
+        // values fail before the API starts accepting recordings.
+        Environment.SetEnvironmentVariable(
+            WgcEncoderModePolicy.EnvironmentVariable,
+            WgcEncoderModePolicy.ToArgumentValue(WgcEncoderModePolicy.NormalizeEnvironment()),
+            EnvironmentVariableTarget.Process);
+
         if (!string.IsNullOrWhiteSpace(opts.DataDir))
         {
             var absolute = Path.GetFullPath(opts.DataDir);

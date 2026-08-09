@@ -109,6 +109,17 @@ public interface IBackendSelectionPerformanceTracer
 }
 
 /// <summary>
+/// Optional performance evidence for the encoder selected by a WGC recording.
+/// The values are emitted only after the native helper has made a truthful
+/// selection decision, so performance traces do not infer hardware use from a
+/// request flag alone.
+/// </summary>
+public interface IEncoderSelectionPerformanceTracer
+{
+    void EncoderSelected(string traceId, string recordingId, string encoderMode, string selectionReason);
+}
+
+/// <summary>
 /// Optional performance evidence for the immutable capture plan and its
 /// approval-time semantic revalidation. Kept separate so existing tracers do
 /// not need to implement capture-plan internals.

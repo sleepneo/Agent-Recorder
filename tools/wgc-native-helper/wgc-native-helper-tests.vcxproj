@@ -98,6 +98,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="tests\test_framework.h" />
+    <ClInclude Include="..\wgc-native-helper\src\mft_activation.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="tests\test_framework.cpp" />

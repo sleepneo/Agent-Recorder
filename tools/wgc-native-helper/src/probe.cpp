@@ -1,6 +1,7 @@
 #include "probe.h"
 
 #include "dpi_context.h"
+#include "mft_activation.h"
 
 #include <windows.h>
 #include <windows.graphics.capture.interop.h>
@@ -16,6 +17,7 @@
 #include <format>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace wgc {
 
@@ -102,7 +104,7 @@ BOOL CALLBACK ProbeMonitorEnumProc(HMONITOR hMonitor, HDC /*hdcMonitor*/,
     return TRUE;
 }
 
-HRESULT CreateSoftwareH264Encoder() {
+HRESULT CreateSoftwareH264Encoder(std::string* diagnostic) {
     // Enumerate software H.264 encoder MFTs. Avoids a hard-coded CLSID that may not
     // be registered on all Windows SKUs/editions.
     MFT_REGISTER_TYPE_INFO outputType = {};
@@ -114,29 +116,63 @@ HRESULT CreateSoftwareH264Encoder() {
     HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
                            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT,
                            nullptr, &outputType, &activates, &count);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        const auto operations = MakeNativeMftActivationOperations(activates);
+        RunMftActivationCleanupOnly(
+            reinterpret_cast<void**>(activates), count, operations);
+        return hr;
+    }
     if (count == 0) {
-        ::CoTaskMemFree(activates);
+        const auto operations = MakeNativeMftActivationOperations(activates);
+        RunMftActivationCleanupOnly(
+            reinterpret_cast<void**>(activates), count, operations);
         return REGDB_E_CLASSNOTREG;
     }
 
-    bool created = false;
-    for (UINT32 i = 0; i < count; ++i) {
-        Microsoft::WRL::ComPtr<IMFTransform> transform;
-        hr = activates[i]->ActivateObject(__uuidof(IMFTransform),
-                                          reinterpret_cast<void**>(transform.GetAddressOf()));
-        activates[i]->Release();
-        if (SUCCEEDED(hr)) {
-            created = true;
-            // Release any remaining activate objects that were not examined.
-            for (UINT32 j = i + 1; j < count; ++j) {
-                activates[j]->Release();
-            }
-            break;
-        }
+    const auto operations = MakeNativeMftActivationOperations(activates);
+    const MftActivationLifecycleResult lifecycle = RunMftActivationLifecycle(
+        reinterpret_cast<void**>(activates), count, operations, {},
+        MftActivationProcessingPolicy::StopAfterFirstUsable);
+    if (lifecycle.usableCandidateCount > 0) {
+        return S_OK;
     }
-    ::CoTaskMemFree(activates);
-    return created ? S_OK : hr;
+    if (diagnostic && lifecycle.shutdownFailureCount > 0) {
+        *diagnostic = "Software H.264 activation ShutdownObject failed";
+    }
+    return lifecycle.firstFailureHresult != S_OK
+        ? lifecycle.firstFailureHresult
+        : REGDB_E_CLASSNOTREG;
+}
+
+HardwareH264EnumerationEvidence EnumerateHardwareH264() {
+    HardwareH264EnumerationEvidence evidence;
+    MFT_REGISTER_TYPE_INFO outputType = {};
+    outputType.guidMajorType = MFMediaType_Video;
+    outputType.guidSubtype = MFVideoFormat_H264;
+
+    IMFActivate** activates = nullptr;
+    UINT32 count = 0;
+    const HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                                 MFT_ENUM_FLAG_HARDWARE,
+                                 nullptr, &outputType, &activates, &count);
+    if (FAILED(hr)) {
+        const auto operations = MakeNativeMftActivationOperations(activates);
+        RunMftActivationCleanupOnly(
+            reinterpret_cast<void**>(activates), count, operations);
+        return evidence;
+    }
+    evidence.enumerationSucceeded = true;
+    evidence.returnedCandidateCount = count;
+
+    const auto operations = MakeNativeMftActivationOperations(activates);
+    const MftActivationLifecycleResult lifecycle = RunMftActivationLifecycle(
+        reinterpret_cast<void**>(activates), count, operations, {},
+        MftActivationProcessingPolicy::ProcessAll);
+    evidence.activationSuccessCount = lifecycle.activationSuccessCount;
+    evidence.activatedCandidateCount = lifecycle.usableCandidateCount;
+    evidence.activationFailureCount = lifecycle.activationFailureCount;
+    evidence.shutdownFailureCount = lifecycle.shutdownFailureCount;
+    return evidence;
 }
 
 } // namespace
@@ -209,12 +245,24 @@ ProbeResult RunProbe() {
     }
     result.d3d11Initialized = true;
 
-    hr = CreateSoftwareH264Encoder();
+    std::string softwareEncoderDiagnostic;
+    hr = CreateSoftwareH264Encoder(&softwareEncoderDiagnostic);
     if (FAILED(hr)) {
         result.error = std::format("Software H.264 encoder creation failed: {}", HresultToString(hr));
+        if (!softwareEncoderDiagnostic.empty()) {
+            result.error += "; " + softwareEncoderDiagnostic;
+        }
         return result;
     }
     result.encoderCreated = true;
+
+    // Hardware enumeration is optional evidence for the experimental encoder
+    // route. It must never make the shared software WGC capability unavailable.
+    const HardwareH264EnumerationEvidence hardwareEvidence = EnumerateHardwareH264();
+    result.hardwareH264Available = IsHardwareH264Available(hardwareEvidence);
+    result.hardwareH264CandidateCount = hardwareEvidence.activatedCandidateCount;
+    result.hardwareH264ActivationFailureCount = hardwareEvidence.activationFailureCount;
+    result.hardwareH264ShutdownFailureCount = hardwareEvidence.shutdownFailureCount;
 
     mfGuard.needShutdown = false;
     MFShutdown();

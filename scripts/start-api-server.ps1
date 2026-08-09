@@ -66,6 +66,43 @@ if ($normalizedWindowBackend -notin @("", "wgc", "wgc-continuous")) {
     throw "WindowBackend must be empty, wgc-continuous, or legacy alias wgc. Received '$WindowBackend'."
 }
 
+$rawWgcEncoder = [System.Environment]::GetEnvironmentVariable("AGENT_RECORDER_WGC_ENCODER", "Process")
+$normalizedWgcEncoder = if ([string]::IsNullOrWhiteSpace($rawWgcEncoder) -or $rawWgcEncoder.Trim().ToLowerInvariant() -eq "software") {
+    "software"
+} elseif ($rawWgcEncoder.Trim().ToLowerInvariant() -eq "hardware-preferred") {
+    "hardware-preferred"
+} else {
+    throw "AGENT_RECORDER_WGC_ENCODER must be empty, software, or hardware-preferred. Received '$rawWgcEncoder'."
+}
+
+function Set-ProcessEnvironmentSafely {
+    param(
+        [Parameter(Mandatory=$true)] [System.Diagnostics.ProcessStartInfo]$psi,
+        [Parameter(Mandatory=$true)] [string]$name,
+        [Parameter(Mandatory=$true)] [AllowEmptyString()] [string]$value
+    )
+    if ($null -ne $psi.Environment) {
+        try { $psi.Environment[$name] = $value; return } catch {}
+    }
+    if ($null -ne $psi.EnvironmentVariables) {
+        try { $psi.EnvironmentVariables[$name] = $value; return } catch {}
+    }
+    [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+}
+
+function Remove-ProcessEnvironmentSafely {
+    param(
+        [Parameter(Mandatory=$true)] [System.Diagnostics.ProcessStartInfo]$psi,
+        [Parameter(Mandatory=$true)] [string]$name
+    )
+    if ($null -ne $psi.Environment) {
+        try { $psi.Environment.Remove($name) } catch {}
+    }
+    if ($null -ne $psi.EnvironmentVariables) {
+        try { $psi.EnvironmentVariables.Remove($name) } catch {}
+    }
+}
+
 function Stop-OldAgentRecorderProcesses {
     $oldHeadless = @(Get-Process AgentRecorder.Headless -ErrorAction SilentlyContinue)
     if ($oldHeadless.Count -eq 0) { return $true }
@@ -263,6 +300,7 @@ function Invoke-ProcessLauncher {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.WorkingDirectory = $ProjectRoot
+    Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WGC_ENCODER" -value $normalizedWgcEncoder
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($null -eq $proc) {

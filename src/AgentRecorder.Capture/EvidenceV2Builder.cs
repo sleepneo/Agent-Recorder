@@ -129,7 +129,9 @@ public sealed class EvidenceV2Builder
             ["fps"] = summary.Fps ?? 0,
             ["frames_captured"] = summary.FramesCaptured ?? 0,
             ["frames_dropped"] = summary.FramesDropped ?? 0,
-            ["capture_method"] = summary.CaptureMethod ?? ""
+            ["capture_method"] = summary.CaptureMethod ?? "",
+            ["encoder_mode"] = summary.EncoderMode ?? "",
+            ["encoder_selection_reason"] = summary.EncoderSelectionReason ?? ""
         };
 
         // Build audit events
@@ -207,20 +209,45 @@ public sealed class EvidenceV2Builder
         // recording.session_started
         if (!string.IsNullOrEmpty(recId))
         {
-            events.Add(new Dictionary<string, object?> { ["event"] = "recording.session_started", ["recording_id"] = recId });
+            events.Add(new Dictionary<string, object?>
+            {
+                ["event"] = "recording.session_started",
+                ["recording_id"] = recId,
+                ["encoder_mode"] = summary.EncoderMode ?? "",
+                ["encoder_selection_reason"] = summary.EncoderSelectionReason ?? ""
+            });
         }
 
         // Terminal event
         if (summary.State == ContinuousSessionState.Success)
         {
             // OK -> completed: recording.completed only
-            events.Add(new Dictionary<string, object?> { ["event"] = "recording.completed", ["recording_id"] = recId });
+            events.Add(new Dictionary<string, object?>
+            {
+                ["event"] = "recording.completed",
+                ["recording_id"] = recId,
+                ["encoder_mode"] = summary.EncoderMode ?? "",
+                ["encoder_selection_reason"] = summary.EncoderSelectionReason ?? ""
+            });
         }
         else if (summary.State == ContinuousSessionState.Stopped)
         {
             // STOPPED -> completed: must have both recording.stopped AND recording.completed
-            events.Add(new Dictionary<string, object?> { ["event"] = "recording.stopped", ["recording_id"] = recId, ["reason"] = "user_requested" });
-            events.Add(new Dictionary<string, object?> { ["event"] = "recording.completed", ["recording_id"] = recId });
+            events.Add(new Dictionary<string, object?>
+            {
+                ["event"] = "recording.stopped",
+                ["recording_id"] = recId,
+                ["reason"] = "user_requested",
+                ["encoder_mode"] = summary.EncoderMode ?? "",
+                ["encoder_selection_reason"] = summary.EncoderSelectionReason ?? ""
+            });
+            events.Add(new Dictionary<string, object?>
+            {
+                ["event"] = "recording.completed",
+                ["recording_id"] = recId,
+                ["encoder_mode"] = summary.EncoderMode ?? "",
+                ["encoder_selection_reason"] = summary.EncoderSelectionReason ?? ""
+            });
         }
         else if (summary.State == ContinuousSessionState.Failed || summary.State == ContinuousSessionState.MalformedSequence)
         {
@@ -230,6 +257,8 @@ public sealed class EvidenceV2Builder
                 errDict["error"] = summary.ErrorCode;
             else if (!string.IsNullOrEmpty(summary.Reason))
                 errDict["error"] = summary.Reason;
+            errDict["encoder_mode"] = summary.EncoderMode ?? "";
+            errDict["encoder_selection_reason"] = summary.EncoderSelectionReason ?? "";
             events.Add(errDict);
         }
 

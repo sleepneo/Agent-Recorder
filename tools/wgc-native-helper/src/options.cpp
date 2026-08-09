@@ -209,6 +209,19 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
                 result.error = "Invalid fps; expected 1..60";
                 return result;
             }
+        } else if (EqualsArg(arg, L"encoder-mode")) {
+            if (opts.hasEncoderMode) {
+                result.error = "Duplicate --encoder-mode";
+                return result;
+            }
+            std::wstring value;
+            if (!takeNext(value, L"encoder-mode")) return result;
+            if (!TryParseEncoderMode(value, opts.encoderMode) ||
+                opts.encoderMode == EncoderMode::Hardware) {
+                result.error = "Invalid encoder-mode; expected software or hardware-preferred";
+                return result;
+            }
+            opts.hasEncoderMode = true;
         } else if (EqualsArg(arg, L"begin-signal")) {
             if (!takeNext(opts.beginSignalPath, L"begin-signal")) return result;
         } else if (EqualsArg(arg, L"begin-token")) {

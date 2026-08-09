@@ -5,6 +5,8 @@
 #include <mutex>
 #include <string>
 
+#include "encoder_policy.h"
+
 namespace wgc {
 
 // Writes blank-line-delimited IPC v2 events to stdout. All methods flush immediately.
@@ -20,7 +22,10 @@ public:
                  int fps,
                  int width,
                  int height,
-                 const std::string& captureMethod = "WGC_D3D11_FRAME_STREAM");
+                 const std::string& captureMethod = "WGC_D3D11_FRAME_STREAM",
+                 EncoderMode encoderMode = EncoderMode::Software,
+                 EncoderSelectionReason selectionReason = EncoderSelectionReason::SoftwareDefault,
+                 bool encoderSelectionKnown = false);
 
     // Explicit first-frame evidence: a source frame has arrived, was accepted
     // by the timeline, and was copied/staged successfully. This is emitted
@@ -39,21 +44,30 @@ public:
             int64_t durationMs,
             int64_t fileSize,
             int width,
-            int height);
+            int height,
+            EncoderMode encoderMode = EncoderMode::Software,
+            EncoderSelectionReason selectionReason = EncoderSelectionReason::SoftwareDefault,
+            bool encoderSelectionKnown = false);
 
     void Stopped(int64_t framesCaptured,
                  int64_t framesDropped,
                  int64_t durationMs,
                  int64_t fileSize,
                  int width,
-                 int height);
+                 int height,
+                 EncoderMode encoderMode = EncoderMode::Software,
+                 EncoderSelectionReason selectionReason = EncoderSelectionReason::SoftwareDefault,
+                 bool encoderSelectionKnown = false);
 
     void Fail(const std::string& errorCode,
               const std::string& reason,
               const std::string& hresult,
               const std::wstring& partialOutputPath,
               int64_t framesCaptured,
-              int64_t bytesWritten);
+              int64_t bytesWritten,
+              EncoderMode encoderMode = EncoderMode::Software,
+              EncoderSelectionReason selectionReason = EncoderSelectionReason::SoftwareDefault,
+              bool encoderSelectionKnown = false);
 
     void WriteRaw(const std::string& text);
 

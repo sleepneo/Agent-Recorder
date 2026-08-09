@@ -58,6 +58,9 @@ public sealed class WgcContinuousSessionOptions
     /// <summary>Target frame rate, 1-60.</summary>
     public int Fps { get; set; } = 30;
 
+    /// <summary>Normalized hidden WGC encoder policy; actual selection is reported by IPC.</summary>
+    public WgcEncoderMode EncoderMode { get; set; } = WgcEncoderMode.Software;
+
     /// <summary>Absolute path to the begin authorization signal file.</summary>
     public string BeginSignalPath { get; set; } = "";
 

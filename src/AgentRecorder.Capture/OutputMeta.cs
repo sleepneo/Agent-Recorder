@@ -11,7 +11,7 @@ public sealed class OutputMeta
     public string? StderrLog;
     public string[] Warnings = Array.Empty<string>();
 
-    /// <summary>Actual output file path (for WGC backends this is the PNG path, not the .mp4 rec.OutputPath).</summary>
+    /// <summary>Actual output file path. WGC continuous publishes an MP4 here.</summary>
     public string? OutputPath;
 
     /// <summary>Container format, normally "mp4". Defaults to "mp4" when unset.</summary>
@@ -38,9 +38,14 @@ public sealed class OutputMeta
     /// <summary>True when the output file exists on disk (WGC backend post-check).</summary>
     public bool OutputFileExists;
 
-    /// <summary>True when the first 8 bytes match the PNG signature
-    /// (89 50 4E 47 0D 0A 1A 0A) when a backend supplies a media signature check.</summary>
+    /// <summary>Legacy image-signature field retained for non-WGC backends.</summary>
     public bool IsValidPngSignature;
+
+    /// <summary>Actual WGC video encoder mode: software or hardware.</summary>
+    public string? VideoEncoderMode;
+
+    /// <summary>Stable WGC encoder selection reason.</summary>
+    public string? VideoEncoderSelectionReason;
 
     // Microphone audio outcome tracking.
     public string? AudioStatus; // "not_requested" | "recorded" | "start_failed" | "lost" | "missing_audio_track"

@@ -2034,6 +2034,7 @@ public sealed class RecordingEngine
                     : RecordingBundleSnapshot.NotApplicable();
 
                 rec.State = RecState.completed;
+                TraceEncoderSelection(rec, meta);
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "completed", stopReason: rec.StopReason);
                 BumpStateVersion();
                 _audit.Log("recording.completed", new
@@ -2046,6 +2047,8 @@ public sealed class RecordingEngine
                     container = meta.Container ?? "mp4",
                     codec = meta.Codec ?? "h264",
                     capture_method = meta.CaptureMethod ?? "",
+                    encoder_mode = meta.VideoEncoderMode ?? "",
+                    encoder_selection_reason = meta.VideoEncoderSelectionReason ?? "",
                     width = meta.Width,
                     height = meta.Height,
                     ffmpeg_exit_code = exitCode,
@@ -2083,6 +2086,7 @@ public sealed class RecordingEngine
                 rec.Error = stableErrorCode;
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 rec.State = RecState.failed;
+                TraceEncoderSelection(rec, meta);
                 _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", stopReason: rec.StopReason, errorCode: stableErrorCode);
                 BumpStateVersion();
                 _audit.Log("recording.failed", new
@@ -2094,6 +2098,8 @@ public sealed class RecordingEngine
                     container = meta.Container ?? "mp4",
                     codec = meta.Codec ?? "h264",
                     capture_method = meta.CaptureMethod ?? "",
+                    encoder_mode = meta.VideoEncoderMode ?? "",
+                    encoder_selection_reason = meta.VideoEncoderSelectionReason ?? "",
                     stage = meta.Stage ?? "",
                     hresult = meta.Hresult ?? "",
                     ffmpeg_exit_code = exitCode,
@@ -2143,6 +2149,29 @@ public sealed class RecordingEngine
                 notifier.ShowRecordingFailure(rec.Id, meta.StopReason!);
             else
                 tray.ShowError("Recording failed: " + meta.StopReason);
+        }
+    }
+
+    private void TraceEncoderSelection(Recording rec, OutputMeta meta)
+    {
+        if (string.IsNullOrWhiteSpace(meta.VideoEncoderMode) ||
+            string.IsNullOrWhiteSpace(meta.VideoEncoderSelectionReason) ||
+            _tracer is not IEncoderSelectionPerformanceTracer encoderTracer)
+        {
+            return;
+        }
+
+        try
+        {
+            encoderTracer.EncoderSelected(
+                GetTraceIdForRecording(rec.Id),
+                rec.Id,
+                meta.VideoEncoderMode,
+                meta.VideoEncoderSelectionReason);
+        }
+        catch
+        {
+            // Encoder diagnostics must never change recording finalization.
         }
     }
 
@@ -2460,6 +2489,8 @@ public sealed class RecordingEngine
                 width = meta?.Width ?? 0,
                 height = meta?.Height ?? 0,
                 capture_method = meta?.CaptureMethod ?? "",
+                encoder_mode = meta?.VideoEncoderMode ?? "",
+                encoder_selection_reason = meta?.VideoEncoderSelectionReason ?? "",
                 ffmpeg_exit_code = rec.ExitCode
             },
             stop_reason = rec.StopReason ?? "",
@@ -2769,13 +2800,15 @@ public sealed class RecordingEngine
             : "not_checked";
 
         if (!full)
-            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, audio_status = audioStatus, audio_continuity_status = audioContinuityStatus, warnings };
+            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, encoder_mode = m.VideoEncoderMode ?? "", encoder_selection_reason = m.VideoEncoderSelectionReason ?? "", audio_status = audioStatus, audio_continuity_status = audioContinuityStatus, warnings };
         return new
         {
             path = actualPath, exists, size_bytes = m.SizeBytes,
             duration_seconds = m.DurationSeconds, created_at = Iso(rec.CompletedAtUtc ?? DateTime.UtcNow),
             container, codec, width = m.Width, height = m.Height, fps = m.Fps,
             capture_method = m.CaptureMethod ?? "",
+            encoder_mode = m.VideoEncoderMode ?? "",
+            encoder_selection_reason = m.VideoEncoderSelectionReason ?? "",
             command_args = rec.Config?.CommandArgs ?? "",
             backend = rec.BackendType,
             source_type = rec.SourceType,

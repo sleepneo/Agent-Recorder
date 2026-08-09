@@ -599,7 +599,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.2.0\n"
+                StandardOutput = "wgc-native-helper 0.3.0\n"
             },
             new WgcHelperProcessResult
             {
@@ -611,7 +611,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
     private static string HealthyOutput((int x, int y, int w, int h) bounds) =>
         $"RESULT: OK\nDpiAwareness: per_monitor_v2\nMonitorCount: 1\n" +
         $"Monitor[0]: x={bounds.x} y={bounds.y} width={bounds.w} height={bounds.h} primary=true\n" +
-        "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\n";
+        "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\nHardwareH264Available: false\nHardwareH264CandidateCount: 0\n";
 
     private static CaptureConfig Config((int x, int y, int w, int h) bounds) => new()
     {

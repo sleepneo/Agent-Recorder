@@ -218,7 +218,7 @@ public sealed class WgcRegionVerticalSliceTests
                     config.DisplayBounds.Value.h) }
                 : Array.Empty<WgcMonitorBounds>();
             var evidence = new WgcContinuousCapabilityEvidence(
-                "0.2.0", "per_monitor_v2", _healthy, _healthy, _healthy, monitors);
+                "0.3.0", "per_monitor_v2", _healthy, _healthy, _healthy, monitors);
             return new WgcContinuousAvailabilityResult(
                 _healthy,
                 _healthy ? "available" : "probe_timeout",
@@ -234,7 +234,7 @@ public sealed class WgcRegionVerticalSliceTests
         {
             var display = config.DisplayBounds!.Value;
             var evidence = new WgcContinuousCapabilityEvidence(
-                "0.2.0",
+                "0.3.0",
                 "per_monitor_v2",
                 true,
                 true,

@@ -36,6 +36,7 @@ void PrintHelp() {
         "  --output <absolute-mp4-path>\n"
         "  --duration-ms <1000..10000>\n"
         "  --fps <1..60>\n"
+        "  --encoder-mode <software|hardware-preferred>\n"
         "  --begin-signal <absolute-path>\n"
         "  --begin-token <unguessable-token>\n"
         "  --begin-timeout-ms <bounded-ms>\n"
@@ -49,7 +50,7 @@ void PrintHelp() {
 }
 
 void PrintVersion() {
-    std::cout << "wgc-native-helper 0.2.0\n";
+    std::cout << "wgc-native-helper 0.3.0\n";
 }
 
 void PrintProbeResult(const ProbeResult& result) {
@@ -67,6 +68,10 @@ void PrintProbeResult(const ProbeResult& result) {
     std::cout << "WgcSupported: " << (result.wgcSupported ? "true" : "false") << "\n";
     std::cout << "D3d11Initialized: " << (result.d3d11Initialized ? "true" : "false") << "\n";
     std::cout << "EncoderCreated: " << (result.encoderCreated ? "true" : "false") << "\n";
+    std::cout << "HardwareH264Available: " << (result.hardwareH264Available ? "true" : "false") << "\n";
+    std::cout << "HardwareH264CandidateCount: " << result.hardwareH264CandidateCount << "\n";
+    std::cout << "HardwareH264ActivationFailureCount: " << result.hardwareH264ActivationFailureCount << "\n";
+    std::cout << "HardwareH264ShutdownFailureCount: " << result.hardwareH264ShutdownFailureCount << "\n";
     std::cout << "WindowCaptureSupported: " << (result.windowCaptureSupported ? "true" : "false") << "\n";
     if (!result.error.empty()) {
         std::cout << "Reason: " << result.error << "\n";

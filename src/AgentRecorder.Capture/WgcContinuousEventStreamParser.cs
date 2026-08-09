@@ -7,6 +7,39 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public static class WgcContinuousEventStreamParser
 {
+    private static readonly HashSet<string> EncoderSelectionReasons = new(StringComparer.Ordinal)
+    {
+        "software_default",
+        "hardware_selected",
+        "hardware_unavailable_fallback",
+        "hardware_init_failed_fallback",
+        "hardware_unverified_fallback"
+    };
+
+    private static readonly HashSet<string> KnownEventFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "RESULT", "Stage", "RecordingId", "Output", "Container", "Codec", "Fps",
+        "Width", "Height", "FramesCaptured", "FrameNumber", "FramesDropped", "ElapsedMs",
+        "DurationMs", "BytesWritten", "FileSize", "StopReason", "CaptureMethod",
+        "EncoderMode", "EncoderSelectionReason", "HRESULT", "Reason", "ErrorCode",
+        "PartialOutputPath"
+    };
+
+    private static bool IsValidEncoderMode(string? value) =>
+        value is "software" or "hardware";
+
+    private static bool IsValidEncoderSelection(string? mode, string? reason)
+    {
+        if (!IsValidEncoderMode(mode) || !EncoderSelectionReasons.Contains(reason ?? ""))
+            return false;
+        return mode == "hardware"
+            ? reason == "hardware_selected"
+            : reason != "hardware_selected";
+    }
+
+    private static bool EncoderSelectionMatches(WgcContinuousEvent evt, WgcContinuousSessionSummary summary) =>
+        string.Equals(evt.EncoderMode, summary.EncoderMode, StringComparison.Ordinal) &&
+        string.Equals(evt.EncoderSelectionReason, summary.EncoderSelectionReason, StringComparison.Ordinal);
     /// <summary>
     /// Parse the helper stdout into a list of structured events.
     /// Never throws - returns an empty list on empty/malformed input.
@@ -59,6 +92,7 @@ public static class WgcContinuousEventStreamParser
     {
         var evt = new WgcContinuousEvent();
         bool hasResult = false;
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var rawLine in lines)
         {
@@ -73,6 +107,12 @@ public static class WgcContinuousEventStreamParser
 
             var key = line.Substring(0, colonIdx).Trim();
             var value = line.Substring(colonIdx + 2).Trim();
+
+            if (KnownEventFields.Contains(key))
+            {
+                if (!seenKeys.Add(key.ToUpperInvariant()))
+                    evt.HasDuplicateFields = true;
+            }
 
             switch (key)
             {
@@ -161,6 +201,12 @@ public static class WgcContinuousEventStreamParser
                     break;
                 case "CaptureMethod":
                     evt.CaptureMethod = value;
+                    break;
+                case "EncoderMode":
+                    evt.EncoderMode = value;
+                    break;
+                case "EncoderSelectionReason":
+                    evt.EncoderSelectionReason = value;
                     break;
                 case "HRESULT":
                     evt.Hresult = value;
@@ -260,6 +306,11 @@ public static class WgcContinuousEventStreamParser
 
         foreach (var evt in events)
         {
+            if (evt.HasDuplicateFields)
+            {
+                hasMalformedSequence = true;
+                summary.ValidationErrors.Add("Event contains duplicate fields");
+            }
             // Track numeric parse errors on every event, regardless of type
             if (evt.HasNumericParseError)
                 hadAnyNumericParseError = true;
@@ -286,6 +337,15 @@ public static class WgcContinuousEventStreamParser
                         summary.ValidationErrors.Add("STARTED event missing required field: Codec");
                     if (string.IsNullOrEmpty(evt.CaptureMethod))
                         summary.ValidationErrors.Add("STARTED event missing required field: CaptureMethod");
+                    if (string.IsNullOrEmpty(evt.EncoderMode))
+                        summary.ValidationErrors.Add("STARTED event missing required field: EncoderMode");
+                    if (string.IsNullOrEmpty(evt.EncoderSelectionReason))
+                        summary.ValidationErrors.Add("STARTED event missing required field: EncoderSelectionReason");
+                    if (!IsValidEncoderSelection(evt.EncoderMode, evt.EncoderSelectionReason))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("STARTED event has invalid encoder mode or selection reason");
+                    }
 
                     // Required numeric STARTED fields
                     if (evt.FpsParseFailed)
@@ -312,6 +372,8 @@ public static class WgcContinuousEventStreamParser
                     summary.Width = evt.Width;
                     summary.Height = evt.Height;
                     summary.CaptureMethod = evt.CaptureMethod;
+                    summary.EncoderMode = evt.EncoderMode;
+                    summary.EncoderSelectionReason = evt.EncoderSelectionReason;
                     break;
 
                 case ContinuousEventResult.Progress:
@@ -417,6 +479,17 @@ public static class WgcContinuousEventStreamParser
                     seenTerminalEvent = true;
                     summary.State = ContinuousSessionState.Success;
 
+                    if (!IsValidEncoderSelection(evt.EncoderMode, evt.EncoderSelectionReason))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("OK event missing or has invalid encoder selection fields");
+                    }
+                    else if (!EncoderSelectionMatches(evt, summary))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("OK encoder selection does not match STARTED");
+                    }
+
                     // Required OK fields: FramesCaptured, DurationMs, Width, Height, FileSize or BytesWritten
                     // Task 57: OK terminal event must carry its own Width/Height (no STARTED fallback).
                     if (evt.FramesCapturedParseFailed)
@@ -476,6 +549,17 @@ public static class WgcContinuousEventStreamParser
                     }
                     seenTerminalEvent = true;
                     summary.State = ContinuousSessionState.Stopped;
+
+                    if (!IsValidEncoderSelection(evt.EncoderMode, evt.EncoderSelectionReason))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("STOPPED event missing or has invalid encoder selection fields");
+                    }
+                    else if (!EncoderSelectionMatches(evt, summary))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("STOPPED encoder selection does not match STARTED");
+                    }
 
                     // STOPPED is graceful; PartialOutputPath presence means malformed sequence
                     if (!string.IsNullOrEmpty(evt.PartialOutputPath))
@@ -550,6 +634,26 @@ public static class WgcContinuousEventStreamParser
                     seenTerminalEvent = true;
                     summary.State = ContinuousSessionState.Failed;
 
+                    if (seenStarted)
+                    {
+                        if (!IsValidEncoderSelection(evt.EncoderMode, evt.EncoderSelectionReason))
+                        {
+                            hasMalformedSequence = true;
+                            summary.ValidationErrors.Add("Post-start FAIL missing or has invalid encoder selection fields");
+                        }
+                        else if (!EncoderSelectionMatches(evt, summary))
+                        {
+                            hasMalformedSequence = true;
+                            summary.ValidationErrors.Add("Post-start FAIL encoder selection does not match STARTED");
+                        }
+                    }
+                    else if ((evt.EncoderMode != null || evt.EncoderSelectionReason != null) &&
+                             !IsValidEncoderSelection(evt.EncoderMode, evt.EncoderSelectionReason))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("Pre-start FAIL has invalid encoder selection fields");
+                    }
+
                     // FAIL requires Reason or ErrorCode (unless direct FAIL before STARTED, which is still allowed to have them)
                     if (string.IsNullOrEmpty(evt.Reason) && string.IsNullOrEmpty(evt.ErrorCode))
                         summary.ValidationErrors.Add("FAIL event missing required field: Reason or ErrorCode");
@@ -566,6 +670,8 @@ public static class WgcContinuousEventStreamParser
                     summary.FramesDropped = evt.FramesDropped;
                     summary.DurationMs = evt.DurationMs;
                     summary.StopReason = evt.StopReason ?? evt.ErrorCode;
+                    summary.EncoderMode = evt.EncoderMode ?? summary.EncoderMode;
+                    summary.EncoderSelectionReason = evt.EncoderSelectionReason ?? summary.EncoderSelectionReason;
 
                     // When FAIL has a partial output path but no OutputPath, surface partial as the failure output path
                     if (string.IsNullOrEmpty(summary.OutputPath) && !string.IsNullOrEmpty(summary.PartialOutputPath))

@@ -23,7 +23,10 @@ void EventWriter::Started(const std::string& recordingId,
                           int fps,
                           int width,
                           int height,
-                          const std::string& captureMethod) {
+                          const std::string& captureMethod,
+                          EncoderMode encoderMode,
+                          EncoderSelectionReason selectionReason,
+                          bool encoderSelectionKnown) {
     std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "STARTED");
     WriteLine("Stage", "SessionStarted");
@@ -35,6 +38,10 @@ void EventWriter::Started(const std::string& recordingId,
     WriteLine("Width", width);
     WriteLine("Height", height);
     WriteLine("CaptureMethod", captureMethod);
+    if (encoderSelectionKnown) {
+        WriteLine("EncoderMode", EncoderModeToString(encoderMode));
+        WriteLine("EncoderSelectionReason", EncoderSelectionReasonToString(selectionReason));
+    }
     EndBlock();
 }
 
@@ -67,7 +74,10 @@ void EventWriter::Ok(int64_t framesCaptured,
                      int64_t durationMs,
                      int64_t fileSize,
                      int width,
-                     int height) {
+                     int height,
+                     EncoderMode encoderMode,
+                     EncoderSelectionReason selectionReason,
+                     bool encoderSelectionKnown) {
     std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "OK");
     WriteLine("Stage", "Complete");
@@ -77,6 +87,10 @@ void EventWriter::Ok(int64_t framesCaptured,
     WriteLine("FileSize", std::format("{} bytes", fileSize));
     WriteLine("Width", width);
     WriteLine("Height", height);
+    if (encoderSelectionKnown) {
+        WriteLine("EncoderMode", EncoderModeToString(encoderMode));
+        WriteLine("EncoderSelectionReason", EncoderSelectionReasonToString(selectionReason));
+    }
     EndBlock();
 }
 
@@ -85,7 +99,10 @@ void EventWriter::Stopped(int64_t framesCaptured,
                           int64_t durationMs,
                           int64_t fileSize,
                           int width,
-                          int height) {
+                          int height,
+                          EncoderMode encoderMode,
+                          EncoderSelectionReason selectionReason,
+                          bool encoderSelectionKnown) {
     std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "STOPPED");
     WriteLine("StopReason", "user_requested");
@@ -95,6 +112,10 @@ void EventWriter::Stopped(int64_t framesCaptured,
     WriteLine("FileSize", std::format("{} bytes", fileSize));
     WriteLine("Width", width);
     WriteLine("Height", height);
+    if (encoderSelectionKnown) {
+        WriteLine("EncoderMode", EncoderModeToString(encoderMode));
+        WriteLine("EncoderSelectionReason", EncoderSelectionReasonToString(selectionReason));
+    }
     EndBlock();
 }
 
@@ -103,7 +124,10 @@ void EventWriter::Fail(const std::string& errorCode,
                        const std::string& hresult,
                        const std::wstring& partialOutputPath,
                        int64_t framesCaptured,
-                       int64_t bytesWritten) {
+                       int64_t bytesWritten,
+                       EncoderMode encoderMode,
+                       EncoderSelectionReason selectionReason,
+                       bool encoderSelectionKnown) {
     std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "FAIL");
     if (!errorCode.empty()) {
@@ -123,6 +147,10 @@ void EventWriter::Fail(const std::string& errorCode,
     }
     if (bytesWritten >= 0) {
         WriteLine("BytesWritten", bytesWritten);
+    }
+    if (encoderSelectionKnown) {
+        WriteLine("EncoderMode", EncoderModeToString(encoderMode));
+        WriteLine("EncoderSelectionReason", EncoderSelectionReasonToString(selectionReason));
     }
     EndBlock();
 }

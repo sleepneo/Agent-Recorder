@@ -867,6 +867,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             OutputPath = stagingOutput,
             DurationMs = durationMs,
             Fps = cfg.Fps,
+            EncoderMode = WgcEncoderModePolicy.NormalizeEnvironment(),
             BeginSignalPath = beginSignal,
             BeginToken = token,
             BeginTimeoutMs = 30000,
@@ -915,6 +916,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             options.DurationMs.ToString(CultureInfo.InvariantCulture),
             "--fps",
             options.Fps.ToString(CultureInfo.InvariantCulture),
+            "--encoder-mode",
+            WgcEncoderModePolicy.ToArgumentValue(options.EncoderMode),
             "--begin-signal",
             options.BeginSignalPath,
             "--begin-token",
@@ -1215,6 +1218,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         probeMeta.SizeBytes = finalSize;
         probeMeta.OutputFileExists = true;
         probeMeta.CaptureMethod = result.Summary?.CaptureMethod;
+        probeMeta.VideoEncoderMode = result.Summary?.EncoderMode;
+        probeMeta.VideoEncoderSelectionReason = result.Summary?.EncoderSelectionReason;
         probeMeta.Stage = result.Summary?.State.ToString();
         probeMeta.AudioStatus = "not_requested";
         probeMeta.StderrLog = result.StderrTail;
@@ -1238,6 +1243,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             Container = source.Container,
             Codec = source.Codec,
             CaptureMethod = source.CaptureMethod,
+            VideoEncoderMode = source.VideoEncoderMode,
+            VideoEncoderSelectionReason = source.VideoEncoderSelectionReason,
             Stage = source.Stage,
             StopReason = source.StopReason,
             Hresult = source.Hresult,
@@ -1314,6 +1321,15 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             {
                 warnings.Add($"summary_capture_method_mismatch: expected={expectedCaptureMethod} actual={summary.CaptureMethod}");
             }
+            if (!string.Equals(summary.EncoderMode, "software", StringComparison.Ordinal) &&
+                !string.Equals(summary.EncoderMode, "hardware", StringComparison.Ordinal))
+            {
+                warnings.Add($"invalid_encoder_mode: {summary.EncoderMode}");
+            }
+            if (string.IsNullOrEmpty(summary.EncoderSelectionReason))
+            {
+                warnings.Add("missing_encoder_selection_reason");
+            }
             if (summary.Width.HasValue && probe.Width > 0 && summary.Width.Value != probe.Width)
             {
                 warnings.Add($"width_mismatch: probe={probe.Width} summary={summary.Width.Value}");
@@ -1354,6 +1370,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         meta.Container = "mp4";
         meta.Codec = "h264";
         meta.CaptureMethod = result.Summary?.CaptureMethod;
+        meta.VideoEncoderMode = result.Summary?.EncoderMode;
+        meta.VideoEncoderSelectionReason = result.Summary?.EncoderSelectionReason;
         meta.Stage = result.Summary?.State.ToString();
         meta.AudioStatus = "not_requested";
         meta.StderrLog = result.StderrTail;

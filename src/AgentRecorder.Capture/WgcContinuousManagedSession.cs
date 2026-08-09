@@ -464,6 +464,9 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         if (_options.Fps is < 1 or > 60)
             throw new ArgumentException("Fps must be between 1 and 60.", nameof(_options));
 
+        if (_options.EncoderMode is not WgcEncoderMode.Software and not WgcEncoderMode.HardwarePreferred)
+            throw new ArgumentException("Encoder mode must be software or hardware-preferred.", nameof(_options));
+
         if (string.IsNullOrWhiteSpace(_options.BeginSignalPath))
             throw new ArgumentException("Begin signal path must be provided.", nameof(_options));
         if (!Path.IsPathRooted(_options.BeginSignalPath))
@@ -531,6 +534,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             _options.DurationMs.ToString(CultureInfo.InvariantCulture),
             "--fps",
             _options.Fps.ToString(CultureInfo.InvariantCulture),
+            "--encoder-mode",
+            WgcEncoderModePolicy.ToArgumentValue(_options.EncoderMode),
             "--begin-signal",
             _options.BeginSignalPath,
             "--begin-token",
@@ -747,7 +752,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
     private void OnStartedEvent(WgcContinuousEvent evt)
     {
-        bool methodMismatch = false;
+        string? violation = null;
         lock (_lock)
         {
             // STARTED is only valid after successful authorization. The
@@ -765,19 +770,32 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                     (evt.Width.HasValue && evt.Height.HasValue &&
                      evt.Width.Value == _options.RegionWidth &&
                      evt.Height.Value == _options.RegionHeight);
+                bool encoderModeValid = evt.EncoderMode is "software" or "hardware";
+                bool encoderReasonValid = evt.EncoderSelectionReason is "software_default" or "hardware_selected" or
+                    "hardware_unavailable_fallback" or "hardware_init_failed_fallback" or
+                    "hardware_unverified_fallback";
+                bool encoderSelectionMatch = encoderModeValid && encoderReasonValid &&
+                    (evt.EncoderMode == "hardware"
+                        ? evt.EncoderSelectionReason == "hardware_selected"
+                        : evt.EncoderSelectionReason != "hardware_selected");
                 if (!string.Equals(evt.CaptureMethod, expectedMethod, StringComparison.Ordinal))
-                    methodMismatch = true;
+                    violation = _options.TargetKind == WgcContinuousTargetKind.Region
+                        ? "region_started_metadata_mismatch"
+                        : "capture_method_mismatch";
                 else if (!dimensionsMatch)
-                    methodMismatch = true;
+                    violation = _options.TargetKind == WgcContinuousTargetKind.Region
+                        ? "region_started_metadata_mismatch"
+                        : "capture_method_mismatch";
+                else if (!encoderSelectionMatch || evt.HasDuplicateFields ||
+                         !EncoderSelectionMatchesRequestedMode(evt.EncoderMode, evt.EncoderSelectionReason))
+                    violation = "encoder_selection_policy_mismatch";
                 else
                     _state = WgcContinuousManagedSessionState.Started;
             }
         }
 
-        if (methodMismatch)
-            OnProtocolViolation(_options.TargetKind == WgcContinuousTargetKind.Region
-                ? "region_started_metadata_mismatch"
-                : "capture_method_mismatch");
+        if (violation != null)
+            OnProtocolViolation(violation);
     }
 
     private void OnFirstFrameEvent(WgcContinuousEvent evt)
@@ -1283,7 +1301,31 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
              !string.Equals(summary.CaptureMethod, "WGC_D3D11_REGION_FRAME_STREAM", StringComparison.Ordinal)))
             return (false, "region_terminal_metadata_mismatch");
 
+        if (!IsValidEncoderSelection(summary.EncoderMode, summary.EncoderSelectionReason) ||
+            !EncoderSelectionMatchesRequestedMode(summary.EncoderMode, summary.EncoderSelectionReason))
+            return (false, "encoder_selection_policy_mismatch");
+
         return (true, null);
+    }
+
+    private static bool IsValidEncoderSelection(string? mode, string? reason) =>
+        mode is "software" or "hardware" &&
+        reason is "software_default" or "hardware_selected" or
+            "hardware_unavailable_fallback" or "hardware_init_failed_fallback" or
+            "hardware_unverified_fallback" &&
+        (mode == "hardware" ? reason == "hardware_selected" : reason != "hardware_selected");
+
+    private bool EncoderSelectionMatchesRequestedMode(string? mode, string? reason)
+    {
+        if (!IsValidEncoderSelection(mode, reason))
+            return false;
+        if (_options.EncoderMode == WgcEncoderMode.Software)
+            return mode == "software" && reason == "software_default";
+        return mode == "hardware"
+            ? reason == "hardware_selected"
+            : reason is "hardware_unavailable_fallback" or
+                "hardware_init_failed_fallback" or
+                "hardware_unverified_fallback";
     }
 
     private void CleanupControlFiles()

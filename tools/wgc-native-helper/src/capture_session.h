@@ -38,6 +38,9 @@ struct CaptureOutcome {
     int width = 0;
     int height = 0;
     std::wstring partialOutputPath;
+    EncoderMode encoderMode = EncoderMode::Software;
+    EncoderSelectionReason encoderSelectionReason = EncoderSelectionReason::SoftwareDefault;
+    bool encoderSelectionKnown = false;
 };
 
 struct CaptureSessionTestTargetRequest {
@@ -124,6 +127,12 @@ struct CaptureSessionTestHooks {
     // writer failure.
     std::function<EncoderResult(int width, int height, int fps,
                                 const std::wstring& outputPath)> onEncoderInitialize;
+
+    // Mode-aware seam for deterministic encoder selection tests. The legacy
+    // hook remains supported for the existing lifecycle tests.
+    std::function<EncoderResult(int width, int height, int fps,
+                                const std::wstring& outputPath,
+                                EncoderMode requestedMode)> onEncoderInitializeWithMode;
 
     // Called instead of encoder.WriteFrame. Used to exercise late-failure
     // evidence without depending on a real Media Foundation encode.

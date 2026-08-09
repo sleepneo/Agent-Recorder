@@ -59,6 +59,20 @@ TEST_REGISTRAR(EventWriterWindowStartedUsesDistinctCaptureMethod, []() {
     ASSERT_NE(capture.Get().find("CaptureMethod: WGC_D3D11_WINDOW_FRAME_STREAM"), std::string::npos);
 });
 
+TEST_REGISTRAR(EventWriterEncoderSelectionFieldsAreEmittedOnlyWithProof, []() {
+    StdoutCapture capture;
+    EventWriter writer;
+    writer.Started("rec-hw", L"C:\\temp\\out.mp4", 30, 1920, 1080,
+                   "WGC_D3D11_FRAME_STREAM", EncoderMode::Hardware,
+                   EncoderSelectionReason::HardwareSelected, true);
+    writer.Ok(1, 0, 1000, 100, 1920, 1080,
+              EncoderMode::Hardware, EncoderSelectionReason::HardwareSelected, true);
+
+    const std::string output = capture.Get();
+    ASSERT_NE(output.find("EncoderMode: hardware"), std::string::npos);
+    ASSERT_NE(output.find("EncoderSelectionReason: hardware_selected"), std::string::npos);
+});
+
 TEST_REGISTRAR(EventWriterProgressContainsRequiredFields, []() {
     StdoutCapture capture;
     EventWriter writer;

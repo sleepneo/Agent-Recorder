@@ -842,7 +842,12 @@ Long-polling response includes additional fields:
   "status": "completed",
   "stop_reason": "duration_reached",
   "elapsed_seconds": 300,
-  "output": { "path": "...", "duration_seconds": 300.0 },
+  "output": {
+    "path": "...",
+    "duration_seconds": 300.0,
+    "encoder_mode": "hardware",
+    "encoder_selection_reason": "hardware_selected"
+  },
   "wait": {
     "requested_ms": 25000,
     "elapsed_ms": 15200,
@@ -873,6 +878,12 @@ New fields:
 | `wait.timed_out` | Whether returned due to timeout (`false` = immediate or early return, `true` = timeout) |
 | `next_poll_hint_ms` | Suggested polling interval; `null` for terminal states, `500` for confirmation pending, `1000` for recording active |
 | `stop_reason` | Termination reason: `duration_reached` for natural completion, `floating_button`, `tray_menu`, `global_hotkey`, `user_requested`, etc. Meaningful in terminal states. |
+| `output.encoder_mode` | Actual WGC encoder mode: `software` or `hardware`. Empty for backends that do not report this evidence. |
+| `output.encoder_selection_reason` | Stable WGC selection evidence: `software_default`, `hardware_selected`, `hardware_unavailable_fallback`, `hardware_init_failed_fallback`, or `hardware_unverified_fallback`. Empty for other backends. |
+
+`hardware_selected` is reported only after the H.264 transform actually used by
+the Media Foundation Sink Writer is verified as a hardware MFT. Hardware
+availability probes and request preferences alone are not treated as proof.
 
 For microphone recordings, terminal responses include `audio.microphone` diagnostics:
 

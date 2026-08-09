@@ -20,6 +20,7 @@ public enum ContinuousEventResult
 /// </summary>
 public sealed class WgcContinuousEvent
 {
+    public bool HasDuplicateFields { get; set; }
     /// <summary>
     /// The RESULT field value: STARTED, PROGRESS, OK, STOPPED, or FAIL.
     /// </summary>
@@ -110,6 +111,9 @@ public sealed class WgcContinuousEvent
     /// The CaptureMethod field value.
     /// </summary>
     public string? CaptureMethod { get; set; }
+
+    public string? EncoderMode { get; set; }
+    public string? EncoderSelectionReason { get; set; }
 
     /// <summary>
     /// The HRESULT field value.

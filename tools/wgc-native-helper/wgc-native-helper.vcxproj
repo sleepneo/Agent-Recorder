@@ -104,12 +104,14 @@
     <ClInclude Include="src\capture_session.h" />
     <ClInclude Include="src\dpi_context.h" />
     <ClInclude Include="src\event_writer.h" />
+    <ClInclude Include="src\encoder_policy.h" />
     <ClInclude Include="src\frame_queue.h" />
     <ClInclude Include="src\options.h" />
     <ClInclude Include="src\path_policy.h" />
     <ClInclude Include="src\pixel_utils.h" />
     <ClInclude Include="src\progress_scheduler.h" />
     <ClInclude Include="src\probe.h" />
+    <ClInclude Include="src\mft_activation.h" />
     <ClInclude Include="src\size_policy.h" />
     <ClInclude Include="src\startup_coordinator.h" />
     <ClInclude Include="src\stop_watcher.h" />

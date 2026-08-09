@@ -49,7 +49,9 @@ Codec: h264
 Fps: 30
 Width: 1920
 Height: 1080
-CaptureMethod: WGC_D3D11_FRAME_STREAM";
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default";
 
         var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
 
@@ -194,6 +196,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 Stage: Capturing
@@ -214,7 +218,7 @@ BytesWritten: 10000";
     public void ParseEvents_BlankLinesWithSpaces_ParsesCorrectly()
     {
         // Simulate blank lines that contain trailing whitespace (spaces or tabs).
-        var stdout = "RESULT: STARTED\nRecordingId: x\nOutput: o.mp4\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\n   \t  \nRESULT: OK\nFramesCaptured: 100\nDurationMs: 1000\nFileSize: 10000 bytes\n";
+        var stdout = "RESULT: STARTED\nRecordingId: x\nOutput: o.mp4\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n   \t  \nRESULT: OK\nFramesCaptured: 100\nDurationMs: 1000\nFileSize: 10000 bytes\n";
 
         var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
         Assert.Equal(2, events.Count);
@@ -223,7 +227,7 @@ BytesWritten: 10000";
     [Fact]
     public void ParseEvents_CrlfLineEndings_ParsesCorrectly()
     {
-        var stdout = "RESULT: STARTED\r\nRecordingId: x\r\nOutput: o.mp4\r\nContainer: mp4\r\nCodec: h264\r\nFps: 30\r\nWidth: 1920\r\nHeight: 1080\r\nCaptureMethod: WGC_D3D11_FRAME_STREAM\r\n\r\nRESULT: OK\r\nFramesCaptured: 100\r\nDurationMs: 1000\r\nFileSize: 10000 bytes\r\n";
+        var stdout = "RESULT: STARTED\r\nRecordingId: x\r\nOutput: o.mp4\r\nContainer: mp4\r\nCodec: h264\r\nFps: 30\r\nWidth: 1920\r\nHeight: 1080\r\nCaptureMethod: WGC_D3D11_FRAME_STREAM\r\nEncoderMode: software\r\nEncoderSelectionReason: software_default\r\n\r\nRESULT: OK\r\nFramesCaptured: 100\r\nDurationMs: 1000\r\nFileSize: 10000 bytes\r\n";
 
         var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
         Assert.Equal(2, events.Count);
@@ -278,12 +282,16 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 300
 ElapsedMs: 10000
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 FramesDropped: 0
 DurationMs: 10000
@@ -317,12 +325,16 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 150
 ElapsedMs: 5000
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 StopReason: user_requested
 FramesCaptured: 150
 DurationMs: 5000
@@ -351,12 +363,16 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 100
 ElapsedMs: 3000
 
 RESULT: FAIL
+EncoderMode: software
+EncoderSelectionReason: software_default
 Reason: Encoding error occurred
 ErrorCode: encoding_error
 PartialOutputPath: C:\output\rec_partial.mp4
@@ -412,8 +428,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes";
@@ -437,13 +457,19 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
 
 RESULT: FAIL
+EncoderMode: software
+EncoderSelectionReason: software_default
 Reason: Unexpected second terminal event
 ErrorCode: error";
 
@@ -466,8 +492,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -494,12 +524,16 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 RecordingId: different-id
 FramesCaptured: 100
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes";
@@ -523,6 +557,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 100";
@@ -546,6 +582,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 200
@@ -554,6 +592,8 @@ RESULT: PROGRESS
 FramesCaptured: 100
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes";
@@ -577,6 +617,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 100
@@ -587,6 +629,8 @@ FramesCaptured: 150
 ElapsedMs: 1000
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes";
@@ -613,8 +657,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes";
@@ -637,6 +685,8 @@ Codec: h264
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
 FramesCaptured: 300
@@ -661,6 +711,8 @@ Codec: h264
 Fps: 30
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
 FramesCaptured: 300
@@ -686,6 +738,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 ElapsedMs: 5000
@@ -714,6 +768,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 150
@@ -742,6 +798,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: lots
@@ -771,6 +829,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: PROGRESS
 FramesCaptured: 150
@@ -800,6 +860,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
 FramesCaptured: 300
@@ -824,6 +886,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
 FramesCaptured: 300
@@ -848,8 +912,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 150
 DurationMs: 5000
 FileSize: 7500000 bytes";
@@ -873,8 +941,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 StopReason: user_requested
 PartialOutputPath: C:\output\rec.mp4
 BytesWritten: 7500000
@@ -901,6 +973,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FAIL
 Stage: something";
@@ -1072,8 +1146,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 StopReason: timeout
 FramesCaptured: 150
 DurationMs: 5000
@@ -1100,8 +1178,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 StopReason: encoding_error
 FramesCaptured: 150
 DurationMs: 5000
@@ -1128,8 +1210,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
+EncoderMode: software
+EncoderSelectionReason: software_default
 StopReason: disk_full
 FramesCaptured: 150
 DurationMs: 5000
@@ -1156,6 +1242,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
 StopReason: window_not_found
@@ -1184,6 +1272,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: STOPPED
 StopReason: zero_frames
@@ -1217,8 +1307,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1243,8 +1337,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1269,8 +1367,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1296,8 +1398,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1323,8 +1429,12 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1352,6 +1462,8 @@ Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1417,6 +1529,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
@@ -1424,6 +1538,8 @@ FrameNumber: 1
 ElapsedMs: 17
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1457,6 +1573,8 @@ Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1484,6 +1602,8 @@ Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1514,6 +1634,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
@@ -1526,6 +1648,8 @@ FrameNumber: 2
 ElapsedMs: 20
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1553,12 +1677,16 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
 ElapsedMs: 10
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1584,6 +1712,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
@@ -1591,6 +1721,8 @@ FrameNumber: 0
 ElapsedMs: 10
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1615,6 +1747,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
@@ -1622,6 +1756,8 @@ FrameNumber: 1
 ElapsedMs: -5
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 300
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1649,6 +1785,8 @@ Fps: 30
 Width: 1920
 Height: 1080
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
@@ -1656,6 +1794,8 @@ FrameNumber: 1
 ElapsedMs: 0
 
 RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: software_default
 FramesCaptured: 1
 DurationMs: 10000
 FileSize: 15000000 bytes
@@ -1667,6 +1807,97 @@ Height: 1080";
         Assert.Equal(ContinuousSessionState.Success, summary.State);
         Assert.True(summary.FirstFrameObserved);
         Assert.Equal(0, summary.FirstFrameElapsedMs);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_HardwareSelectedRequiresHardwareProofReason()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: hardware-01
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: hardware
+EncoderSelectionReason: hardware_selected
+
+RESULT: OK
+EncoderMode: hardware
+EncoderSelectionReason: hardware_selected
+FramesCaptured: 1
+DurationMs: 1000
+FileSize: 10000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.Success, summary.State);
+        Assert.Equal("hardware", summary.EncoderMode);
+        Assert.Equal("hardware_selected", summary.EncoderSelectionReason);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_SoftwareFallbackCarriesStableReason()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: fallback-01
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software
+EncoderSelectionReason: hardware_unavailable_fallback
+
+RESULT: OK
+EncoderMode: software
+EncoderSelectionReason: hardware_unavailable_fallback
+FramesCaptured: 1
+DurationMs: 1000
+FileSize: 10000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.Success, summary.State);
+        Assert.Equal("hardware_unavailable_fallback", summary.EncoderSelectionReason);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_HardwareModeWithFallbackReasonIsMalformed()
+    {
+        var stdout = @"RESULT: STARTED
+RecordingId: invalid-01
+Output: x.mp4
+Container: mp4
+Codec: h264
+Fps: 30
+Width: 1920
+Height: 1080
+CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: hardware
+EncoderSelectionReason: hardware_unverified_fallback
+
+RESULT: OK
+EncoderMode: hardware
+EncoderSelectionReason: hardware_unverified_fallback
+FramesCaptured: 1
+DurationMs: 1000
+FileSize: 10000 bytes
+Width: 1920
+Height: 1080";
+
+        var summary = WgcContinuousEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(ContinuousSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, e => e.Contains("encoder mode or selection reason"));
     }
 }
 
@@ -1712,7 +1943,7 @@ public class ContinuousCaptureFakeRunner
             "Fps: 30\n" +
             "Width: 1920\n" +
             "Height: 1080\n" +
-            "CaptureMethod: WGC_D3D11_FRAME_STREAM\n" +
+            "CaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
             "\n" +
             "RESULT: PROGRESS\n" +
             "FramesCaptured: 150\n" +
@@ -1723,7 +1954,7 @@ public class ContinuousCaptureFakeRunner
         if (stopSignalExists)
         {
             result +=
-                "RESULT: STOPPED\n" +
+                "RESULT: STOPPED\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
                 "StopReason: user_requested\n" +
                 "FramesCaptured: 150\n" +
                 "DurationMs: 5000\n" +
@@ -1734,7 +1965,7 @@ public class ContinuousCaptureFakeRunner
         else
         {
             result +=
-                "RESULT: OK\n" +
+                "RESULT: OK\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
                 "FramesCaptured: 300\n" +
                 "FramesDropped: 0\n" +
                 "DurationMs: 10000\n" +

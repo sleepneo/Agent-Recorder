@@ -1,6 +1,7 @@
 #include "test_framework.h"
 
 #include "dpi_context.h"
+#include "mft_activation.h"
 #include "probe.h"
 
 #include <windows.h>
@@ -16,6 +17,40 @@ using namespace wgc;
 namespace {
 
 namespace fs = std::filesystem;
+
+struct FakeMftCandidate {
+    HRESULT activateHr = S_OK;
+    HRESULT shutdownHr = S_OK;
+    bool inspect = true;
+    int activateCount = 0;
+    int transformReleaseCount = 0;
+    int shutdownCount = 0;
+    int activationReleaseCount = 0;
+};
+
+MftActivationOperations MakeFakeMftActivationOperations(int& arrayFreeCount) {
+    MftActivationOperations operations;
+    operations.activateObject = [](void* activation, void** transform) {
+        auto* candidate = static_cast<FakeMftCandidate*>(activation);
+        ++candidate->activateCount;
+        if (FAILED(candidate->activateHr)) return candidate->activateHr;
+        *transform = candidate;
+        return S_OK;
+    };
+    operations.shutdownObject = [](void* activation) {
+        auto* candidate = static_cast<FakeMftCandidate*>(activation);
+        ++candidate->shutdownCount;
+        return candidate->shutdownHr;
+    };
+    operations.releaseTransform = [](void* transform) {
+        ++static_cast<FakeMftCandidate*>(transform)->transformReleaseCount;
+    };
+    operations.releaseActivation = [](void* activation) {
+        ++static_cast<FakeMftCandidate*>(activation)->activationReleaseCount;
+    };
+    operations.freeActivationArray = [&arrayFreeCount]() { ++arrayFreeCount; };
+    return operations;
+}
 
 std::wstring GetHelperExePath() {
     std::wstring path;
@@ -127,6 +162,14 @@ struct ParsedProbe {
     bool ok = false;
     bool windowCaptureSupportedPresent = false;
     bool windowCaptureSupported = false;
+    bool hardwareH264AvailablePresent = false;
+    bool hardwareH264Available = false;
+    bool hardwareH264CandidateCountPresent = false;
+    std::uint32_t hardwareH264CandidateCount = 0;
+    bool hardwareH264ActivationFailureCountPresent = false;
+    std::uint32_t hardwareH264ActivationFailureCount = 0;
+    bool hardwareH264ShutdownFailureCountPresent = false;
+    std::uint32_t hardwareH264ShutdownFailureCount = 0;
     std::string dpiAwareness;
     size_t monitorCount = 0;
     std::vector<ProbeMonitorInfo> monitors;
@@ -152,6 +195,30 @@ ParsedProbe ParseProbeOutput(const std::string& text) {
         } else if (line.rfind("WindowCaptureSupported: ", 0) == 0) {
             result.windowCaptureSupportedPresent = true;
             result.windowCaptureSupported = line == "WindowCaptureSupported: true";
+        } else if (line.rfind("HardwareH264Available: ", 0) == 0) {
+            result.hardwareH264AvailablePresent = true;
+            result.hardwareH264Available = line == "HardwareH264Available: true";
+        } else if (line.rfind("HardwareH264CandidateCount: ", 0) == 0) {
+            result.hardwareH264CandidateCountPresent = true;
+            try {
+                result.hardwareH264CandidateCount = static_cast<std::uint32_t>(
+                    std::stoul(line.substr(27)));
+            } catch (...) {
+            }
+        } else if (line.rfind("HardwareH264ActivationFailureCount: ", 0) == 0) {
+            result.hardwareH264ActivationFailureCountPresent = true;
+            try {
+                result.hardwareH264ActivationFailureCount = static_cast<std::uint32_t>(
+                    std::stoul(line.substr(std::string("HardwareH264ActivationFailureCount: ").size())));
+            } catch (...) {
+            }
+        } else if (line.rfind("HardwareH264ShutdownFailureCount: ", 0) == 0) {
+            result.hardwareH264ShutdownFailureCountPresent = true;
+            try {
+                result.hardwareH264ShutdownFailureCount = static_cast<std::uint32_t>(
+                    std::stoul(line.substr(std::string("HardwareH264ShutdownFailureCount: ").size())));
+            } catch (...) {
+            }
         } else if (line.rfind("Monitor[", 0) == 0) {
             // Format: Monitor[i]: x=... y=... width=... height=... primary=...
             ProbeMonitorInfo info;
@@ -335,6 +402,15 @@ TEST_REGISTRAR(Probe_OutputContainsDpiAwarenessAndMonitors, []() {
     const ParsedProbe probe = ParseProbeOutput(result.stdoutText);
     ASSERT_TRUE(probe.ok);
     ASSERT_TRUE(probe.windowCaptureSupportedPresent);
+    ASSERT_TRUE(probe.hardwareH264AvailablePresent);
+    ASSERT_TRUE(probe.hardwareH264CandidateCountPresent);
+    ASSERT_TRUE(probe.hardwareH264ActivationFailureCountPresent);
+    ASSERT_TRUE(probe.hardwareH264ShutdownFailureCountPresent);
+    if (probe.hardwareH264Available) {
+        ASSERT_GT(probe.hardwareH264CandidateCount, 0u);
+    } else {
+        ASSERT_EQ(probe.hardwareH264CandidateCount, 0u);
+    }
     ASSERT_EQ(probe.dpiAwareness, "per_monitor_v2");
     ASSERT_GE(probe.monitorCount, 1u);
     ASSERT_EQ(probe.monitors.size(), probe.monitorCount);
@@ -359,6 +435,236 @@ TEST_REGISTRAR(ProbeResult_WindowCapabilityFalseKeepsDisplayPrerequisitesReady, 
 
     ASSERT_TRUE(HasSharedCaptureCapabilities(result));
     ASSERT_FALSE(result.windowCaptureSupported);
+});
+
+TEST_REGISTRAR(ProbeHardwareEvidence_EnumerationAndActivationProduceAvailableCount, []() {
+    HardwareH264EnumerationEvidence evidence;
+    evidence.enumerationSucceeded = true;
+    evidence.returnedCandidateCount = 2;
+    evidence.activatedCandidateCount = 2;
+    ASSERT_TRUE(IsHardwareH264Available(evidence));
+    ASSERT_EQ(evidence.activatedCandidateCount, 2u);
+});
+
+TEST_REGISTRAR(ProbeHardwareEvidence_EnumerationSuccessWithZeroCandidatesIsUnavailable, []() {
+    HardwareH264EnumerationEvidence evidence;
+    evidence.enumerationSucceeded = true;
+    evidence.returnedCandidateCount = 0;
+    evidence.activatedCandidateCount = 0;
+    ASSERT_FALSE(IsHardwareH264Available(evidence));
+});
+
+TEST_REGISTRAR(ProbeHardwareEvidence_EnumerationFailureIsUnavailable, []() {
+    HardwareH264EnumerationEvidence evidence;
+    evidence.enumerationSucceeded = false;
+    evidence.returnedCandidateCount = 0;
+    evidence.activatedCandidateCount = 0;
+    ASSERT_FALSE(IsHardwareH264Available(evidence));
+});
+
+TEST_REGISTRAR(ProbeHardwareEvidence_PartialActivationKeepsOnlyUsableCount, []() {
+    HardwareH264EnumerationEvidence evidence;
+    evidence.enumerationSucceeded = true;
+    evidence.returnedCandidateCount = 3;
+    evidence.activatedCandidateCount = 1;
+    evidence.activationFailureCount = 2;
+    ASSERT_TRUE(IsHardwareH264Available(evidence));
+    ASSERT_EQ(evidence.activatedCandidateCount, 1u);
+
+    evidence.activatedCandidateCount = 0;
+    ASSERT_FALSE(IsHardwareH264Available(evidence));
+});
+
+TEST_REGISTRAR(ProbeHardwareEvidence_ShutdownFailureIsUnavailableAndObservable, []() {
+    HardwareH264EnumerationEvidence evidence;
+    evidence.enumerationSucceeded = true;
+    evidence.returnedCandidateCount = 1;
+    evidence.activationSuccessCount = 1;
+    evidence.activatedCandidateCount = 0;
+    evidence.shutdownFailureCount = 1;
+
+    ASSERT_FALSE(IsHardwareH264Available(evidence));
+    ASSERT_EQ(evidence.activationSuccessCount, 1u);
+    ASSERT_EQ(evidence.shutdownFailureCount, 1u);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_ActivationFailureReleasesWithoutShutdown, []() {
+    FakeMftCandidate candidate;
+    candidate.activateHr = E_FAIL;
+    void* activations[] = { &candidate };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationLifecycle(
+        activations, 1, operations,
+        [](void*) { return true; });
+
+    ASSERT_EQ(result.activationSuccessCount, 0u);
+    ASSERT_EQ(result.usableCandidateCount, 0u);
+    ASSERT_EQ(result.activationFailureCount, 1u);
+    ASSERT_EQ(result.shutdownFailureCount, 0u);
+    ASSERT_EQ(candidate.shutdownCount, 0);
+    ASSERT_EQ(candidate.transformReleaseCount, 0);
+    ASSERT_EQ(candidate.activationReleaseCount, 1);
+    ASSERT_TRUE(result.activationArrayFreed);
+    ASSERT_EQ(arrayFreeCount, 1);
+    ASSERT_EQ(result.firstFailureKind, MftActivationFailureKind::Activation);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_SuccessShutdownAndReleaseExactlyOnce, []() {
+    FakeMftCandidate candidate;
+    void* activations[] = { &candidate };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationLifecycle(
+        activations, 1, operations,
+        [](void*) { return true; });
+
+    ASSERT_EQ(result.activationSuccessCount, 1u);
+    ASSERT_EQ(result.usableCandidateCount, 1u);
+    ASSERT_EQ(result.activationFailureCount, 0u);
+    ASSERT_EQ(result.shutdownFailureCount, 0u);
+    ASSERT_EQ(candidate.transformReleaseCount, 1);
+    ASSERT_EQ(candidate.shutdownCount, 1);
+    ASSERT_EQ(candidate.activationReleaseCount, 1);
+    ASSERT_TRUE(result.activationArrayFreed);
+    ASSERT_EQ(arrayFreeCount, 1);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_ShutdownFailureIsObservableAndNotUsable, []() {
+    FakeMftCandidate candidate;
+    candidate.shutdownHr = E_ACCESSDENIED;
+    void* activations[] = { &candidate };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationLifecycle(
+        activations, 1, operations,
+        [](void*) { return true; });
+
+    ASSERT_EQ(result.activationSuccessCount, 1u);
+    ASSERT_EQ(result.usableCandidateCount, 0u);
+    ASSERT_EQ(result.shutdownFailureCount, 1u);
+    ASSERT_EQ(candidate.transformReleaseCount, 1);
+    ASSERT_EQ(candidate.shutdownCount, 1);
+    ASSERT_EQ(candidate.activationReleaseCount, 1);
+    ASSERT_EQ(result.firstFailureKind, MftActivationFailureKind::Shutdown);
+    ASSERT_EQ(result.firstFailureHresult, E_ACCESSDENIED);
+    ASSERT_TRUE(result.activationArrayFreed);
+    ASSERT_EQ(arrayFreeCount, 1);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_PartialActivationFailureReleasesEveryCandidateAndArrayOnce, []() {
+    FakeMftCandidate usable;
+    FakeMftCandidate activationFailed;
+    activationFailed.activateHr = E_NOINTERFACE;
+    FakeMftCandidate shutdownFailed;
+    shutdownFailed.shutdownHr = E_FAIL;
+    void* activations[] = { &usable, &activationFailed, &shutdownFailed, nullptr };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationLifecycle(
+        activations, 4, operations,
+        [](void*) { return true; },
+        MftActivationProcessingPolicy::ProcessAll);
+
+    ASSERT_EQ(result.activationSuccessCount, 2u);
+    ASSERT_EQ(result.usableCandidateCount, 1u);
+    ASSERT_EQ(result.activationFailureCount, 2u);
+    ASSERT_EQ(result.shutdownFailureCount, 1u);
+    ASSERT_EQ(result.activationFailureHresult, E_NOINTERFACE);
+    ASSERT_EQ(result.shutdownFailureHresult, E_FAIL);
+    ASSERT_EQ(result.firstFailureHresult, E_NOINTERFACE);
+    ASSERT_EQ(usable.activationReleaseCount, 1);
+    ASSERT_EQ(activationFailed.activationReleaseCount, 1);
+    ASSERT_EQ(shutdownFailed.activationReleaseCount, 1);
+    ASSERT_EQ(usable.shutdownCount, 1);
+    ASSERT_EQ(activationFailed.shutdownCount, 0);
+    ASSERT_EQ(shutdownFailed.shutdownCount, 1);
+    ASSERT_TRUE(result.activationArrayFreed);
+    ASSERT_EQ(arrayFreeCount, 1);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_SoftwareProbeStopsAfterFirstUsableAndReleasesRemaining, []() {
+    FakeMftCandidate first;
+    FakeMftCandidate remainingOne;
+    FakeMftCandidate remainingTwo;
+    void* activations[] = { &first, &remainingOne, &remainingTwo };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    int inspected = 0;
+    const auto result = RunMftActivationLifecycle(
+        activations, 3, operations,
+        [&inspected](void* transform) {
+            ++inspected;
+            return static_cast<FakeMftCandidate*>(transform)->inspect;
+        },
+        MftActivationProcessingPolicy::StopAfterFirstUsable);
+
+    ASSERT_EQ(inspected, 1);
+    ASSERT_EQ(result.usableCandidateCount, 1u);
+    ASSERT_EQ(first.activateCount, 1);
+    ASSERT_EQ(remainingOne.activateCount, 0);
+    ASSERT_EQ(remainingTwo.activateCount, 0);
+    ASSERT_EQ(first.activationReleaseCount, 1);
+    ASSERT_EQ(remainingOne.activationReleaseCount, 1);
+    ASSERT_EQ(remainingTwo.activationReleaseCount, 1);
+    ASSERT_EQ(first.shutdownCount, 1);
+    ASSERT_EQ(remainingOne.shutdownCount, 0);
+    ASSERT_EQ(remainingTwo.shutdownCount, 0);
+    ASSERT_EQ(arrayFreeCount, 1);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_SoftwareProbeContinuesAfterFailureThenStops, []() {
+    FakeMftCandidate activationFailed;
+    activationFailed.activateHr = E_NOINTERFACE;
+    FakeMftCandidate usable;
+    FakeMftCandidate remaining;
+    void* activations[] = { &activationFailed, &usable, &remaining };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationLifecycle(
+        activations, 3, operations, [](void*) { return true; },
+        MftActivationProcessingPolicy::StopAfterFirstUsable);
+
+    ASSERT_EQ(result.activationSuccessCount, 1u);
+    ASSERT_EQ(result.usableCandidateCount, 1u);
+    ASSERT_EQ(activationFailed.activateCount, 1);
+    ASSERT_EQ(activationFailed.shutdownCount, 0);
+    ASSERT_EQ(usable.activateCount, 1);
+    ASSERT_EQ(usable.shutdownCount, 1);
+    ASSERT_EQ(remaining.activateCount, 0);
+    ASSERT_EQ(remaining.shutdownCount, 0);
+    ASSERT_EQ(activationFailed.activationReleaseCount, 1);
+    ASSERT_EQ(usable.activationReleaseCount, 1);
+    ASSERT_EQ(remaining.activationReleaseCount, 1);
+    ASSERT_EQ(arrayFreeCount, 1);
+});
+
+TEST_REGISTRAR(MftActivationLifecycle_EnumerationFailureCleansOnlyWithoutActivation, []() {
+    FakeMftCandidate first;
+    FakeMftCandidate second;
+    void* activations[] = { &first, nullptr, &second };
+    int arrayFreeCount = 0;
+    const auto operations = MakeFakeMftActivationOperations(arrayFreeCount);
+
+    const auto result = RunMftActivationCleanupOnly(activations, 3, operations);
+
+    ASSERT_EQ(result.activationSuccessCount, 0u);
+    ASSERT_EQ(result.activationFailureCount, 0u);
+    ASSERT_EQ(result.shutdownFailureCount, 0u);
+    ASSERT_EQ(first.activateCount, 0);
+    ASSERT_EQ(second.activateCount, 0);
+    ASSERT_EQ(first.shutdownCount, 0);
+    ASSERT_EQ(second.shutdownCount, 0);
+    ASSERT_EQ(first.activationReleaseCount, 1);
+    ASSERT_EQ(second.activationReleaseCount, 1);
+    ASSERT_TRUE(result.activationArrayFreed);
+    ASSERT_EQ(arrayFreeCount, 1);
 });
 
 TEST_REGISTRAR(Probe_PrimaryMonitorBoundsMatchWin32Physical, []() {

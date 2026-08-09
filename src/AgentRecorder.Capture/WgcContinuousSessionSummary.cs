@@ -108,6 +108,12 @@ public sealed class WgcContinuousSessionSummary
     /// </summary>
     public string? CaptureMethod { get; set; }
 
+    /// <summary>Actual selected WGC video encoder mode: software or hardware.</summary>
+    public string? EncoderMode { get; set; }
+
+    /// <summary>Stable reason for the actual encoder selection.</summary>
+    public string? EncoderSelectionReason { get; set; }
+
     /// <summary>
     /// Whether the terminal OK/STOPPED event explicitly provided Width and Height.
     /// Region captures require terminal dimensions so a stale STARTED size cannot

@@ -512,6 +512,9 @@ TEST_REGISTRAR(VideoEncoderSyntheticAsymmetricPatternVerifiedByFfprobe, []() {
     VideoEncoder encoder;
     auto initResult = encoder.Initialize(64, 64, 30, path);
     ASSERT_EQ(initResult.status, EncoderStatus::Ok);
+    ASSERT_EQ(initResult.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(initResult.selectionReason, EncoderSelectionReason::SoftwareDefault);
+    ASSERT_TRUE(initResult.selectionKnown);
 
     constexpr int kFrameCount = 30;
     constexpr int64_t kFrameDurationHns = 10000000LL / 30;
@@ -610,6 +613,323 @@ TEST_REGISTRAR(VideoEncoderSyntheticAsymmetricPatternVerifiedByFfprobe, []() {
     ASSERT_GT(bottomBlue[0], 200u); // B
     ASSERT_LT(bottomBlue[1], 40u);  // G
     ASSERT_LT(bottomBlue[2], 40u);  // R
+});
+
+TEST_REGISTRAR(VideoEncoderHardwarePreferredReportsTruthfulSelectionOrFallback, []() {
+    ComGuard com;
+
+    std::wstring path = MakeTempMp4Path(L"_hardware_preferred.mp4");
+    TempFileGuard guard({ path });
+
+    VideoEncoder encoder;
+    auto initResult = encoder.Initialize(64, 64, 30, path, EncoderMode::HardwarePreferred);
+    ASSERT_EQ(initResult.status, EncoderStatus::Ok);
+    ASSERT_TRUE(initResult.selectionKnown);
+
+    if (initResult.encoderMode == EncoderMode::Hardware) {
+        ASSERT_EQ(initResult.selectionReason, EncoderSelectionReason::HardwareSelected);
+    } else {
+        ASSERT_EQ(initResult.encoderMode, EncoderMode::Software);
+        ASSERT_TRUE(initResult.selectionReason == EncoderSelectionReason::HardwareUnavailableFallback ||
+                    initResult.selectionReason == EncoderSelectionReason::HardwareInitFailedFallback ||
+                    initResult.selectionReason == EncoderSelectionReason::HardwareUnverifiedFallback);
+    }
+
+    auto writeResult = encoder.WriteFrame(MakeAsymmetricTestFrame(64, 64), 0, 10000000LL / 30);
+    ASSERT_EQ(writeResult.status, EncoderStatus::Ok);
+    ASSERT_EQ(encoder.Finalize().status, EncoderStatus::Ok);
+    ASSERT_TRUE(FileExists(path));
+});
+
+EncoderAttempt SuccessfulSoftwareAttempt() {
+    EncoderAttempt attempt;
+    attempt.status = EncoderStatus::Ok;
+    attempt.writerCreated = true;
+    attempt.writerStarted = true;
+    attempt.transformClass = EncoderTransformClass::SoftwareH264;
+    return attempt;
+}
+
+EncoderAttempt SuccessfulHardwareAttempt() {
+    EncoderAttempt attempt;
+    attempt.status = EncoderStatus::Ok;
+    attempt.hardwareEnumerationAttempted = true;
+    attempt.hardwareCandidateAvailable = true;
+    attempt.writerCreated = true;
+    attempt.writerStarted = true;
+    attempt.transformClass = EncoderTransformClass::HardwareH264;
+    return attempt;
+}
+
+EncoderAttempt FailedHardwareAttempt(
+    bool candidateAvailable,
+    bool writerStarted,
+    EncoderTransformClass transformClass = EncoderTransformClass::Unknown) {
+    EncoderAttempt attempt;
+    attempt.status = EncoderStatus::InitializeFailed;
+    attempt.error = "synthetic hardware attempt failed";
+    attempt.hresult = "0x80004005";
+    attempt.hardwareEnumerationAttempted = true;
+    attempt.hardwareCandidateAvailable = candidateAvailable;
+    attempt.writerCreated = candidateAvailable;
+    attempt.writerStarted = writerStarted;
+    attempt.transformClass = transformClass;
+    return attempt;
+}
+
+TEST_REGISTRAR(EncoderSelection_SoftwareRequestUsesOnlySoftwareAttempt, []() {
+    int softwareAttempts = 0;
+    int hardwareAttempts = 0;
+    int cleanupCalls = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::Software) {
+            ++softwareAttempts;
+            return SuccessfulSoftwareAttempt();
+        }
+        ++hardwareAttempts;
+        return SuccessfulHardwareAttempt();
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::Software, operations);
+    ASSERT_EQ(result.status, EncoderStatus::Ok);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(result.selectionReason, EncoderSelectionReason::SoftwareDefault);
+    ASSERT_TRUE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 1);
+    ASSERT_EQ(hardwareAttempts, 0);
+    ASSERT_EQ(cleanupCalls, 0);
+});
+
+TEST_REGISTRAR(EncoderSelection_HardwareProofSelectsHardwareWithoutFallback, []() {
+    int softwareAttempts = 0;
+    int hardwareAttempts = 0;
+    int cleanupCalls = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::Software) {
+            ++softwareAttempts;
+            return SuccessfulSoftwareAttempt();
+        }
+        ++hardwareAttempts;
+        return SuccessfulHardwareAttempt();
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::Ok);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Hardware);
+    ASSERT_EQ(result.selectionReason, EncoderSelectionReason::HardwareSelected);
+    ASSERT_TRUE(result.selectionKnown);
+    ASSERT_EQ(hardwareAttempts, 1);
+    ASSERT_EQ(softwareAttempts, 0);
+    ASSERT_EQ(cleanupCalls, 0);
+});
+
+TEST_REGISTRAR(EncoderSelection_NoCandidateUsesUnavailableFallback, []() {
+    int softwareAttempts = 0;
+    int cleanupCalls = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred)
+            return FailedHardwareAttempt(false, false);
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        return EncoderCleanupResult{ EncoderCleanupStatus::AlreadyAbsent, {}, "0x80070002" };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::Ok);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(result.selectionReason, EncoderSelectionReason::HardwareUnavailableFallback);
+    ASSERT_TRUE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 1);
+    ASSERT_EQ(cleanupCalls, 1);
+});
+
+TEST_REGISTRAR(EncoderSelection_HardwareInitFailureUsesInitFallback, []() {
+    int softwareAttempts = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred)
+            return FailedHardwareAttempt(true, false);
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = []() {
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::Ok);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(result.selectionReason, EncoderSelectionReason::HardwareInitFailedFallback);
+    ASSERT_TRUE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 1);
+});
+
+TEST_REGISTRAR(EncoderSelection_HardwareUnverifiedUsesUnverifiedFallback, []() {
+    int softwareAttempts = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred)
+            return FailedHardwareAttempt(true, true, EncoderTransformClass::Unknown);
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = []() {
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::Ok);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(result.selectionReason, EncoderSelectionReason::HardwareUnverifiedFallback);
+    ASSERT_TRUE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 1);
+});
+
+TEST_REGISTRAR(EncoderSelection_SoftwareFallbackFailureLeavesSelectionUnknownAndNoResidue, []() {
+    std::wstring path = MakeTempMp4Path(L"_selection_failure.mp4");
+    std::wstring partialPath = path + L".partial";
+    std::wstring stagingPath = path + L".staging";
+    TempFileGuard guard({ path, partialPath, stagingPath });
+    int softwareAttempts = 0;
+    int cleanupCalls = 0;
+
+    auto createMarker = [&]() {
+        HANDLE handle = ::CreateFileW(
+            path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_TEMPORARY, nullptr);
+        ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+        ::CloseHandle(handle);
+    };
+
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred) {
+            createMarker();
+            return FailedHardwareAttempt(true, false);
+        }
+        ++softwareAttempts;
+        createMarker();
+        EncoderAttempt attempt;
+        attempt.status = EncoderStatus::InitializeFailed;
+        attempt.error = "synthetic software fallback failed";
+        attempt.hresult = "0x80004005";
+        return attempt;
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        const bool removed = ::DeleteFileW(path.c_str()) != 0 ||
+            (::GetLastError() == ERROR_FILE_NOT_FOUND && !FileExists(path));
+        ::DeleteFileW(partialPath.c_str());
+        ::DeleteFileW(stagingPath.c_str());
+        return EncoderCleanupResult{
+            removed ? EncoderCleanupStatus::Removed : EncoderCleanupStatus::Failed,
+            removed ? "" : "synthetic cleanup did not remove output",
+            removed ? "" : "0x80070005" };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::InitializeFailed);
+    ASSERT_FALSE(result.selectionKnown);
+    ASSERT_EQ(result.encoderMode, EncoderMode::Software);
+    ASSERT_EQ(softwareAttempts, 1);
+    ASSERT_EQ(cleanupCalls, 2);
+    ASSERT_FALSE(FileExists(path));
+    ASSERT_FALSE(FileExists(partialPath));
+    ASSERT_FALSE(FileExists(stagingPath));
+});
+
+TEST_REGISTRAR(EncoderSelection_CleanupFailureStopsFallbackAndKeepsSelectionUnknown, []() {
+    int softwareAttempts = 0;
+    int cleanupCalls = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred)
+            return FailedHardwareAttempt(true, true);
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        return EncoderCleanupResult{
+            EncoderCleanupStatus::Failed,
+            "synthetic DeleteFileW failure",
+            "0x80070005" };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::InitializeFailed);
+    ASSERT_FALSE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 0);
+    ASSERT_EQ(cleanupCalls, 1);
+    ASSERT_TRUE(result.error.find("cleanup") != std::string::npos);
+});
+
+TEST_REGISTRAR(EncoderSelection_ActivationShutdownFailureStopsFallbackAndKeepsSelectionUnknown, []() {
+    int softwareAttempts = 0;
+    int cleanupCalls = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred) {
+            EncoderAttempt attempt = FailedHardwareAttempt(true, false);
+            attempt.hardwareActivationShutdownFailed = true;
+            attempt.error = "Hardware H.264 activation ShutdownObject failed";
+            attempt.hresult = "0x80070005";
+            return attempt;
+        }
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = [&]() {
+        ++cleanupCalls;
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::InitializeFailed);
+    ASSERT_FALSE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 0);
+    ASSERT_EQ(cleanupCalls, 1);
+    ASSERT_NE(result.selectionReason, EncoderSelectionReason::HardwareUnavailableFallback);
+    ASSERT_TRUE(result.error.find("ShutdownObject") != std::string::npos);
+});
+
+TEST_REGISTRAR(EncoderSelection_ShutdownFailureUsesItsOwnHresultAfterEarlierActivationFailure, []() {
+    int softwareAttempts = 0;
+    EncoderSelectionOperations operations;
+    operations.attempt = [&](EncoderMode mode) {
+        if (mode == EncoderMode::HardwarePreferred) {
+            EncoderAttempt attempt = FailedHardwareAttempt(true, false);
+            attempt.hardwareActivationShutdownFailed = true;
+            attempt.error = "activation failed, then ShutdownObject failed";
+            attempt.hresult = "0x80070005";
+            return attempt;
+        }
+        ++softwareAttempts;
+        return SuccessfulSoftwareAttempt();
+    };
+    operations.cleanupFailedAttempt = []() {
+        return EncoderCleanupResult{ EncoderCleanupStatus::Removed, {}, {} };
+    };
+
+    const EncoderResult result = ResolveEncoderSelection(EncoderMode::HardwarePreferred, operations);
+    ASSERT_EQ(result.status, EncoderStatus::InitializeFailed);
+    ASSERT_FALSE(result.selectionKnown);
+    ASSERT_EQ(softwareAttempts, 0);
+    ASSERT_EQ(result.hresult, "0x80070005");
 });
 
 TEST_REGISTRAR(VideoEncoderBoundedIrregularTimelineEndsAtCaptureDeadline, []() {

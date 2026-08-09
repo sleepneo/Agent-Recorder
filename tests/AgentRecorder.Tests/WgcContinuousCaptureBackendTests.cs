@@ -199,6 +199,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         "Width: 1920",
         "Height: 1080",
         $"CaptureMethod: {captureMethod}",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         ""
     };
 
@@ -215,6 +217,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     private static string[] Ok(long frames = 300, long durationMs = 5000, long fileSize = 15000000) => new[]
     {
         "RESULT: OK",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         $"FramesCaptured: {frames}",
         "FramesDropped: 0",
         $"DurationMs: {durationMs}",
@@ -239,6 +243,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         $"Width: {width}",
         $"Height: {height}",
         "CaptureMethod: WGC_D3D11_REGION_FRAME_STREAM",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         ""
     };
 
@@ -248,6 +254,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         long fileSize = 1024) => new[]
     {
         "RESULT: OK",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         "FramesCaptured: 300",
         "FramesDropped: 0",
         "DurationMs: 5000",
@@ -260,6 +268,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     private static string[] Stopped(long frames = 150, long durationMs = 2500, long fileSize = 7500000) => new[]
     {
         "RESULT: STOPPED",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         "StopReason: user_requested",
         $"FramesCaptured: {frames}",
         "FramesDropped: 0",
@@ -273,6 +283,8 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     private static string[] Fail(string reason, string errorCode) => new[]
     {
         "RESULT: FAIL",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         $"ErrorCode: {errorCode}",
         $"Reason: {reason}",
         "FramesCaptured: 0",
@@ -1596,16 +1608,16 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         switch (mode)
         {
             case "width":
-                finalLines[5] = "Width: 1919";
+                finalLines[7] = "Width: 1919";
                 break;
             case "height":
-                finalLines[6] = "Height: 1079";
+                finalLines[8] = "Height: 1079";
                 break;
             case "size":
-                finalLines[4] = "FileSize: 9999 bytes";
+                finalLines[6] = "FileSize: 9999 bytes";
                 break;
             case "duration":
-                finalLines[3] = "DurationMs: 10000";
+                finalLines[5] = "DurationMs: 10000";
                 break;
         }
 
@@ -3287,7 +3299,9 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
                 DurationMs = 5000,
                 HasFileSize = true,
                 FileSize = 10000,
-                CaptureMethod = "WGC_D3D11_FRAME_STREAM"
+                CaptureMethod = "WGC_D3D11_FRAME_STREAM",
+                EncoderMode = "software",
+                EncoderSelectionReason = "software_default"
             }
         };
 

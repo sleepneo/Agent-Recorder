@@ -100,8 +100,19 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         "Width: 1920",
         "Height: 1080",
         "CaptureMethod: WGC_D3D11_FRAME_STREAM",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         "" // blank-line event separator
     };
+
+    private static string[] WithEncoderSelection(
+        IEnumerable<string> lines,
+        string mode,
+        string reason) => lines
+        .Select(line => line
+            .Replace("EncoderMode: software", $"EncoderMode: {mode}", StringComparison.Ordinal)
+            .Replace("EncoderSelectionReason: software_default", $"EncoderSelectionReason: {reason}", StringComparison.Ordinal))
+        .ToArray();
 
     private static string[] Progress(long frames, long elapsedMs, long bytesWritten = 0) => new[]
     {
@@ -116,6 +127,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     private static string[] Ok(long frames = 300, long durationMs = 5000, long fileSize = 15000000) => new[]
     {
         "RESULT: OK",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         $"FramesCaptured: {frames}",
         "FramesDropped: 0",
         $"DurationMs: {durationMs}",
@@ -128,6 +141,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     private static string[] Stopped(long frames = 150, long durationMs = 2500, long fileSize = 7500000) => new[]
     {
         "RESULT: STOPPED",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         "StopReason: user_requested",
         $"FramesCaptured: {frames}",
         "FramesDropped: 0",
@@ -149,12 +164,16 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         "Width: 640",
         "Height: 480",
         "CaptureMethod: WGC_D3D11_REGION_FRAME_STREAM",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         ""
     };
 
     private static string[] RegionOk(long fileSize = 15000000) => new[]
     {
         "RESULT: OK",
+        "EncoderMode: software",
+        "EncoderSelectionReason: software_default",
         "FramesCaptured: 150",
         "FramesDropped: 0",
         "DurationMs: 5000",
@@ -169,6 +188,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var lines = new List<string>
         {
             "RESULT: FAIL",
+            "EncoderMode: software",
+            "EncoderSelectionReason: software_default",
             $"ErrorCode: {errorCode}",
             $"Reason: {reason}",
             "FramesCaptured: 0",
@@ -629,7 +650,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         public void Start(string fileName, IReadOnlyList<string> argumentList)
         {
-            var stdoutText = $"RESULT: STARTED\nRecordingId: r\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\n\nRESULT: OK\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
+            var stdoutText = $"RESULT: STARTED\nRecordingId: r\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n\nRESULT: OK\nEncoderMode: software\nEncoderSelectionReason: software_default\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
             var stdout = new MemoryStream(Encoding.UTF8.GetBytes(stdoutText));
             var stderr = new RepeatingByteStream(_stderrByteLength, (byte)'y');
 
@@ -1031,6 +1052,118 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
         Assert.True(result.OutputFileExists, "Output file must exist");
         Assert.Equal(fileSize, result.OutputFileSizeBytes);
+    }
+
+    [Fact]
+    public async Task HardwarePreferred_DisplayAcceptsOnlyHardwareOrTruthfulFallback()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o => o.EncoderMode = WgcEncoderMode.HardwarePreferred);
+        const string reason = "hardware_unavailable_fallback";
+        const long fileSize = 15000000;
+        var stdout = WithEncoderSelection(Started(recId, opts.OutputPath), "software", reason)
+            .Concat(WithEncoderSelection(Ok(fileSize: fileSize), "software", reason))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.Equal("software", result.Summary!.EncoderMode);
+        Assert.Equal(reason, result.Summary.EncoderSelectionReason);
+    }
+
+    [Fact]
+    public async Task HardwarePreferred_DisplayRejectsSoftwareDefaultAsPolicyMismatch()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o => o.EncoderMode = WgcEncoderMode.HardwarePreferred);
+        var stdout = Started(recId, opts.OutputPath).Concat(Ok()).ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout, waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("protocol", result.FailurePhase);
+        Assert.Equal("encoder_selection_policy_mismatch", result.FailureCategory);
+        Assert.False(result.OutputFileExists);
+    }
+
+    [Fact]
+    public async Task Software_WindowRejectsHardwareSelectionAsPolicyMismatch()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+        });
+        var started = WithEncoderSelection(Started(recId, opts.OutputPath), "hardware", "hardware_selected")
+            .Select(line => line.Replace(
+                "WGC_D3D11_FRAME_STREAM",
+                "WGC_D3D11_WINDOW_FRAME_STREAM",
+                StringComparison.Ordinal));
+        var stdout = started.Concat(WithEncoderSelection(Ok(), "hardware", "hardware_selected")).ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout, waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("encoder_selection_policy_mismatch", result.FailureCategory);
+    }
+
+    [Fact]
+    public async Task HardwarePreferred_RegionAcceptsHardwareSelection()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Region;
+            o.DisplayX = -1920;
+            o.DisplayY = -200;
+            o.DisplayWidth = 1920;
+            o.DisplayHeight = 1080;
+            o.RegionX = -1800;
+            o.RegionY = -100;
+            o.RegionWidth = 640;
+            o.RegionHeight = 480;
+            o.EncoderMode = WgcEncoderMode.HardwarePreferred;
+        });
+        const long fileSize = 15000000;
+        var stdout = WithEncoderSelection(RegionStarted(recId, opts.OutputPath), "hardware", "hardware_selected")
+            .Concat(WithEncoderSelection(RegionOk(fileSize), "hardware", "hardware_selected"))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.Equal("hardware", result.Summary!.EncoderMode);
+        Assert.Equal("hardware_selected", result.Summary.EncoderSelectionReason);
     }
 
     [Fact]
@@ -1986,6 +2119,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             .Concat(new[]
             {
                 "RESULT: OK",
+                "EncoderMode: software",
+                "EncoderSelectionReason: software_default",
                 "FramesCaptured: 300",
                 "FramesDropped: 0",
                 "DurationMs: 5000",
@@ -2082,8 +2217,12 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             "Width: 1920",
             "Height: 1080",
             "CaptureMethod: WGC_D3D11_FRAME_STREAM",
+            "EncoderMode: software",
+            "EncoderSelectionReason: software_default",
             "",
             "RESULT: FAIL",
+            "EncoderMode: software",
+            "EncoderSelectionReason: software_default",
             $"ErrorCode: {reason}",
             $"Reason: {reason}",
             "FramesCaptured: 8",
@@ -2425,8 +2564,12 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             "Width: 1920\r\n" +
             "Height: 1080\r\n" +
             "CaptureMethod: WGC_D3D11_FRAME_STREAM\r\n" +
+            "EncoderMode: software\r\n" +
+            "EncoderSelectionReason: software_default\r\n" +
             "\r\n" +
             "RESULT: OK\r\n" +
+            "EncoderMode: software\r\n" +
+            "EncoderSelectionReason: software_default\r\n" +
             "FramesCaptured: 1\r\n" +
             "DurationMs: 1000\r\n" +
             "FileSize: 100 bytes\r\n" +
@@ -2488,6 +2631,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         Assert.Equal("--duration-ms", args[args.IndexOf("--duration-ms")]);
         Assert.Equal("2000", args[args.IndexOf("--duration-ms") + 1]);
         Assert.Equal("60", args[args.IndexOf("--fps") + 1]);
+        Assert.Equal("software", args[args.IndexOf("--encoder-mode") + 1]);
         Assert.Equal(opts.BeginSignalPath, args[args.IndexOf("--begin-signal") + 1]);
         Assert.Equal(opts.StopSignalPath, args[args.IndexOf("--stop-signal") + 1]);
         Assert.Equal("--i-understand-this-captures-screen", args[^1]);

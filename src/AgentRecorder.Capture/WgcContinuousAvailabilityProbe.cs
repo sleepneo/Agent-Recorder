@@ -26,7 +26,9 @@ public sealed class WgcContinuousCapabilityEvidence
         bool d3d11Initialized,
         bool encoderCreated,
         IReadOnlyList<WgcMonitorBounds> monitors,
-        bool windowCaptureSupported = false)
+        bool windowCaptureSupported = false,
+        bool hardwareH264Available = false,
+        int? hardwareH264CandidateCount = null)
     {
         HelperVersion = helperVersion ?? "";
         DpiAwareness = dpiAwareness ?? "";
@@ -34,6 +36,8 @@ public sealed class WgcContinuousCapabilityEvidence
         D3d11Initialized = d3d11Initialized;
         EncoderCreated = encoderCreated;
         WindowCaptureSupported = windowCaptureSupported;
+        HardwareH264Available = hardwareH264Available;
+        HardwareH264CandidateCount = hardwareH264CandidateCount;
         Monitors = Array.AsReadOnly((monitors ?? Array.Empty<WgcMonitorBounds>()).ToArray());
     }
 
@@ -43,6 +47,8 @@ public sealed class WgcContinuousCapabilityEvidence
     public bool D3d11Initialized { get; }
     public bool EncoderCreated { get; }
     public bool WindowCaptureSupported { get; }
+    public bool HardwareH264Available { get; }
+    public int? HardwareH264CandidateCount { get; }
     public IReadOnlyList<WgcMonitorBounds> Monitors { get; }
 }
 
@@ -78,7 +84,7 @@ public sealed class WgcContinuousAvailabilityProbe :
     IWgcContinuousAvailabilityProbe,
     IWgcContinuousAvailabilityWarmupProbe
 {
-    public const string SupportedHelperVersion = "0.2.0";
+    public const string SupportedHelperVersion = "0.3.0";
     public const int VersionTimeoutMs = 1500;
     public const int ProbeTimeoutMs = 3000;
     public static readonly TimeSpan DefaultCacheTtl = TimeSpan.FromSeconds(30);
@@ -577,6 +583,9 @@ public sealed class WgcContinuousAvailabilityProbe :
         bool? d3d11Initialized = null;
         bool? encoderCreated = null;
         bool? windowCaptureSupported = null;
+        bool? hardwareH264Available = null;
+        int? hardwareH264CandidateCount = null;
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var monitors = new List<WgcMonitorBounds>();
 
         foreach (string line in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
@@ -587,18 +596,40 @@ public sealed class WgcContinuousAvailabilityProbe :
             {
                 string key = trimmed[..separator].Trim();
                 string value = trimmed[(separator + 1)..].Trim();
+                bool isKnownProbeKey = key.Equals("RESULT", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("DpiAwareness", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("WgcSupported", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("D3d11Initialized", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("EncoderCreated", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("WindowCaptureSupported", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("HardwareH264Available", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("HardwareH264CandidateCount", StringComparison.OrdinalIgnoreCase);
+                if (isKnownProbeKey)
+                {
+                    if (!seenKeys.Add(key.ToUpperInvariant()))
+                        return false;
+                }
                 if (string.Equals(key, "RESULT", StringComparison.OrdinalIgnoreCase))
-                    resultOk = string.Equals(value, "OK", StringComparison.OrdinalIgnoreCase);
+                    resultOk = value.Equals("OK", StringComparison.OrdinalIgnoreCase);
                 else if (string.Equals(key, "DpiAwareness", StringComparison.OrdinalIgnoreCase))
                     dpiAwareness = value;
                 else if (string.Equals(key, "WgcSupported", StringComparison.OrdinalIgnoreCase))
-                    wgcSupported = ParseBoolean(value);
+                    wgcSupported = ParseBooleanStrict(value);
                 else if (string.Equals(key, "D3d11Initialized", StringComparison.OrdinalIgnoreCase))
-                    d3d11Initialized = ParseBoolean(value);
+                    d3d11Initialized = ParseBooleanStrict(value);
                 else if (string.Equals(key, "EncoderCreated", StringComparison.OrdinalIgnoreCase))
-                    encoderCreated = ParseBoolean(value);
+                    encoderCreated = ParseBooleanStrict(value);
                 else if (string.Equals(key, "WindowCaptureSupported", StringComparison.OrdinalIgnoreCase))
-                    windowCaptureSupported = ParseBoolean(value);
+                    windowCaptureSupported = ParseBooleanStrict(value);
+                else if (string.Equals(key, "HardwareH264Available", StringComparison.OrdinalIgnoreCase))
+                    hardwareH264Available = ParseBooleanStrict(value);
+                else if (string.Equals(key, "HardwareH264CandidateCount", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int count) ||
+                        count < 0 || count > 1024)
+                        return false;
+                    hardwareH264CandidateCount = count;
+                }
             }
 
             Match monitor = MonitorLine.Match(trimmed);
@@ -618,7 +649,13 @@ public sealed class WgcContinuousAvailabilityProbe :
             || !d3d11Initialized.HasValue
             || !encoderCreated.HasValue
             || !windowCaptureSupported.HasValue
+            || !hardwareH264Available.HasValue
             || monitors.Count == 0)
+            return false;
+
+        if (hardwareH264CandidateCount.HasValue &&
+            ((hardwareH264Available == true && hardwareH264CandidateCount.Value < 1) ||
+             (hardwareH264Available == false && hardwareH264CandidateCount.Value != 0)))
             return false;
 
         evidence = new WgcContinuousCapabilityEvidence(
@@ -628,12 +665,15 @@ public sealed class WgcContinuousAvailabilityProbe :
             d3d11Initialized.Value,
             encoderCreated.Value,
             monitors,
-            windowCaptureSupported.Value);
+            windowCaptureSupported.Value,
+            hardwareH264Available.Value,
+            hardwareH264CandidateCount);
         return true;
     }
 
-    private static bool ParseBoolean(string value) =>
-        bool.TryParse(value, out bool result) && result;
+    private static bool? ParseBooleanStrict(string value) =>
+        value.Equals("true", StringComparison.OrdinalIgnoreCase) ? true :
+        value.Equals("false", StringComparison.OrdinalIgnoreCase) ? false : null;
 
     private static WgcContinuousAvailabilityResult Unavailable(
         string reasonCode,

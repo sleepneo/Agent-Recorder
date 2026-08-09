@@ -64,6 +64,8 @@ public class WgcContinuousFakeProcessTests : IDisposable
                 "Width: 1920\n" +
                 "Height: 1080\n" +
                 "CaptureMethod: WGC_D3D11_FRAME_STREAM\n" +
+                "EncoderMode: software\n" +
+                "EncoderSelectionReason: software_default\n" +
                 "\n" +
                 "RESULT: PROGRESS\n" +
                 "FramesCaptured: 150\n" +
@@ -75,6 +77,8 @@ public class WgcContinuousFakeProcessTests : IDisposable
             {
                 result +=
                     "RESULT: STOPPED\n" +
+                    "EncoderMode: software\n" +
+                    "EncoderSelectionReason: software_default\n" +
                     "StopReason: user_requested\n" +
                     "FramesCaptured: 150\n" +
                     "DurationMs: 5000\n" +
@@ -86,6 +90,8 @@ public class WgcContinuousFakeProcessTests : IDisposable
             {
                 result +=
                     "RESULT: OK\n" +
+                    "EncoderMode: software\n" +
+                    "EncoderSelectionReason: software_default\n" +
                     "FramesCaptured: 300\n" +
                     "FramesDropped: 0\n" +
                     "DurationMs: 10000\n" +
@@ -189,6 +195,8 @@ public class WgcContinuousFakeProcessTests : IDisposable
         Assert.Equal(0, output.GetProperty("frames_dropped").GetInt32());
         Assert.Equal(10000, output.GetProperty("duration_ms").GetInt32());
         Assert.Equal(30, output.GetProperty("fps").GetInt32());
+        Assert.Equal("software", output.GetProperty("encoder_mode").GetString());
+        Assert.Equal("software_default", output.GetProperty("encoder_selection_reason").GetString());
 
         var auditEvents = evidence.GetProperty("audit_events");
         Assert.Equal(5, auditEvents.GetArrayLength());
@@ -265,9 +273,9 @@ public class WgcContinuousFakeProcessTests : IDisposable
             "Fps: 30\n" +
             "Width: 1920\n" +
             "Height: 1080\n" +
-            "CaptureMethod: WGC_D3D11_FRAME_STREAM\n" +
+            "CaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
             "\n" +
-            "RESULT: FAIL\n" +
+            "RESULT: FAIL\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
             "StopReason: encoding_error\n" +
             "ErrorCode: encoding_error\n" +
             "Reason: Encoder failed to produce valid video stream\n" +
@@ -393,9 +401,9 @@ public class WgcContinuousFakeProcessTests : IDisposable
             "Fps: 30\n" +
             "Width: 1920\n" +
             "Height: 1080\n" +
-            "CaptureMethod: WGC_D3D11_FRAME_STREAM\n" +
+            "CaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
             "\n" +
-            "RESULT: OK\n" +
+            "RESULT: OK\nEncoderMode: software\nEncoderSelectionReason: software_default\n" +
             "FramesCaptured: 300\n" +
             "DurationMs: 10000\n" +
             "FileSize: " + fileSize + " bytes\n" +

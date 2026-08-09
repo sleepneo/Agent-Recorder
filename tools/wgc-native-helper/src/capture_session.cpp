@@ -217,6 +217,9 @@ struct CapturePipelineState {
 
     int sourceWidth = 0;
     int sourceHeight = 0;
+    EncoderMode encoderMode = EncoderMode::Software;
+    EncoderSelectionReason encoderSelectionReason = EncoderSelectionReason::SoftwareDefault;
+    bool encoderSelectionKnown = false;
 
     std::mutex loopMutex;
     std::condition_variable loopCv;
@@ -506,17 +509,20 @@ void WriteTerminalOutcome(EventWriter& writer, const CaptureOutcome& outcome) {
         case CaptureResult::Failed:
             writer.Fail(outcome.errorCode, outcome.reason, outcome.hresult,
                         outcome.partialOutputPath, outcome.framesCaptured,
-                        outcome.bytesWritten);
+                        outcome.bytesWritten, outcome.encoderMode,
+                        outcome.encoderSelectionReason, outcome.encoderSelectionKnown);
             break;
         case CaptureResult::Stopped:
             writer.Stopped(outcome.framesCaptured, outcome.framesDropped,
                            outcome.durationMs, outcome.bytesWritten,
-                           outcome.width, outcome.height);
+                           outcome.width, outcome.height, outcome.encoderMode,
+                           outcome.encoderSelectionReason, outcome.encoderSelectionKnown);
             break;
         case CaptureResult::Success:
             writer.Ok(outcome.framesCaptured, outcome.framesDropped,
                       outcome.durationMs, outcome.bytesWritten,
-                      outcome.width, outcome.height);
+                      outcome.width, outcome.height, outcome.encoderMode,
+                      outcome.encoderSelectionReason, outcome.encoderSelectionKnown);
             break;
         default:
             writer.Fail("internal_error",
@@ -525,6 +531,25 @@ void WriteTerminalOutcome(EventWriter& writer, const CaptureOutcome& outcome) {
                         outcome.framesCaptured, outcome.bytesWritten);
             break;
     }
+}
+
+bool EncoderSelectionMatchesRequest(
+    EncoderMode requestedMode,
+    EncoderMode actualMode,
+    EncoderSelectionReason reason,
+    bool known) {
+    if (!known) return false;
+    if (requestedMode == EncoderMode::Software) {
+        return actualMode == EncoderMode::Software &&
+               reason == EncoderSelectionReason::SoftwareDefault;
+    }
+    if (actualMode == EncoderMode::Hardware) {
+        return reason == EncoderSelectionReason::HardwareSelected;
+    }
+    if (actualMode != EncoderMode::Software) return false;
+    return reason == EncoderSelectionReason::HardwareUnavailableFallback ||
+           reason == EncoderSelectionReason::HardwareInitFailedFallback ||
+           reason == EncoderSelectionReason::HardwareUnverifiedFallback;
 }
 
 CaptureOutcome NormalizeFailureEvidence(CaptureOutcome outcome,
@@ -955,16 +980,56 @@ CaptureOutcome CaptureSession::Run() {
         } threadComGuard{threadComInitialized};
 
         EncoderResult initResult;
-        if (hooks_.onEncoderInitialize) {
+        if (hooks_.onEncoderInitialize && options_.encoderMode != EncoderMode::Software) {
+            initResult.status = EncoderStatus::InitializeFailed;
+            initResult.error = "encoder_selection_policy_mismatch: hardware-preferred requires the mode-aware encoder hook";
+            initResult.hresult = "0x80004005";
+        } else if (hooks_.onEncoderInitialize) {
             initResult = hooks_.onEncoderInitialize(captureWidth, captureHeight, options_.fps,
                                                      partialOutputPath_);
+        } else if (hooks_.onEncoderInitializeWithMode) {
+            initResult = hooks_.onEncoderInitializeWithMode(captureWidth, captureHeight, options_.fps,
+                                                            partialOutputPath_, options_.encoderMode);
         } else {
-            initResult = encoder.Initialize(captureWidth, captureHeight, options_.fps, partialOutputPath_);
+            initResult = encoder.Initialize(captureWidth, captureHeight, options_.fps, partialOutputPath_,
+                                            options_.encoderMode);
         }
         if (initResult.status != EncoderStatus::Ok) {
             state->coordinator.SignalEncoderFailed(initResult.error, initResult.hresult);
             return;
         }
+
+        // The legacy test hook predates encoder selection evidence. It is only
+        // a valid seam for an explicitly requested software session; a
+        // hardware-preferred request must use the mode-aware hook or the real
+        // VideoEncoder, otherwise it would silently fake software_default.
+        if (!initResult.selectionKnown) {
+            if (options_.encoderMode == EncoderMode::Software) {
+                initResult.encoderMode = EncoderMode::Software;
+                initResult.selectionReason = EncoderSelectionReason::SoftwareDefault;
+                initResult.selectionKnown = true;
+            } else {
+                state->coordinator.SignalEncoderFailed(
+                    "encoder_selection_policy_mismatch",
+                    "hardware-preferred encoder initialization did not provide selection evidence");
+                return;
+            }
+        }
+
+        if (!EncoderSelectionMatchesRequest(
+                options_.encoderMode,
+                initResult.encoderMode,
+                initResult.selectionReason,
+                initResult.selectionKnown)) {
+            state->coordinator.SignalEncoderFailed(
+                "encoder_selection_policy_mismatch",
+                "encoder selection does not match the requested mode");
+            return;
+        }
+
+        state->encoderMode = initResult.encoderMode;
+        state->encoderSelectionReason = initResult.selectionReason;
+        state->encoderSelectionKnown = initResult.selectionKnown;
 
         state->coordinator.SignalEncoderReady();
 
@@ -1133,15 +1198,23 @@ CaptureOutcome CaptureSession::Run() {
 
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
         if (callbackDrainTimeout) {
-            return MakeFailWithEvidence("callback_drain_timeout",
-                                        "Timed out waiting for frame callbacks to exit",
-                                        "", partialPath,
-                                        framesCaptured, framesDropped, durationMs, bytesWritten,
-                                        captureWidth, captureHeight);
+            CaptureOutcome outcome = MakeFailWithEvidence("callback_drain_timeout",
+                                                          "Timed out waiting for frame callbacks to exit",
+                                                          "", partialPath,
+                                                          framesCaptured, framesDropped, durationMs, bytesWritten,
+                                                          captureWidth, captureHeight);
+            outcome.encoderMode = state->encoderMode;
+            outcome.encoderSelectionReason = state->encoderSelectionReason;
+            outcome.encoderSelectionKnown = state->encoderSelectionKnown;
+            return outcome;
         }
-        return MakeFailWithEvidence(errorCode, reason, hresult, partialPath,
-                                    framesCaptured, framesDropped, durationMs, bytesWritten,
-                                    captureWidth, captureHeight);
+        CaptureOutcome outcome = MakeFailWithEvidence(errorCode, reason, hresult, partialPath,
+                                                      framesCaptured, framesDropped, durationMs, bytesWritten,
+                                                      captureWidth, captureHeight);
+        outcome.encoderMode = state->encoderMode;
+        outcome.encoderSelectionReason = state->encoderSelectionReason;
+        outcome.encoderSelectionKnown = state->encoderSelectionKnown;
+        return outcome;
     };
 
     // Wait for begin authorization before touching capture session.
@@ -1258,7 +1331,9 @@ CaptureOutcome CaptureSession::Run() {
             ? "WGC_D3D11_REGION_FRAME_STREAM"
             : "WGC_D3D11_FRAME_STREAM";
     writer_.Started(WideToUtf8(options_.recordingId), outputPath_, options_.fps,
-                    captureWidth, captureHeight, captureMethod);
+                    captureWidth, captureHeight, captureMethod,
+                    state->encoderMode, state->encoderSelectionReason,
+                    state->encoderSelectionKnown);
     if (hooks_.onStarted) {
         hooks_.onStarted();
     }
@@ -1433,6 +1508,9 @@ CaptureOutcome CaptureSession::Run() {
 
     // CaptureSession returns a complete outcome; the terminal IPC event is
     // emitted exactly once by main.cpp (the single terminal owner).
+    outcome.encoderMode = state->encoderMode;
+    outcome.encoderSelectionReason = state->encoderSelectionReason;
+    outcome.encoderSelectionKnown = state->encoderSelectionKnown;
     return outcome;
 }
 

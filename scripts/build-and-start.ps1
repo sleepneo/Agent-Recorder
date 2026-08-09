@@ -11,6 +11,15 @@ if ($normalizedWindowBackend -notin @("", "wgc", "wgc-continuous")) {
     throw "WindowBackend must be empty, wgc-continuous, or legacy alias wgc. Received '$WindowBackend'."
 }
 
+$rawWgcEncoder = [System.Environment]::GetEnvironmentVariable("AGENT_RECORDER_WGC_ENCODER", "Process")
+$normalizedWgcEncoder = if ([string]::IsNullOrWhiteSpace($rawWgcEncoder) -or $rawWgcEncoder.Trim().ToLowerInvariant() -eq "software") {
+    "software"
+} elseif ($rawWgcEncoder.Trim().ToLowerInvariant() -eq "hardware-preferred") {
+    "hardware-preferred"
+} else {
+    throw "AGENT_RECORDER_WGC_ENCODER must be empty, software, or hardware-preferred. Received '$rawWgcEncoder'."
+}
+
 function Set-ProcessEnvironmentSafely {
     param(
         [Parameter(Mandatory=$true)] [System.Diagnostics.ProcessStartInfo]$psi,
@@ -88,6 +97,7 @@ $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 
 Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_DATA_DIR" -value "D:\works\python\007-Agent-Recorder\.local-data"
+Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WGC_ENCODER" -value $normalizedWgcEncoder
 $ffmpeg = Get-Command ffmpeg -EA SilentlyContinue
 if ($ffmpeg) { Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_FFMPEG_DIR" -value (Split-Path $ffmpeg.Source -Parent) }
 

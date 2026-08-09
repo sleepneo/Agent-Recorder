@@ -32,6 +32,13 @@ internal static class Program
 
     private static void Run()
     {
+        // Normalize the hidden encoder policy once at process startup. Empty
+        // means software; invalid values fail before WGC warmup or recording.
+        Environment.SetEnvironmentVariable(
+            WgcEncoderModePolicy.EnvironmentVariable,
+            WgcEncoderModePolicy.ToArgumentValue(WgcEncoderModePolicy.NormalizeEnvironment()),
+            EnvironmentVariableTarget.Process);
+
         // Start timing as early as possible.
         var readiness = new RuntimeReadiness("tray", ApiServer.Port);
 

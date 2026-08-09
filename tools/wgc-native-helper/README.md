@@ -1,6 +1,6 @@
 # wgc-native-helper
 
-`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation 软件 H.264 编码，对单个显示器、窗口或隐藏实验性的显示器区域进行短时连续录制，输出标准 MP4。
+`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation H.264 编码，对单个显示器、窗口或隐藏实验性的显示器区域进行短时连续录制，输出标准 MP4。默认请求 software H.264；隐藏的 `hardware-preferred` 实验路径只有在 Sink Writer 实际 transform evidence 证明硬件编码器后才会报告 hardware selection。
 
 本 helper 不直接对外提供 HTTP API，而是由主进程通过命令行启动并通过 stdout 上的 IPC v2 事件流监督生命周期。
 
@@ -92,7 +92,8 @@ wgc-native-helper.exe --probe
 - 当前 DPI awareness 上下文（必须为 `per_monitor_v2`）。
 - 显示器数量与每个显示器的物理像素边界（`x,y,width,height`）及 primary 标记。
 - D3D11 设备（含 WARP 回退）能否初始化。
-- 能否通过 `MFTEnumEx` 创建 H.264 软件编码器。
+- 能否通过 `MFTEnumEx` 完整激活并 shutdown H.264 软件编码器。
+- 硬件 H.264 候选的 activation 与 `ShutdownObject` failure count；这些是 candidate evidence，不是实际录制成功证明。
 
 输出示例：
 
@@ -105,10 +106,14 @@ Monitor[1]: x=3840 y=0 width=1920 height=1080 primary=false
 WgcSupported: true
 D3d11Initialized: true
 EncoderCreated: true
+HardwareH264Available: false
+HardwareH264CandidateCount: 0
+HardwareH264ActivationFailureCount: 0
+HardwareH264ShutdownFailureCount: 0
 WindowCaptureSupported: true
 ```
 
-### 连续 window 录制模式（helper 0.2.0）
+### 连续 window 录制模式（helper 0.3.0）
 
 托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–10 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；历史值 `AGENT_RECORDER_WINDOW_BACKEND=wgc` 仅作为兼容别名，并在进入 selector 后归一化为 `wgc-continuous`，不会再选择单帧后端。
 
@@ -120,6 +125,7 @@ wgc-native-helper.exe
   --output <absolute-mp4-path>
   --duration-ms <1000..10000>
   --fps <1..60>
+  --encoder-mode <software|hardware-preferred>
   --begin-signal <absolute-path>
   --begin-token <unguessable-token>
   --begin-timeout-ms <100..300000>
@@ -129,7 +135,7 @@ wgc-native-helper.exe
 
 窗口目标使用 `IGraphicsCaptureItemInterop::CreateForWindow`，输出事件的 `CaptureMethod` 为 `WGC_D3D11_WINDOW_FRAME_STREAM`。目标 HWND 失效、窗口最小化或不可用、窗口关闭、首次采集尺寸变化和 item 创建失败都会以目标专用错误终止；不会伪装成 display 失败，也不会等待通用 watchdog 超时。真实桌面已确认窗口捕获会显示 Windows 隐私边框和 Agent Recorder REC 指示；关闭/最小化/尺寸变化的最终失败语义由自动化覆盖，仍需在不同应用、GPU 和 Windows 版本上持续复验。
 
-### 隐藏连续 region 实验模式（helper 0.2.0）
+### 隐藏连续 region 实验模式（helper 0.3.0）
 
 托管 selector 只在 `AGENT_RECORDER_REGION_BACKEND=wgc-continuous`、无麦克风、时长 1–10 秒、帧率 1–60、区域为正数且偶数尺寸、区域完整包含于唯一目标显示器，并且非捕获 `--probe` 证据匹配该显示器时选择此模式。环境变量为空、未知或使用已退役的 `wgc` 值时仍走 FFmpeg；此能力不改变公开 API 或默认后端。
 
@@ -185,7 +191,11 @@ Fps: <fps>
 Width: <width>
 Height: <height>
 CaptureMethod: WGC_D3D11_FRAME_STREAM
+EncoderMode: software|hardware
+EncoderSelectionReason: software_default|hardware_selected|hardware_unavailable_fallback|hardware_init_failed_fallback|hardware_unverified_fallback
 ```
+
+`software` 是默认且明确关闭 Media Foundation hardware transforms 的路径。`hardware-preferred` 只在 Sink Writer 实际 transform chain 暴露硬件 H.264 MFT 证据时报告 `EncoderMode: hardware` 与 `hardware_selected`；仅有硬件开关、D3D manager、MFT 枚举或 transform 创建不能算选择成功。否则会回退到 software，并报告对应的稳定 fallback reason。probe 中的 `HardwareH264Available` 只是非捕获能力提示，不会改变共享 WGC 可用性。
 
 ### PROGRESS
 
@@ -280,10 +290,12 @@ BytesWritten: <bytes>
 
 ## 已知限制
 
-- 本轮实现单个 display 与单个 window 的连续 WGC 视频切片；不做 region、硬件编码、麦克风或系统声音。display 已完成 10/10 真实验收；window 已完成真实基础捕获，最新倒计时与关闭/最小化/尺寸变化提示仍需一次检查点复验。
+- 当前 helper 共享 display、window、region 三条连续 WGC capture 路径；region 仍是隐藏实验，受托管 selector 的显式开关、稳定显示器身份和非捕获 probe barrier 约束。公共 API 和默认后端仍不启用 WGC continuous。
+- 硬件 H.264 仍是隐藏实验。`HardwareH264Available` 和 candidate count 只是 probe 能力证据，不是硬件录制成功；只有 Sink Writer 实际 transform chain 经过分类并报告 `hardware/hardware_selected` 才算硬件选择成功。Task 200B 的自动化验证不替代真实桌面硬件验收。
+- 默认软件路径请求并验证 software H.264 transform；CPU RGB32 输入、GPU→CPU 拷贝和非 zero-copy 编码路径保持不变。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
 - Windows 自带的 WGC 黄色边框是系统隐私提示，本 helper 不尝试绕过或隐藏。
-- 2026-08-04 已完成受控 selector 产品路径的 10/10 真实稳定性验收。10 次主屏录制均由本地用户确认后进入 `wgc-continuous`，产出 `3840x2160`、30 FPS、298-300 帧、9.933-10.000 秒且可完整解码的 H.264 MP4；审计顺序、终态、helper 退出和 partial/staging 清理均通过。C# 托管会话、`ICaptureBackend`、非捕获可用性探测、短期缓存和 FFmpeg 回退均已接线；self-contained portable 包会在 `AgentRecorder.WgcHelper\wgc-native-helper.exe` 携带唯一生产 helper。公共 API 仍拒绝 WGC continuous 录制，默认 FFmpeg 后端未改变；后续能力继续按 window、region、硬编、系统声音的顺序独立验收。
+- 麦克风和系统声音不进入 WGC helper；音频仍由既有 FFmpeg/AudioHelper 路径独立处理。WGC 隐私边框、consent barrier、staging 原子发布和 FFmpeg fallback 的既有限制继续有效。
 
 ## 测试
 

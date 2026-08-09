@@ -33,6 +33,34 @@ TEST_REGISTRAR(OptionsProbeReturnsProbeMode, []() {
     ASSERT_EQ(result.options.mode, CaptureMode::Probe);
 });
 
+TEST_REGISTRAR(OptionsEncoderModeDefaultsToSoftware, []() {
+    auto result = ParseArgs({ L"--probe" });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.encoderMode, EncoderMode::Software);
+    ASSERT_FALSE(result.options.hasEncoderMode);
+});
+
+TEST_REGISTRAR(OptionsEncoderModeAcceptsNormalizedValues, []() {
+    auto result = ParseArgs({ L"--encoder-mode", L"  SoFtWaRe  ", L"--probe" });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.encoderMode, EncoderMode::Software);
+    ASSERT_TRUE(result.options.hasEncoderMode);
+
+    result = ParseArgs({ L"--encoder-mode", L" HARDWARE-PREFERRED ", L"--probe" });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.encoderMode, EncoderMode::HardwarePreferred);
+    ASSERT_TRUE(result.options.hasEncoderMode);
+});
+
+TEST_REGISTRAR(OptionsEncoderModeRejectsInvalidMissingAndDuplicate, []() {
+    auto result = ParseArgs({ L"--encoder-mode", L"hardware" });
+    ASSERT_FALSE(result.error.empty());
+    result = ParseArgs({ L"--encoder-mode" });
+    ASSERT_FALSE(result.error.empty());
+    result = ParseArgs({ L"--encoder-mode", L"software", L"--encoder-mode", L"software" });
+    ASSERT_FALSE(result.error.empty());
+});
+
 TEST_REGISTRAR(OptionsContinuousDisplayParsesAllFields, []() {
     auto result = ParseArgs({
         L"--capture-continuous-display",

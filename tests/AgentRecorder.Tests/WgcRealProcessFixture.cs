@@ -141,6 +141,8 @@ internal static class Program
         Console.WriteLine("Width: 1920");
         Console.WriteLine("Height: 1080");
         Console.WriteLine("CaptureMethod: WGC_TEST_HELPER");
+        Console.WriteLine("EncoderMode: software");
+        Console.WriteLine("EncoderSelectionReason: software_default");
         Console.WriteLine();
         Console.Out.Flush();
         Log("Wrote STARTED event");

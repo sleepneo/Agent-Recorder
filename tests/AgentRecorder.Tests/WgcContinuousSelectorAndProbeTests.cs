@@ -327,7 +327,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.2.0\n",
+                StandardOutput = "wgc-native-helper 0.3.0\n",
             },
             new WgcHelperProcessResult
             {
@@ -349,13 +349,74 @@ public sealed class WgcContinuousAvailabilityProbeTests
     }
 
     [Fact]
+    public void ProbeRejectsMissingDuplicateAndInvalidHardwareEvidence()
+    {
+        string healthy = HealthyProbeOutput();
+        string[] malformedOutputs =
+        {
+            healthy.Replace("HardwareH264Available: false\n", "", StringComparison.Ordinal),
+            healthy + "HardwareH264Available: false\n",
+            healthy.Replace("HardwareH264Available: false", "HardwareH264Available: maybe", StringComparison.Ordinal),
+            healthy.Replace("HardwareH264CandidateCount: 0", "HardwareH264CandidateCount: 1025", StringComparison.Ordinal)
+        };
+
+        foreach (string output in malformedOutputs)
+        {
+            var runner = new FakeProbeProcessRunner(
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
+
+            var result = CreateProbe(runner).Check(EligibleConfig());
+
+            Assert.False(result.Available);
+            Assert.Equal("probe_output_invalid", result.ReasonCode);
+        }
+    }
+
+    [Fact]
+    public void ProbeHardwareEvidence_RequiresCountToMatchAvailabilityWhenPresent()
+    {
+        string healthy = HealthyProbeOutput();
+        string[] malformedOutputs =
+        {
+            healthy.Replace("HardwareH264CandidateCount: 0", "HardwareH264CandidateCount: 1", StringComparison.Ordinal),
+            healthy.Replace("HardwareH264Available: false", "HardwareH264Available: true", StringComparison.Ordinal),
+        };
+
+        foreach (string output in malformedOutputs)
+        {
+            var runner = new FakeProbeProcessRunner(
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
+
+            var result = CreateProbe(runner).Check(EligibleConfig());
+
+            Assert.False(result.Available);
+            Assert.Equal("probe_output_invalid", result.ReasonCode);
+        }
+
+        string availableOutput = healthy
+            .Replace("HardwareH264Available: false", "HardwareH264Available: true", StringComparison.Ordinal)
+            .Replace("HardwareH264CandidateCount: 0", "HardwareH264CandidateCount: 2", StringComparison.Ordinal);
+        var availableRunner = new FakeProbeProcessRunner(
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = availableOutput });
+
+        var available = CreateProbe(availableRunner).Check(EligibleConfig());
+
+        Assert.True(available.Available);
+        Assert.True(available.Evidence!.HardwareH264Available);
+        Assert.Equal(2, available.Evidence.HardwareH264CandidateCount);
+    }
+
+    [Fact]
     public void WindowTarget_DoesNotRequireExactMonitorBoundsMatch()
     {
         var runner = new FakeProbeProcessRunner(
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.2.0\n",
+                StandardOutput = "wgc-native-helper 0.3.0\n",
             },
             new WgcHelperProcessResult
             {
@@ -385,7 +446,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             "WindowCaptureSupported: false",
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
         var config = new CaptureConfig
         {
@@ -410,7 +471,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             "WindowCaptureSupported: false",
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -441,7 +502,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     {
         WgcHelperProcessResult version = expectedReason switch
         {
-            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.3.0\n" },
             "version_timeout" => new() { ExitCode = -1, TimedOut = true },
             _ => new() { ExitCode = 0, StandardOutputTruncated = true },
         };
@@ -484,7 +545,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             _ => new WgcHelperProcessResult { ExitCode = 0, StandardOutput = HealthyProbeOutput((0, 0, 800, 600)) },
         };
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
             probeResult);
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -509,7 +570,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             field + ": " + value,
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -522,7 +583,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     public void RunnerException_IsolatedAsUnavailableWithoutLeakingException()
     {
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.2.0\n" })
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" })
         {
             ThrowOnCall = 2,
         };
@@ -557,7 +618,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
         var b = bounds ?? Bounds;
         return $"RESULT: OK\nDpiAwareness: per_monitor_v2\nMonitorCount: 1\n" +
                $"Monitor[0]: x={b.x} y={b.y} width={b.w} height={b.h} primary=true\n" +
-               "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\n";
+               "WgcSupported: true\nD3d11Initialized: true\nEncoderCreated: true\nWindowCaptureSupported: true\nHardwareH264Available: false\nHardwareH264CandidateCount: 0\n";
     }
 
     private sealed class FakeProbeProcessRunner : IWgcHelperProcessRunner

@@ -1175,7 +1175,9 @@ X-Agent-Recorder-Key: <api-key>
     "bytes_written": 1234567,
     "duration_seconds": 300.0,
     "width": 1200,
-    "height": 800
+    "height": 800,
+    "encoder_mode": "hardware",
+    "encoder_selection_reason": "hardware_selected"
   }
 }
 ```
@@ -1243,6 +1245,10 @@ X-Agent-Recorder-Key: <api-key>
 | `wait.timed_out` | 是否因超时返回（`false`=立即返回或状态变化提前返回，`true`=超时） |
 | `next_poll_hint_ms` | 下次轮询建议毫秒数；`null` 表示已终止无需轮询，`1000` 表示仍在进行建议继续 |
 | `stop_reason` | 终态原因：`duration_reached`（自然达到计划时长）、`floating_button`、`tray_menu`、`global_hotkey`、`user_requested` 等；仅在 `completed`/`failed` 等终止状态有意义 |
+| `output.encoder_mode` | WGC 实际编码器模式：`software` 或 `hardware`；不提供该证据的后端返回空字符串。 |
+| `output.encoder_selection_reason` | WGC 稳定选择依据：`software_default`、`hardware_selected`、`hardware_unavailable_fallback`、`hardware_init_failed_fallback` 或 `hardware_unverified_fallback`；其他后端返回空字符串。 |
+
+只有 Media Foundation Sink Writer 实际使用的 H.264 transform 被验证为硬件 MFT 时，才允许返回 `hardware_selected`。能力探测发现硬件候选或请求了硬件优先模式，都不能单独作为硬编生效证据。
 
 `since_status` 比较不区分大小写。
 

@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <cstdint>
+#include "encoder_policy.h"
 #include <string>
 #include <string_view>
 
@@ -36,6 +37,8 @@ struct Options {
     std::wstring outputPath;
     int durationMs = 0;
     int fps = 0;
+    EncoderMode encoderMode = EncoderMode::Software;
+    bool hasEncoderMode = false;
 
     std::wstring beginSignalPath;
     std::wstring beginToken;

@@ -15,7 +15,7 @@ namespace AgentRecorder.Logging;
 /// monotonic elapsed times and writes them as rolling JSONL under
 /// <c>&lt;data-dir&gt;\perf\recording-traces.jsonl</c>.
 /// </summary>
-public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer, ICapturePlanPerformanceTracer, IDisposable
+public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer, IEncoderSelectionPerformanceTracer, ICapturePlanPerformanceTracer, IDisposable
 {
     private readonly RollingJsonlWriter _writer;
     private readonly ConcurrentDictionary<string, long> _intentStartTicks = new();
@@ -206,6 +206,16 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSel
                 ["availability_source"] = availabilitySource,
                 ["availability_elapsed_ms"] = availabilityElapsedMs,
                 ["fallback"] = fallback
+            });
+    }
+
+    public void EncoderSelected(string traceId, string recordingId, string encoderMode, string selectionReason)
+    {
+        Write(traceId, "capture.encoder_selected", recordingId: recordingId,
+            data: new Dictionary<string, object?>
+            {
+                ["encoder_mode"] = encoderMode,
+                ["encoder_selection_reason"] = selectionReason
             });
     }
 

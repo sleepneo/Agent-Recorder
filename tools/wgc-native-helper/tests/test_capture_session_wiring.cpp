@@ -627,6 +627,38 @@ TEST_REGISTRAR(CaptureSessionEncoderInitFailedDistinctFromTimeout, []() {
     ASSERT_EQ(outcome.hresult, "0x80004005");
 });
 
+TEST_REGISTRAR(CaptureSessionLegacyEncoderHookRejectedForHardwarePreferred, []() {
+    TempDir dir(L"wgc-test-legacy-hardware-policy");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+
+    WriteFile(beginPath, L"test-token-175c");
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath);
+    opts.encoderMode = EncoderMode::HardwarePreferred;
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = RunWithStopCancel(session, stopPath, std::chrono::milliseconds(5000));
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "encoder_init_failed");
+    ASSERT_TRUE(outcome.reason.find("encoder_selection_policy_mismatch") != std::string::npos);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+});
+
 TEST_REGISTRAR(CaptureSessionLateFailurePreservesEvidence, []() {
     TempDir dir(L"wgc-test-late-evidence");
     const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
