@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <d3d11.h>
 
 #include "begin_gate.h"
 #include "capture_lifecycle.h"
@@ -42,6 +43,7 @@ struct CaptureOutcome {
 struct CaptureSessionTestTargetRequest {
     CaptureMode mode = CaptureMode::ContinuousDisplay;
     Rect displayBounds;
+    Rect regionBounds;
     std::uint64_t windowHwnd = 0;
 };
 
@@ -68,6 +70,18 @@ void WriteTerminalOutcome(EventWriter& writer, const CaptureOutcome& outcome);
 // deleted and omitted. Success / Stopped outcomes are returned unchanged.
 CaptureOutcome NormalizeFailureEvidence(CaptureOutcome outcome,
                                         const std::wstring& canonicalPartialPath);
+
+// Production GPU crop primitive. It copies one validated D3D11 texture box
+// into a tightly packed BGRA buffer through a staging texture. CopyFrameToBgra
+// supplies the WGC frame texture and delegates here; tests call this function
+// directly with a real hardware/WARP D3D11 texture.
+HRESULT CopyTextureRegionToBgra(ID3D11Device* device,
+                                ID3D11Texture2D* sourceTexture,
+                                int sourceOffsetX,
+                                int sourceOffsetY,
+                                int destWidth,
+                                int destHeight,
+                                std::vector<uint8_t>& outPixels);
 
 // Test-only seams for verifying production wiring without starting a real WGC
 // capture. When a hook is empty the production behavior is used unchanged.

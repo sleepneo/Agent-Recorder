@@ -241,7 +241,7 @@ internal sealed class RecordingFailureNotificationManager : IDisposable
     }
 
     internal static bool IsSupportedReason(string? reasonCode) => reasonCode is
-        "window_closed" or "window_minimized" or "size_changed";
+        "window_closed" or "window_minimized" or "size_changed" or "capture_semantics_changed";
 
     public void Dispose()
     {
@@ -388,6 +388,7 @@ internal sealed class RecordingFailureNotificationForm : Form
             "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
             "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
             "size_changed" => "Tray_RecordingFailure_SizeChangedBody",
+            "capture_semantics_changed" => "Tray_RecordingFailure_CaptureSemanticsChangedBody",
             _ => "Tray_RecordingFailure_GenericBody"
         });
 
@@ -610,6 +611,7 @@ internal static class RecordingFailureNotificationLayout
             "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
             "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
             "size_changed" => "Tray_RecordingFailure_SizeChangedBody",
+            "capture_semantics_changed" => "Tray_RecordingFailure_CaptureSemanticsChangedBody",
             _ => "Tray_RecordingFailure_GenericBody"
         };
         int effectiveDpi = Math.Max(96, dpi);

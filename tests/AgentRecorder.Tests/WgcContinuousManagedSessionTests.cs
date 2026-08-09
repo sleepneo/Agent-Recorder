@@ -138,6 +138,32 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         "" // blank-line event separator
     };
 
+    private static string[] RegionStarted(string recordingId, string outputPath) => new[]
+    {
+        "RESULT: STARTED",
+        $"RecordingId: {recordingId}",
+        $"Output: {outputPath}",
+        "Container: mp4",
+        "Codec: h264",
+        "Fps: 30",
+        "Width: 640",
+        "Height: 480",
+        "CaptureMethod: WGC_D3D11_REGION_FRAME_STREAM",
+        ""
+    };
+
+    private static string[] RegionOk(long fileSize = 15000000) => new[]
+    {
+        "RESULT: OK",
+        "FramesCaptured: 150",
+        "FramesDropped: 0",
+        "DurationMs: 5000",
+        $"FileSize: {fileSize} bytes",
+        "Width: 640",
+        "Height: 480",
+        ""
+    };
+
     private static string[] Fail(string reason, string errorCode, string? partialPath = null)
     {
         var lines = new List<string>
@@ -923,6 +949,53 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     // -----------------------------------------------------------------
     // Lifecycle / Start
     // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task RegionSession_UsesDisplayAndRegionArguments_AndWaitsForAuthorization()
+    {
+        var recId = $"region_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Region;
+            o.DisplayX = -1920;
+            o.DisplayY = -200;
+            o.DisplayWidth = 1920;
+            o.DisplayHeight = 1080;
+            o.RegionX = -1800;
+            o.RegionY = -100;
+            o.RegionWidth = 640;
+            o.RegionHeight = 480;
+        });
+        const long fileSize = 15000000;
+        var stdout = RegionStarted(recId, opts.OutputPath)
+            .Concat(RegionOk(fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(
+            stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+
+        Assert.Equal(WgcContinuousManagedSessionState.WaitingForAuthorization, session.State);
+        Assert.False(File.Exists(opts.BeginSignalPath));
+        Assert.Contains("--capture-continuous-region", fake.CapturedArguments!);
+        Assert.Contains("--display-bounds", fake.CapturedArguments!);
+        Assert.Contains("-1920,-200,1920,1080", fake.CapturedArguments!);
+        Assert.Contains("--region-bounds", fake.CapturedArguments!);
+        Assert.Contains("-1800,-100,640,480", fake.CapturedArguments!);
+
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.True(result.OutputFileExists);
+        Assert.Equal(fileSize, result.OutputFileSizeBytes);
+    }
 
     [Fact]
     public async Task StartAsync_ReturnsBeforeSessionCompletes()

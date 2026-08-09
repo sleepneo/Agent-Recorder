@@ -434,6 +434,18 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             if (_options.WindowHandle == nint.Zero)
                 throw new ArgumentException("Window handle must be non-zero.", nameof(_options));
         }
+        else if (_options.TargetKind == WgcContinuousTargetKind.Region)
+        {
+            if (!WgcRegionGeometry.TryGetCrop(
+                    new WgcRegionRect(_options.DisplayX, _options.DisplayY,
+                        _options.DisplayWidth, _options.DisplayHeight),
+                    new WgcRegionRect(_options.RegionX, _options.RegionY,
+                        _options.RegionWidth, _options.RegionHeight),
+                    out _, out _))
+                throw new ArgumentException(
+                    "Region bounds must be even, at least 32x32, and contained within display bounds.",
+                    nameof(_options));
+        }
         else
         {
             throw new ArgumentException("Unknown WGC continuous target kind.", nameof(_options));
@@ -486,13 +498,22 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         {
             _options.TargetKind == WgcContinuousTargetKind.Window
                 ? "--capture-continuous-window"
-                : "--capture-continuous-display"
+                : _options.TargetKind == WgcContinuousTargetKind.Region
+                    ? "--capture-continuous-region"
+                    : "--capture-continuous-display"
         };
 
         if (_options.TargetKind == WgcContinuousTargetKind.Window)
         {
             args.Add("--window-hwnd");
             args.Add($"0x{unchecked((ulong)_options.WindowHandle.ToInt64()):X}");
+        }
+        else if (_options.TargetKind == WgcContinuousTargetKind.Region)
+        {
+            args.Add("--display-bounds");
+            args.Add(FormattableString.Invariant($"{_options.DisplayX},{_options.DisplayY},{_options.DisplayWidth},{_options.DisplayHeight}"));
+            args.Add("--region-bounds");
+            args.Add(FormattableString.Invariant($"{_options.RegionX},{_options.RegionY},{_options.RegionWidth},{_options.RegionHeight}"));
         }
         else
         {
@@ -531,8 +552,15 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         {
             using (linkedCts)
             {
+                // Yield after reserving the owner task so a caller that
+                // cancels immediately after AuthorizeCapture returns is
+                // observed before authorization can publish a begin token.
+                // This also keeps the linked CTS lifetime deterministic for
+                // repeated-cancel cleanup paths.
+                await Task.Yield();
                 try
                 {
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     await _signalWriter.WriteBeginTokenAsync(
                         _options.BeginSignalPath + ".tmp",
                         _options.BeginSignalPath,
@@ -730,8 +758,16 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             {
                 string expectedMethod = _options.TargetKind == WgcContinuousTargetKind.Window
                     ? "WGC_D3D11_WINDOW_FRAME_STREAM"
-                    : "WGC_D3D11_FRAME_STREAM";
+                    : _options.TargetKind == WgcContinuousTargetKind.Region
+                        ? "WGC_D3D11_REGION_FRAME_STREAM"
+                        : "WGC_D3D11_FRAME_STREAM";
+                bool dimensionsMatch = _options.TargetKind != WgcContinuousTargetKind.Region ||
+                    (evt.Width.HasValue && evt.Height.HasValue &&
+                     evt.Width.Value == _options.RegionWidth &&
+                     evt.Height.Value == _options.RegionHeight);
                 if (!string.Equals(evt.CaptureMethod, expectedMethod, StringComparison.Ordinal))
+                    methodMismatch = true;
+                else if (!dimensionsMatch)
                     methodMismatch = true;
                 else
                     _state = WgcContinuousManagedSessionState.Started;
@@ -739,7 +775,9 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         }
 
         if (methodMismatch)
-            OnProtocolViolation("capture_method_mismatch");
+            OnProtocolViolation(_options.TargetKind == WgcContinuousTargetKind.Region
+                ? "region_started_metadata_mismatch"
+                : "capture_method_mismatch");
     }
 
     private void OnFirstFrameEvent(WgcContinuousEvent evt)
@@ -1238,6 +1276,12 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             return (false, "file_size_mismatch");
         if (summary.HasBytesWritten && summary.BytesWritten.HasValue && summary.BytesWritten.Value != actualSize)
             return (false, "bytes_written_mismatch");
+
+        if (_options.TargetKind == WgcContinuousTargetKind.Region &&
+            (summary.Width != _options.RegionWidth || summary.Height != _options.RegionHeight ||
+             !summary.TerminalDimensionsPresent ||
+             !string.Equals(summary.CaptureMethod, "WGC_D3D11_REGION_FRAME_STREAM", StringComparison.Ordinal)))
+            return (false, "region_terminal_metadata_mismatch");
 
         return (true, null);
     }

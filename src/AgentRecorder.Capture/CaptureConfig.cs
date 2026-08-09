@@ -3,6 +3,32 @@ public sealed class CaptureConfig
 {
     public string SourceKind = "display";
     public (int x, int y, int w, int h) Bounds;
+    /// <summary>
+    /// Public ordinal selected by the request, for example <c>display_1</c>.
+    /// This is not a topology-stable identity.
+    /// </summary>
+    public string? DisplayId;
+
+    /// <summary>
+    /// Internal fixed-format fingerprint frozen from the same active topology
+    /// snapshot as <see cref="DisplayId"/> and <see cref="DisplayBounds"/>.
+    /// It is never accepted from the client or exposed in API summaries.
+    /// </summary>
+    public string? DisplayStableIdentity;
+
+    /// <summary>
+    /// Reliability state for <see cref="DisplayStableIdentity"/>. Production
+    /// region requests require <c>Resolved</c> before confirmation.
+    /// </summary>
+    public AgentRecorder.Windows.DisplayIdentityResolutionStatus DisplayIdentityStatus =
+        AgentRecorder.Windows.DisplayIdentityResolutionStatus.Unresolved;
+
+    /// <summary>
+    /// Complete physical bounds of the selected display. Region captures keep
+    /// this separate from <see cref="Bounds"/>, which is the user-confirmed
+    /// region rectangle.
+    /// </summary>
+    public (int x, int y, int w, int h)? DisplayBounds;
     public string? WindowTitle;
     public nint WindowHandle;
     public bool Microphone;

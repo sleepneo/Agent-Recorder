@@ -40,6 +40,20 @@ bool ParseDisplayBounds(std::wstring_view text, Rect& out) {
     return true;
 }
 
+bool SetCaptureMode(Options& opts, CaptureMode mode, ParseResult& result) {
+    if (opts.mode == CaptureMode::Probe || opts.mode == CaptureMode::Help ||
+        opts.mode == CaptureMode::Version) {
+        result.error = "Capture mode conflicts with probe/help/version mode";
+        return false;
+    }
+    if (opts.mode != CaptureMode::None) {
+        result.error = "Capture target modes are mutually exclusive";
+        return false;
+    }
+    opts.mode = mode;
+    return true;
+}
+
 bool ParseWindowHwndStrict(std::wstring_view text, std::uint64_t& out) {
     if (text.empty() || text.front() == L'+' || text.front() == L'-') {
         return false;
@@ -113,15 +127,23 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             return result;
         }
         if (EqualsArg(arg, L"probe")) {
+            if (opts.mode != CaptureMode::None) {
+                result.error = "Capture mode conflicts with --probe";
+                return result;
+            }
             opts.mode = CaptureMode::Probe;
             continue;
         }
         if (EqualsArg(arg, L"capture-continuous-display")) {
-            opts.mode = CaptureMode::ContinuousDisplay;
+            if (!SetCaptureMode(opts, CaptureMode::ContinuousDisplay, result)) return result;
             continue;
         }
         if (EqualsArg(arg, L"capture-continuous-window")) {
-            opts.mode = CaptureMode::ContinuousWindow;
+            if (!SetCaptureMode(opts, CaptureMode::ContinuousWindow, result)) return result;
+            continue;
+        }
+        if (EqualsArg(arg, L"capture-continuous-region")) {
+            if (!SetCaptureMode(opts, CaptureMode::ContinuousRegion, result)) return result;
             continue;
         }
         if (EqualsArg(arg, L"i-understand-this-captures-screen")) {
@@ -139,12 +161,29 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
         };
 
         if (EqualsArg(arg, L"display-bounds")) {
+            if (opts.hasDisplayBounds) {
+                result.error = "Duplicate --display-bounds";
+                return result;
+            }
             std::wstring value;
             if (!takeNext(value, L"display-bounds")) return result;
             if (!ParseDisplayBounds(value, opts.displayBounds)) {
                 result.error = "Invalid display-bounds format; expected x,y,width,height";
                 return result;
             }
+            opts.hasDisplayBounds = true;
+        } else if (EqualsArg(arg, L"region-bounds")) {
+            if (opts.hasRegionBounds) {
+                result.error = "Duplicate --region-bounds";
+                return result;
+            }
+            std::wstring value;
+            if (!takeNext(value, L"region-bounds")) return result;
+            if (!ParseDisplayBounds(value, opts.regionBounds)) {
+                result.error = "Invalid region-bounds format; expected x,y,width,height";
+                return result;
+            }
+            opts.hasRegionBounds = true;
         } else if (EqualsArg(arg, L"window-hwnd")) {
             std::wstring value;
             if (!takeNext(value, L"window-hwnd")) return result;

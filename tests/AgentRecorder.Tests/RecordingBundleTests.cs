@@ -568,34 +568,6 @@ public class RecordingBundleTests : IDisposable
     }
 
     [Fact]
-    public void RecordingEngine_WgcStillFrame_MarksNotApplicable()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CountingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
-
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "wgc");
-
-        var rec = new Recording
-        {
-            SourceType = "window",
-            BackendType = "wgc",
-            OutputPath = MediaPath("wgc"),
-            Config = new CaptureConfig { SourceKind = "window", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("wgc") }
-        };
-        rec.LastMeta = new OutputMeta { Container = "png", Codec = "still-frame", DurationSeconds = 0, SizeBytes = 1024, Width = 100, Height = 100, OutputFileExists = true, IsValidPngSignature = true };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        backend.FireNaturalExit(0, rec.LastMeta);
-
-        Assert.Equal(RecState.completed, rec.State);
-        Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
-        Assert.Equal(0, generator.CallCount);
-    }
-
-    [Fact]
     public void RecordingEngine_FfmpegMp4Success_TriggersBundleGenerationOnce()
     {
         var audit = new CaptureAuditLogger();
@@ -659,7 +631,7 @@ public class RecordingBundleTests : IDisposable
     [InlineData("ffmpeg", true)]
     [InlineData("ffmpeg-region", true)]
     [InlineData("ffmpeg-window-region", true)]
-    [InlineData("wgc", false)]
+    [InlineData("wgc-continuous", false)]
     [InlineData("some-unknown-backend", false)]
     public void RecordingEngine_BackendEligibility_OnlyFfmpegMp4BackendsGenerateBundle(string backendType, bool shouldGenerate)
     {
@@ -1109,7 +1081,7 @@ public class RecordingBundleTests : IDisposable
     [InlineData("ffmpeg", true)]
     [InlineData("ffmpeg-region", true)]
     [InlineData("ffmpeg-window-region", true)]
-    [InlineData("wgc", false)]
+    [InlineData("wgc-continuous", false)]
     [InlineData("ffmpeg-window", false)]
     [InlineData("", false)]
     public void CaptureBackendSelector_IsFfmpegMp4Backend_RecognizesProductionBackends(string backendType, bool expected)

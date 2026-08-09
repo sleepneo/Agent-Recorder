@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Forms;
+using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 
@@ -141,8 +142,18 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private string? _foregroundError;
     private string? _foregroundErrorStage;
     private readonly IUiTextProvider _text;
+    private readonly IDwmThumbnailProvider _dwmThumbnailProvider;
     private readonly ToolTip _tooltip;
     private readonly List<(Label Label, Label Value)> _infoRows = new();
+    private JsonNode? _summaryNode;
+    private IDwmThumbnail? _dwmThumbnail;
+    private Size _dwmSourceSize;
+    private Rectangle _dwmDestination;
+    private bool _windowSurfacePreview;
+    private bool _dwmEnsurePosted;
+    private bool _dwmDisposed;
+    private bool _restoreDwmAfterHandleCreated;
+    private int _dwmHandleGeneration;
 
     private const int ForegroundVerifyDelayMs = 150;
     private const int MaxForegroundAttempts = 2;
@@ -196,6 +207,20 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     internal bool HasPreviewImageForTests => _previewBox?.Image != null;
     internal string PreviewBoundsTextForTests => _previewBoundsLabel?.Text ?? "";
     internal string PreviewFallbackTextForTests => _previewFallbackLabel?.Text ?? "";
+    internal bool WindowSurfacePreviewForTests => _windowSurfacePreview;
+    internal bool DwmThumbnailActiveForTests => _dwmThumbnail != null;
+    internal Rectangle DwmThumbnailDestinationForTests => _dwmDestination;
+    internal nint DwmDestinationWindowForTests => IsHandleCreated ? Handle : nint.Zero;
+    internal nint PreviewPanelHandleForTests =>
+        _previewPanel?.IsHandleCreated == true ? _previewPanel.Handle : nint.Zero;
+    internal Rectangle PreviewPanelFormBoundsForTests => GetFormRelativeBounds(_previewPanel);
+    internal bool WindowSurfacePreviewSurfaceIsTransparentForTests =>
+        _windowSurfacePreview && _previewPanel != null && _previewPanel.BackColor == Color.Transparent;
+    internal bool WindowSurfacePreviewChildrenAreHiddenForTests =>
+        _windowSurfacePreview && _previewBox != null && !_previewBox.Visible &&
+        _previewFallbackLabel != null && !_previewFallbackLabel.Visible;
+    internal void EnsureDwmThumbnailForTests() => EnsureWindowSurfaceThumbnail();
+    internal void RecreateHandleForTests() => RecreateHandle();
     internal string TimeoutTextForTests => _timeoutLabel?.Text ?? "";
     internal bool ApproveButtonEnabledForTests => _approveButton?.Enabled ?? false;
     internal bool CountdownTimerEnabledForTests => _countdownTimer?.Enabled ?? false;
@@ -294,7 +319,8 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         IReadOnlyList<Rectangle>? workingAreas = null,
         Rectangle? fallbackWorkingArea = null,
         IUiTextProvider? textProvider = null,
-        IPerformanceTracer? tracer = null)
+        IPerformanceTracer? tracer = null,
+        IDwmThumbnailProvider? dwmThumbnailProvider = null)
     {
         _item = item;
         _queuePosition = queuePosition;
@@ -311,6 +337,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
         _auditLogger = auditLogger;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
+        _dwmThumbnailProvider = dwmThumbnailProvider ?? new DwmThumbnailProvider();
         _workingAreas = workingAreas ?? Array.Empty<Rectangle>();
         _fallbackWorkingArea = fallbackWorkingArea ?? Rectangle.Empty;
 
@@ -327,10 +354,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     {
         if (disposing)
         {
+            _dwmDisposed = true;
+            _dwmHandleGeneration++;
+            _dwmEnsurePosted = false;
             StopCountdownTimer();
             StopForegroundVerificationTimer();
             _countdownTimer?.Dispose();
             _tooltip?.Dispose();
+            DisposeDwmThumbnail();
             _previewBox?.Image?.Dispose();
             if (_previewBox != null)
                 _previewBox.Image = null;
@@ -391,6 +422,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         _foregroundAttempts = 0;
         EnsureTopMostForeground();
+        EnsureWindowSurfaceThumbnail();
 
         if (EnableDelayedForegroundVerification && IsHandleCreated && !IsDisposed)
         {
@@ -399,6 +431,16 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         // Safe default: put focus on reject so a stray Enter does not approve.
         _rejectButton?.Focus();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+
+        bool restoreAfterRecreation = _restoreDwmAfterHandleCreated;
+        _restoreDwmAfterHandleCreated = false;
+        if (_windowSurfacePreview && (Visible || restoreAfterRecreation))
+            ScheduleWindowSurfaceThumbnailEnsure(restoreAfterRecreation);
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
@@ -427,6 +469,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
     private void OnFormClosed(object? sender, FormClosedEventArgs e)
     {
+        DisposeDwmThumbnail();
         _closeAudited = true;
         LogAudit("confirmation.form_closed", CreateLifecyclePayload("closed"));
         Closed?.Invoke(this, new ConfirmationDialogLifecycleEventArgs(
@@ -446,10 +489,168 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
     protected override void OnHandleDestroyed(EventArgs e)
     {
+        _restoreDwmAfterHandleCreated = _windowSurfacePreview && Visible && !_dwmDisposed;
+        _dwmHandleGeneration++;
+        _dwmEnsurePosted = false;
+        DisposeDwmThumbnail();
         base.OnHandleDestroyed(e);
         LogAudit("confirmation.handle_destroyed", CreateLifecyclePayload("handle_destroyed"));
         HandleDestroyed?.Invoke(this, new ConfirmationDialogLifecycleEventArgs(
             _pendingDecision, _closeReason, 0, false));
+    }
+
+    private void EnsureWindowSurfaceThumbnail()
+    {
+        if (!_windowSurfacePreview || _dwmThumbnail != null ||
+            !IsHandleCreated || IsDisposed || _summaryNode == null)
+            return;
+
+        if (!WindowIdParser.TryParse(GetString(_summaryNode, "window_id"), out var sourceWindow) ||
+            sourceWindow == nint.Zero)
+            return;
+
+        try
+        {
+            if (!_dwmThumbnailProvider.TryRegister(Handle, sourceWindow, out var thumbnail))
+                return;
+
+            if (!thumbnail.TryQuerySourceSize(out var sourceSize))
+            {
+                thumbnail.Dispose();
+                return;
+            }
+
+            _dwmThumbnail = thumbnail;
+            _dwmSourceSize = sourceSize;
+            if (!UpdateWindowSurfaceThumbnail())
+                DisposeDwmThumbnail();
+        }
+        catch
+        {
+            DisposeDwmThumbnail();
+        }
+    }
+
+    private void ScheduleWindowSurfaceThumbnailEnsure(bool allowTransientlyHiddenForm)
+    {
+        if (_dwmDisposed || _dwmEnsurePosted || !_windowSurfacePreview ||
+            !IsHandleCreated || IsDisposed || _summaryNode == null)
+            return;
+
+        int generation = _dwmHandleGeneration;
+        _dwmEnsurePosted = true;
+        try
+        {
+            BeginInvoke((MethodInvoker)(() =>
+            {
+                if (generation != _dwmHandleGeneration)
+                    return;
+
+                _dwmEnsurePosted = false;
+                if (_dwmDisposed || IsDisposed || !IsHandleCreated ||
+                    (!allowTransientlyHiddenForm && !Visible))
+                    return;
+
+                EnsureWindowSurfaceThumbnail();
+            }));
+        }
+        catch
+        {
+            if (generation == _dwmHandleGeneration)
+                _dwmEnsurePosted = false;
+        }
+    }
+
+    private bool UpdateWindowSurfaceThumbnail()
+    {
+        if (!_windowSurfacePreview || _dwmThumbnail == null || _previewPanel == null ||
+            _dwmSourceSize.Width <= 0 || _dwmSourceSize.Height <= 0)
+            return false;
+
+        try
+        {
+            var panelScreenOrigin = _previewPanel.PointToScreen(Point.Empty);
+            var panelClientOrigin = PointToClient(panelScreenOrigin);
+            var panelClient = new Rectangle(panelClientOrigin, _previewPanel.ClientSize);
+            // PointToClient and ClientSize already use WinForms device-pixel
+            // coordinates. DWM consumes the destination in this top-level
+            // form client space; applying DeviceDpi/96 here would scale the
+            // same rectangle a second time on 150%/200% monitors.
+            var destination = DwmThumbnailGeometry.Fit(panelClient, _dwmSourceSize);
+            if (destination == Rectangle.Empty ||
+                !_dwmThumbnail.TryUpdateDestination(destination, sourceClientAreaOnly: false))
+                return false;
+
+            _dwmDestination = destination;
+            _previewBox.Visible = false;
+            _previewFallbackLabel.Visible = false;
+            _previewPanel.BackColor = Color.Transparent;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void DisposeDwmThumbnail()
+    {
+        var thumbnail = _dwmThumbnail;
+        _dwmThumbnail = null;
+        _dwmSourceSize = Size.Empty;
+        _dwmDestination = Rectangle.Empty;
+        if (thumbnail == null)
+            return;
+
+        try { thumbnail.Dispose(); }
+        catch { }
+
+        if (_windowSurfacePreview && _previewFallbackLabel != null && !_previewFallbackLabel.IsDisposed)
+        {
+            _previewPanel.BackColor = Color.FromArgb(32, 32, 32);
+            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(_summaryNode);
+            _previewFallbackLabel.Visible = true;
+        }
+    }
+
+    private string BuildWindowSurfaceFallback(JsonNode? summary)
+    {
+        string title = summary == null ? "N/A" : GetString(summary, "source_title");
+        string application = summary == null ? "" : GetString(summary, "source_application");
+        string identity = string.IsNullOrWhiteSpace(application) || application == "N/A"
+            ? title
+            : $"{title} ({application})";
+        return _text.Format("Confirmation_Preview_WindowSurface_Fallback", identity);
+    }
+
+    private string GetCaptureSemanticsDisplay(JsonNode summary)
+    {
+        string semantics = GetString(summary, "capture_semantics");
+        return semantics switch
+        {
+            "window_surface" => _text.Get("Confirmation_CaptureSemantics_WindowSurface"),
+            "screen_rectangle" => _text.Get("Confirmation_CaptureSemantics_ScreenRectangle"),
+            "display_surface" => _text.Get("Confirmation_CaptureSemantics_Display"),
+            "region_rectangle" => _text.Get("Confirmation_CaptureSemantics_Region"),
+            _ => semantics
+        };
+    }
+
+    private string BuildPreviewSemanticsLabel(JsonNode summary)
+    {
+        string semantics = GetString(summary, "capture_semantics");
+        string label = semantics switch
+        {
+            "window_surface" => _text.Get("Confirmation_Preview_WindowSurface_Label"),
+            "screen_rectangle" => _text.Get("Confirmation_Preview_ScreenRectangle_Label"),
+            "display_surface" => _text.Get("Confirmation_Preview_Display_Label"),
+            "region_rectangle" => _text.Get("Confirmation_Preview_Region_Label"),
+            _ => _text.Get("Confirmation_Preview_Fallback")
+        };
+
+        return _captureBounds != null
+            ? $"{label} | X={_captureBounds.X} Y={_captureBounds.Y} W={_captureBounds.Width} H={_captureBounds.Height}"
+            : label + " | " + _text.Get("Confirmation_Preview_NoBounds");
     }
 
     /// <summary>
@@ -486,6 +687,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private void BuildLayout()
     {
         var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary))!;
+        _summaryNode = s;
 
         var rootTable = new TableLayoutPanel
         {
@@ -571,18 +773,20 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 10,
+            RowCount = 11,
             AutoSize = false
         };
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        for (int i = 0; i < 10; i++)
-            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 10f));
+        for (int i = 0; i < 11; i++)
+            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 11f));
 
         int row = 0;
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Source"), GetString(s, "source"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceType"), GetString(s, "source_type"));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_CaptureSemantics"),
+            GetCaptureSemanticsDisplay(s));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), GetString(s, "source_title"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), GetString(s, "duration"));
         var rawAudio = GetString(s, "audio");
@@ -629,6 +833,19 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _previewPanel.Controls.Add(_previewFallbackLabel);
 
         _captureBounds = ConfirmationPreviewBuilder.ParseBounds(s);
+        _windowSurfacePreview = string.Equals(
+            GetString(s, "capture_semantics"),
+            "window_surface",
+            StringComparison.Ordinal);
+
+        if (_windowSurfacePreview)
+        {
+            // The DWM thumbnail is registered against the top-level
+            // confirmation HWND, not this Panel child HWND. Keep the panel as
+            // a reserved, transparent visual surface and ensure no opaque
+            // PictureBox/fallback child can paint over the DWM destination.
+            _previewPanel.BackColor = Color.Transparent;
+        }
 
         _previewBoundsLabel = new Label
         {
@@ -638,9 +855,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             AutoSize = true,
             Margin = new Padding(0, 4, 0, 0)
         };
-        _previewBoundsLabel.Text = _captureBounds != null
-            ? $"X={_captureBounds.X} Y={_captureBounds.Y} W={_captureBounds.Width} H={_captureBounds.Height}"
-            : _text.Get("Confirmation_Preview_NoBounds");
+        _previewBoundsLabel.Text = BuildPreviewSemanticsLabel(s);
 
         var previewContainer = new TableLayoutPanel
         {
@@ -669,22 +884,36 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
                 _warningLabel.MaximumSize = new Size(available, 0);
             if (_timeoutLabel != null)
                 _timeoutLabel.MaximumSize = new Size(available, 0);
+            if (_windowSurfacePreview && _dwmThumbnail != null && !UpdateWindowSurfaceThumbnail())
+                DisposeDwmThumbnail();
         };
 
-        // Build preview once layout exists; scale max capture size with available space.
-        var previewMaxSize = ComputePreviewMaxSize();
-        var previewBitmap = ConfirmationPreviewBuilder.TryBuildPreview(s, _previewProvider, previewMaxSize, out var fallbackMessage);
-        if (previewBitmap != null)
+        if (_windowSurfacePreview)
         {
-            _previewBox.Image = previewBitmap;
-            _previewBox.Visible = true;
-            _previewFallbackLabel.Visible = false;
+            // A window_surface promise can never use a desktop screenshot.
+            // DWM registration is deferred until the confirmation HWND exists.
+            _previewBox.Visible = false;
+            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(s);
+            _previewFallbackLabel.Visible = true;
         }
         else
         {
-            _previewBox.Visible = false;
-            _previewFallbackLabel.Text = fallbackMessage ?? _text.Get("Confirmation_Preview_Fallback");
-            _previewFallbackLabel.Visible = true;
+            // Display/region/window-rectangle plans truthfully show composed
+            // desktop pixels using the existing GDI provider.
+            var previewMaxSize = ComputePreviewMaxSize();
+            var previewBitmap = ConfirmationPreviewBuilder.TryBuildPreview(s, _previewProvider, previewMaxSize, out var fallbackMessage);
+            if (previewBitmap != null)
+            {
+                _previewBox.Image = previewBitmap;
+                _previewBox.Visible = true;
+                _previewFallbackLabel.Visible = false;
+            }
+            else
+            {
+                _previewBox.Visible = false;
+                _previewFallbackLabel.Text = fallbackMessage ?? _text.Get("Confirmation_Preview_Fallback");
+                _previewFallbackLabel.Visible = true;
+            }
         }
 
         // Set the minimum scrollable height based on the content's preferred size.
@@ -807,7 +1036,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             var infoRowSample = TextRenderer.MeasureText("Xy", new Font("Segoe UI", 9));
             int rowMinHeight = infoRowSample.Height + 4;
-            int infoPreferredHeight = (rowMinHeight * 10) + _infoPanel.Padding.Vertical;
+            int infoPreferredHeight = (rowMinHeight * 11) + _infoPanel.Padding.Vertical;
 
             int previewLabelHeight = _previewBoundsLabel.PreferredSize.Height + _previewBoundsLabel.Margin.Vertical;
             int previewPreferredHeight = Math.Max(_previewPanel.MinimumSize.Height, 260) + previewLabelHeight;
@@ -952,6 +1181,17 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     {
         var val = node[key];
         if (val == null) return "N/A";
+        if (val is JsonValue jsonValue)
+        {
+            try
+            {
+                return jsonValue.GetValue<string?>() ?? "N/A";
+            }
+            catch
+            {
+                // Numeric and boolean metadata still use their JSON text form.
+            }
+        }
         return val.ToString();
     }
 

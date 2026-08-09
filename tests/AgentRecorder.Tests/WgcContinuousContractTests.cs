@@ -4,15 +4,13 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 /// <summary>
-/// Contract tests for WGC continuous recording evidence (schema v2.0 draft).
+/// Contract tests for WGC continuous recording evidence (schema v2.0).
 /// These tests validate the contract shape without requiring real WGC, helper, or GUI.
-/// Status: Design draft only - no real continuous capture is implemented.
 /// </summary>
 public class WgcContinuousContractTests
 {
     private const string SchemaV2 = "2.0";
     private const string CaptureKindContinuous = "continuous";
-    private const string CaptureKindStillFrame = "still-frame";
 
     private static JsonElement ParsePayload(string json)
     {
@@ -204,78 +202,6 @@ public class WgcContinuousContractTests
     }
 
     // -----------------------------------------------------------------
-    // Still-frame vs continuous distinction
-    // -----------------------------------------------------------------
-
-    [Fact]
-    public void StillFrameEvidence_DoesNotHaveContinuousFields()
-    {
-        var payload = new
-        {
-            schema_version = "1.0",
-            timestamp = "2026-06-21T15:00:00Z",
-            mode = "real",
-            window_hwnd = "1839564",
-            window_id = "window_1839564",
-            final_status = "completed",
-            output = new
-            {
-                path = "C:\\output.png",
-                container = "png",
-                codec = "still-frame"
-            },
-            actual_file_exists = true,
-            is_valid_png_signature = true
-        };
-        var json = Serialize(payload);
-        var root = ParsePayload(json);
-
-        Assert.Equal("1.0", root.GetProperty("schema_version").GetString());
-        Assert.False(root.TryGetProperty("capture_kind", out _));
-        Assert.False(root.TryGetProperty("frames_captured", out _));
-        Assert.False(root.TryGetProperty("duration_ms", out _));
-    }
-
-    [Fact]
-    public void ContinuousEvidence_DistinctFromStillFrame()
-    {
-        var continuousPayload = BuildContinuousSuccessPayload();
-        var continuousRoot = ParsePayload(continuousPayload);
-
-        var stillFramePayload = new
-        {
-            schema_version = "1.0",
-            timestamp = "2026-06-21T15:00:00Z",
-            mode = "real",
-            window_hwnd = "1839564",
-            window_id = "window_1839564",
-            final_status = "completed",
-            output = new
-            {
-                path = "C:\\output.png",
-                container = "png",
-                codec = "still-frame"
-            },
-            actual_file_exists = true,
-            is_valid_png_signature = true
-        };
-        var stillFrameJson = Serialize(stillFramePayload);
-        var stillFrameRoot = ParsePayload(stillFrameJson);
-
-        // Different schema versions
-        Assert.NotEqual(continuousRoot.GetProperty("schema_version").GetString(),
-                       stillFrameRoot.GetProperty("schema_version").GetString());
-
-        // Continuous has capture_kind
-        Assert.True(continuousRoot.TryGetProperty("capture_kind", out _));
-        Assert.False(stillFrameRoot.TryGetProperty("capture_kind", out _));
-
-        // Different containers
-        Assert.Equal("mp4", continuousRoot.GetProperty("output").GetProperty("container").GetString());
-        Assert.Equal("png", stillFrameRoot.GetProperty("output").GetProperty("container").GetString());
-    }
-
-    // -----------------------------------------------------------------
     // Helper methods to build payloads
     // -----------------------------------------------------------------
 
@@ -320,7 +246,7 @@ public class WgcContinuousContractTests
             {
                 new { @event = "confirmation.created", confirmation_id = "conf_t50_continuous_001" },
                 new { @event = "confirmation.approved", confirmation_id = "conf_t50_continuous_001", recording_id = "rec_t50_continuous_001" },
-                new { @event = "recording.backend_selected", backend = "wgc", recording_id = "rec_t50_continuous_001" },
+                new { @event = "recording.backend_selected", backend = "wgc-continuous", recording_id = "rec_t50_continuous_001" },
                 new { @event = "recording.session_started", recording_id = "rec_t50_continuous_001" },
                 new { @event = "recording.completed", recording_id = "rec_t50_continuous_001" }
             }
@@ -369,7 +295,7 @@ public class WgcContinuousContractTests
             {
                 new { @event = "confirmation.created", confirmation_id = "conf_t50_partial_001" },
                 new { @event = "confirmation.approved", confirmation_id = "conf_t50_partial_001", recording_id = "rec_t50_partial_001" },
-                new { @event = "recording.backend_selected", backend = "wgc", recording_id = "rec_t50_partial_001" },
+                new { @event = "recording.backend_selected", backend = "wgc-continuous", recording_id = "rec_t50_partial_001" },
                 new { @event = "recording.session_started", recording_id = "rec_t50_partial_001" },
                 new { @event = "recording.cancelled", recording_id = "rec_t50_partial_001", reason = "user_requested" }
             }

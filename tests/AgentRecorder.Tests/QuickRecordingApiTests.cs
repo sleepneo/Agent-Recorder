@@ -74,6 +74,7 @@ public class QuickRecordingApiTests
     private static void Cleanup(string dataDir)
     {
         SystemQuery.SetDisplayProvider(null);
+        SystemQuery.SetDisplayTopologyProvider(null);
         SystemQuery.SetActiveWindowProvider(null);
         SystemQuery.SetWindowProvider(null);
         try { if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true); } catch { }
@@ -89,6 +90,19 @@ public class QuickRecordingApiTests
 
     private static StringContent JsonContent(string json) =>
         new(json, Encoding.UTF8, "application/json");
+
+    private static void SetSingleDisplayTopology()
+    {
+        var fingerprint = DisplayIdentityDeriver.Resolve("quick-test-source", new[]
+        {
+            new DisplayTargetMapping("quick-test-source", "quick-test-display")
+        }).Fingerprint!;
+        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        {
+            new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+                fingerprint, DisplayIdentityResolutionStatus.Resolved)
+        });
+    }
 
     [Fact]
     public async Task QuickRecording_MissingApiKey_Returns401()
@@ -346,6 +360,7 @@ public class QuickRecordingApiTests
             {
                 new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
             });
+            SetSingleDisplayTopology();
 
             server.Start();
             using var client = CreateClient();
@@ -829,6 +844,7 @@ public class QuickRecordingApiTests
             {
                 new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
             });
+            SetSingleDisplayTopology();
 
             server.Start();
             using var client = CreateClient();
@@ -915,6 +931,7 @@ public class QuickRecordingApiTests
             {
                 new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
             });
+            SetSingleDisplayTopology();
 
             server.Start();
             using var client = CreateClient();
@@ -1038,6 +1055,7 @@ public class QuickRecordingApiTests
             {
                 new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
             });
+            SetSingleDisplayTopology();
 
             server.Start();
             using var client = CreateClient();

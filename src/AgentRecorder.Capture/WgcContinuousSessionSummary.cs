@@ -109,6 +109,13 @@ public sealed class WgcContinuousSessionSummary
     public string? CaptureMethod { get; set; }
 
     /// <summary>
+    /// Whether the terminal OK/STOPPED event explicitly provided Width and Height.
+    /// Region captures require terminal dimensions so a stale STARTED size cannot
+    /// authenticate a different crop.
+    /// </summary>
+    public bool TerminalDimensionsPresent { get; set; }
+
+    /// <summary>
     /// The Hresult from FAIL events.
     /// </summary>
     public string? Hresult { get; set; }

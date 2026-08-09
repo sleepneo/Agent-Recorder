@@ -459,6 +459,7 @@ public static class WgcContinuousEventStreamParser
                     summary.HasFileSize = evt.FileSize.HasValue;
                     summary.Width = evt.Width;
                     summary.Height = evt.Height;
+                    summary.TerminalDimensionsPresent = evt.Width.HasValue && evt.Height.HasValue;
                     summary.StopReason = "duration_reached";
                     break;
 
@@ -536,6 +537,7 @@ public static class WgcContinuousEventStreamParser
                     summary.HasFileSize = evt.FileSize.HasValue;
                     summary.Width = evt.Width ?? summary.Width;
                     summary.Height = evt.Height ?? summary.Height;
+                    summary.TerminalDimensionsPresent = evt.Width.HasValue && evt.Height.HasValue;
                     summary.StopReason = evt.StopReason ?? "user_requested";
                     break;
 

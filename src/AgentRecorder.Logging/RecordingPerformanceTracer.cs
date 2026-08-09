@@ -15,7 +15,7 @@ namespace AgentRecorder.Logging;
 /// monotonic elapsed times and writes them as rolling JSONL under
 /// <c>&lt;data-dir&gt;\perf\recording-traces.jsonl</c>.
 /// </summary>
-public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer, IDisposable
+public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSelectionPerformanceTracer, ICapturePlanPerformanceTracer, IDisposable
 {
     private readonly RollingJsonlWriter _writer;
     private readonly ConcurrentDictionary<string, long> _intentStartTicks = new();
@@ -206,6 +206,48 @@ public sealed class RecordingPerformanceTracer : IPerformanceTracer, IBackendSel
                 ["availability_source"] = availabilitySource,
                 ["availability_elapsed_ms"] = availabilityElapsedMs,
                 ["fallback"] = fallback
+            });
+    }
+
+    public void CapturePlanCreated(string traceId, string recordingId, string requestedBackend,
+        string plannedBackend, string captureSemantics, string selectionReasonCode,
+        string availabilitySource, bool fallback)
+    {
+        Write(traceId, "capture.plan_created", recordingId: recordingId, backend: plannedBackend,
+            data: new Dictionary<string, object?>
+            {
+                ["requested_backend"] = requestedBackend,
+                ["planned_backend"] = plannedBackend,
+                ["capture_semantics"] = captureSemantics,
+                ["preview_semantics"] = captureSemantics,
+                ["selection_reason_code"] = selectionReasonCode,
+                ["availability_source"] = availabilitySource,
+                ["fallback"] = fallback
+            });
+    }
+
+    public void CapturePlanRevalidated(
+        string traceId,
+        string recordingId,
+        string approvedBackend,
+        string approvedSemantics,
+        string approvedReasonCode,
+        string revalidatedBackend,
+        string revalidatedSemantics,
+        string revalidatedReasonCode,
+        bool semanticsChanged)
+    {
+        Write(traceId, "capture.plan_revalidated", recordingId: recordingId,
+            backend: revalidatedBackend,
+            data: new Dictionary<string, object?>
+            {
+                ["approved_backend"] = approvedBackend,
+                ["approved_semantics"] = approvedSemantics,
+                ["approved_reason_code"] = approvedReasonCode,
+                ["revalidated_backend"] = revalidatedBackend,
+                ["revalidated_semantics"] = revalidatedSemantics,
+                ["revalidated_reason_code"] = revalidatedReasonCode,
+                ["semantics_changed"] = semanticsChanged
             });
     }
 

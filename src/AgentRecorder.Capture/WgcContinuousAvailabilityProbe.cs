@@ -362,9 +362,13 @@ public sealed class WgcContinuousAvailabilityProbe :
         }
         else
         {
-            var bounds = config.Bounds;
-            if (!lookup.Result.Evidence.Monitors.Contains(
-                    new WgcMonitorBounds(bounds.x, bounds.y, bounds.w, bounds.h)))
+            var displayBounds = config.DisplayBounds ?? config.Bounds;
+            var display = new WgcMonitorBounds(
+                displayBounds.x, displayBounds.y, displayBounds.w, displayBounds.h);
+            bool displayMatchesExactly = lookup.Result.Evidence.Monitors
+                .Count(m => m.Equals(display)) == 1;
+
+            if (!displayMatchesExactly)
             {
                 return new WgcContinuousAvailabilityResult(
                     false,
@@ -372,6 +376,23 @@ public sealed class WgcContinuousAvailabilityProbe :
                     lookup.Source,
                     elapsedMs,
                     lookup.Result.Evidence);
+            }
+
+            if (string.Equals(config.SourceKind, "region", StringComparison.Ordinal))
+            {
+                var region = config.Bounds;
+                if (!WgcRegionGeometry.TryGetCrop(
+                        new WgcRegionRect(display.X, display.Y, display.Width, display.Height),
+                        new WgcRegionRect(region.x, region.y, region.w, region.h),
+                        out _, out _))
+                {
+                    return new WgcContinuousAvailabilityResult(
+                        false,
+                        "region_bounds_not_eligible",
+                        lookup.Source,
+                        elapsedMs,
+                        lookup.Result.Evidence);
+                }
             }
         }
 
@@ -494,7 +515,8 @@ public sealed class WgcContinuousAvailabilityProbe :
     {
         if (config == null ||
             (!string.Equals(config.SourceKind, "display", StringComparison.Ordinal) &&
-             !string.Equals(config.SourceKind, "window", StringComparison.Ordinal)))
+             !string.Equals(config.SourceKind, "window", StringComparison.Ordinal) &&
+             !string.Equals(config.SourceKind, "region", StringComparison.Ordinal)))
             return false;
         if (config.Microphone || !config.DurationSeconds.HasValue)
             return false;
@@ -504,8 +526,21 @@ public sealed class WgcContinuousAvailabilityProbe :
             return false;
         if (config.Bounds.w <= 0 || config.Bounds.h <= 0)
             return false;
-        return !string.Equals(config.SourceKind, "window", StringComparison.Ordinal)
-            || config.WindowHandle != nint.Zero;
+        if (string.Equals(config.SourceKind, "window", StringComparison.Ordinal))
+            return config.WindowHandle != nint.Zero;
+
+        if (string.Equals(config.SourceKind, "region", StringComparison.Ordinal))
+        {
+            if (string.IsNullOrWhiteSpace(config.DisplayId) || !config.DisplayBounds.HasValue)
+                return false;
+            var display = config.DisplayBounds.Value;
+            return WgcRegionGeometry.TryGetCrop(
+                new WgcRegionRect(display.x, display.y, display.w, display.h),
+                new WgcRegionRect(config.Bounds.x, config.Bounds.y, config.Bounds.w, config.Bounds.h),
+                out _, out _);
+        }
+
+        return true;
     }
 
     private static bool TryParseCompatibleVersion(string stdout)

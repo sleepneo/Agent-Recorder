@@ -61,30 +61,57 @@ public sealed class WgcContinuousSelectorTests
     }
 
     [Fact]
-    public void WindowLegacyWgcFlag_PreservesOneFrameBackendWithoutProbe()
+    public void WindowLegacyWgcFlag_NormalizesToContinuousAndUsesProbe()
     {
         var probe = new FakeAvailabilityProbe(true);
         var result = WithWindowFlag("wgc", () =>
             CaptureBackendSelector.Select(EligibleWindowConfig(), probe));
 
-        Assert.Equal("wgc", result.BackendType);
-        Assert.IsType<WgcWindowCaptureBackend>(result.Backend);
-        Assert.Equal(0, probe.CallCount);
+        Assert.Equal("wgc-continuous", result.BackendType);
+        Assert.IsType<WgcContinuousCaptureBackend>(result.Backend);
+        Assert.Equal(1, probe.CallCount);
     }
 
     [Fact]
-    public void WindowLegacyWgcFlag_WithMicrophone_PreservesOneFrameBackendWithoutProbe()
+    public void WindowLegacyWgcFlag_WithMicrophoneFallsBackBeforeProbe()
     {
         var config = EligibleWindowConfig();
         config.Microphone = true;
         var probe = new FakeAvailabilityProbe(true);
 
         var result = WithWindowFlag("  WGC  ", () =>
-            CaptureBackendSelector.Select(config, probe));
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
 
-        Assert.Equal("wgc", result.BackendType);
-        Assert.IsType<WgcWindowCaptureBackend>(result.Backend);
+        Assert.Equal("ffmpeg-window-region-av-split", result.BackendType);
+        Assert.IsType<AvSplitCaptureBackend>(result.Backend);
+        Assert.Equal("microphone_not_eligible", result.Evidence.SelectionReasonCode);
         Assert.Equal(0, probe.CallCount);
+    }
+
+    [Theory]
+    [InlineData("wgc", 30, "duration_not_eligible")]
+    [InlineData(" WGC ", 5, "microphone_not_eligible")]
+    public void WindowLegacyAlias_UsesContinuousEligibilityAndScreenRectangleFallback(
+        string flag,
+        int duration,
+        string expectedReason)
+    {
+        var config = EligibleWindowConfig();
+        config.DurationSeconds = duration;
+        if (expectedReason == "microphone_not_eligible")
+            config.Microphone = true;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag(flag, () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal("ffmpeg-window-region" + (config.Microphone ? "-av-split" : ""), result.BackendType);
+        Assert.Equal(expectedReason, result.Evidence.SelectionReasonCode);
+        Assert.True(result.Evidence.Fallback);
+        Assert.Equal(0, probe.CallCount);
+        var plan = WithWindowFlag(flag, () => CaptureBackendSelector.BuildPlan(config, probe));
+        Assert.Equal("screen_rectangle", plan.CaptureSemantics);
+        Assert.NotEqual("wgc", plan.PlannedBackend);
     }
 
     [Fact]

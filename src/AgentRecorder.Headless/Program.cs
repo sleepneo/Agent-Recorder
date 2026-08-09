@@ -171,7 +171,7 @@ internal static class Program
                     opts.FfmpegDir = GetArgValue(args, ref i, "--ffmpeg-dir");
                     break;
                 case "--window-backend":
-                    opts.WindowBackend = GetArgValue(args, ref i, "--window-backend");
+                    opts.WindowBackend = GetArgValueAllowEmpty(args, ref i, "--window-backend");
                     break;
                 case "--pid-file":
                     opts.PidFile = GetArgValue(args, ref i, "--pid-file");
@@ -201,6 +201,13 @@ internal static class Program
         return value;
     }
 
+    private static string GetArgValueAllowEmpty(string[] args, ref int index, string name)
+    {
+        if (index + 1 >= args.Length)
+            throw new ArgumentException($"{name} requires a value.");
+        return args[++index];
+    }
+
     private static void PrintHelp()
     {
         SafeConsoleWrite("AgentRecorder.Headless");
@@ -208,7 +215,7 @@ internal static class Program
         SafeConsoleWrite("Options:");
         SafeConsoleWrite("  --data-dir <path>          Data directory (logs, api-key.txt).");
         SafeConsoleWrite("  --ffmpeg-dir <path>        Directory containing ffmpeg.exe.");
-        SafeConsoleWrite("  --window-backend <backend> Window capture backend (wgc). Default: FFmpeg gdigrab.");
+        SafeConsoleWrite("  --window-backend <backend> Window backend: empty, wgc-continuous, or legacy alias wgc. Default: FFmpeg gdigrab.");
         SafeConsoleWrite("  --pid-file <path>          Write process ID to this file on startup.");
         SafeConsoleWrite("  --shutdown-event-name <n>  Windows named event for graceful shutdown.");
         SafeConsoleWrite("  --help, -h                 Show this help.");
@@ -229,9 +236,30 @@ internal static class Program
             Environment.SetEnvironmentVariable("AGENT_RECORDER_FFMPEG_DIR", absolute, EnvironmentVariableTarget.Process);
         }
 
-        if (!string.IsNullOrWhiteSpace(opts.WindowBackend))
+        if (opts.WindowBackend != null)
         {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", opts.WindowBackend, EnvironmentVariableTarget.Process);
+            string normalized = CaptureBackendSelector.NormalizeWindowBackendArgument(opts.WindowBackend);
+            if (string.Equals(opts.WindowBackend.Trim(), CaptureBackendSelector.WgcLegacyAlias, StringComparison.OrdinalIgnoreCase))
+            {
+                SafeConsoleWrite("Warning: --window-backend wgc is a compatibility alias; using wgc-continuous.");
+            }
+
+            Environment.SetEnvironmentVariable(
+                CaptureBackendSelector.WgcEnvVar,
+                normalized.Length == 0 ? null : normalized,
+                EnvironmentVariableTarget.Process);
+        }
+        else
+        {
+            string? inherited = Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar);
+            if (string.Equals(inherited?.Trim(), CaptureBackendSelector.WgcLegacyAlias, StringComparison.OrdinalIgnoreCase))
+            {
+                SafeConsoleWrite("Warning: AGENT_RECORDER_WINDOW_BACKEND=wgc is a compatibility alias; using wgc-continuous.");
+                Environment.SetEnvironmentVariable(
+                    CaptureBackendSelector.WgcEnvVar,
+                    CaptureBackendSelector.WgcContinuousBackend,
+                    EnvironmentVariableTarget.Process);
+            }
         }
     }
 

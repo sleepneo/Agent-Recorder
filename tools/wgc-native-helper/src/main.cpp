@@ -1,5 +1,6 @@
 #include "begin_gate.h"
 #include "capture_session.h"
+#include "display_geometry.h"
 #include "dpi_context.h"
 #include "event_writer.h"
 #include "options.h"
@@ -28,6 +29,9 @@ void PrintHelp() {
         "  --display-bounds <x,y,width,height>\n"
         "  --capture-continuous-window\n"
         "  --window-hwnd <non-zero-64-bit-hwnd>\n"
+        "  --capture-continuous-region\n"
+        "  --display-bounds <display-x,display-y,display-width,display-height>\n"
+        "  --region-bounds <region-x,region-y,region-width,region-height>\n"
         "  --recording-id <safe-id>\n"
         "  --output <absolute-mp4-path>\n"
         "  --duration-ms <1000..10000>\n"
@@ -74,8 +78,10 @@ std::string HresultToString(HRESULT hr) {
 }
 
 bool ValidateContinuousOptions(const Options& opts, std::string& error) {
-    if (opts.mode != CaptureMode::ContinuousDisplay && opts.mode != CaptureMode::ContinuousWindow) {
-        error = "Expected --capture-continuous-display or --capture-continuous-window";
+    if (opts.mode != CaptureMode::ContinuousDisplay &&
+        opts.mode != CaptureMode::ContinuousWindow &&
+        opts.mode != CaptureMode::ContinuousRegion) {
+        error = "Expected --capture-continuous-display, --capture-continuous-window, or --capture-continuous-region";
         return false;
     }
     if (!opts.hasConsentFlag) {
@@ -90,14 +96,45 @@ bool ValidateContinuousOptions(const Options& opts, std::string& error) {
         error = "Missing --output";
         return false;
     }
-    if (opts.mode == CaptureMode::ContinuousDisplay &&
-        (opts.displayBounds.width <= 0 || opts.displayBounds.height <= 0)) {
-        error = "Invalid display-bounds; width and height must be positive";
-        return false;
+    if (opts.mode == CaptureMode::ContinuousDisplay) {
+        if (!opts.hasDisplayBounds || opts.displayBounds.width <= 0 || opts.displayBounds.height <= 0) {
+            error = "Invalid display-bounds; width and height must be positive";
+            return false;
+        }
+        if (opts.hasRegionBounds || opts.windowHwnd != 0) {
+            error = "Display capture cannot include window-hwnd or region-bounds";
+            return false;
+        }
     }
-    if (opts.mode == CaptureMode::ContinuousWindow && opts.windowHwnd == 0) {
-        error = "Invalid window-hwnd; expected a non-zero 64-bit HWND";
-        return false;
+    if (opts.mode == CaptureMode::ContinuousWindow) {
+        if (opts.windowHwnd == 0) {
+            error = "Invalid window-hwnd; expected a non-zero 64-bit HWND";
+            return false;
+        }
+        if (opts.hasDisplayBounds || opts.hasRegionBounds) {
+            error = "Window capture cannot include display-bounds or region-bounds";
+            return false;
+        }
+    }
+    if (opts.mode == CaptureMode::ContinuousRegion) {
+        if (!opts.hasDisplayBounds || !opts.hasRegionBounds) {
+            error = "Region capture requires both --display-bounds and --region-bounds";
+            return false;
+        }
+        if (opts.displayBounds.width <= 0 || opts.displayBounds.height <= 0) {
+            error = "Invalid display-bounds; width and height must be positive";
+            return false;
+        }
+        int cropX = 0;
+        int cropY = 0;
+        if (!TryGetRegionCrop(opts.displayBounds, opts.regionBounds, cropX, cropY)) {
+            error = "Invalid region-bounds; region must be even, at least 32x32, and contained within display-bounds";
+            return false;
+        }
+        if (opts.windowHwnd != 0) {
+            error = "Region capture cannot include window-hwnd";
+            return false;
+        }
     }
     if (opts.durationMs < 1000 || opts.durationMs > 10000) {
         error = "Invalid duration-ms; expected 1000..10000";
@@ -279,6 +316,15 @@ int wmain(int argc, wchar_t* argv[]) {
                 return RunContinuous(opts);
             }
             case CaptureMode::ContinuousWindow: {
+                std::string error;
+                if (!ValidateContinuousOptions(opts, error)) {
+                    EventWriter writer;
+                    writer.Fail("invalid_arguments", error, "", {}, 0, 0);
+                    return kExitFailure;
+                }
+                return RunContinuous(opts);
+            }
+            case CaptureMode::ContinuousRegion: {
                 std::string error;
                 if (!ValidateContinuousOptions(opts, error)) {
                     EventWriter writer;

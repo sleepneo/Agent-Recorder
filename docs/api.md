@@ -166,12 +166,14 @@ The response includes:
 
 A native `wgc-native-helper.exe`, managed continuous session, and
 capture-backend adapter are present in the repository. Guarded selectors can
-use this pipeline for eligible short, silent display or window requests only
-when the corresponding local experiment is explicitly enabled. Availability
+use this pipeline for eligible short, silent display, window, or region requests
+only when the corresponding local experiment is explicitly enabled. Availability
 is checked without capture, successful evidence is cached briefly, and an
 ineligible or unavailable request falls back to FFmpeg. Window mode uses the
 actual HWND and reports stable lifecycle failures when the target closes,
-minimizes, or changes size. The self-contained portable package contains one
+minimizes, or changes size. Region mode locks a stable display identity,
+revalidates current topology after approval, and crops the display texture on
+the GPU before encoding. The self-contained portable package contains one
 production helper. **WGC continuous recording is not exposed as a public API
 capability**, remains disabled by default, and cannot be selected through
 public request fields.
@@ -1090,3 +1092,24 @@ is empty until mouse/keyboard mark support is implemented.
 | `AUDIO_DEVICE_NOT_FOUND` | The requested `audio.microphone.device_id` was not found; list devices and retry |
 | `AUDIO_DEVICE_REQUIRED` | Multiple microphones are available and `audio.microphone.device_id` is required |
 | `METHOD_NOT_ALLOWED` | HTTP confirmation approval/rejection is blocked |
+
+## Window capture semantics
+
+The pending confirmation summary contains privacy-safe planning fields:
+`capture_semantics`, `planned_backend`, `preview_semantics`, `window_id`,
+`selection_reason_code`, and `selection_fallback`. These fields describe the
+approved plan; they do not expose helper paths, probe output, tokens, or native
+handles beyond the existing `window_id` contract.
+
+`window_surface` means the selected HWND content and excludes unrelated windows
+covering it. `wgc-continuous` uses this class. `screen_rectangle` means the
+composed desktop rectangle used by `ffmpeg-window-region` or its A/V split
+variant; a covering window may therefore appear. Display and region requests use
+the explicit `display_surface` and `region_rectangle` classes.
+
+The plan is built before confirmation without constructing or starting a backend.
+After local approval it is revalidated without pixel capture. A window identity or
+semantic change returns a terminal `capture_semantics_changed` failure before
+countdown, authorization, helper/FFmpeg start, recording controls, or output
+creation. The caller must issue a new request. WGC remains experimental and
+default-off.

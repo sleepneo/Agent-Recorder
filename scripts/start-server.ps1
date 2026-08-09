@@ -13,12 +13,17 @@
     Build configuration: Release (default) or Debug
 
 .PARAMETER WindowBackend
-    Window capture backend: "" (default, use FFmpeg gdigrab) or "wgc" (prototype stub)
+    Window capture backend: "" (default, use FFmpeg gdigrab), "wgc-continuous",
+    or legacy compatibility alias "wgc".
     Leaving it unset means window recordings use FFmpeg gdigrab.
 
 .EXAMPLE
+    .\scripts\start-server.ps1 -WindowBackend wgc-continuous
+    # Enables the controlled WGC continuous window backend
+
+.EXAMPLE
     .\scripts\start-server.ps1 -WindowBackend wgc
-    # Enables the WGC prototype stub for window capture (not for production use)
+    # Accepted for compatibility; normalized to wgc-continuous with a warning
 
 .EXAMPLE
     .\scripts\start-server.ps1
@@ -34,6 +39,11 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = "D:\works\python\007-Agent-Recorder"
 Set-Location $ProjectRoot
 
+$normalizedWindowBackend = $WindowBackend.Trim().ToLowerInvariant()
+if ($normalizedWindowBackend -notin @("", "wgc", "wgc-continuous")) {
+    throw "WindowBackend must be empty, wgc-continuous, or legacy alias wgc. Received '$WindowBackend'."
+}
+
 function Set-ProcessEnvironmentSafely {
     param(
         [Parameter(Mandatory=$true)] [System.Diagnostics.ProcessStartInfo]$psi,
@@ -47,6 +57,19 @@ function Set-ProcessEnvironmentSafely {
         try { $psi.EnvironmentVariables[$name] = $value; return } catch {}
     }
     [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+}
+
+function Remove-ProcessEnvironmentSafely {
+    param(
+        [Parameter(Mandatory=$true)] [System.Diagnostics.ProcessStartInfo]$psi,
+        [Parameter(Mandatory=$true)] [string]$name
+    )
+    if ($null -ne $psi.Environment) {
+        try { $psi.Environment.Remove($name) } catch {}
+    }
+    if ($null -ne $psi.EnvironmentVariables) {
+        try { $psi.EnvironmentVariables.Remove($name) } catch {}
+    }
 }
 
 function Stop-OldAgentRecorderProcesses {
@@ -137,11 +160,15 @@ if ($ffmpeg) {
     Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_FFMPEG_DIR" -value (Split-Path $ffmpeg.Source -Parent)
 }
 
-# Window Backend: Only set if explicitly requested. Default is FFmpeg gdigrab.
-if ($WindowBackend -eq "wgc") {
-    Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WINDOW_BACKEND" -value "wgc"
-    Write-Host "[INFO] WGC backend enabled (prototype stub) via -WindowBackend wgc" -ForegroundColor Yellow
+# Window Backend: only set if explicitly requested. Default is FFmpeg gdigrab.
+if ($normalizedWindowBackend -eq "wgc") {
+    Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WINDOW_BACKEND" -value "wgc-continuous"
+    Write-Host "[WARN] -WindowBackend wgc is a compatibility alias; normalized to wgc-continuous." -ForegroundColor Yellow
+} elseif ($normalizedWindowBackend -eq "wgc-continuous") {
+    Set-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WINDOW_BACKEND" -value "wgc-continuous"
+    Write-Host "[INFO] WGC continuous window backend enabled via -WindowBackend wgc-continuous" -ForegroundColor Yellow
 } else {
+    Remove-ProcessEnvironmentSafely -psi $psi -name "AGENT_RECORDER_WINDOW_BACKEND"
     Write-Host "[INFO] Default window backend: FFmpeg gdigrab" -ForegroundColor Green
 }
 

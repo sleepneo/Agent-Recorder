@@ -27,12 +27,19 @@ public class ConfigParserRegionTests : IDisposable
             new("display_1", "Primary Display", true,
                 new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
         });
+        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        {
+            new("display_1", "Primary Display", true,
+                new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+                Stable("display-1"), DisplayIdentityResolutionStatus.Resolved)
+        });
     }
 
     public void Dispose()
     {
         // Restore default Win32 provider after each test
         SystemQuery.SetDisplayProvider(null);
+        SystemQuery.SetDisplayTopologyProvider(null);
     }
 
     // ============ Positive tests ============
@@ -87,6 +94,32 @@ public class ConfigParserRegionTests : IDisposable
         // Act & Assert: should not throw
         var rec = ConfigParser.Build(cfg, "test-agent", out _);
         Assert.NotNull(rec);
+    }
+
+    [Fact]
+    public void Parse_UnavailableDisplayIdentity_FailsWithStableRetryableError()
+    {
+        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        {
+            new("display_1", "Primary Display", true,
+                new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+                null, DisplayIdentityResolutionStatus.Unavailable)
+        });
+
+        var cfg = ParseJson(@"{
+            ""source"": {
+                ""type"": ""region"",
+                ""display_id"": ""display_1"",
+                ""bounds"": { ""x"": 100, ""y"": 50, ""width"": 800, ""height"": 600 }
+            }
+        }");
+
+        var ex = Assert.Throws<ApiException>(() => ConfigParser.Build(cfg, "test-agent", out _));
+
+        Assert.Equal(503, ex.Status);
+        Assert.Equal("DISPLAY_IDENTITY_UNAVAILABLE", ex.Code);
+        Assert.Contains("Retry", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("device", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -192,6 +225,13 @@ public class ConfigParserRegionTests : IDisposable
         {
             new("display_1", "Primary", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0),
             new("display_2", "Secondary Left", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.0)
+        });
+        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        {
+            new("display_1", "Primary", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+                Stable("display-1"), DisplayIdentityResolutionStatus.Resolved),
+            new("display_2", "Secondary Left", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.0,
+                Stable("display-2"), DisplayIdentityResolutionStatus.Resolved)
         });
 
         var cfg = ParseJson(@"{
@@ -427,4 +467,10 @@ public class ConfigParserRegionTests : IDisposable
         var result = SystemQuery.EnumDisplays();
         Assert.DoesNotContain(result, d => d.id == "fake");
     }
+
+    private static string Stable(string target) =>
+        DisplayIdentityDeriver.Resolve("test-source", new[]
+        {
+            new DisplayTargetMapping("test-source", target)
+        }).Fingerprint!;
 }

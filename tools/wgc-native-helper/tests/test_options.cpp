@@ -83,6 +83,37 @@ TEST_REGISTRAR(OptionsContinuousWindowParsesStrictHwnd, []() {
     ASSERT_EQ(result.options.windowHwnd, static_cast<std::uint64_t>(0x1234));
 });
 
+TEST_REGISTRAR(OptionsContinuousRegionParsesDisplayAndRegionBounds, []() {
+    auto result = ParseArgs({
+        L"--capture-continuous-region",
+        L"--display-bounds", L"-1920,-100,1920,1080",
+        L"--region-bounds", L"-1800,0,640,480",
+        L"--recording-id", L"region-recording",
+        L"--output", L"C:\\temp\\out.mp4",
+        L"--duration-ms", L"5000",
+        L"--fps", L"30",
+        L"--begin-signal", L"C:\\temp\\begin.txt",
+        L"--begin-token", L"token-123",
+        L"--begin-timeout-ms", L"10000",
+        L"--stop-signal", L"C:\\temp\\stop.txt",
+        L"--i-understand-this-captures-screen"
+    });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.mode, CaptureMode::ContinuousRegion);
+    ASSERT_TRUE(result.options.hasDisplayBounds);
+    ASSERT_TRUE(result.options.hasRegionBounds);
+    ASSERT_EQ(result.options.displayBounds.x, -1920);
+    ASSERT_EQ(result.options.regionBounds.x, -1800);
+    ASSERT_EQ(result.options.regionBounds.width, 640);
+});
+
+TEST_REGISTRAR(OptionsCaptureTargetModesAreMutuallyExclusive, []() {
+    auto result = ParseArgs({ L"--capture-continuous-display", L"--capture-continuous-region" });
+    ASSERT_FALSE(result.error.empty());
+    result = ParseArgs({ L"--capture-continuous-region", L"--capture-continuous-region" });
+    ASSERT_FALSE(result.error.empty());
+});
+
 TEST_REGISTRAR(OptionsWindowHwndRejectsMalformedSignedOverflowAndZero, []() {
     const wchar_t* invalid[] = {
         L"0", L"-1", L"+1", L"0x", L"0x12trailing",

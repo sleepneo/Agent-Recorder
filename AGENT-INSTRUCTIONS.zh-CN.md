@@ -567,3 +567,14 @@ GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording
 ```text
 AGENT-API-REFERENCE.zh-CN.md
 ```
+
+## 窗口目标的确认说明
+
+向用户描述窗口录制时，必须使用确认摘要中的 `capture_semantics` 和
+`preview_semantics`：`window_surface` 是所选窗口内容且排除遮挡窗口；
+`screen_rectangle` 是窗口当前屏幕区域，遮挡窗口可能被录入。不要把通用的
+`source_type=window` 当成窗口表面承诺，也不要把屏幕截图称为窗口内容预览。
+
+如果批准后的计划校验返回 `capture_semantics_changed`，应报告“捕获方式在确认后
+发生变化，录制未开始”，然后重新创建请求。不得通过 HTTP 自批准，也不得把该失败
+当作已开始录制或返回一个输出文件路径。

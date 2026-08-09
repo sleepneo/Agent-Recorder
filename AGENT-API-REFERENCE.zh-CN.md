@@ -255,7 +255,7 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的短时无麦克风 display/window 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
+**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的短时无麦克风 display/window/region 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态；region 模式按稳定显示器身份复核 topology，并在编码前执行 GPU 裁剪。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
 
 **音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。`system_audio` 仍为 `{ "supported": false, "status": "not_implemented" }`。请求中设置 `audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。
 
@@ -1555,3 +1555,24 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
 | `METHOD_NOT_ALLOWED` | 405 | 禁止通过 HTTP 批准/拒绝本地确认。 |
 
 `AUDIO_DEVICE_MUTED` 与 `AUDIO_DEVICE_NOT_AVAILABLE` 都在弹出选区/确认 UI 之前返回，不会创建 recording 或 confirmation。当 CoreAudio 状态因临时故障无法读取时，状态按 unknown 处理，不会误报为静音或 inactive，也不会阻断录制。
+
+## 15. 窗口捕获语义字段
+
+窗口确认摘要包含以下隐私安全字段，供 agent 在用户批准前准确描述即将发生的
+捕获含义：
+
+| 字段 | 含义 |
+|---|---|
+| `capture_semantics` | `window_surface`（所选窗口内容，不含遮挡窗口）或 `screen_rectangle`（窗口当前屏幕矩形，可能含遮挡窗口）；显示器和区域分别使用 `display_surface` 与 `region_rectangle`。 |
+| `planned_backend` | 已完成能力判断的后端名称；只表示计划，不表示已启动。 |
+| `preview_semantics` | 确认预览所承诺的语义，通常与 `capture_semantics` 相同。 |
+| `window_id` | 现有公开窗口身份契约；不暴露 HWND 以外的内部句柄或路径。 |
+| `selection_reason_code` / `selection_fallback` | 稳定的选择原因与是否发生回退。 |
+
+`wgc-continuous` 的合格窗口计划使用 `window_surface`；窗口 FFmpeg 区域路径
+使用 `screen_rectangle`。30 秒等不符合 WGC 实验条件的请求会在确认前显示
+`screen_rectangle`，不会先承诺窗口表面语义。
+
+用户批准后会重新执行不采集像素的计划校验。若窗口目标身份或窗口语义发生变化，
+请求以 `capture_semantics_changed` 失败，并在倒计时、授权、helper/FFmpeg 启动、
+REC/停止 UI 和输出文件创建之前终止。请重新创建请求；HTTP 不能批准或替换该确认。

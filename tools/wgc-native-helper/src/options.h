@@ -11,6 +11,7 @@ enum class CaptureMode {
     None,
     ContinuousDisplay,
     ContinuousWindow,
+    ContinuousRegion,
     Probe,
     Help,
     Version
@@ -27,6 +28,9 @@ struct Options {
     CaptureMode mode = CaptureMode::None;
 
     Rect displayBounds;
+    Rect regionBounds;
+    bool hasDisplayBounds = false;
+    bool hasRegionBounds = false;
     std::uint64_t windowHwnd = 0;
     std::wstring recordingId;
     std::wstring outputPath;

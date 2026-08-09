@@ -742,10 +742,11 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     {
         bool isDisplay = string.Equals(cfg.SourceKind, "display", StringComparison.Ordinal);
         bool isWindow = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal);
-        if (!isDisplay && !isWindow)
+        bool isRegion = string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal);
+        if (!isDisplay && !isWindow && !isRegion)
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
-                $"WGC continuous backend only supports source_kind='display' or 'window' (got '{cfg.SourceKind}').");
+                $"WGC continuous backend only supports source_kind='display', 'window', or 'region' (got '{cfg.SourceKind}').");
         }
 
         var (_, _, w, h) = cfg.Bounds;
@@ -754,6 +755,21 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             throw new ApiException(400, "INVALID_ARGUMENT", isWindow
                 ? "WGC continuous window backend requires positive target bounds."
                 : "WGC continuous backend requires positive capture width and height.");
+        }
+
+        if (isRegion)
+        {
+            if (string.IsNullOrWhiteSpace(cfg.DisplayId) || !cfg.DisplayBounds.HasValue)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "WGC continuous region backend requires a target display identity and complete display bounds.");
+
+            var display = cfg.DisplayBounds.Value;
+            if (!WgcRegionGeometry.TryGetCrop(
+                    new WgcRegionRect(display.x, display.y, display.w, display.h),
+                    new WgcRegionRect(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h),
+                    out _, out _))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "WGC continuous region backend requires an even region contained within display bounds.");
         }
 
         if (isWindow && cfg.WindowHandle == nint.Zero)
@@ -836,11 +852,17 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             RecordingId = "wgc-c-" + Guid.NewGuid().ToString("N")[..16],
             TargetKind = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal)
                 ? WgcContinuousTargetKind.Window
-                : WgcContinuousTargetKind.Display,
-            DisplayX = cfg.Bounds.x,
-            DisplayY = cfg.Bounds.y,
-            DisplayWidth = cfg.Bounds.w,
-            DisplayHeight = cfg.Bounds.h,
+                : string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal)
+                    ? WgcContinuousTargetKind.Region
+                    : WgcContinuousTargetKind.Display,
+            DisplayX = cfg.DisplayBounds?.x ?? cfg.Bounds.x,
+            DisplayY = cfg.DisplayBounds?.y ?? cfg.Bounds.y,
+            DisplayWidth = cfg.DisplayBounds?.w ?? cfg.Bounds.w,
+            DisplayHeight = cfg.DisplayBounds?.h ?? cfg.Bounds.h,
+            RegionX = cfg.Bounds.x,
+            RegionY = cfg.Bounds.y,
+            RegionWidth = cfg.Bounds.w,
+            RegionHeight = cfg.Bounds.h,
             WindowHandle = cfg.WindowHandle,
             OutputPath = stagingOutput,
             DurationMs = durationMs,
@@ -860,13 +882,22 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         {
             options.TargetKind == WgcContinuousTargetKind.Window
                 ? "--capture-continuous-window"
-                : "--capture-continuous-display"
+                : options.TargetKind == WgcContinuousTargetKind.Region
+                    ? "--capture-continuous-region"
+                    : "--capture-continuous-display"
         };
 
         if (options.TargetKind == WgcContinuousTargetKind.Window)
         {
             args.Add("--window-hwnd");
             args.Add($"0x{unchecked((ulong)options.WindowHandle.ToInt64()):X}");
+        }
+        else if (options.TargetKind == WgcContinuousTargetKind.Region)
+        {
+            args.Add("--display-bounds");
+            args.Add(FormattableString.Invariant($"{options.DisplayX},{options.DisplayY},{options.DisplayWidth},{options.DisplayHeight}"));
+            args.Add("--region-bounds");
+            args.Add(FormattableString.Invariant($"{options.RegionX},{options.RegionY},{options.RegionWidth},{options.RegionHeight}"));
         }
         else
         {
@@ -1228,7 +1259,9 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         var warnings = new List<string>();
         string expectedCaptureMethod = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal)
             ? "WGC_D3D11_WINDOW_FRAME_STREAM"
-            : "WGC_D3D11_FRAME_STREAM";
+            : string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal)
+                ? "WGC_D3D11_REGION_FRAME_STREAM"
+                : "WGC_D3D11_FRAME_STREAM";
 
         // The media probe validates the bytes and usually has no knowledge of
         // which capture source produced them. The authenticated helper STARTED
@@ -1257,6 +1290,12 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         if (probe.Width <= 0 || probe.Height <= 0)
         {
             warnings.Add($"invalid_dimensions: width={probe.Width} height={probe.Height}");
+        }
+
+        if (string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal))
+        {
+            if (probe.Width != cfg.Bounds.w || probe.Height != cfg.Bounds.h)
+                warnings.Add($"region_dimensions_mismatch: expected={cfg.Bounds.w}x{cfg.Bounds.h} actual={probe.Width}x{probe.Height}");
         }
 
         if (probe.DurationSeconds <= 0)

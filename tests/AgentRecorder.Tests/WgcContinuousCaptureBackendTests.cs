@@ -99,6 +99,18 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         };
     }
 
+    private CaptureConfig CreateRegionConfig(string outputPath, bool deferCaptureStart = true) => new()
+    {
+        SourceKind = "region",
+        DisplayId = "display-left",
+        DisplayBounds = (-1920, -200, 1920, 1080),
+        Bounds = (-1800, -100, 640, 480),
+        DurationSeconds = 5,
+        Fps = 30,
+        OutputPath = outputPath,
+        DeferCaptureStart = deferCaptureStart
+    };
+
     private WgcContinuousCaptureBackend CreateBackend(
         FakeWgcContinuousProcess process,
         out FakePublisher publisher,
@@ -209,6 +221,39 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         $"FileSize: {fileSize} bytes",
         "Width: 1920",
         "Height: 1080",
+        ""
+    };
+
+    private static string[] RegionStarted(
+        string recordingId,
+        string outputPath,
+        int width = 640,
+        int height = 480) => new[]
+    {
+        "RESULT: STARTED",
+        $"RecordingId: {recordingId}",
+        $"Output: {outputPath}",
+        "Container: mp4",
+        "Codec: h264",
+        "Fps: 30",
+        $"Width: {width}",
+        $"Height: {height}",
+        "CaptureMethod: WGC_D3D11_REGION_FRAME_STREAM",
+        ""
+    };
+
+    private static string[] RegionOk(
+        int width,
+        int height,
+        long fileSize = 1024) => new[]
+    {
+        "RESULT: OK",
+        "FramesCaptured: 300",
+        "FramesDropped: 0",
+        "DurationMs: 5000",
+        $"FileSize: {fileSize} bytes",
+        $"Width: {width}",
+        $"Height: {height}",
         ""
     };
 
@@ -363,6 +408,68 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         await process.BeginSignalObservedTask.WaitAsync(TimeSpan.FromSeconds(5));
         backend.Dispose();
+    }
+
+    [Fact]
+    public void Start_Region_PassesDisplayAndRegionBoundsInCanonicalOrder()
+    {
+        FakeSession? fake = null;
+        var backend = CreateBackend(options => fake = new FakeSession(options), out _, out _);
+        var cfg = CreateRegionConfig(Path.Combine(_finalDir, "region-args.mp4"));
+
+        backend.Start(cfg);
+
+        Assert.NotNull(fake);
+        Assert.StartsWith("--capture-continuous-region", cfg.CommandArgs, StringComparison.Ordinal);
+        Assert.Contains("--display-bounds", cfg.CommandArgs, StringComparison.Ordinal);
+        Assert.Contains("-1920,-200,1920,1080", cfg.CommandArgs, StringComparison.Ordinal);
+        Assert.Contains("--region-bounds", cfg.CommandArgs, StringComparison.Ordinal);
+        Assert.Contains("-1800,-100,640,480", cfg.CommandArgs, StringComparison.Ordinal);
+        Assert.Equal(WgcContinuousTargetKind.Region, fake!.Options.TargetKind);
+        Assert.Equal((-1920, -200, 1920, 1080),
+            (fake.Options.DisplayX, fake.Options.DisplayY, fake.Options.DisplayWidth, fake.Options.DisplayHeight));
+        Assert.Equal((-1800, -100, 640, 480),
+            (fake.Options.RegionX, fake.Options.RegionY, fake.Options.RegionWidth, fake.Options.RegionHeight));
+
+        backend.Dispose();
+    }
+
+    [Fact]
+    public void Start_RegionInvalidOddBounds_FailsBeforeHelperAndLeavesNoOutput()
+    {
+        string outputPath = Path.Combine(_finalDir, "region-invalid.mp4");
+        var process = new FakeWgcContinuousProcess(Array.Empty<string>());
+        var backend = CreateBackend(process, out _, out _);
+        var cfg = CreateRegionConfig(outputPath);
+        cfg.Bounds = (-1800, -100, 641, 480);
+
+        Assert.Throws<ApiException>(() => backend.Start(cfg));
+        Assert.Equal(0, process.StartInvocationCount);
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public async Task RegionTerminalDimensionMismatch_FailsWithoutPublishingFinalMp4()
+    {
+        string outputPath = Path.Combine(_finalDir, "region-terminal-mismatch.mp4");
+        var process = new FakeWgcContinuousProcess(
+            RegionStarted("r-region-mismatch", "ignored")
+                .Concat(RegionOk(800, 600))
+                .ToArray(),
+            createOutputFile: true,
+            outputFileSize: 1024);
+        var backend = CreateBackend(process, out var publisher, out _);
+        var cfg = CreateRegionConfig(outputPath, deferCaptureStart: false);
+
+        backend.Start(cfg);
+        await WaitForConditionAsync(
+            () => _lastHarness?.Session.IsCompleted == true,
+            TimeSpan.FromSeconds(5),
+            "Region helper mismatch did not reach a terminal state.");
+        backend.Stop();
+
+        Assert.Equal(0, publisher.CallCount);
+        Assert.False(File.Exists(outputPath));
     }
 
     [Fact]

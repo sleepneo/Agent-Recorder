@@ -2,6 +2,7 @@
 
 #include "display_geometry.h"
 
+#include <climits>
 #include <windows.h>
 
 namespace wgc {
@@ -72,6 +73,25 @@ TEST_REGISTRAR(RectExactlyMatchesMonitor_NegativeOriginOffByOneMismatch, []() {
     Rect target{-1920, 0, 1920, 1080};
     RECT monitor = MakeRect(-1919, 0, 1, 1080);
     ASSERT_FALSE(RectExactlyMatchesMonitor(target, monitor));
+});
+
+TEST_REGISTRAR(TryGetRegionCropSupportsNegativeDisplayOrigin, []() {
+    int offsetX = 0;
+    int offsetY = 0;
+    ASSERT_TRUE(TryGetRegionCrop({-1920, -200, 1920, 1080},
+                                 {-1800, -100, 640, 480}, offsetX, offsetY));
+    ASSERT_EQ(offsetX, 120);
+    ASSERT_EQ(offsetY, 100);
+});
+
+TEST_REGISTRAR(TryGetRegionCropRejectsOverflowZeroOddAndOutOfBounds, []() {
+    int offsetX = 0;
+    int offsetY = 0;
+    ASSERT_FALSE(TryGetRegionCrop({0, 0, 100, 100},
+                                  {INT_MAX, 0, 32, 32}, offsetX, offsetY));
+    ASSERT_FALSE(TryGetRegionCrop({0, 0, 100, 100}, {0, 0, 0, 32}, offsetX, offsetY));
+    ASSERT_FALSE(TryGetRegionCrop({0, 0, 100, 100}, {1, 1, 33, 32}, offsetX, offsetY));
+    ASSERT_FALSE(TryGetRegionCrop({0, 0, 100, 100}, {80, 80, 32, 32}, offsetX, offsetY));
 });
 
 } // namespace test

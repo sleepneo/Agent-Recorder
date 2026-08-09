@@ -132,78 +132,6 @@ public class SecurityRegressionTests
         Assert.IsType<FfmpegCaptureBackend>(backend);
     }
 
-    [Fact]
-    public void WindowCaptureBackend_WithWgcFlag_UsesWgcStub()
-    {
-        Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", "wgc");
-        try
-        {
-            var (backend, type) = CaptureBackendSelector.Select(new CaptureConfig { SourceKind = "window" });
-
-            Assert.NotNull(backend);
-            Assert.Equal("wgc", type);
-            Assert.IsType<WgcWindowCaptureBackend>(backend);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", null);
-        }
-    }
-
-    // =====================================================================
-    // 4) WgcWindowCaptureBackend 不能静默成功 — 必须以明确异常暴露错误
-    //    (a) 构造函数在没有 helper exe 时抛出清晰异常
-    //    (b) Start 在无效 HWND / 非 window source 时抛出清晰异常
-    // =====================================================================
-
-    [Fact]
-    public void WgcBackend_Start_FailsClearlyOnInvalidSource()
-    {
-        var fakeRunner = new FakeWgcHelperProcessRunner(new WgcHelperProcessResult());
-        var backend = new WgcWindowCaptureBackend(fakeRunner, "fake.exe");
-        var cfg = new CaptureConfig { SourceKind = "window", WindowHandle = 0 };
-
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.Start(cfg));
-        Assert.Contains("WGC", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("WindowHandle", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void WgcBackend_Start_FailsClearlyWhenHelperReturnsFailure()
-    {
-        var fakeRunner = new FakeWgcHelperProcessRunner(new WgcHelperProcessResult
-        {
-            ExitCode = 1,
-            StandardOutput = "RESULT: FAIL\nStage: IsWindow(HWND)\nHRESULT: 0x80070057\n",
-            StandardError = ""
-        });
-        var backend = new WgcWindowCaptureBackend(fakeRunner, "fake.exe");
-        var cfg = new CaptureConfig { SourceKind = "window", WindowHandle = new nint(1234), OutputPath = "out.png" };
-
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.Start(cfg));
-        Assert.Contains("WGC", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("0x80070057", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("Stage", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void WgcBackend_Start_RequiresExePath_ForSafety()
-    {
-        // Default ctor defers exe-resolution to Start() time. Start() with a
-        // valid config must throw a clear exception mentioning WGC / the exe
-        // path / env var because no helper executable is available in the
-        // test environment.
-        var backend = new WgcWindowCaptureBackend();
-        var cfg = new CaptureConfig { SourceKind = "window", WindowHandle = new nint(1234), OutputPath = "out.png" };
-
-        var ex = Assert.ThrowsAny<Exception>(() => backend.Start(cfg));
-        Assert.True(
-            ex.Message.Contains("WGC", StringComparison.Ordinal) ||
-            ex.Message.Contains("helper", StringComparison.OrdinalIgnoreCase),
-            "Expected exception to mention WGC or helper (got: " + ex.Message + ")"
-        );
-    }
-
     // =====================================================================
     // 5) 启动脚本安全检查：默认不开启 WGC
     // =====================================================================
@@ -217,8 +145,11 @@ public class SecurityRegressionTests
         // 默认 WindowBackend 参数为空
         Assert.Contains("WindowBackend = \"\"", script);
 
-        // 必须有条件分支：只有显式传 -WindowBackend wgc 时才设置
-        Assert.Contains("if ($WindowBackend -eq \"wgc\")", script);
+        // Both the recommended value and compatibility alias must normalize
+        // to the same continuous backend before the child process starts.
+        Assert.Contains("wgc-continuous", script);
+        Assert.Contains("compatibility alias", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("WindowBackend must be empty", script, StringComparison.Ordinal);
 
         // 通过缩进层级追踪：找出所有设置 WGC 的赋值行，检查它们是否在 if 块内
         // PowerShell 的 if/else 块通过缩进来界定
@@ -271,9 +202,37 @@ public class SecurityRegressionTests
         var root = GetProjectRoot();
         var script = File.ReadAllText(Path.Combine(root, "scripts", "build-and-start.ps1"));
 
-        // 之前有 bug: 无条件设置 AGENT_RECORDER_WINDOW_BACKEND=wgc
-        // 修复后：应被移除或注释
+        Assert.Contains("param(", script);
+        Assert.Contains("wgc-continuous", script);
+        Assert.Contains("compatibility alias", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("psi.EnvironmentVariables[\"AGENT_RECORDER_WINDOW_BACKEND\"] = \"wgc\"", script);
+    }
+
+    [Fact]
+    public void StartApiServerScript_NormalizesAliasAndRejectsUnknown()
+    {
+        var root = GetProjectRoot();
+        var script = File.ReadAllText(Path.Combine(root, "scripts", "start-api-server.ps1"));
+
+        Assert.Contains("wgc-continuous", script);
+        Assert.Contains("compatibility alias", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("WindowBackend must be empty", script, StringComparison.Ordinal);
+        Assert.Contains("window_backend = if ($normalizedWindowBackend)", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProductionSources_DoNotGenerateRetiredSingleFrameArgument()
+    {
+        var root = GetProjectRoot();
+        var retiredArgument = "--capture-" + "one-frame-window";
+        var paths = Directory.EnumerateFiles(Path.Combine(root, "src"), "*.*", SearchOption.AllDirectories)
+            .Concat(Directory.EnumerateFiles(Path.Combine(root, "scripts"), "*.ps1", SearchOption.AllDirectories));
+
+        foreach (var path in paths)
+        {
+            var text = File.ReadAllText(path);
+            Assert.DoesNotContain(retiredArgument, text, StringComparison.Ordinal);
+        }
     }
 
     // =====================================================================

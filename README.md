@@ -59,7 +59,9 @@ Agents should use the paths returned by `ensure-running` or
 - Active-window recording defaults to visible window bounds clipped to the
   virtual desktop and the FFmpeg `ffmpeg-window-region` backend. A guarded
   local experiment can instead use native WGC continuous window capture for
-  eligible short, silent recordings.
+  eligible short, silent recordings. Confirmation distinguishes the selected
+  window surface from a composed screen rectangle and revalidates that meaning
+  after approval before any capture starts.
 - Interactive selected-region UI with precise coordinates, size presets, edge/window
   snapping, click-to-pick visible windows, and resilient top-most behavior across
   multi-monitor desktops.
@@ -92,11 +94,13 @@ Agents should use the paths returned by `ensure-running` or
   and Focal Bathys have passed supervised product-path recording. Compatibility
   is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
   fallback, and system-audio capture is not implemented.
-- The experimental native WGC continuous pipeline supports eligible display and
-  window targets behind separate local environment switches. It provides
+- The experimental native WGC continuous pipeline supports eligible display,
+  window, and selected-region targets behind separate local environment switches. It provides
   non-capturing availability probes, short-lived success caching, authenticated
-  first-frame evidence, explicit window lifecycle failures, and automatic
-  FFmpeg fallback. The self-contained portable package includes exactly one
+  first-frame evidence, explicit window lifecycle failures, stable display
+  identity and topology revalidation, GPU region cropping, and automatic FFmpeg
+  fallback. Display stability, occluded-window capture, and a 10-second region
+  capture have passed supervised desktop acceptance. The self-contained portable package includes exactly one
   production `AgentRecorder.WgcHelper\wgc-native-helper.exe`. The pipeline
   remains disabled by default and is not exposed as a public API capability.
 - Local audit log and MP4 output.

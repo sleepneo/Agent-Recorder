@@ -1,6 +1,5 @@
 #include "pixel_utils.h"
 
-#include <algorithm>
 #include <limits>
 
 namespace wgc {

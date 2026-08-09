@@ -15,7 +15,8 @@
     Build configuration: Release (default) or Debug
 
 .PARAMETER WindowBackend
-    Window capture backend: "" (default, use FFmpeg gdigrab) or "wgc" (prototype stub)
+    Window capture backend: "" (default, use FFmpeg gdigrab), "wgc-continuous",
+    or legacy compatibility alias "wgc".
     Leaving it unset means window recordings use FFmpeg gdigrab.
 
 .PARAMETER MetadataFile
@@ -33,8 +34,12 @@
     Use only if breakaway fails in your environment.
 
 .EXAMPLE
+    .\scripts\start-api-server.ps1 -WindowBackend wgc-continuous
+    # Enables the controlled WGC continuous window backend
+
+.EXAMPLE
     .\scripts\start-api-server.ps1 -WindowBackend wgc
-    # Enables the WGC prototype stub for window capture (not for production use)
+    # Accepted for compatibility; normalized to wgc-continuous with a warning
 
 .EXAMPLE
     .\scripts\start-api-server.ps1
@@ -55,6 +60,11 @@ $ProjectRoot = "D:\works\python\007-Agent-Recorder"
 $DataDir = "D:\works\python\007-Agent-Recorder\.local-data"
 $Port = 37891
 Set-Location $ProjectRoot
+
+$normalizedWindowBackend = $WindowBackend.Trim().ToLowerInvariant()
+if ($normalizedWindowBackend -notin @("", "wgc", "wgc-continuous")) {
+    throw "WindowBackend must be empty, wgc-continuous, or legacy alias wgc. Received '$WindowBackend'."
+}
 
 function Stop-OldAgentRecorderProcesses {
     $oldHeadless = @(Get-Process AgentRecorder.Headless -ErrorAction SilentlyContinue)
@@ -217,11 +227,16 @@ if ($ffmpeg) {
     $headlessArgs.Add((Split-Path $ffmpeg.Source -Parent))
 }
 
-if ($WindowBackend -eq "wgc") {
+if ($normalizedWindowBackend -eq "wgc") {
     $headlessArgs.Add("--window-backend")
-    $headlessArgs.Add("wgc")
-    Write-Host "[INFO] WGC backend enabled (prototype stub) via -WindowBackend wgc" -ForegroundColor Yellow
+    $headlessArgs.Add("wgc-continuous")
+    Write-Host "[WARN] -WindowBackend wgc is a compatibility alias; normalized to wgc-continuous." -ForegroundColor Yellow
+} elseif ($normalizedWindowBackend -eq "wgc-continuous") {
+    $headlessArgs.Add("--window-backend")
+    $headlessArgs.Add("wgc-continuous")
+    Write-Host "[INFO] WGC continuous window backend enabled via -WindowBackend wgc-continuous" -ForegroundColor Yellow
 } else {
+    [System.Environment]::SetEnvironmentVariable("AGENT_RECORDER_WINDOW_BACKEND", $null, "Process")
     Write-Host "[INFO] Default window backend: FFmpeg gdigrab" -ForegroundColor Green
 }
 
@@ -384,7 +399,7 @@ $metadata = [ordered]@{
     arguments = $headlessArgs.ToArray()
     port = $Port
     data_dir = $DataDir
-    window_backend = if ($WindowBackend) { $WindowBackend } else { "ffmpeg_gdigrab" }
+    window_backend = if ($normalizedWindowBackend) { "wgc-continuous" } else { "ffmpeg_gdigrab" }
     launcher_flags = $launcherFlags
     instance_id = $instanceId
 }

@@ -360,7 +360,7 @@ public class HeadlessHostIntegrationTests
     }
 
     [Fact]
-    public void HeadlessHost_WindowBackendArgument_Wgc_WhenExplicit()
+    public void HeadlessHost_WindowBackendArgument_WgcAlias_IsNormalized()
     {
         using var tmp = new TempDirectory();
         foreach (var p in Process.GetProcessesByName("AgentRecorder.Headless"))
@@ -383,11 +383,32 @@ public class HeadlessHostIntegrationTests
                 .First(e => e.GetProperty("event").GetString() == "service.starting");
 
             var backend = starting.GetProperty("window_backend").GetString();
-            Assert.Equal("wgc", backend);
+            Assert.Equal("wgc-continuous", backend);
         }
         finally
         {
             try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+        }
+    }
+
+    [Fact]
+    public void HeadlessHost_WindowBackendArgument_UnknownFailsBeforeServerStart()
+    {
+        using var tmp = new TempDirectory();
+        foreach (var p in Process.GetProcessesByName("AgentRecorder.Headless"))
+        {
+            try { p.Kill(); p.WaitForExit(3000); } catch { }
+        }
+
+        var proc = StartHeadless(tmp.Path, "future-backend");
+        try
+        {
+            Assert.True(proc.WaitForExit(10000), "Unknown window backend should fail fast.");
+            Assert.NotEqual(0, proc.ExitCode);
+        }
+        finally
+        {
+            try { if (!proc.HasExited) proc.Kill(); } catch { }
         }
     }
 

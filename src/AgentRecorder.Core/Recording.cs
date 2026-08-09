@@ -11,6 +11,7 @@ public sealed class Recording
     public string Agent { get; set; } = "unknown";
     public string SourceType { get; set; } = "";
     public string SourceTitle { get; set; } = "";
+    public string SourceApplication { get; set; } = "";
     public bool Microphone { get; set; }
     public string? MicrophoneDeviceId { get; set; }
     public string? MicrophoneDeviceName { get; set; }
@@ -71,6 +72,12 @@ public sealed class Recording
     public string? StderrExcerpt;
     public int ExitCode = -1;
     public string BackendType { get; set; } = "ffmpeg";
+
+    /// <summary>
+    /// The immutable, privacy-safe decision shown to the user before approval.
+    /// It is reused after approval only after non-capturing revalidation.
+    /// </summary>
+    public CapturePlan? ApprovedCapturePlan { get; set; }
 
     /// <summary>
     /// Why the recording ended. Populated by explicit Stop(...) and natural exit finalize.

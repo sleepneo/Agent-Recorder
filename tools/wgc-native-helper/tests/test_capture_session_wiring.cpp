@@ -10,9 +10,12 @@
 #include "string_utils.h"
 
 #include <windows.h>
+#include <d3d11.h>
+#include <wrl/client.h>
 
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdlib>
 #include <condition_variable>
 #include <cstdint>
@@ -27,6 +30,109 @@
 #include <vector>
 
 using namespace wgc;
+
+TEST_REGISTRAR(CopyTextureRegionToBgra_UsesProductionGpuCropWithNonZeroOffset, []() {
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    const D3D_FEATURE_LEVEL featureLevels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0
+    };
+
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,
+        D3D_DRIVER_TYPE_HARDWARE,
+        nullptr,
+        flags,
+        featureLevels,
+        static_cast<UINT>(std::size(featureLevels)),
+        D3D11_SDK_VERSION,
+        device.GetAddressOf(),
+        nullptr,
+        context.GetAddressOf());
+    if (FAILED(hr)) {
+        // WARP is still a real D3D11 device and exercises the production GPU
+        // staging/copy path. It is an explicit fallback for hosts without a
+        // hardware adapter, never a CPU crop substitute.
+        hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_WARP,
+            nullptr,
+            flags,
+            featureLevels,
+            static_cast<UINT>(std::size(featureLevels)),
+            D3D11_SDK_VERSION,
+            device.ReleaseAndGetAddressOf(),
+            nullptr,
+            context.ReleaseAndGetAddressOf());
+    }
+    ASSERT_TRUE(SUCCEEDED(hr));
+    ASSERT_TRUE(device != nullptr);
+    ASSERT_TRUE(context != nullptr);
+
+    constexpr int sourceWidth = 8;
+    constexpr int sourceHeight = 8;
+    constexpr UINT sourceRowPitch = sourceWidth * 4 + 16;
+    std::vector<uint8_t> source(static_cast<size_t>(sourceRowPitch) * sourceHeight, 0xEE);
+    for (int y = 0; y < sourceHeight; ++y) {
+        for (int x = 0; x < sourceWidth; ++x) {
+            const size_t offset = static_cast<size_t>(y) * sourceRowPitch + static_cast<size_t>(x) * 4;
+            source[offset + 0] = static_cast<uint8_t>(0x10 + x);
+            source[offset + 1] = static_cast<uint8_t>(0x20 + y);
+            source[offset + 2] = static_cast<uint8_t>(0x80 + x + y);
+            source[offset + 3] = 0xFF;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    sourceDesc.Width = sourceWidth;
+    sourceDesc.Height = sourceHeight;
+    sourceDesc.MipLevels = 1;
+    sourceDesc.ArraySize = 1;
+    sourceDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sourceDesc.SampleDesc.Count = 1;
+    sourceDesc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA initialData = {};
+    initialData.pSysMem = source.data();
+    initialData.SysMemPitch = sourceRowPitch;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    hr = device->CreateTexture2D(&sourceDesc, &initialData, texture.GetAddressOf());
+    ASSERT_TRUE(SUCCEEDED(hr));
+    ASSERT_TRUE(texture != nullptr);
+
+    std::vector<uint8_t> pixels;
+    hr = CopyTextureRegionToBgra(device.Get(), texture.Get(), 2, 3, 3, 2, pixels);
+    ASSERT_TRUE(SUCCEEDED(hr));
+    ASSERT_EQ(pixels.size(), static_cast<size_t>(3 * 2 * 4));
+
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            const size_t offset = static_cast<size_t>(y * 3 + x) * 4;
+            ASSERT_EQ(pixels[offset + 0], static_cast<uint8_t>(0x12 + x));
+            ASSERT_EQ(pixels[offset + 1], static_cast<uint8_t>(0x23 + y));
+            ASSERT_EQ(pixels[offset + 2], static_cast<uint8_t>(0x85 + x + y));
+            ASSERT_EQ(pixels[offset + 3], 0xFF);
+        }
+    }
+
+    auto expectFailureAndClear = [&](int offsetX, int offsetY, int width, int height) {
+        pixels.assign(11, 0xAB);
+        const HRESULT invalid = CopyTextureRegionToBgra(
+            device.Get(), texture.Get(), offsetX, offsetY, width, height, pixels);
+        ASSERT_TRUE(FAILED(invalid));
+        ASSERT_TRUE(pixels.empty());
+    };
+    expectFailureAndClear(-1, 0, 2, 2);
+    expectFailureAndClear(0, -1, 2, 2);
+    expectFailureAndClear(0, 0, 0, 2);
+    expectFailureAndClear(0, 0, 2, 0);
+    expectFailureAndClear(INT_MAX, 0, INT_MAX, 2);
+    expectFailureAndClear(7, 7, 2, 2);
+});
 
 namespace {
 
@@ -1821,7 +1927,7 @@ TEST_REGISTRAR(CaptureSessionTargetCreationRoutesDisplayAndWindowRequests, []() 
     auto run = [&](CaptureMode mode, const Rect& bounds, std::uint64_t hwnd,
                    CaptureSessionTestTargetRequest& observed) {
         const std::wstring suffix = mode == CaptureMode::ContinuousWindow
-            ? L"window" : L"display";
+            ? L"window" : (mode == CaptureMode::ContinuousRegion ? L"region" : L"display");
         const std::wstring outputPath = JoinPath(dir.path, suffix + L".mp4");
         const std::wstring partialPath = JoinPath(dir.path, suffix + L".partial.mp4");
         const std::wstring beginPath = JoinPath(dir.path, suffix + L".begin");
@@ -1830,6 +1936,9 @@ TEST_REGISTRAR(CaptureSessionTargetCreationRoutesDisplayAndWindowRequests, []() 
         Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath, 1000);
         opts.mode = mode;
         opts.windowHwnd = hwnd;
+        if (mode == CaptureMode::ContinuousRegion) {
+            opts.regionBounds = {bounds.x + 10, bounds.y + 20, 640, 480};
+        }
 
         EventWriter writer;
         BeginGate gate(opts.beginSignalPath, opts.beginToken,
@@ -1861,6 +1970,19 @@ TEST_REGISTRAR(CaptureSessionTargetCreationRoutesDisplayAndWindowRequests, []() 
     run(CaptureMode::ContinuousWindow, displayBounds, 0x1234, windowRequest);
     ASSERT_EQ(windowRequest.mode, CaptureMode::ContinuousWindow);
     ASSERT_EQ(windowRequest.windowHwnd, 0x1234u);
+
+    CaptureSessionTestTargetRequest regionRequest;
+    run(CaptureMode::ContinuousRegion, displayBounds, 0, regionRequest);
+    ASSERT_EQ(regionRequest.mode, CaptureMode::ContinuousRegion);
+    ASSERT_EQ(regionRequest.displayBounds.x, displayBounds.x);
+    ASSERT_EQ(regionRequest.displayBounds.y, displayBounds.y);
+    ASSERT_EQ(regionRequest.displayBounds.width, displayBounds.width);
+    ASSERT_EQ(regionRequest.displayBounds.height, displayBounds.height);
+    ASSERT_EQ(regionRequest.regionBounds.x, displayBounds.x + 10);
+    ASSERT_EQ(regionRequest.regionBounds.y, displayBounds.y + 20);
+    ASSERT_EQ(regionRequest.regionBounds.width, 640);
+    ASSERT_EQ(regionRequest.regionBounds.height, 480);
+    ASSERT_EQ(regionRequest.windowHwnd, 0u);
 });
 
 TEST_REGISTRAR(CaptureSessionWindowBeforeBegin_DoesNotStartCaptureOrWrite, []() {
@@ -1899,6 +2021,49 @@ TEST_REGISTRAR(CaptureSessionWindowBeforeBegin_DoesNotStartCaptureOrWrite, []() 
     ASSERT_EQ(outcome.errorCode, "timeout");
     ASSERT_EQ(startCount.load(), 0);
     ASSERT_EQ(writeCount.load(), 0);
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_FALSE(FileExists(partialPath));
+});
+
+TEST_REGISTRAR(CaptureSessionRegionBeforeBegin_DoesNotStartCaptureOrCopy, []() {
+    TempDir dir(L"wgc-test-region-before-begin");
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+
+    Options opts = MakeContinuousOptions({10, 20, 800, 600}, outputPath,
+                                          beginPath, stopPath, 1000);
+    opts.mode = CaptureMode::ContinuousRegion;
+    opts.regionBounds = {110, 40, 640, 480};
+    opts.beginTimeoutMs = 100;
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<int> startCount{0};
+    std::atomic<int> copyCount{0};
+    CaptureSessionTestHooks hooks;
+    hooks.onStartCapture = [&]() { startCount.fetch_add(1); };
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onCopyFrame = [&](const QueuedFrame&, int, int,
+                            std::vector<uint8_t>&) {
+        copyCount.fetch_add(1);
+        return true;
+    };
+    session.SetTestHooks(hooks);
+
+    CaptureOutcome outcome = session.Run();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "timeout");
+    ASSERT_EQ(startCount.load(), 0);
+    ASSERT_EQ(copyCount.load(), 0);
     ASSERT_FALSE(FileExists(outputPath));
     ASSERT_FALSE(FileExists(partialPath));
 });

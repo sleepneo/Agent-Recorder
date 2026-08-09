@@ -107,3 +107,32 @@ public interface IBackendSelectionPerformanceTracer
         int? availabilityElapsedMs,
         bool fallback);
 }
+
+/// <summary>
+/// Optional performance evidence for the immutable capture plan and its
+/// approval-time semantic revalidation. Kept separate so existing tracers do
+/// not need to implement capture-plan internals.
+/// </summary>
+public interface ICapturePlanPerformanceTracer
+{
+    void CapturePlanCreated(
+        string traceId,
+        string recordingId,
+        string requestedBackend,
+        string plannedBackend,
+        string captureSemantics,
+        string selectionReasonCode,
+        string availabilitySource,
+        bool fallback);
+
+    void CapturePlanRevalidated(
+        string traceId,
+        string recordingId,
+        string approvedBackend,
+        string approvedSemantics,
+        string approvedReasonCode,
+        string revalidatedBackend,
+        string revalidatedSemantics,
+        string revalidatedReasonCode,
+        bool semanticsChanged);
+}

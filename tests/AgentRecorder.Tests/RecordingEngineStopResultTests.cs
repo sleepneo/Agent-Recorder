@@ -390,10 +390,10 @@ public class RecordingEngineStopResultTests
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
-    public void LegacyWgc_DoesNotAcquireContinuousLifecycleMapping(string reason)
+    public void UnrelatedBackend_DoesNotAcquireContinuousLifecycleMapping(string reason)
     {
         var tray = new FailureTray();
-        var outputPath = Path.Combine(Path.GetTempPath(), $"legacy-wgc-{Guid.NewGuid():N}.mp4");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"unrelated-backend-{Guid.NewGuid():N}.mp4");
         var (engine, rec, backend, audit) = Setup(
             30,
             new OutputMeta
@@ -404,12 +404,12 @@ public class RecordingEngineStopResultTests
                 OutputPath = outputPath,
                 OutputFileExists = false
             },
-            backendType: "wgc",
+            backendType: "unrelated-backend",
             tray: tray);
 
         backend.FireNaturalExit(0, backend.StopResult);
 
-        Assert.Equal("wgc", rec.BackendType);
+        Assert.Equal("unrelated-backend", rec.BackendType);
         Assert.Equal(RecState.failed, rec.State);
         Assert.Equal("unexpected_exit", rec.StopReason);
         Assert.NotEqual(reason, rec.Error);

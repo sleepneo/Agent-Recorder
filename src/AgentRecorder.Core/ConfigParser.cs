@@ -73,16 +73,24 @@ public static class ConfigParser
                 rec.SourceTitle = $"Test Display ({did})";
                 cap.SourceKind = "display";
                 cap.Bounds = (0, 0, 1920, 1080);
+                cap.DisplayId = did;
+                cap.DisplayBounds = cap.Bounds;
+                cap.DisplayStableIdentity = $"synthetic-test-display:{did}";
+                cap.DisplayIdentityStatus = DisplayIdentityResolutionStatus.Resolved;
             }
             else
             {
-                var d = SystemQuery.EnumDisplays().FirstOrDefault(x => x.id == did)
+                var d = SystemQuery.EnumDisplayTopology().FirstOrDefault(x => x.id == did)
                         ?? throw new ApiException(404, "SOURCE_NOT_FOUND",
                             $"Display {did} not found", new { suggested_action = "list_displays" });
                 rec.SourceType = "display";
                 rec.SourceTitle = d.name;
                 cap.SourceKind = "display";
                 cap.Bounds = (d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height);
+                cap.DisplayId = d.id;
+                cap.DisplayBounds = (d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height);
+                cap.DisplayStableIdentity = d.stable_identity;
+                cap.DisplayIdentityStatus = d.identity_status;
             }
         }
         else if (type == "window")
@@ -93,6 +101,7 @@ public static class ConfigParser
             {
                 rec.SourceType = "window";
                 rec.SourceTitle = $"Test Window ({wid})";
+                rec.SourceApplication = "test-window";
                 cap.SourceKind = "window";
                 cap.WindowTitle = wid;
                 cap.Bounds = (0, 0, 1280, 720);
@@ -129,6 +138,7 @@ public static class ConfigParser
 
                 rec.SourceType = "window";
                 rec.SourceTitle = w.title;
+                rec.SourceApplication = w.app_name;
                 cap.SourceKind = "window";
                 cap.WindowTitle = w.title;
                 cap.WindowHandle = WindowIdParser.Parse(wid);
@@ -166,14 +176,29 @@ public static class ConfigParser
 
             if (!testMode)
             {
-                var d = SystemQuery.EnumDisplays().FirstOrDefault(x => x.id == did)
+                // Resolve public ID, bounds, and the internal identity from one
+                // active topology snapshot. A public ordinal is never used as
+                // a fallback identity when Windows parsing is unavailable.
+                var d = SystemQuery.EnumDisplayTopology().FirstOrDefault(x => x.id == did)
                         ?? throw new ApiException(404, "SOURCE_NOT_FOUND",
                             $"Display {did} not found", new { suggested_action = "list_displays" });
 
+                if (d.identity_status != DisplayIdentityResolutionStatus.Resolved ||
+                    !DisplayIdentityDeriver.IsFixedFormat(d.stable_identity))
+                {
+                    throw new ApiException(503, "DISPLAY_IDENTITY_UNAVAILABLE",
+                        "The selected display identity could not be resolved safely. Retry after the display topology is stable.",
+                        new { suggested_action = "list_displays_and_retry" });
+                }
+
                 // Check bounds are within display
                 var db = d.bounds;
+                long regionRight = (long)bx + bw;
+                long regionBottom = (long)by + bh;
+                long displayRight = (long)db.x + db.width;
+                long displayBottom = (long)db.y + db.height;
                 if (bx < db.x || by < db.y
-                    || bx + bw > db.x + db.width || by + bh > db.y + db.height)
+                    || regionRight > displayRight || regionBottom > displayBottom)
                 {
                     throw new ApiException(400, "INVALID_ARGUMENT",
                         $"Region bounds (x={bx},y={by},w={bw},h={bh}) exceeds display bounds (x={db.x},y={db.y},w={db.width},h={db.height})",
@@ -184,6 +209,10 @@ public static class ConfigParser
                 rec.SourceTitle = $"region:{d.name}";
                 cap.SourceKind = "region";
                 cap.Bounds = (bx, by, normalizedBw, normalizedBh);
+                cap.DisplayId = d.id;
+                cap.DisplayBounds = (db.x, db.y, db.width, db.height);
+                cap.DisplayStableIdentity = d.stable_identity;
+                cap.DisplayIdentityStatus = d.identity_status;
                 cap.RegionNormalizedBounds = wasNormalized ? (normalizedBw, normalizedBh) : null;
             }
             else
@@ -193,6 +222,10 @@ public static class ConfigParser
                 rec.SourceTitle = $"Test Region ({bx},{by},{bw},{bh})";
                 cap.SourceKind = "region";
                 cap.Bounds = (bx, by, normalizedBw, normalizedBh);
+                cap.DisplayId = did;
+                cap.DisplayBounds = (0, 0, 1920, 1080);
+                cap.DisplayStableIdentity = $"synthetic-test-display:{did}";
+                cap.DisplayIdentityStatus = DisplayIdentityResolutionStatus.Resolved;
             }
         }
         else throw new ApiException(400, "UNSUPPORTED_FEATURE",
@@ -445,7 +478,8 @@ public static class ConfigParser
     /// <summary>
     /// Task 64: reject explicit continuous-recording markers before any
     /// source/window/display enumeration happens. This keeps the public API
-    /// boundary frozen: WGC continuous recording is not implemented yet.
+    /// boundary frozen: WGC continuous recording remains an internal controlled
+    /// experiment and is not a public request capability.
     /// </summary>
     private static void RejectUnsupportedContinuousFeatures(JsonNode cfg)
     {
@@ -475,7 +509,7 @@ public static class ConfigParser
     private static ApiException ContinuousUnsupported(string field, string value) =>
         new(400, "UNSUPPORTED_FEATURE",
             $"WGC continuous recording is not implemented. '{field}'='{value}' is not supported. " +
-            "Current supported capabilities: standard FFmpeg recording and WGC still-frame PNG when enabled via feature flag.");
+            "Current public API capabilities remain standard FFmpeg recording; WGC continuous is selected only through controlled internal experiment entry points.");
 
     /// <summary>
     /// Clamps window bounds to the virtual screen bounds so that FFmpeg gdigrab

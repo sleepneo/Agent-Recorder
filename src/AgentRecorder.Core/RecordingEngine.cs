@@ -52,8 +52,12 @@ public sealed class RecordingEngine
     private readonly IRecordingBundleGenerator? _bundleGenerator;
     private readonly IMicrophoneDeviceProvider _microphoneProvider;
     private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
+    private readonly IDisplayTopologyProvider _displayTopologyProvider;
+    private bool _usesDefaultBackendFactory = true;
+    private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
+        CaptureBackendSelector.BuildPlan;
     private Func<CaptureConfig, CaptureBackendSelection>? _backendSelectionFactory =
-        CaptureBackendSelector.SelectWithEvidence;
+        null;
     private readonly object _lock = new();
     private ITrayContext? _tray;
 
@@ -64,8 +68,7 @@ public sealed class RecordingEngine
     /// <summary>
     /// Factory used to select an ICaptureBackend for a given source type.
     /// Default: <c>CaptureBackendSelector.Select(cfg)</c>.
-    /// Replaceable for tests (e.g. to inject a WgcWindowCaptureBackend
-    /// wired to a fake process runner).
+    /// Replaceable for tests that need an injected capture backend.
     /// </summary>
     public Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> BackendFactory
     {
@@ -73,12 +76,17 @@ public sealed class RecordingEngine
         set
         {
             _backendFactory = value ?? throw new ArgumentNullException(nameof(value));
+            _usesDefaultBackendFactory = false;
             _backendSelectionFactory = null;
         }
     }
 
     private Func<CaptureConfig, (ICaptureBackend Backend, string BackendType)> _backendFactory =
-        CaptureBackendSelector.Select;
+        cfg =>
+        {
+            var plan = CaptureBackendSelector.BuildPlan(cfg);
+            return (CaptureBackendSelector.CreateBackend(plan.PlannedBackend), plan.PlannedBackend);
+        };
 
     /// <summary>
     /// Legacy test seam: set a factory that only needs the source kind.
@@ -121,16 +129,28 @@ public sealed class RecordingEngine
         set => _backendSelectionFactory = value;
     }
 
+    /// <summary>
+    /// Test seam for deterministic non-capturing plan revalidation. Production
+    /// uses CaptureBackendSelector.BuildPlan for both plan snapshots.
+    /// </summary>
+    internal Func<CaptureConfig, CapturePlan>? CapturePlanFactoryForTests
+    {
+        get => _capturePlanFactory;
+        set => _capturePlanFactory = value;
+    }
+
     public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null,
         IRecordingBundleGenerator? bundleGenerator = null,
         IMicrophoneDeviceProvider? microphoneProvider = null,
-        IMicrophoneStatusProvider? microphoneStatusProvider = null)
+        IMicrophoneStatusProvider? microphoneStatusProvider = null,
+        IDisplayTopologyProvider? displayTopologyProvider = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _bundleGenerator = bundleGenerator;
         _microphoneProvider = microphoneProvider ?? new EmptyMicrophoneProvider();
         _microphoneStatusProvider = microphoneStatusProvider ?? NullMicrophoneStatusProvider.Instance;
+        _displayTopologyProvider = displayTopologyProvider ?? SystemQueryDisplayTopologyProvider.Instance;
     }
 
     /// <summary>
@@ -230,10 +250,6 @@ public sealed class RecordingEngine
     private static string ResolveTerminalErrorCode(string? backendType, bool microphoneRequested, OutputMeta meta, int exitCode,
         bool fileOk, bool durationOk, bool rangeOk, bool exitOk, bool allowWgcLifecycleReason)
     {
-        bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
-                               string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
-        bool isWgc = string.Equals(backendType, "wgc", StringComparison.OrdinalIgnoreCase);
-
         // Native WGC lifecycle reasons are already authenticated by the
         // helper and must outrank generic exit/file heuristics.
         if (IsWgcContinuousBackend(backendType) &&
@@ -262,16 +278,6 @@ public sealed class RecordingEngine
                 return "microphone_missing_audio_track";
             if (string.Equals(meta.AudioStatus, "start_failed", StringComparison.OrdinalIgnoreCase))
                 return "microphone_start_failed";
-        }
-
-        if (isWgc && isWgcStillFrame)
-        {
-            if (!exitOk) return "wgc_non_zero_exit";
-            if (!meta.OutputFileExists) return "wgc_missing_output";
-            if (!fileOk) return "wgc_empty_output";
-            if (meta.Width == 0 || meta.Height == 0) return "wgc_zero_dimensions";
-            if (meta.OutputFileExists && !meta.IsValidPngSignature) return "wgc_invalid_png_signature";
-            return "wgc_output_validation_failed";
         }
 
         if (!exitOk) return "non_zero_exit";
@@ -422,6 +428,13 @@ public sealed class RecordingEngine
                 });
         }
 
+        // Construct the immutable, non-capturing decision before any local
+        // confirmation is queued. Capability probing is allowed here; backend
+        // construction and all pixel-producing work remain approval-gated.
+        var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+        rec.ApprovedCapturePlan = capturePlan;
+        rec.BackendType = capturePlan.PlannedBackend;
+
         // =====================================================================
         // Phase 4: Final guard + atomic register (prevents race condition where
         // two requests pass Phase-2 check, then both register.)
@@ -509,6 +522,7 @@ public sealed class RecordingEngine
             nested_role = rec.NestedRole ?? "none",
             parent_recording_id = rec.ParentRecordingId ?? ""
         });
+        LogCapturePlan("recording.capture_plan_created", rec, capturePlan, traceId);
 
         bool needConfirm = PolicyEngine.RequiresConfirmation();
 
@@ -536,8 +550,26 @@ public sealed class RecordingEngine
                 expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                 source_type = rec.SourceType,
                 source_title = rec.SourceTitle,
+                source_application = rec.SourceApplication,
+                window_id = capturePlan.TargetIdentity,
                 trace_id = traceId,
                 coordinate_space = "virtual_screen",
+                capture_semantics = capturePlan.CaptureSemantics,
+                planned_backend = capturePlan.PlannedBackend,
+                preview_semantics = capturePlan.CaptureSemantics,
+                selection_reason_code = capturePlan.Evidence.SelectionReasonCode,
+                selection_availability_source = capturePlan.Evidence.AvailabilitySource,
+                selection_fallback = capturePlan.FallbackOccurred,
+                target_display_id = capturePlan.TargetDisplayId ?? "",
+                target_display_bounds = capturePlan.DisplayBounds == null
+                    ? null
+                    : new
+                    {
+                        x = capturePlan.DisplayBounds.X,
+                        y = capturePlan.DisplayBounds.Y,
+                        width = capturePlan.DisplayBounds.Width,
+                        height = capturePlan.DisplayBounds.Height
+                    },
                 capture_bounds = (rec.Config.Bounds.w > 0 && rec.Config.Bounds.h > 0)
                     ? new { x = rec.Config.Bounds.x, y = rec.Config.Bounds.y, width = rec.Config.Bounds.w, height = rec.Config.Bounds.h }
                     : null
@@ -551,6 +583,16 @@ public sealed class RecordingEngine
                     // timeout has already claimed it, this call must not modify
                     // recording state or emit events.
                     if (!conf.TryDecide("approved"))
+                        return;
+
+                    BumpStateVersion();
+                    _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                    _tracer.ConfirmationApproved(traceId, rec.Id, conf.Id);
+
+                    // Revalidate the non-capturing decision before applying any
+                    // output override or starting a countdown/backend. A window
+                    // semantic change fails closed and requires a fresh request.
+                    if (!TryRevalidateCapturePlan(rec, traceId, tray))
                         return;
 
                     var applied = ApplyConfirmationOutputDirectory(rec, decision, conf.Id);
@@ -576,10 +618,6 @@ public sealed class RecordingEngine
                         TrySetIdleOnAllDone(tray);
                         return;
                     }
-
-                    BumpStateVersion();
-                    _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
-                    _tracer.ConfirmationApproved(traceId, rec.Id, conf.Id);
 
                     if (!TryPreflightBeforeStart(rec, conf, tray))
                         return;
@@ -696,6 +734,425 @@ public sealed class RecordingEngine
         return true;
     }
 
+    private bool TryRevalidateCapturePlan(Recording rec, string traceId, ITrayContext tray)
+    {
+        var approved = rec.ApprovedCapturePlan;
+        if (approved == null)
+            return true;
+
+        DisplayTopologySnapshot? currentTopology = null;
+        string? topologyFailure = null;
+        bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
+        if (approvedRegion && !TryValidateApprovedRegionTopology(
+                approved,
+                rec.Config,
+                out currentTopology,
+                out topologyFailure))
+        {
+            // Topology is checked before rebuilding the capability/backend plan.
+            // A stale or malformed region must never reach a backend, helper,
+            // countdown, or output-directory side effect.
+        }
+
+        CapturePlan? revalidated = null;
+        string? failureType = null;
+        if (topologyFailure == null)
+        {
+            try
+            {
+                revalidated = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+            }
+            catch (Exception ex)
+            {
+                failureType = ex.GetType().Name;
+            }
+        }
+
+        bool changed = topologyFailure != null || revalidated == null || IsCapturePlanDrift(approved, revalidated);
+        var approvedDisplayBounds = approved.DisplayBounds == null
+            ? null
+            : new
+            {
+                x = approved.DisplayBounds.X,
+                y = approved.DisplayBounds.Y,
+                width = approved.DisplayBounds.Width,
+                height = approved.DisplayBounds.Height
+            };
+        var currentDisplayBounds = currentTopology.HasValue
+            ? new
+            {
+                x = currentTopology.Value.Bounds.X,
+                y = currentTopology.Value.Bounds.Y,
+                width = currentTopology.Value.Bounds.Width,
+                height = currentTopology.Value.Bounds.Height
+            }
+            : revalidated?.DisplayBounds == null
+                ? null
+                : new
+                {
+                    x = revalidated.DisplayBounds.X,
+                    y = revalidated.DisplayBounds.Y,
+                    width = revalidated.DisplayBounds.Width,
+                    height = revalidated.DisplayBounds.Height
+                };
+        try
+        {
+            _audit.Log("recording.capture_plan_revalidated", new
+            {
+                recording_id = rec.Id,
+                source_type = rec.SourceType,
+                approved_backend = approved.PlannedBackend,
+                approved_semantics = approved.CaptureSemantics,
+                approved_reason_code = approved.Evidence.SelectionReasonCode,
+                revalidated_backend = revalidated?.PlannedBackend ?? "unavailable",
+                revalidated_semantics = revalidated?.CaptureSemantics ?? "unavailable",
+                revalidated_reason_code = revalidated?.Evidence.SelectionReasonCode ?? "plan_unavailable",
+                revalidated_availability_source = revalidated?.Evidence.AvailabilitySource ?? "not_run",
+                approved_display_id = approved.TargetDisplayId ?? "",
+                revalidated_display_id = currentTopology?.PublicId ?? revalidated?.TargetDisplayId ?? "",
+                approved_display_identity_fingerprint = approved.TargetDisplayIdentity ?? "",
+                revalidated_display_identity_fingerprint = ResolvedIdentityForAudit(currentTopology)
+                    ?? revalidated?.TargetDisplayIdentity ?? "",
+                approved_display_bounds = approvedDisplayBounds,
+                revalidated_display_bounds = currentDisplayBounds,
+                topology_status = approvedRegion
+                    ? topologyFailure == null ? "passed" : "failed"
+                    : "not_required",
+                topology_reason = approvedRegion
+                    ? topologyFailure ?? "matched"
+                    : "not_required",
+                semantics_changed = changed,
+                failure_type = topologyFailure ?? failureType ?? ""
+            });
+        }
+        catch { }
+
+        if (_tracer is ICapturePlanPerformanceTracer planTracer)
+        {
+            try
+            {
+                planTracer.CapturePlanRevalidated(
+                    traceId,
+                    rec.Id,
+                    approved.PlannedBackend,
+                    approved.CaptureSemantics,
+                    approved.Evidence.SelectionReasonCode,
+                    revalidated?.PlannedBackend ?? "unavailable",
+                    revalidated?.CaptureSemantics ?? "unavailable",
+                    revalidated?.Evidence.SelectionReasonCode ?? "plan_unavailable",
+                    changed);
+            }
+            catch { }
+        }
+
+        if (!changed)
+            return true;
+
+        const string errorCode = "capture_semantics_changed";
+        MarkBundleNotApplicable(rec);
+        lock (rec)
+        {
+            if (rec.IsFinalized)
+                return false;
+
+            rec.IsFinalized = true;
+            rec.CompletedAtUtc = DateTime.UtcNow;
+            rec.StopReason = errorCode;
+            rec.Error = errorCode;
+            rec.Warnings.Add(errorCode);
+            rec.State = RecState.failed;
+            BumpStateVersion();
+        }
+
+        try
+        {
+            _audit.Log("recording.capture_semantics_changed", new
+            {
+                recording_id = rec.Id,
+                source_type = rec.SourceType,
+                approved_backend = approved.PlannedBackend,
+                approved_semantics = approved.CaptureSemantics,
+                approved_reason_code = approved.Evidence.SelectionReasonCode,
+                revalidated_backend = revalidated?.PlannedBackend ?? "unavailable",
+                revalidated_semantics = revalidated?.CaptureSemantics ?? "unavailable",
+                revalidated_reason_code = revalidated?.Evidence.SelectionReasonCode ?? "plan_unavailable",
+                approved_display_id = approved.TargetDisplayId ?? "",
+                revalidated_display_id = currentTopology?.PublicId ?? revalidated?.TargetDisplayId ?? "",
+                approved_display_identity_fingerprint = approved.TargetDisplayIdentity ?? "",
+                revalidated_display_identity_fingerprint = ResolvedIdentityForAudit(currentTopology)
+                    ?? revalidated?.TargetDisplayIdentity ?? "",
+                approved_display_bounds = approvedDisplayBounds,
+                revalidated_display_bounds = currentDisplayBounds,
+                topology_status = approvedRegion
+                    ? topologyFailure == null ? "passed" : "failed"
+                    : "not_required",
+                topology_reason = approvedRegion
+                    ? topologyFailure ?? "matched"
+                    : "not_required",
+                error_code = errorCode
+            });
+        }
+        catch { }
+
+        _tracer.RecordingTerminal(traceId, rec.Id, status: "failed", stopReason: errorCode, errorCode: errorCode);
+
+        if (tray is IRecordingFailureNotifier notifier)
+        {
+            notifier.ShowRecordingFailure(rec.Id, errorCode);
+        }
+        else
+        {
+            tray.ShowError("Capture semantics changed; retry the request. / 捕获语义已改变，请重新发起请求。" );
+        }
+
+        TrySetIdleOnAllDone(tray);
+        return false;
+    }
+
+    private bool TryValidateApprovedRegionTopology(
+        CapturePlan approved,
+        CaptureConfig currentConfig,
+        out DisplayTopologySnapshot? observedCurrent,
+        out string? failureReason)
+    {
+        observedCurrent = null;
+        failureReason = null;
+
+        if (string.IsNullOrWhiteSpace(approved.TargetDisplayIdentity) ||
+            approved.DisplayBounds == null ||
+            approved.Bounds == null)
+        {
+            failureReason = approved.TargetDisplayIdentityStatus == DisplayIdentityResolutionStatus.Unavailable
+                ? "identity_unavailable"
+                : "identity_unresolved";
+            return false;
+        }
+
+        if (approved.TargetDisplayIdentityStatus != DisplayIdentityResolutionStatus.Resolved)
+        {
+            failureReason = approved.TargetDisplayIdentityStatus == DisplayIdentityResolutionStatus.Unavailable
+                ? "identity_unavailable"
+                : "identity_unresolved";
+            return false;
+        }
+
+        IReadOnlyList<DisplayTopologySnapshot> displays;
+        try
+        {
+            displays = _displayTopologyProvider.GetCurrentDisplays();
+        }
+        catch
+        {
+            failureReason = "topology_provider_failed";
+            return false;
+        }
+
+        if (displays == null)
+        {
+            failureReason = "topology_provider_failed";
+            return false;
+        }
+
+        var matches = displays
+            .Where(display => display.IdentityStatus == DisplayIdentityResolutionStatus.Resolved &&
+                string.Equals(
+                display.StableIdentity,
+                approved.TargetDisplayIdentity,
+                StringComparison.Ordinal))
+            .ToArray();
+
+        if (matches.Length == 0)
+        {
+            var samePublicId = displays
+                .Where(display => string.Equals(
+                    display.PublicId,
+                    approved.TargetDisplayId,
+                    StringComparison.Ordinal))
+                .ToArray();
+            if (samePublicId.Length > 0)
+            {
+                observedCurrent = samePublicId[0];
+                failureReason = samePublicId.Any(display =>
+                    display.IdentityStatus == DisplayIdentityResolutionStatus.Ambiguous)
+                        ? "identity_ambiguous"
+                    : samePublicId.Any(display =>
+                        display.IdentityStatus == DisplayIdentityResolutionStatus.Unavailable)
+                        ? "identity_unavailable"
+                    : samePublicId.Any(display =>
+                        display.IdentityStatus != DisplayIdentityResolutionStatus.Resolved ||
+                        string.IsNullOrWhiteSpace(display.StableIdentity))
+                        ? "identity_unresolved"
+                        : "identity_mismatch";
+                return false;
+            }
+
+            // A single observed display is safe to include in the audit as the
+            // current candidate. It contains only public metadata and bounds.
+            if (displays.Count == 1)
+                observedCurrent = displays[0];
+            failureReason = "identity_missing";
+            return false;
+        }
+
+        observedCurrent = matches[0];
+        if (matches.Length != 1)
+        {
+            failureReason = "identity_ambiguous";
+            return false;
+        }
+
+        var current = matches[0];
+        if (current.IdentityStatus != DisplayIdentityResolutionStatus.Resolved ||
+            string.IsNullOrWhiteSpace(current.StableIdentity))
+        {
+            failureReason = current.IdentityStatus == DisplayIdentityResolutionStatus.Ambiguous
+                ? "identity_ambiguous"
+                : "identity_unresolved";
+            return false;
+        }
+
+        if (current.Bounds != approved.DisplayBounds)
+        {
+            failureReason = "topology_display_bounds_changed";
+            return false;
+        }
+
+        var approvedDisplay = new WgcRegionRect(
+            current.Bounds.X,
+            current.Bounds.Y,
+            current.Bounds.Width,
+            current.Bounds.Height);
+        var approvedRegion = new WgcRegionRect(
+            approved.Bounds.X,
+            approved.Bounds.Y,
+            approved.Bounds.Width,
+            approved.Bounds.Height);
+        if (!WgcRegionGeometry.TryGetCrop(approvedDisplay, approvedRegion, out _, out _))
+        {
+            failureReason = "topology_region_not_contained";
+            return false;
+        }
+
+        // The approved plan is immutable, but keep the live request geometry
+        // under the same containment lock so a stale/mutated request fails
+        // before the backend selection/probe path.
+        var currentRegion = new WgcRegionRect(
+            currentConfig.Bounds.x,
+            currentConfig.Bounds.y,
+            currentConfig.Bounds.w,
+            currentConfig.Bounds.h);
+        if (!WgcRegionGeometry.TryGetCrop(approvedDisplay, currentRegion, out _, out _))
+        {
+            failureReason = "topology_region_not_contained";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsCapturePlanDrift(CapturePlan approved, CapturePlan current)
+    {
+        bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
+        bool currentRegion = string.Equals(current.SourceKind, "region", StringComparison.Ordinal);
+        if (approvedRegion || currentRegion)
+        {
+            if (!approvedRegion || !currentRegion)
+                return true;
+            if (!string.Equals(approved.TargetDisplayIdentity, current.TargetDisplayIdentity, StringComparison.Ordinal))
+                return true;
+            if (approved.TargetDisplayIdentityStatus != current.TargetDisplayIdentityStatus)
+                return true;
+            if (approved.DisplayBounds != current.DisplayBounds || approved.Bounds != current.Bounds)
+                return true;
+            if (!string.Equals(approved.PlannedBackend, current.PlannedBackend, StringComparison.Ordinal))
+                return true;
+            return !string.Equals(approved.CaptureSemantics, current.CaptureSemantics, StringComparison.Ordinal);
+        }
+
+        bool approvedWindow = string.Equals(approved.SourceKind, "window", StringComparison.Ordinal);
+        bool currentWindow = string.Equals(current.SourceKind, "window", StringComparison.Ordinal);
+        if (!approvedWindow && !currentWindow)
+            return false;
+        if (!approvedWindow || !currentWindow)
+            return true;
+
+        if (!string.Equals(approved.TargetIdentity, current.TargetIdentity, StringComparison.Ordinal))
+            return true;
+
+        // TargetIdentity is the privacy-safe summary value, but retain the
+        // native HWND check as an independent lock. A future caller must not
+        // be able to keep a stale identity string while switching the actual
+        // source window handle after confirmation.
+        if (approved.WindowHandle != current.WindowHandle)
+            return true;
+
+        if (!string.Equals(approved.PlannedBackend, current.PlannedBackend, StringComparison.Ordinal))
+            return true;
+
+        if (!string.Equals(approved.CaptureSemantics, current.CaptureSemantics, StringComparison.Ordinal))
+            return true;
+
+        // A window-surface promise may never degrade to a desktop rectangle,
+        // even if another selector result would otherwise be startable.
+        return approved.IsWindowSurface && !current.IsWindowSurface;
+    }
+
+    private static string? ResolvedIdentityForAudit(DisplayTopologySnapshot? topology)
+        => topology.HasValue &&
+            topology.Value.IdentityStatus == DisplayIdentityResolutionStatus.Resolved
+            ? topology.Value.StableIdentity
+            : null;
+
+    private void LogCapturePlan(string eventName, Recording rec, CapturePlan plan, string traceId)
+    {
+        try
+        {
+            _audit.Log(eventName, new
+            {
+                recording_id = rec.Id,
+                source_type = rec.SourceType,
+                target_identity = plan.TargetIdentity ?? "",
+                requested_backend = plan.RequestedBackend,
+                planned_backend = plan.PlannedBackend,
+                capture_semantics = plan.CaptureSemantics,
+                preview_semantics = plan.CaptureSemantics,
+                target_display_id = plan.TargetDisplayId ?? "",
+                target_display_identity_fingerprint = plan.TargetDisplayIdentity ?? "",
+                target_display_bounds = plan.DisplayBounds == null
+                    ? null
+                    : new
+                    {
+                        x = plan.DisplayBounds.X,
+                        y = plan.DisplayBounds.Y,
+                        width = plan.DisplayBounds.Width,
+                        height = plan.DisplayBounds.Height
+                    },
+                selection_reason_code = plan.Evidence.SelectionReasonCode,
+                availability_source = plan.Evidence.AvailabilitySource,
+                availability_elapsed_ms = plan.Evidence.AvailabilityElapsedMs,
+                fallback = plan.FallbackOccurred
+            });
+        }
+        catch { }
+
+        if (_tracer is ICapturePlanPerformanceTracer planTracer)
+        {
+            try
+            {
+                planTracer.CapturePlanCreated(
+                    traceId,
+                    rec.Id,
+                    plan.RequestedBackend,
+                    plan.PlannedBackend,
+                    plan.CaptureSemantics,
+                    plan.Evidence.SelectionReasonCode,
+                    plan.Evidence.AvailabilitySource,
+                    plan.FallbackOccurred);
+            }
+            catch { }
+        }
+    }
+
     /// <summary>
     /// Runs the before-start preflight checks. If they fail, marks the recording
     /// as failed, logs a <c>recording.preflight_failed</c> audit event, shows a
@@ -753,15 +1210,28 @@ public sealed class RecordingEngine
 
     private void StartCapture(Recording rec, string? traceId, ITrayContext tray)
     {
-        // Select backend FIRST, so WGC still-frame backends can signal
-        // "I am synchronous and might complete during Start()".
-        var selectionEvidence = _backendSelectionFactory != null
-            ? _backendSelectionFactory(rec.Config)
-            : null;
-        var selection = selectionEvidence?.AsTuple() ?? BackendFactory(rec.Config);
+        // Production creates the backend only from the already-approved plan.
+        // Legacy test seams may still supply a concrete selection or factory.
+        CaptureBackendSelection? selectionEvidence = null;
+        (ICaptureBackend Backend, string BackendType) selection;
+        if (_backendSelectionFactory != null)
+        {
+            selectionEvidence = _backendSelectionFactory(rec.Config);
+            selection = selectionEvidence.AsTuple();
+        }
+        else if (_usesDefaultBackendFactory && rec.ApprovedCapturePlan != null)
+        {
+            selection = (
+                CaptureBackendSelector.CreateBackend(rec.ApprovedCapturePlan.PlannedBackend),
+                rec.ApprovedCapturePlan.PlannedBackend);
+        }
+        else
+        {
+            selection = BackendFactory(rec.Config);
+        }
         rec.Backend = selection.Backend;
         rec.BackendType = selection.BackendType;
-        var evidence = selectionEvidence?.Evidence ?? new CaptureBackendSelectionEvidence(
+        var evidence = selectionEvidence?.Evidence ?? rec.ApprovedCapturePlan?.Evidence ?? new CaptureBackendSelectionEvidence(
             "default",
             rec.BackendType,
             "custom_backend_factory",
@@ -817,8 +1287,8 @@ public sealed class RecordingEngine
         }
 
         // Hook natural exit BEFORE setting state and BEFORE calling
-        // Backend.Start(). This way a synchronous backend (like WGC
-        // still-frame) can FinalizeRecording() from inside Start(),
+        // Backend.Start(). This way a synchronous backend can
+        // FinalizeRecording() from inside Start(),
         // which will bump state preparing -> completed/failed.
         rec.Backend.OnNaturalExit((exitCode, meta) =>
         {
@@ -930,7 +1400,7 @@ public sealed class RecordingEngine
             {
                 tray.SetPreparing(rec);
             }
-            // Non-observable backends (e.g. WGC still-frame) cannot wait for evidence.
+            // Non-observable backends cannot wait for evidence.
             else if (!rec.IsFinalized)
             {
                 TransitionToRecording(rec, traceId, tray, firstFrameEvidence: null);
@@ -941,8 +1411,7 @@ public sealed class RecordingEngine
             _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
                 rec.BackendType ?? "unknown", "backend_start_exception", ex.GetType().Name);
 
-            // If the backend already finalized itself inside Start() (e.g. a
-            // synchronous WGC still-frame that called OnNaturalExit), do NOT
+            // If the backend already finalized itself inside Start(), do NOT
             // overwrite its terminal state, error, stop reason, output metadata,
             // or audit/tray state. Record a non-terminal diagnostic audit only.
             if (rec.IsFinalized)
@@ -1513,9 +1982,6 @@ public sealed class RecordingEngine
             bool rangeOk = !natural || expected == 0 || (meta.DurationSeconds >= expected * 0.3 && meta.DurationSeconds <= expected * 1.5);
             bool exitOk = exitCode == 0;
 
-            bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
-                                   string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
-
             bool microphoneRequested = rec.Microphone;
             bool audioOk = !microphoneRequested ||
                            string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
@@ -1531,42 +1997,15 @@ public sealed class RecordingEngine
             if (microphoneRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
                 audioOk = false;
 
-            bool success;
-            if (isWgcStillFrame && string.Equals(rec.BackendType, "wgc", StringComparison.OrdinalIgnoreCase))
+            bool success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
+                           !wgcContinuousOutputValidationFailed;
+            if (!success)
             {
-                // WGC still-frame: require valid PNG signature on disk in addition
-                // to exit==0, reasonable size, width/height > 0. This replaces the
-                // previous "warning-only" check so invalid-PNG captures end in
-                // state=failed instead of state=completed.
-                success = exitOk
-                    && meta.OutputFileExists
-                    && fileOk
-                    && meta.Width > 0
-                    && meta.Height > 0
-                    && meta.IsValidPngSignature;
-                if (!success)
-                {
-                    if (!exitOk) rec.Warnings.Add($"wgc_non_zero_exit: helper exit_code={exitCode}");
-                    if (!meta.OutputFileExists) rec.Warnings.Add("wgc_missing_output: helper reported success but output file is absent on disk");
-                    if (!fileOk) rec.Warnings.Add($"wgc_empty_output: file size {meta.SizeBytes} bytes < {minSize}");
-                    if (meta.Width == 0 || meta.Height == 0)
-                        rec.Warnings.Add($"wgc_zero_dimensions: width={meta.Width} height={meta.Height}");
-                    if (meta.OutputFileExists && !meta.IsValidPngSignature)
-                        rec.Warnings.Add("wgc_invalid_png_signature: output file exists but does not start with the standard PNG 8-byte magic header");
-                }
-            }
-            else
-            {
-                success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
-                          !wgcContinuousOutputValidationFailed;
-                if (!success)
-                {
-                    if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
-                    if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
-                    if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
-                    if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
-                    if (!audioOk) rec.Warnings.Add($"microphone_audio_failed: audio_status={meta.AudioStatus ?? "unknown"}");
-                }
+                if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
+                if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
+                if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
+                if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
+                if (!audioOk) rec.Warnings.Add($"microphone_audio_failed: audio_status={meta.AudioStatus ?? "unknown"}");
             }
 
             // Merge backend-produced warnings (e.g. microphone failure evidence)
@@ -1769,12 +2208,10 @@ public sealed class RecordingEngine
         request = null!;
 
         // Bundle is only for successful FFmpeg MP4 recordings.
-        bool isWgcStillFrame = string.Equals(meta.Container, "png", StringComparison.Ordinal) &&
-                               string.Equals(meta.Codec, "still-frame", StringComparison.Ordinal);
         bool isFfmpegMp4 = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) &&
                            string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
 
-        if (_bundleGenerator == null || isWgcStillFrame || !isFfmpegMp4)
+        if (_bundleGenerator == null || !isFfmpegMp4)
             return false;
 
         // Exactly-once guard: natural exit and Stop() may both reach here.
@@ -1974,9 +2411,7 @@ public sealed class RecordingEngine
         var rec = Get(id);
         var elapsed = ComputeElapsedSeconds(rec);
 
-        // For WGC still-frame the actual file lives in meta.OutputPath rather
-        // than rec.OutputPath (which is the FFmpeg output path). Pick the
-        // right one so we read the correct bytes, container, codec for callers.
+        // Prefer the backend-reported output path when available.
         var meta = rec.LastMeta;
         string actualPath = meta?.OutputPath ?? rec.OutputPath;
 
@@ -2044,9 +2479,8 @@ public sealed class RecordingEngine
     public object GetOutput(string id)
     {
         var rec = Get(id);
-        // Prefer the meta already produced by the backend (e.g. WGC still-frame
-        // writes PNG path into meta.OutputPath). Fall back to probing the
-        // FFmpeg output path for legacy recordings that have no LastMeta yet.
+        // Prefer metadata already produced by the backend. Fall back to probing
+        // the FFmpeg output path when no metadata is available.
         var meta = rec.LastMeta;
         if (meta == null)
         {
@@ -2316,14 +2750,10 @@ public sealed class RecordingEngine
         var expectedSecs = rec.DurationSeconds ?? 0;
         var warnings = new List<string>(m.Warnings ?? Array.Empty<string>());
 
-        bool isWgcStillFrame = string.Equals(container, "png", StringComparison.Ordinal) &&
-                               string.Equals(codec, "still-frame", StringComparison.Ordinal);
-
-        // Duration warnings are only meaningful for video streams (FFmpeg).
-        // WGC still-frame intentionally has DurationSeconds=0.
-        // Explicit user/agent stops may legitimately be shorter than planned; skip duration warnings then.
+        // Explicit user/agent stops may legitimately be shorter than planned;
+        // skip duration warnings then.
         bool isUserInitiatedStop = !string.IsNullOrEmpty(rec.StopReason) && rec.StopReason != "duration_reached";
-        if (!isWgcStillFrame && !isUserInitiatedStop)
+        if (!isUserInitiatedStop)
         {
             if (expectedSecs > 0 && m.DurationSeconds < expectedSecs * 0.5 && m.DurationSeconds > 0)
                 warnings.Add($"Actual duration ({m.DurationSeconds:F1}s) is less than expected ({expectedSecs}s). This may indicate a capture issue.");

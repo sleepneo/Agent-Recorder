@@ -3,7 +3,8 @@ namespace AgentRecorder.Capture;
 public enum WgcContinuousTargetKind
 {
     Display,
-    Window
+    Window,
+    Region
 }
 
 /// <summary>
@@ -32,6 +33,18 @@ public sealed class WgcContinuousSessionOptions
 
     /// <summary>Target display height in physical pixels.</summary>
     public int DisplayHeight { get; set; }
+
+    /// <summary>Effective region left coordinate in virtual physical pixels.</summary>
+    public int RegionX { get; set; }
+
+    /// <summary>Effective region top coordinate in virtual physical pixels.</summary>
+    public int RegionY { get; set; }
+
+    /// <summary>Effective region width in physical pixels.</summary>
+    public int RegionWidth { get; set; }
+
+    /// <summary>Effective region height in physical pixels.</summary>
+    public int RegionHeight { get; set; }
 
     /// <summary>Target window HWND. Required only for the Window target.</summary>
     public nint WindowHandle { get; set; }

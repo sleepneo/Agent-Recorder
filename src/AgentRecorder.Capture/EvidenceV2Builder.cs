@@ -201,7 +201,7 @@ public sealed class EvidenceV2Builder
         // recording.backend_selected
         if (!string.IsNullOrEmpty(recId))
         {
-            events.Add(new Dictionary<string, object?> { ["event"] = "recording.backend_selected", ["backend"] = "wgc", ["recording_id"] = recId });
+            events.Add(new Dictionary<string, object?> { ["event"] = "recording.backend_selected", ["backend"] = "wgc-continuous", ["recording_id"] = recId });
         }
 
         // recording.session_started

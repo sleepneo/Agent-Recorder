@@ -2,7 +2,8 @@ namespace AgentRecorder.Capture;
 
 /// <summary>
 /// Raw process-execution result: exit code + stdout/stderr strings.
-/// Deliberately unstructured — used as input to WgcHelperOutputParser.
+/// Deliberately unstructured — used by the continuous WGC probe/session
+/// process boundary.
 /// </summary>
 public sealed class WgcHelperProcessResult
 {

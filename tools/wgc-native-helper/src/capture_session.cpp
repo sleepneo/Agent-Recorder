@@ -118,9 +118,12 @@ HRESULT CopyFrameToBgra(ID3D11Device* device,
                         const winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame& frame,
                         int destWidth,
                         int destHeight,
+                        int sourceOffsetX,
+                        int sourceOffsetY,
                         std::vector<uint8_t>& outPixels) {
     if (!device || !frame) return E_INVALIDARG;
     if (destWidth <= 0 || destHeight <= 0) return E_INVALIDARG;
+    if (sourceOffsetX < 0 || sourceOffsetY < 0) return E_INVALIDARG;
 
     auto surface = frame.Surface();
     if (!surface) return E_FAIL;
@@ -132,60 +135,13 @@ HRESULT CopyFrameToBgra(ID3D11Device* device,
     HRESULT hr = dxgiAccess->GetInterface(__uuidof(ID3D11Texture2D),
                                           reinterpret_cast<void**>(sourceTexture.GetAddressOf()));
     if (FAILED(hr)) return hr;
-
-    D3D11_TEXTURE2D_DESC desc = {};
-    sourceTexture->GetDesc(&desc);
-    const int sourceWidth = static_cast<int>(desc.Width);
-    const int sourceHeight = static_cast<int>(desc.Height);
-    if (destWidth > sourceWidth || destHeight > sourceHeight) {
-        return E_UNEXPECTED;
-    }
-
-    D3D11_TEXTURE2D_DESC stagingDesc = {};
-    stagingDesc.Width = static_cast<UINT>(destWidth);
-    stagingDesc.Height = static_cast<UINT>(destHeight);
-    stagingDesc.MipLevels = 1;
-    stagingDesc.ArraySize = 1;
-    stagingDesc.SampleDesc.Count = 1;
-    stagingDesc.SampleDesc.Quality = 0;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
-    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTexture;
-    hr = device->CreateTexture2D(&stagingDesc, nullptr, stagingTexture.GetAddressOf());
-    if (FAILED(hr)) return hr;
-
-    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
-    device->GetImmediateContext(context.GetAddressOf());
-
-    D3D11_BOX srcBox = {};
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.front = 0;
-    srcBox.right = static_cast<UINT>(destWidth);
-    srcBox.bottom = static_cast<UINT>(destHeight);
-    srcBox.back = 1;
-    context->CopySubresourceRegion(stagingTexture.Get(), 0, 0, 0, 0,
-                                   sourceTexture.Get(), 0, &srcBox);
-
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return hr;
-
-    const UINT rowPitch = mapped.RowPitch;
-    const UINT destRowPitch = static_cast<UINT>(destWidth) * 4;
-    outPixels.resize(static_cast<size_t>(destRowPitch) * destHeight);
-    for (int row = 0; row < destHeight; ++row) {
-        const uint8_t* src = static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(row) * rowPitch;
-        uint8_t* dst = outPixels.data() + static_cast<size_t>(row) * destRowPitch;
-        std::memcpy(dst, src, destRowPitch);
-    }
-
-    context->Unmap(stagingTexture.Get(), 0);
-    return S_OK;
+    return CopyTextureRegionToBgra(device,
+                                   sourceTexture.Get(),
+                                   sourceOffsetX,
+                                   sourceOffsetY,
+                                   destWidth,
+                                   destHeight,
+                                   outPixels);
 }
 
 int64_t GetFileSize(const std::wstring& path) {
@@ -454,6 +410,97 @@ struct ScopedThread {
 
 } // namespace
 
+HRESULT CopyTextureRegionToBgra(ID3D11Device* device,
+                                ID3D11Texture2D* sourceTexture,
+                                int sourceOffsetX,
+                                int sourceOffsetY,
+                                int destWidth,
+                                int destHeight,
+                                std::vector<uint8_t>& outPixels) {
+    outPixels.clear();
+    if (!device || !sourceTexture ||
+        sourceOffsetX < 0 || sourceOffsetY < 0 ||
+        destWidth <= 0 || destHeight <= 0 ||
+        static_cast<uint64_t>(destWidth) > std::numeric_limits<UINT>::max() ||
+        static_cast<uint64_t>(destHeight) > std::numeric_limits<UINT>::max()) {
+        return E_INVALIDARG;
+    }
+
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    sourceTexture->GetDesc(&sourceDesc);
+    if (sourceDesc.Width == 0 || sourceDesc.Height == 0 ||
+        sourceDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        return E_INVALIDARG;
+    }
+
+    const uint64_t sourceRight = static_cast<uint64_t>(sourceOffsetX) +
+                                 static_cast<uint64_t>(destWidth);
+    const uint64_t sourceBottom = static_cast<uint64_t>(sourceOffsetY) +
+                                  static_cast<uint64_t>(destHeight);
+    if (static_cast<uint64_t>(sourceOffsetX) >= sourceDesc.Width ||
+        static_cast<uint64_t>(sourceOffsetY) >= sourceDesc.Height ||
+        sourceRight > sourceDesc.Width ||
+        sourceBottom > sourceDesc.Height) {
+        return E_UNEXPECTED;
+    }
+
+    const size_t destRowBytes = static_cast<size_t>(destWidth) * 4u;
+    if (destRowBytes / 4u != static_cast<size_t>(destWidth) ||
+        static_cast<size_t>(destHeight) > std::numeric_limits<size_t>::max() / destRowBytes) {
+        return E_INVALIDARG;
+    }
+    const size_t outputBytes = destRowBytes * static_cast<size_t>(destHeight);
+
+    D3D11_TEXTURE2D_DESC stagingDesc = {};
+    stagingDesc.Width = static_cast<UINT>(destWidth);
+    stagingDesc.Height = static_cast<UINT>(destHeight);
+    stagingDesc.MipLevels = 1;
+    stagingDesc.ArraySize = 1;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.SampleDesc.Quality = 0;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTexture;
+    HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, stagingTexture.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(context.GetAddressOf());
+    if (!context) return E_FAIL;
+
+    D3D11_BOX srcBox = {};
+    srcBox.left = static_cast<UINT>(sourceOffsetX);
+    srcBox.top = static_cast<UINT>(sourceOffsetY);
+    srcBox.front = 0;
+    srcBox.right = static_cast<UINT>(sourceRight);
+    srcBox.bottom = static_cast<UINT>(sourceBottom);
+    srcBox.back = 1;
+    context->CopySubresourceRegion(stagingTexture.Get(), 0, 0, 0, 0,
+                                   sourceTexture, 0, &srcBox);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    hr = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr) || !mapped.pData || mapped.RowPitch < destRowBytes) {
+        if (SUCCEEDED(hr)) context->Unmap(stagingTexture.Get(), 0);
+        return FAILED(hr) ? hr : E_UNEXPECTED;
+    }
+
+    outPixels.resize(outputBytes);
+    for (int row = 0; row < destHeight; ++row) {
+        const uint8_t* src = static_cast<const uint8_t*>(mapped.pData) +
+                             static_cast<size_t>(row) * mapped.RowPitch;
+        uint8_t* dst = outPixels.data() + static_cast<size_t>(row) * destRowBytes;
+        std::memcpy(dst, src, destRowBytes);
+    }
+
+    context->Unmap(stagingTexture.Get(), 0);
+    return S_OK;
+}
+
 void WriteTerminalOutcome(EventWriter& writer, const CaptureOutcome& outcome) {
     switch (outcome.result) {
         case CaptureResult::Failed:
@@ -545,15 +592,19 @@ CaptureOutcome CaptureSession::Run() {
     winrt::event_token itemClosedToken{};
 
     if (options_.mode != CaptureMode::ContinuousDisplay &&
-        options_.mode != CaptureMode::ContinuousWindow) {
+        options_.mode != CaptureMode::ContinuousWindow &&
+        options_.mode != CaptureMode::ContinuousRegion) {
         return MakeEarlyFail("invalid_target", "Unsupported continuous capture target");
     }
 
     int sourceWidth = 64;
     int sourceHeight = 64;
+    int cropOffsetX = 0;
+    int cropOffsetY = 0;
     MonitorEnumContext monitorCtx;
     if (!hooks_.useSyntheticPlatformResources) {
-        if (options_.mode == CaptureMode::ContinuousDisplay) {
+        if (options_.mode == CaptureMode::ContinuousDisplay ||
+            options_.mode == CaptureMode::ContinuousRegion) {
             monitorCtx.target = options_.displayBounds;
             ::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&monitorCtx));
             if (monitorCtx.match == nullptr) {
@@ -612,7 +663,8 @@ CaptureOutcome CaptureSession::Run() {
                                      "Failed to get GraphicsCaptureItem factory");
             }
             winrt::Windows::Graphics::Capture::GraphicsCaptureItem abiItem{nullptr};
-            if (options_.mode == CaptureMode::ContinuousDisplay) {
+            if (options_.mode == CaptureMode::ContinuousDisplay ||
+                options_.mode == CaptureMode::ContinuousRegion) {
                 hr = factory->CreateForMonitor(
                     monitorCtx.match,
                     winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),
@@ -639,10 +691,17 @@ CaptureOutcome CaptureSession::Run() {
         const auto displaySize = item.Size();
         sourceWidth = displaySize.Width;
         sourceHeight = displaySize.Height;
+        if (options_.mode == CaptureMode::ContinuousRegion &&
+            (sourceWidth != options_.displayBounds.width ||
+             sourceHeight != options_.displayBounds.height)) {
+            return MakeEarlyFail("display_size_mismatch",
+                                 "WGC display item size does not match display-bounds");
+        }
     } else if (hooks_.onCreateCaptureItem) {
         CaptureSessionTestTargetRequest request;
         request.mode = options_.mode;
         request.displayBounds = options_.displayBounds;
+        request.regionBounds = options_.regionBounds;
         request.windowHwnd = options_.windowHwnd;
         try {
             hr = hooks_.onCreateCaptureItem(request);
@@ -662,7 +721,21 @@ CaptureOutcome CaptureSession::Run() {
 
     int captureWidth = 0;
     int captureHeight = 0;
-    if (!ComputeCaptureDimensions(sourceWidth, sourceHeight, captureWidth, captureHeight)) {
+    if (options_.mode == CaptureMode::ContinuousRegion) {
+        if (!TryGetRegionCrop(options_.displayBounds, options_.regionBounds,
+                              cropOffsetX, cropOffsetY)) {
+            return MakeEarlyFail("invalid_region_bounds",
+                                 "Region bounds are not an even, contained crop of display-bounds");
+        }
+        if (!ComputeCaptureDimensions(options_.regionBounds.width,
+                                      options_.regionBounds.height,
+                                      captureWidth, captureHeight)) {
+            return MakeEarlyFail("region_size_unsupported",
+                                 std::format("Region size {}x{} is too small for capture",
+                                             options_.regionBounds.width,
+                                             options_.regionBounds.height));
+        }
+    } else if (!ComputeCaptureDimensions(sourceWidth, sourceHeight, captureWidth, captureHeight)) {
         return MakeEarlyFail(options_.mode == CaptureMode::ContinuousWindow
                                  ? "window_size_unsupported"
                                  : "display_size_unsupported",
@@ -949,7 +1022,8 @@ CaptureOutcome CaptureSession::Run() {
                     }
                 } else {
                     copyHr = CopyFrameToBgra(d3dDevice.Get(), qf.frame,
-                                             captureWidth, captureHeight, pixels);
+                                             captureWidth, captureHeight,
+                                             cropOffsetX, cropOffsetY, pixels);
                 }
                 if (qf.frame) {
                     try { qf.frame.Close(); } catch (...) {}
@@ -1178,11 +1252,13 @@ CaptureOutcome CaptureSession::Run() {
 
     const auto deadline = beginTime + std::chrono::milliseconds(options_.durationMs);
 
+    const char* captureMethod = options_.mode == CaptureMode::ContinuousWindow
+        ? "WGC_D3D11_WINDOW_FRAME_STREAM"
+        : options_.mode == CaptureMode::ContinuousRegion
+            ? "WGC_D3D11_REGION_FRAME_STREAM"
+            : "WGC_D3D11_FRAME_STREAM";
     writer_.Started(WideToUtf8(options_.recordingId), outputPath_, options_.fps,
-                    captureWidth, captureHeight,
-                    options_.mode == CaptureMode::ContinuousWindow
-                        ? "WGC_D3D11_WINDOW_FRAME_STREAM"
-                        : "WGC_D3D11_FRAME_STREAM");
+                    captureWidth, captureHeight, captureMethod);
     if (hooks_.onStarted) {
         hooks_.onStarted();
     }

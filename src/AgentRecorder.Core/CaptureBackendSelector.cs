@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
@@ -12,6 +13,9 @@ public static class CaptureBackendSelector
 {
     public const string WgcEnvVar = "AGENT_RECORDER_WINDOW_BACKEND";
     public const string DisplayBackendEnvVar = "AGENT_RECORDER_DISPLAY_BACKEND";
+    public const string RegionBackendEnvVar = "AGENT_RECORDER_REGION_BACKEND";
+    public const string WgcContinuousBackend = "wgc-continuous";
+    public const string WgcLegacyAlias = "wgc";
 
     private static readonly IWgcContinuousAvailabilityProbe DefaultDisplayProbe =
         new WgcContinuousAvailabilityProbe();
@@ -30,10 +34,19 @@ public static class CaptureBackendSelector
         IWgcContinuousAvailabilityProbe displayProbe) =>
         SelectWithEvidence(cfg, displayProbe).AsTuple();
 
-    public static CaptureBackendSelection SelectWithEvidence(CaptureConfig cfg) =>
-        SelectWithEvidence(cfg, DefaultDisplayProbe);
+    /// <summary>
+    /// Builds a complete capture decision without constructing or starting a
+    /// backend. This is the only selector entry point used before confirmation.
+    /// </summary>
+    public static CapturePlan BuildPlan(CaptureConfig cfg) =>
+        BuildPlan(cfg, DefaultDisplayProbe);
 
-    public static CaptureBackendSelection SelectWithEvidence(
+    /// <summary>
+    /// Builds a complete capture decision without constructing or starting a
+    /// backend. The WGC availability probe is capability-only and does not read
+    /// screen pixels.
+    /// </summary>
+    public static CapturePlan BuildPlan(
         CaptureConfig cfg,
         IWgcContinuousAvailabilityProbe displayProbe)
     {
@@ -46,10 +59,43 @@ public static class CaptureBackendSelector
         }
 
         var decision = Determine(cfg, displayProbe);
-        return new CaptureBackendSelection(
-            CreateBackend(decision.BackendType),
+        return new CapturePlan(
+            decision.Evidence.RequestedBackend,
             decision.BackendType,
-            decision.Evidence);
+            decision.Evidence,
+            DetermineSemantics(cfg.SourceKind, decision.BackendType),
+            cfg.SourceKind,
+            cfg.SourceKind == "window" && cfg.WindowHandle != nint.Zero
+                ? $"window_{cfg.WindowHandle.ToInt64()}"
+                : null,
+            cfg.WindowHandle,
+            cfg.Bounds.w > 0 && cfg.Bounds.h > 0
+                ? new CapturePlanBounds(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h)
+                : null,
+            cfg.SourceKind == "region" ? cfg.DisplayStableIdentity : null,
+            cfg.DisplayBounds.HasValue
+                ? new CapturePlanBounds(
+                    cfg.DisplayBounds.Value.x,
+                    cfg.DisplayBounds.Value.y,
+                    cfg.DisplayBounds.Value.w,
+                    cfg.DisplayBounds.Value.h)
+                : null,
+            cfg.SourceKind is "region" or "display" ? cfg.DisplayId : null,
+            cfg.DisplayIdentityStatus);
+    }
+
+    public static CaptureBackendSelection SelectWithEvidence(CaptureConfig cfg) =>
+        SelectWithEvidence(cfg, DefaultDisplayProbe);
+
+    public static CaptureBackendSelection SelectWithEvidence(
+        CaptureConfig cfg,
+        IWgcContinuousAvailabilityProbe displayProbe)
+    {
+        var plan = BuildPlan(cfg, displayProbe);
+        return new CaptureBackendSelection(
+            CreateBackend(plan.PlannedBackend),
+            plan.PlannedBackend,
+            plan.Evidence);
     }
 
     public static string SelectBackendType(CaptureConfig cfg) =>
@@ -70,6 +116,26 @@ public static class CaptureBackendSelector
             || string.Equals(backendType, "ffmpeg-window-region-av-split", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Normalizes the headless/startup argument contract. The empty value keeps
+    /// WGC disabled; the historical <c>wgc</c> spelling is accepted only as an
+    /// alias and never survives into the process environment or capture plan.
+    /// </summary>
+    public static string NormalizeWindowBackendArgument(string? value)
+    {
+        string normalized = value?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+            return string.Empty;
+
+        if (string.Equals(normalized, WgcLegacyAlias, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, WgcContinuousBackend, StringComparison.OrdinalIgnoreCase))
+            return WgcContinuousBackend;
+
+        throw new ArgumentException(
+            $"Unsupported window backend '{value}'. Expected empty, '{WgcContinuousBackend}', or legacy alias '{WgcLegacyAlias}'.",
+            nameof(value));
+    }
+
     private static BackendDecision Determine(
         CaptureConfig cfg,
         IWgcContinuousAvailabilityProbe displayProbe)
@@ -80,8 +146,89 @@ public static class CaptureBackendSelector
         if (string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal))
             return DetermineWindow(cfg, displayProbe);
 
+        if (string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal))
+            return DetermineRegion(cfg, displayProbe);
+
         string regionBackend = cfg.Microphone ? "ffmpeg-region-av-split" : "ffmpeg-region";
         return DefaultDecision(regionBackend, "default_backend");
+    }
+
+    private static BackendDecision DetermineRegion(
+        CaptureConfig cfg,
+        IWgcContinuousAvailabilityProbe probe)
+    {
+        string fallbackBackend = cfg.Microphone ? "ffmpeg-region-av-split" : "ffmpeg-region";
+        string? flag = Environment.GetEnvironmentVariable(RegionBackendEnvVar);
+        if (!string.Equals(flag, WgcContinuousBackend, StringComparison.Ordinal))
+        {
+            return new BackendDecision(
+                fallbackBackend,
+                new CaptureBackendSelectionEvidence(
+                    "default",
+                    fallbackBackend,
+                    "experiment_disabled",
+                    "not_run",
+                    null,
+                    false));
+        }
+
+        const string requestedBackend = WgcContinuousBackend;
+        if (cfg.Microphone)
+            return FallbackDecision(fallbackBackend, requestedBackend, "microphone_not_eligible");
+        if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
+            return FallbackDecision(fallbackBackend, requestedBackend, "duration_not_eligible");
+        if (cfg.Fps is < 1 or > 60)
+            return FallbackDecision(fallbackBackend, requestedBackend, "fps_not_eligible");
+        if (cfg.Bounds.w <= 0 || cfg.Bounds.h <= 0 ||
+            !cfg.DisplayBounds.HasValue || string.IsNullOrWhiteSpace(cfg.DisplayId))
+            return FallbackDecision(fallbackBackend, requestedBackend, "region_bounds_not_eligible");
+
+        var display = cfg.DisplayBounds.Value;
+        if (!WgcRegionGeometry.TryGetCrop(
+                new WgcRegionRect(display.x, display.y, display.w, display.h),
+                new WgcRegionRect(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h),
+                out _, out _))
+            return FallbackDecision(fallbackBackend, requestedBackend, "region_bounds_not_eligible");
+
+        WgcContinuousAvailabilityResult availability;
+        try
+        {
+            availability = probe.Check(cfg);
+        }
+        catch
+        {
+            availability = new WgcContinuousAvailabilityResult(false, "probe_exception", "fresh_probe", 0);
+        }
+
+        string source = NormalizeAvailabilitySource(availability.AvailabilitySource);
+        bool evidenceHasTargetDisplay = availability.Evidence?.Monitors.Count(m =>
+            cfg.DisplayBounds.HasValue &&
+            m.Equals(new WgcMonitorBounds(
+                cfg.DisplayBounds.Value.x,
+                cfg.DisplayBounds.Value.y,
+                cfg.DisplayBounds.Value.w,
+                cfg.DisplayBounds.Value.h))) == 1;
+        bool available = availability.Available && evidenceHasTargetDisplay;
+        string reason = available
+            ? source switch
+            {
+                "cache_hit" => "wgc_cache_hit",
+                "single_flight" => "wgc_single_flight",
+                _ => "wgc_probe_success"
+            }
+            : availability.Available && !evidenceHasTargetDisplay
+                ? "probe_bounds_mismatch"
+                : NormalizeProbeReason(availability.ReasonCode);
+
+        return new BackendDecision(
+            available ? WgcContinuousBackend : fallbackBackend,
+            new CaptureBackendSelectionEvidence(
+                requestedBackend,
+                available ? WgcContinuousBackend : fallbackBackend,
+                reason,
+                source,
+                availability.ElapsedMs,
+                !available));
     }
 
     private static BackendDecision DetermineWindow(
@@ -89,20 +236,16 @@ public static class CaptureBackendSelector
         IWgcContinuousAvailabilityProbe probe)
     {
         var flag = Environment.GetEnvironmentVariable(WgcEnvVar)?.Trim() ?? "";
-        if (string.Equals(flag, "wgc", StringComparison.OrdinalIgnoreCase))
-        {
-            // Preserve the legacy prototype exactly. Its microphone behavior
-            // is intentionally outside the continuous-window experiment.
-            return DefaultDecision("wgc", "window_backend_selected");
-        }
+        if (string.Equals(flag, WgcLegacyAlias, StringComparison.OrdinalIgnoreCase))
+            flag = WgcContinuousBackend;
 
-        if (!string.Equals(flag, "wgc-continuous", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(flag, WgcContinuousBackend, StringComparison.OrdinalIgnoreCase))
         {
             string backendType = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
             return DefaultDecision(backendType, "window_backend_selected");
         }
 
-        const string requestedBackend = "wgc-continuous";
+        const string requestedBackend = WgcContinuousBackend;
         string fallbackBackend = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
         if (cfg.Microphone)
             return FallbackDecision(fallbackBackend, requestedBackend, "microphone_not_eligible");
@@ -138,10 +281,10 @@ public static class CaptureBackendSelector
         if (availability.Available)
         {
             return new BackendDecision(
-                "wgc-continuous",
+                WgcContinuousBackend,
                 new CaptureBackendSelectionEvidence(
                     requestedBackend,
-                    "wgc-continuous",
+                    WgcContinuousBackend,
                     reason,
                     source,
                     availability.ElapsedMs,
@@ -262,17 +405,44 @@ public static class CaptureBackendSelector
                 null,
                 false));
 
-    private static ICaptureBackend CreateBackend(string backendType) =>
+    /// <summary>
+    /// Constructs a backend after the caller has completed confirmation and
+    /// plan revalidation. This method has no role in plan construction.
+    /// </summary>
+    public static ICaptureBackend CreateBackend(string backendType) =>
         backendType switch
         {
             "wgc-continuous" => new WgcContinuousCaptureBackend(),
-            "wgc" => new WgcWindowCaptureBackend(),
             "ffmpeg-av-split" or "ffmpeg-window-region-av-split" or "ffmpeg-region-av-split"
                 => new AvSplitCaptureBackend(),
             "ffmpeg" or "ffmpeg-window-region" or "ffmpeg-region"
                 => new FfmpegCaptureBackend(),
             _ => throw new InvalidOperationException("Unknown capture backend decision.")
         };
+
+    internal static string DetermineSemanticsForTests(string sourceKind, string backendType) =>
+        DetermineSemantics(sourceKind, backendType);
+
+    private static string DetermineSemantics(string sourceKind, string backendType)
+    {
+        if (string.Equals(sourceKind, "window", StringComparison.Ordinal))
+        {
+            return backendType switch
+            {
+                "wgc-continuous" => "window_surface",
+                "ffmpeg-window-region" or "ffmpeg-window-region-av-split" => "screen_rectangle",
+                _ => throw new ApiException(
+                    500,
+                    "CAPTURE_SEMANTICS_UNKNOWN",
+                    $"Capture backend '{backendType}' has no declared window capture semantics.")
+            };
+        }
+
+        if (string.Equals(sourceKind, "display", StringComparison.Ordinal))
+            return "display_surface";
+
+        return "region_rectangle";
+    }
 
     private static bool IsDisplayExperimentEnabled()
     {
@@ -295,6 +465,7 @@ public static class CaptureBackendSelector
             or "probe_d3d11_uninitialized" or "probe_encoder_unavailable"
             or "probe_bounds_mismatch" or "probe_window_unsupported" or "probe_exception"
             or "window_handle_not_eligible" or "bounds_not_eligible"
+            or "region_bounds_not_eligible" or "display_identity_not_eligible"
             => reason,
         _ => "probe_unavailable"
     };

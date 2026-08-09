@@ -116,3 +116,30 @@ Context files are written using a random temp file in the same directory and ato
   that set `audio.system_audio.enabled=true` fail fast with
   `CAPABILITY_NOT_IMPLEMENTED` and never reach confirmation or capture.
 - Microphone discovery supports both the bundled FFmpeg classic dshow listing and the FFmpeg 8.x tagged format. The parser accepts only trusted logger prefixes and complete records; malformed, incomplete, or conflicting listings fail closed as `unavailable`, and partial device lists are never returned. See [API reference](api.md#get-audiodevices) for the exact grammar and response contract.
+
+## Truthful window confirmation
+
+The consent boundary also locks the meaning of a window request. The pre-confirmation
+plan may run a capability-only WGC probe, but it must not construct a backend, start a
+capture pipeline, or deliver screen pixels to Agent Recorder.
+
+`window_surface` is rendered in the confirmation form only through a disposable DWM
+thumbnail registered against the confirmation HWND. Source pixels are composed by
+Windows and are never read back, copied with GDI, written to a temporary screenshot,
+or captured through WGC frames. If DWM cannot display it, the UI shows the target
+title/application and the promised window-surface semantics as an identity-only
+fallback. `screen_rectangle` is the composed desktop area captured by the FFmpeg
+window-region path and may include covering windows; it keeps the existing GDI
+screen-area preview and is labeled accordingly.
+
+Immediately before countdown and capture authorization, the engine recomputes the
+non-capturing plan. A window semantic or target identity change fails closed with
+`capture_semantics_changed`, before countdown, REC/stop controls, helper/FFmpeg
+startup, or output creation. The user must retry with a fresh confirmation.
+
+Experimental WGC region plans apply the same boundary to display topology. The
+public `display_N` ordinal is kept separate from an internal stable display
+fingerprint. After approval, the engine rereads active target metadata and verifies
+target availability, stable identity, display bounds, and region containment before
+countdown or helper authorization. Hotplug, target replacement, display movement,
+or size changes therefore fail closed without creating capture output.

@@ -1174,7 +1174,7 @@ public class ConfirmationFormTests
             var infoPanelClient = form.InfoPanelClientRectangleForTests;
             var rows = form.GetInfoRowBoundsRelativeToInfoPanelForTests();
 
-            Assert.Equal(10, rows.Count);
+            Assert.Equal(11, rows.Count);
 
             for (int i = 0; i < rows.Count; i++)
             {
@@ -1491,7 +1491,7 @@ public class ConfirmationFormTests
 
             var mainContent = form.MainContentPanelBoundsForTests;
             var rows = form.GetInfoRowBoundsForTests();
-            Assert.Equal(10, rows.Count);
+            Assert.Equal(11, rows.Count);
 
             for (int i = 0; i < rows.Count; i++)
             {
