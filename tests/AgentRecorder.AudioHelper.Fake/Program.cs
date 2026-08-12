@@ -58,6 +58,7 @@ internal static class Program
         int? floodEvents = null;
         bool longLine = false;
         bool largeBlock = false;
+        bool duplicateSourceFail = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -121,6 +122,8 @@ internal static class Program
                 longLine = true;
             else if (string.Equals(arg, "--large-block", StringComparison.OrdinalIgnoreCase))
                 largeBlock = true;
+            else if (string.Equals(arg, "--duplicate-source-fail", StringComparison.OrdinalIgnoreCase))
+                duplicateSourceFail = true;
         }
 
         recordingId ??= "rec_fake";
@@ -154,6 +157,12 @@ internal static class Program
             EmitFail(failCode, failReason ?? "fake failure", recordingId);
             if (failThenExitZero)
                 return 0;
+            return 1;
+        }
+
+        if (duplicateSourceFail)
+        {
+            EmitDuplicateSourceFail(recordingId);
             return 1;
         }
 
@@ -360,6 +369,17 @@ internal static class Program
         WriteLine("Reason", reason);
         WriteLine("RecordingId", recordingId);
         WriteLine("BytesWritten", 0);
+        EndBlock();
+    }
+
+    private static void EmitDuplicateSourceFail(string recordingId)
+    {
+        WriteLine("RESULT", "FAIL");
+        WriteLine("ErrorCode", "audio_capture_error");
+        WriteLine("Reason", "duplicate source test");
+        WriteLine("RecordingId", recordingId);
+        WriteLine("AudioSourceKind", "microphone");
+        WriteLine("AudioSourceKind", "system-loopback");
         EndBlock();
     }
 

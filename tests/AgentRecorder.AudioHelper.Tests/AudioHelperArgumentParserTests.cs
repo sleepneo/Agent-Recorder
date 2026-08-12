@@ -26,6 +26,91 @@ public class AudioHelperArgumentParserTests
         Assert.Equal("C:\\temp\\stop.signal", result.Options.StopSignalPath);
         Assert.Equal("rec_abc123", result.Options.RecordingId);
         Assert.Equal(AudioCaptureEngine.WasapiDirect, result.Options.CaptureEngine);
+        Assert.Equal(AudioSourceKind.Microphone, result.Options.SourceKind);
+    }
+
+    [Theory]
+    [InlineData("microphone", "Microphone")]
+    [InlineData("MICROPHONE", "Microphone")]
+    [InlineData("system-loopback", "SystemLoopback")]
+    [InlineData("SYSTEM-LOOPBACK", "SystemLoopback")]
+    public void Parse_SourceKind_NormalizesKnownValues(string value, string expectedName)
+    {
+        var result = AudioHelperArgumentParser.Parse(new[]
+        {
+            "--endpoint-id", "endpoint",
+            "--output", "C:\\temp\\rec.wav",
+            "--allowed-root", "C:\\temp",
+            "--stop-signal", "C:\\temp\\stop.signal",
+            "--recording-id", "rec_1",
+            "--source-kind", value
+        });
+
+        Assert.True(result.Ok);
+        Assert.Equal(expectedName, result.Options.SourceKind.ToString());
+    }
+
+    [Theory]
+    [InlineData("screen")]
+    [InlineData("")]
+    public void Parse_SourceKind_UnknownOrEmptyReturnsError(string value)
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--source-kind", value });
+
+        Assert.False(result.Ok);
+        Assert.Contains("source", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parse_SourceKindMissingValueReturnsError()
+    {
+        var result = AudioHelperArgumentParser.Parse(new[] { "--source-kind" });
+
+        Assert.False(result.Ok);
+        Assert.Contains("Missing value", result.Error);
+    }
+
+    [Fact]
+    public void Parse_LoopbackRejectsWindowsMediaCaptureAndHfpArguments()
+    {
+        var common = new[]
+        {
+            "--endpoint-id", "render",
+            "--output", "C:\\temp\\rec.wav",
+            "--allowed-root", "C:\\temp",
+            "--stop-signal", "C:\\temp\\stop.signal",
+            "--recording-id", "rec_1",
+            "--source-kind", "system-loopback"
+        };
+
+        var mediaCapture = AudioHelperArgumentParser.Parse(common.Concat(new[]
+        {
+            "--capture-engine", "windows-mediacapture"
+        }).ToArray());
+        var explicitHfp = AudioHelperArgumentParser.Parse(common.Concat(new[]
+        {
+            "--hfp-render-endpoint-id", "render-hfp"
+        }).ToArray());
+        var autoHfp = AudioHelperArgumentParser.Parse(common.Concat(new[] { "--auto-hfp-pair" }).ToArray());
+
+        Assert.False(mediaCapture.Ok);
+        Assert.False(explicitHfp.Ok);
+        Assert.False(autoHfp.Ok);
+        Assert.Contains("system-loopback", mediaCapture.Error);
+        Assert.Contains("system-loopback", explicitHfp.Error);
+        Assert.Contains("system-loopback", autoHfp.Error);
+    }
+
+    [Fact]
+    public void Parse_ProbeAndVersionRejectSourceKind()
+    {
+        var probe = AudioHelperArgumentParser.Parse(new[] { "--probe", "--source-kind", "system-loopback" });
+        var version = AudioHelperArgumentParser.Parse(new[] { "--version", "--source-kind", "microphone" });
+
+        Assert.False(probe.Ok);
+        Assert.False(version.Ok);
+        Assert.Contains("cannot be mixed", probe.Error);
+        Assert.Contains("cannot be mixed", version.Error);
     }
 
     [Theory]

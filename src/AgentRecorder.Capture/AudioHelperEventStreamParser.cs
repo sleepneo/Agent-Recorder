@@ -76,6 +76,15 @@ public static class AudioHelperEventStreamParser
             if (!seenKeys.Add(key))
             {
                 evt.DuplicateField = true;
+                if (key == "AudioSourceKind")
+                    evt.AudioSourceKindDuplicate = true;
+                continue;
+            }
+
+            if (key == "AudioSourceKind" &&
+                (value.Length > 4096 || value.Any(char.IsControl)))
+            {
+                evt.AudioSourceKindInvalid = true;
                 continue;
             }
 
@@ -96,6 +105,11 @@ public static class AudioHelperEventStreamParser
                     break;
                 case "RecordingId":
                     evt.RecordingId = value;
+                    break;
+                case "AudioSourceKind":
+                    evt.AudioSourceKind = value;
+                    evt.AudioSourceKindInvalid =
+                        value != "microphone" && value != "system-loopback";
                     break;
                 case "SampleRate":
                     if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sr))
@@ -324,7 +338,10 @@ public static class AudioHelperEventStreamParser
         bool seenStarted = false;
         bool seenTerminalEvent = false;
         bool hasMalformedSequence = false;
+        bool hasMalformedSourceMetadata = false;
+        bool? sourceAwareStream = null;
         string? firstRecordingId = null;
+        string? firstAudioSourceKind = null;
 
         long lastElapsedMs = -1;
         long lastWallElapsedMs = -1;
@@ -338,8 +355,96 @@ public static class AudioHelperEventStreamParser
                 hasMalformedSequence = true;
                 summary.ValidationErrors.Add("Duplicate field in event");
             }
+            if (evt.AudioSourceKindDuplicate)
+            {
+                // This field is a trust boundary for the source-aware stream;
+                // unlike historical duplicate fields in declarative FAIL, it
+                // must fail closed even when ErrorCode is otherwise stable.
+                hasMalformedSequence = true;
+                hasMalformedSourceMetadata = true;
+                summary.ValidationErrors.Add("Duplicate AudioSourceKind field in event");
+            }
             if (evt.HasNumericParseError)
                 summary.HasNumericParseError = true;
+            if (evt.AudioSourceKindInvalid)
+            {
+                hasMalformedSequence = true;
+                hasMalformedSourceMetadata = true;
+                summary.ValidationErrors.Add("AudioSourceKind must be 'microphone' or 'system-loopback'");
+            }
+
+            if (evt.Result == AudioHelperEventResult.Started)
+            {
+                sourceAwareStream = evt.AudioSourceKind != null;
+            }
+            else if (sourceAwareStream.HasValue)
+            {
+                bool hasSource = evt.AudioSourceKind != null;
+                if (hasSource != sourceAwareStream.Value)
+                {
+                    hasMalformedSequence = true;
+                    hasMalformedSourceMetadata = true;
+                    summary.ValidationErrors.Add(
+                        sourceAwareStream.Value
+                            ? $"{evt.Result} event missing AudioSourceKind in source-aware stream"
+                            : $"{evt.Result} event introduced AudioSourceKind into a legacy stream");
+                }
+            }
+            else if (evt.AudioSourceKind != null &&
+                     !(evt.Result == AudioHelperEventResult.Fail && !seenStarted))
+            {
+                hasMalformedSequence = true;
+                hasMalformedSourceMetadata = true;
+                summary.ValidationErrors.Add("AudioSourceKind appeared before STARTED");
+            }
+
+            if (evt.AudioSourceKind != null && !evt.AudioSourceKindInvalid)
+            {
+                if (firstAudioSourceKind == null)
+                {
+                    firstAudioSourceKind = evt.AudioSourceKind;
+                    summary.AudioSourceKind = evt.AudioSourceKind;
+                }
+                else if (!string.Equals(firstAudioSourceKind, evt.AudioSourceKind, StringComparison.Ordinal))
+                {
+                    hasMalformedSequence = true;
+                    hasMalformedSourceMetadata = true;
+                    summary.ValidationErrors.Add(
+                        $"AudioSourceKind mismatch: expected '{firstAudioSourceKind}', got '{evt.AudioSourceKind}'");
+                }
+
+                if (evt.AudioSourceKind == "system-loopback")
+                {
+                    if (evt.CaptureMethod != null && evt.CaptureMethod != "WASAPI_SHARED_LOOPBACK")
+                    {
+                        hasMalformedSequence = true;
+                        hasMalformedSourceMetadata = true;
+                        summary.ValidationErrors.Add("system-loopback requires CaptureMethod WASAPI_SHARED_LOOPBACK");
+                    }
+                    if (evt.CaptureEngine != null && evt.CaptureEngine != "wasapi-direct")
+                    {
+                        hasMalformedSequence = true;
+                        hasMalformedSourceMetadata = true;
+                        summary.ValidationErrors.Add("system-loopback requires CaptureEngine wasapi-direct");
+                    }
+                    if (evt.PairEvidence != null ||
+                        evt.AutoHfpPairStatus != null ||
+                        evt.AutoHfpPairResultCode != null ||
+                        evt.AutoHfpPairTransportClassification != null ||
+                        evt.RenderPrimeReadyMs.HasValue)
+                    {
+                        hasMalformedSequence = true;
+                        hasMalformedSourceMetadata = true;
+                        summary.ValidationErrors.Add("system-loopback events must not contain HFP metadata");
+                    }
+                }
+                else if (evt.AudioSourceKind == "microphone" && evt.CaptureMethod == "WASAPI_SHARED_LOOPBACK")
+                {
+                    hasMalformedSequence = true;
+                    hasMalformedSourceMetadata = true;
+                    summary.ValidationErrors.Add("microphone events cannot declare WASAPI_SHARED_LOOPBACK");
+                }
+            }
             if (evt.RenderPrimeReadyMs.HasValue && evt.RenderPrimeReadyMs.Value < 0)
                 summary.ValidationErrors.Add("RenderPrimeReadyMs must be non-negative");
 
@@ -368,6 +473,7 @@ public static class AudioHelperEventStreamParser
                         summary.ValidationErrors.Add("STARTED event missing required field: TimestampFrequency");
 
                     summary.RecordingId = evt.RecordingId;
+                    summary.AudioSourceKind ??= evt.AudioSourceKind;
                     summary.SampleRate = evt.SampleRate;
                     summary.Channels = evt.Channels;
                     summary.BitsPerSample = evt.BitsPerSample;
@@ -566,7 +672,11 @@ public static class AudioHelperEventStreamParser
 
         bool hasDeclarativeFailure = summary.State == AudioHelperSessionState.Failed && !string.IsNullOrEmpty(summary.ErrorCode);
 
-        if ((hasMalformedSequence || summary.ValidationErrors.Count > 0 || summary.HasNumericParseError) && !hasDeclarativeFailure)
+        if (hasMalformedSourceMetadata)
+        {
+            summary.State = AudioHelperSessionState.MalformedSequence;
+        }
+        else if ((hasMalformedSequence || summary.ValidationErrors.Count > 0 || summary.HasNumericParseError) && !hasDeclarativeFailure)
         {
             summary.State = AudioHelperSessionState.MalformedSequence;
         }
@@ -646,6 +756,7 @@ public sealed class AudioHelperSessionSummary
     public bool HasNumericParseError { get; set; }
 
     public string? RecordingId { get; set; }
+    public string? AudioSourceKind { get; set; }
     public int? SampleRate { get; set; }
     public int? Channels { get; set; }
     public int? BitsPerSample { get; set; }

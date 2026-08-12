@@ -170,4 +170,38 @@ public class AudioHelperEventWriterTests
         Assert.Contains("RESULT: OK", output);
         Assert.Contains("DurationMs: 123", output);
     }
+
+    [Fact]
+    public void LoopbackEvents_EmitSourceAndDoNotEmitHfpMetadata()
+    {
+        var sw = new StringWriter();
+        var writer = new EventWriter(sw, null);
+
+        var info = new AudioHelperEventInfo
+        {
+            RecordingId = "rec_loopback",
+            AudioSourceKind = AudioSourceKindNames.SystemLoopback,
+            SampleRate = 48000,
+            Channels = 2,
+            BitsPerSample = 32,
+            FirstSampleAnchorTicks = 100,
+            TimestampFrequency = 10000000,
+            BytesWritten = 0,
+            CaptureMethod = "WASAPI_SHARED_LOOPBACK",
+            CaptureEngine = "wasapi-direct",
+            CaptureStrategy = "wasapi-loopback",
+            PairEvidence = "must-not-appear",
+            AutoHfpPairStatus = "must-not-appear"
+        };
+
+        writer.Started(info);
+        writer.Progress(info);
+        writer.Stopped(info);
+
+        var output = sw.ToString();
+        Assert.Contains("AudioSourceKind: system-loopback", output);
+        Assert.Contains("CaptureMethod: WASAPI_SHARED_LOOPBACK", output);
+        Assert.DoesNotContain("PairEvidence:", output);
+        Assert.DoesNotContain("AutoHfpPairStatus:", output);
+    }
 }

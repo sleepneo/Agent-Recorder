@@ -30,6 +30,7 @@ internal static class AudioCaptureEngineNames
 internal sealed class AudioHelperOptions
 {
     public AudioHelperMode Mode { get; set; }
+    public AudioSourceKind SourceKind { get; set; } = AudioSourceKind.Microphone;
     public AudioCaptureEngine CaptureEngine { get; set; } = AudioCaptureEngine.WasapiDirect;
     internal bool AutoHfpPairDiscovery { get; set; }
     public string EndpointId { get; set; } = "";
@@ -195,6 +196,17 @@ internal static class AudioHelperArgumentParser
                     return result;
                 }
             }
+            else if (string.Equals(name, "source-kind", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = TakeNext("source-kind");
+                if (v == null) return result;
+                if (!AudioSourceKindNames.TryParse(v, out var sourceKind))
+                {
+                    result.Error = $"Unknown source kind: {v}";
+                    return result;
+                }
+                opts.SourceKind = sourceKind;
+            }
             else
             {
                 result.Error = $"Unknown argument: {arg}";
@@ -214,7 +226,8 @@ internal static class AudioHelperArgumentParser
                 !string.IsNullOrEmpty(opts.StopSignalPath) ||
                 !string.IsNullOrEmpty(opts.RecordingId) ||
                 opts.AutoHfpPairDiscovery ||
-                seen.Contains("capture-engine"))
+                seen.Contains("capture-engine") ||
+                seen.Contains("source-kind"))
             {
                 string modeName = opts.Mode == AudioHelperMode.Version ? "version" : "probe";
                 result.Error = $"--{modeName} cannot be mixed with capture arguments";
@@ -233,6 +246,27 @@ internal static class AudioHelperArgumentParser
         {
             result.Error = "--auto-hfp-pair requires --capture-engine wasapi-direct";
             return result;
+        }
+
+        if (opts.SourceKind == AudioSourceKind.SystemLoopback)
+        {
+            if (opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
+            {
+                result.Error = "--source-kind system-loopback requires --capture-engine wasapi-direct";
+                return result;
+            }
+
+            if (!string.IsNullOrEmpty(opts.HfpRenderEndpointId))
+            {
+                result.Error = "--hfp-render-endpoint-id cannot be used with --source-kind system-loopback";
+                return result;
+            }
+
+            if (opts.AutoHfpPairDiscovery)
+            {
+                result.Error = "--auto-hfp-pair cannot be used with --source-kind system-loopback";
+                return result;
+            }
         }
 
         result.Ok = true;

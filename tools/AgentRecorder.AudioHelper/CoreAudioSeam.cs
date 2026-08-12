@@ -13,6 +13,7 @@ namespace AgentRecorder.AudioHelper;
 internal interface IDevice : IDisposable
 {
     DeviceState State { get; }
+    DataFlow DataFlow { get; }
     IAudioClient CreateAudioClient();
 }
 
@@ -68,6 +69,20 @@ internal interface IAudioCaptureClient : IDisposable
 {
     int GetNextPacketSize();
     IntPtr GetBuffer(out int framesAvailable, out AudioClientBufferFlags flags);
+
+    /// <summary>
+    /// Position-aware overload. Existing microphone/HFP test seams can keep
+    /// implementing the legacy overload; the default implementation marks the
+    /// position evidence unavailable for callers that require loopback timing.
+    /// </summary>
+    IntPtr GetBuffer(out int framesAvailable, out AudioClientBufferFlags flags,
+        out long devicePosition, out long qpcPosition)
+    {
+        devicePosition = -1;
+        qpcPosition = 0;
+        return GetBuffer(out framesAvailable, out flags);
+    }
+
     void ReleaseBuffer(int framesRead);
 }
 
@@ -191,6 +206,8 @@ internal sealed class NAudioDevice : IDevice
 
     public DeviceState State => _device.State;
 
+    public DataFlow DataFlow => _device.DataFlow;
+
     public IAudioClient CreateAudioClient() => new NAudioAudioClient(_device.AudioClient);
 
     public void Dispose() => _device.Dispose();
@@ -245,6 +262,10 @@ internal sealed class NAudioAudioCaptureClient : IAudioCaptureClient
 
     public IntPtr GetBuffer(out int framesAvailable, out AudioClientBufferFlags flags)
         => _client.GetBuffer(out framesAvailable, out flags);
+
+    public IntPtr GetBuffer(out int framesAvailable, out AudioClientBufferFlags flags,
+        out long devicePosition, out long qpcPosition)
+        => _client.GetBuffer(out framesAvailable, out flags, out devicePosition, out qpcPosition);
 
     public void ReleaseBuffer(int framesRead) => _client.ReleaseBuffer(framesRead);
 

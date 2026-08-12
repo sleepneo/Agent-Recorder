@@ -21,6 +21,7 @@ public sealed class AudioHelperEvent
     public AudioHelperEventResult Result { get; set; }
     public string? Stage { get; set; }
     public string? RecordingId { get; set; }
+    public string? AudioSourceKind { get; set; }
     public int? SampleRate { get; set; }
     public int? Channels { get; set; }
     public int? BitsPerSample { get; set; }
@@ -77,6 +78,8 @@ public sealed class AudioHelperEvent
     public bool MaxEstimatedGapMsParseFailed { get; set; }
     public bool RenderPrimeReadyMsParseFailed { get; set; }
     public bool DuplicateField { get; set; }
+    public bool AudioSourceKindDuplicate { get; set; }
+    public bool AudioSourceKindInvalid { get; set; }
 
     public bool HasNumericParseError =>
         SampleRateParseFailed ||

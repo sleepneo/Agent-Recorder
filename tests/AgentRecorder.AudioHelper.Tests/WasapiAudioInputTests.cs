@@ -19,6 +19,7 @@ public class WasapiAudioInputTests
     {
         public bool Disposed { get; private set; }
         public NAudio.Wave.WaveFormat? Format => null;
+        public AudioSourceKind SourceKind => AudioSourceKind.Microphone;
         public long DiscontinuityCount => 0;
 #pragma warning disable CS0067
         public event EventHandler<NAudio.Wave.WaveInEventArgs>? DataAvailable;
@@ -64,6 +65,7 @@ public class WasapiAudioInputTests
     private sealed class FakeDevice : IDevice
     {
         public DeviceState State { get; set; } = DeviceState.Active;
+        public DataFlow DataFlow { get; set; } = DataFlow.Capture;
         public Func<IAudioClient>? CreateAudioClientCallback { get; set; }
         public bool Disposed => _disposeCount > 0;
         public int DisposeCount => _disposeCount;

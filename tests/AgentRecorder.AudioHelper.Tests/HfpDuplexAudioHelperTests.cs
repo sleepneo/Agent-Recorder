@@ -1559,6 +1559,7 @@ MaxEstimatedGapMs: 0
     private sealed class FakeInput : IAudioInput
     {
         public WaveFormat? Format { get; } = new WaveFormat(16000, 16, 1);
+        public AudioSourceKind SourceKind => AudioSourceKind.Microphone;
         public ManualResetEventSlim Started { get; } = new(false);
         public long DiscontinuityCount => 0;
         public int StartCount;
@@ -1761,6 +1762,7 @@ MaxEstimatedGapMs: 0
         public WaveFormat Format { get; } = new WaveFormat(16000, 16, 1);
         public Queue<FakeAudioClient> Clients { get; } = new();
         public DeviceState State => DeviceState.Active;
+        public DataFlow DataFlow => DataFlow.Capture;
         public int DisposeCount;
         public IAudioClient CreateAudioClient() => Clients.Dequeue();
         public void Dispose() => Interlocked.Increment(ref DisposeCount);

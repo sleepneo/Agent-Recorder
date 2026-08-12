@@ -11,6 +11,7 @@ namespace AgentRecorder.AudioHelper;
 internal sealed class CaptureSession : IDisposable
 {
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan LoopbackPaddingTolerance = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan StopWaitTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan DefaultStallDetectionThreshold = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DefaultFirstPacketTimeout = TimeSpan.FromSeconds(7);
@@ -103,6 +104,14 @@ internal sealed class CaptureSession : IDisposable
     private WaveFormat? _waveFormat;
     private Timer? _stallTimer;
     private Timer? _firstPacketTimer;
+    private Timer? _loopbackTimer;
+    private LoopbackTimeline? _loopbackTimeline;
+    private readonly object _loopbackCallbackGate = new();
+    private readonly object _loopbackPreStartLock = new();
+    private List<AudioPacketEventArgs> _loopbackPreStartPackets = new();
+    private int _loopbackStartConfirmed;
+
+    private const int MaxLoopbackPreStartPackets = 256;
 
     private long _bytesWritten;
     private long _firstCallbackTimestamp;
@@ -293,10 +302,12 @@ internal sealed class CaptureSession : IDisposable
             }
 
             _writer = writer;
+            if (IsSystemLoopback)
+                ResetLoopbackAttempt(format);
 
             // Wire handlers before starting so no packets are dropped between
             // AudioClient.Start and the capture thread publishing data.
-            input.DataAvailable += OnDataAvailable;
+            AttachInputHandlers(input);
             input.RecordingStopped += OnRecordingStopped;
 
             try
@@ -304,6 +315,31 @@ internal sealed class CaptureSession : IDisposable
                 var startResult = input.StartRecording();
                 if (startResult == StartRecordingResult.Started)
                 {
+                    if (IsSystemLoopback)
+                    {
+                        try
+                        {
+                            if (!ConfirmLoopbackStart())
+                            {
+                                ConvergeTerminal(
+                                    userRequested: false,
+                                    "audio_loopback_timeline_failed",
+                                    "Loopback start succeeded but the timeline could not be anchored",
+                                    _paths.PartialPath);
+                                return;
+                            }
+                        }
+                        catch (LoopbackTimelineException ex)
+                        {
+                            ConvergeTerminal(
+                                userRequested: false,
+                                "audio_loopback_packet_position_invalid",
+                                ex.Message,
+                                _paths.PartialPath);
+                            return;
+                        }
+                    }
+
                     // Success: exit the retry loop.
                     break;
                 }
@@ -371,8 +407,26 @@ internal sealed class CaptureSession : IDisposable
             }
         }
 
-        Interlocked.Exchange(ref _startRecordingTimestamp, Stopwatch.GetTimestamp());
-        Interlocked.Exchange(ref _lastStreamResumeTimestamp, _startRecordingTimestamp);
+        if (IsSystemLoopback)
+        {
+            var anchor = Interlocked.Read(ref _firstSampleAnchorTicks);
+            if (anchor <= 0 || _loopbackTimeline == null)
+            {
+                ConvergeTerminal(
+                    userRequested: false,
+                    "audio_loopback_timeline_failed",
+                    "Loopback timeline anchor was not established",
+                    _paths.PartialPath);
+                return;
+            }
+
+            EmitStarted(_waveFormat!, anchor, Interlocked.Read(ref _bytesWritten));
+        }
+        else
+        {
+            Interlocked.Exchange(ref _startRecordingTimestamp, Stopwatch.GetTimestamp());
+            Interlocked.Exchange(ref _lastStreamResumeTimestamp, _startRecordingTimestamp);
+        }
 
         // Only arm the first-packet timer if no packet has already arrived and
         // the capture thread has not already reached a terminal state before
@@ -383,8 +437,13 @@ internal sealed class CaptureSession : IDisposable
             if (_terminalEventRaised != 0)
                 return;
 
-            ArmFirstPacketTimer();
-            StartStallMonitor();
+            if (IsSystemLoopback)
+                StartLoopbackProgressMonitor();
+            else
+            {
+                ArmFirstPacketTimer();
+                StartStallMonitor();
+            }
             _watcher.Start();
         }
 
@@ -415,6 +474,11 @@ internal sealed class CaptureSession : IDisposable
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
+        // Loopback uses the position-aware event below. Keeping the legacy
+        // callback out of that path prevents a packet from being written once
+        // through each event contract.
+        if (IsSystemLoopback)
+            return;
         if (e.BytesRecorded <= 0)
             return;
 
@@ -473,7 +537,7 @@ internal sealed class CaptureSession : IDisposable
             }
         }
 
-        if (firstPacket)
+        if (firstPacket && !IsSystemLoopback)
         {
             DisarmFirstPacketTimer();
             EmitStarted(format, firstSampleAnchorTicks, bytesWrittenAfter);
@@ -492,6 +556,67 @@ internal sealed class CaptureSession : IDisposable
         if (_userStopRequested != 0)
         {
             Volatile.Read(ref _input)?.StopRecording();
+        }
+    }
+
+    private void OnLoopbackPacketAvailable(object? sender, AudioPacketEventArgs packet)
+    {
+        if (packet.BytesRecorded <= 0 || !ReferenceEquals(sender, Volatile.Read(ref _input)))
+            return;
+
+        // A packet callback must never block an AudioClient capture thread
+        // behind terminal finalization. If a tick owns the gate, the callback
+        // may wait only before terminal ownership is claimed; once terminal is
+        // claimed it fails closed and returns immediately.
+        if (!Monitor.TryEnter(_loopbackCallbackGate))
+        {
+            if (Volatile.Read(ref _terminalEventRaised) != 0)
+                return;
+            Monitor.Enter(_loopbackCallbackGate);
+        }
+
+        try
+        {
+            lock (_stateLock)
+            {
+                if (_terminalEventRaised != 0 ||
+                    !ReferenceEquals(sender, Volatile.Read(ref _input)))
+                    return;
+
+                if (Volatile.Read(ref _loopbackStartConfirmed) == 0)
+                {
+                    lock (_loopbackPreStartLock)
+                    {
+                        if (_loopbackPreStartPackets.Count >= MaxLoopbackPreStartPackets)
+                        {
+                            SetPendingErrorLocked(
+                                "audio_loopback_start_packet_overflow",
+                                "Loopback packets arrived before the successful Start boundary faster than they could be drained",
+                                _paths.PartialPath);
+                            return;
+                        }
+
+                        _loopbackPreStartPackets.Add(packet.Clone());
+                    }
+                    return;
+                }
+
+                AppendLoopbackPacketLocked(packet);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetPendingError(
+                ex is LoopbackTimelineException
+                    ? "audio_loopback_packet_position_invalid"
+                    : "audio_loopback_timeline_failed",
+                "Failed to append loopback packet: " + ex.Message,
+                _paths.PartialPath);
+            Volatile.Read(ref _input)?.StopRecording();
+        }
+        finally
+        {
+            Monitor.Exit(_loopbackCallbackGate);
         }
     }
 
@@ -530,8 +655,13 @@ internal sealed class CaptureSession : IDisposable
             }
             else
             {
+                bool loopbackPacketPositionFailure = IsSystemLoopback &&
+                    e.Exception is AudioCaptureRuntimeException positionRuntime &&
+                    string.Equals(positionRuntime.Stage, "ReadPacket", StringComparison.Ordinal);
                 SetPendingError(
-                    e.Exception is AudioCaptureRuntimeException classified && !string.IsNullOrEmpty(classified.ErrorCode)
+                    loopbackPacketPositionFailure
+                        ? "audio_loopback_packet_position_invalid"
+                        : e.Exception is AudioCaptureRuntimeException classified && !string.IsNullOrEmpty(classified.ErrorCode)
                         ? classified.ErrorCode
                         : "audio_capture_error",
                     e.Exception.Message,
@@ -559,6 +689,61 @@ internal sealed class CaptureSession : IDisposable
 
         var interval = TimeSpan.FromMilliseconds(Math.Min(MaxStallCheckInterval.TotalMilliseconds, threshold.TotalMilliseconds / 2));
         _stallTimer = new Timer(_ => CheckStall(), null, interval, interval);
+    }
+
+    private void StartLoopbackProgressMonitor()
+    {
+        _loopbackTimer = new Timer(_ => TickLoopback(), null, ProgressInterval, ProgressInterval);
+    }
+
+    private void StopLoopbackProgressMonitor()
+    {
+        var timer = Interlocked.Exchange(ref _loopbackTimer, null);
+        if (timer == null)
+            return;
+
+        try { timer.Dispose(); } catch { }
+    }
+
+    private void TickLoopback()
+    {
+        bool stopInput = false;
+        lock (_loopbackCallbackGate)
+        {
+            lock (_stateLock)
+            {
+                if (_terminalEventRaised != 0 || _userStopRequested != 0 || _startedEventRaised == 0)
+                    return;
+
+                // Keep the state lock through the write and event emission.
+                // Terminal claim takes the same lock before waiting for this
+                // gate, so claim/write ordering is atomic rather than a
+                // check-then-use race.
+                var now = Stopwatch.GetTimestamp();
+                try
+                {
+                    // Progress is observational only. Packet position is the
+                    // sole capture-time source allowed to advance media;
+                    // terminal finalization owns wall-clock silence padding.
+                    TryEmitProgress(
+                        Interlocked.Read(ref _bytesWritten),
+                        Interlocked.Read(ref _firstSampleAnchorTicks),
+                        force: true,
+                        allowDuringRecovery: true);
+                }
+                catch (Exception ex)
+                {
+                    SetPendingErrorLocked(
+                        "audio_loopback_timeline_failed",
+                        "Loopback silence maintenance failed: " + ex.Message,
+                        _paths.PartialPath);
+                    stopInput = true;
+                }
+            }
+        }
+
+        if (stopInput)
+            Volatile.Read(ref _input)?.StopRecording();
     }
 
     private void StopStallMonitor()
@@ -644,6 +829,7 @@ internal sealed class CaptureSession : IDisposable
     private void AttemptRuntimeRecovery(string trigger, string triggerMetrics)
     {
         Volatile.Write(ref _runtimeRecoveryThreadId, Environment.CurrentManagedThreadId);
+        bool convergeUserStopAfterRecovery = false;
         try
         {
             // 1. Detach the starved input. Once _input is cleared the recovery
@@ -743,7 +929,7 @@ internal sealed class CaptureSession : IDisposable
                 // callbacks and not-yet-current candidate callbacks cannot write.
                 PadMeasuredGap();
 
-                candidate.DataAvailable += OnDataAvailable;
+                AttachInputHandlers(candidate);
                 candidate.RecordingStopped += OnRecordingStopped;
 
                 bool publishedForStart;
@@ -829,21 +1015,31 @@ internal sealed class CaptureSession : IDisposable
                 lock (_stateLock)
                 {
                     terminalAfterStart = _terminalEventRaised != 0;
-                    stopAfterStart = !terminalAfterStart && _userStopRequested != 0 && ReferenceEquals(_input, candidate);
                     committed = false;
 
-                    if (stopAfterStart)
+                    if (!terminalAfterStart && ReferenceEquals(_input, candidate))
                     {
-                        candidateToStop = candidate;
-                        _input = null;
-                        _inputFinalizationInProgress++;
-                    }
-                    else if (!terminalAfterStart && ReferenceEquals(_input, candidate))
-                    {
+                        // StartRecording has returned Started, so this
+                        // generation is a successful recovery even when a
+                        // user stop raced the commit check. Count the
+                        // successful boundary first, then detach the
+                        // candidate for stop/finalization if requested.
                         _gapOverThresholdChecks = 0;
                         Interlocked.Increment(ref _successfulRecoveries);
                         Interlocked.Exchange(ref _lastStreamResumeTimestamp, Stopwatch.GetTimestamp());
                         committed = true;
+
+                        stopAfterStart = _userStopRequested != 0;
+                        if (stopAfterStart)
+                        {
+                            candidateToStop = candidate;
+                            _input = null;
+                            _inputFinalizationInProgress++;
+                        }
+                    }
+                    else
+                    {
+                        stopAfterStart = false;
                     }
                 }
 
@@ -879,10 +1075,20 @@ internal sealed class CaptureSession : IDisposable
         {
             lock (_stateLock)
             {
+                // OnRecordingStopped deliberately lets the recovery owner
+                // finish a candidate lifecycle when a user stop races the
+                // reopen. If the candidate was already committed, that event
+                // may arrive in the narrow window after the commit and before
+                // this flag is cleared; make the recovery owner responsible
+                // for terminal convergence so the stop cannot be lost.
+                convergeUserStopAfterRecovery = _userStopRequested != 0 && _terminalEventRaised == 0;
                 Volatile.Write(ref _runtimeRecoveryThreadId, 0);
                 Volatile.Write(ref _runtimeRecoveryInProgress, 0);
                 Monitor.PulseAll(_stateLock);
             }
+
+            if (convergeUserStopAfterRecovery)
+                ConvergeTerminal(userRequested: true);
         }
     }
 
@@ -938,7 +1144,7 @@ internal sealed class CaptureSession : IDisposable
 
     private void FinalizeOwnedInput(IAudioInput input)
     {
-        try { input.DataAvailable -= OnDataAvailable; } catch { }
+        try { DetachInputHandlers(input); } catch { }
         try { input.RecordingStopped -= OnRecordingStopped; } catch { }
         try { input.StopRecording(); } catch { }
         try { input.Dispose(); } catch { }
@@ -1073,6 +1279,136 @@ internal sealed class CaptureSession : IDisposable
         }
     }
 
+    private void ResetLoopbackAttempt(WaveFormat format)
+    {
+        _loopbackTimeline = new LoopbackTimeline(format, Stopwatch.Frequency, LoopbackPaddingTolerance);
+        Volatile.Write(ref _loopbackStartConfirmed, 0);
+        lock (_loopbackPreStartLock)
+            _loopbackPreStartPackets = new List<AudioPacketEventArgs>();
+
+        Interlocked.Exchange(ref _bytesWritten, 0);
+        Interlocked.Exchange(ref _firstCallbackTimestamp, 0);
+        Interlocked.Exchange(ref _lastCallbackTimestamp, 0);
+        Interlocked.Exchange(ref _lastProgressTimestamp, 0);
+        Interlocked.Exchange(ref _firstSampleAnchorTicks, 0);
+        Interlocked.Exchange(ref _startRecordingTimestamp, 0);
+        Interlocked.Exchange(ref _lastStreamResumeTimestamp, 0);
+    }
+
+    private bool ConfirmLoopbackStart()
+    {
+        lock (_loopbackCallbackGate)
+        {
+            lock (_stateLock)
+            {
+                if (_terminalEventRaised != 0 || _userStopRequested != 0)
+                    return false;
+            }
+
+            var timeline = _loopbackTimeline ?? throw new InvalidOperationException("Loopback timeline is not initialized");
+            var anchor = Stopwatch.GetTimestamp();
+            timeline.Start(anchor);
+            Interlocked.Exchange(ref _startRecordingTimestamp, anchor);
+            Interlocked.Exchange(ref _firstSampleAnchorTicks, anchor);
+            Interlocked.Exchange(ref _firstCallbackTimestamp, anchor);
+            Interlocked.Exchange(ref _lastCallbackTimestamp, anchor);
+            Interlocked.Exchange(ref _lastProgressTimestamp, anchor);
+            Interlocked.Exchange(ref _lastStreamResumeTimestamp, anchor);
+            Volatile.Write(ref _loopbackStartConfirmed, 1);
+
+            List<AudioPacketEventArgs> pending;
+            lock (_loopbackPreStartLock)
+            {
+                pending = _loopbackPreStartPackets;
+                _loopbackPreStartPackets = new List<AudioPacketEventArgs>();
+            }
+
+            try
+            {
+                foreach (var packet in pending)
+                    AppendLoopbackPacketLocked(packet);
+                return true;
+            }
+            catch
+            {
+                Volatile.Write(ref _loopbackStartConfirmed, 0);
+                throw;
+            }
+        }
+    }
+
+    private void AttachInputHandlers(IAudioInput input)
+    {
+        if (IsSystemLoopback)
+        {
+            if (input is not IAudioPacketPositionSource positionSource)
+                throw new InvalidOperationException("Loopback input does not expose WASAPI packet positions");
+            positionSource.PacketPositionAvailable += OnLoopbackPacketAvailable;
+        }
+        else
+        {
+            input.DataAvailable += OnDataAvailable;
+        }
+    }
+
+    private void DetachInputHandlers(IAudioInput input)
+    {
+        if (input is IAudioPacketPositionSource positionSource)
+            positionSource.PacketPositionAvailable -= OnLoopbackPacketAvailable;
+        input.DataAvailable -= OnDataAvailable;
+    }
+
+    private void AppendLoopbackPacketLocked(AudioPacketEventArgs packet)
+    {
+        var timeline = _loopbackTimeline ?? throw new InvalidOperationException("Loopback timeline is not initialized");
+        lock (_writerLock)
+        {
+            var writer = _writer ?? throw new InvalidOperationException("Loopback writer is not initialized");
+            var result = timeline.AppendPacket(
+                packet.Buffer,
+                packet.BytesRecorded,
+                packet.FramesRecorded,
+                packet.DevicePosition,
+                packet.PacketStartTimestampTicks,
+                packet.PositionValid,
+                (buffer, offset, count) => writer.Write(buffer, offset, count),
+                (buffer, count) => writer.Write(buffer, 0, count));
+            Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
+            if (result.ZeroBytesWritten > 0)
+            {
+                Interlocked.Add(ref _gapFilledBytesTotal, result.ZeroBytesWritten);
+                Interlocked.Add(ref _gapFilledMsTotal,
+                    (long)(result.ZeroBytesWritten / (double)writer.WaveFormat.AverageBytesPerSecond * 1000.0));
+            }
+        }
+    }
+
+    private void PadLoopbackToTimestamp(long timestamp, bool finalize)
+    {
+        var timeline = _loopbackTimeline;
+        if (timeline == null)
+            throw new InvalidOperationException("Loopback timeline is not initialized");
+
+        lock (_writerLock)
+        {
+            var writer = _writer;
+            if (writer == null)
+                return;
+
+            var paddedBytes = timeline.PadToTimestamp(
+                timestamp,
+                (buffer, count) => writer.Write(buffer, 0, count),
+                finalize);
+            Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
+            if (paddedBytes > 0)
+            {
+                Interlocked.Add(ref _gapFilledBytesTotal, paddedBytes);
+                Interlocked.Add(ref _gapFilledMsTotal,
+                    (long)(paddedBytes / (double)writer.WaveFormat.AverageBytesPerSecond * 1000.0));
+            }
+        }
+    }
+
     private void TrackMaxGap(long gapMs)
     {
         long current;
@@ -1175,6 +1511,39 @@ internal sealed class CaptureSession : IDisposable
     private void ConvergeTerminal(bool userRequested, string? initialErrorCode = null, string initialReason = "", string? initialPartialPath = null,
         string? hresult = null, string? failureStage = null, bool fromInputCallback = false)
     {
+        // Loopback callbacks and the terminal owner share one serialization
+        // boundary. A packet/tick that acquired it before terminal claim must
+        // finish first; callbacks arriving after the claim fail closed without
+        // blocking an AudioClient thread during input disposal.
+        if (IsSystemLoopback)
+        {
+            // Claim the state flag before waiting for the callback gate. A
+            // packet callback that is blocked behind an in-flight tick then
+            // fails closed instead of blocking AudioClient.Dispose forever.
+            lock (_stateLock)
+            {
+                if (_terminalEventRaised != 0)
+                    return;
+                _terminalEventRaised = 1;
+            }
+
+            lock (_loopbackCallbackGate)
+            {
+                ConvergeTerminalCore(userRequested, initialErrorCode, initialReason,
+                    initialPartialPath, hresult, failureStage, fromInputCallback,
+                    terminalAlreadyClaimed: true);
+            }
+            return;
+        }
+
+        ConvergeTerminalCore(userRequested, initialErrorCode, initialReason,
+            initialPartialPath, hresult, failureStage, fromInputCallback);
+    }
+
+    private void ConvergeTerminalCore(bool userRequested, string? initialErrorCode = null, string initialReason = "", string? initialPartialPath = null,
+        string? hresult = null, string? failureStage = null, bool fromInputCallback = false,
+        bool terminalAlreadyClaimed = false)
+    {
         // Track errors discovered during convergence in locals. SetPendingErrorLocked
         // refuses to write once _terminalEventRaised is set, so any error raised
         // by the owner itself must be captured here rather than in _pendingErrorCode.
@@ -1189,9 +1558,10 @@ internal sealed class CaptureSession : IDisposable
         // once claimed no watchdog can overwrite the reason.
         lock (_stateLock)
         {
-            if (_terminalEventRaised != 0)
+            if (_terminalEventRaised != 0 && !terminalAlreadyClaimed)
                 return;
-            _terminalEventRaised = 1;
+            if (!terminalAlreadyClaimed)
+                _terminalEventRaised = 1;
 
             // If no initial error was supplied but a watchdog/data callback already
             // recorded one, propagate it. The caller's explicit error takes priority.
@@ -1210,6 +1580,7 @@ internal sealed class CaptureSession : IDisposable
 
         StopStallMonitor();
         DisarmFirstPacketTimer();
+        StopLoopbackProgressMonitor();
 
         // Recovery owns the current generation and may still be inside a bounded
         // reopen. Wait for that owner to finish candidate cleanup before terminal
@@ -1230,6 +1601,20 @@ internal sealed class CaptureSession : IDisposable
 
         long stopTimestamp = Stopwatch.GetTimestamp();
         Interlocked.Exchange(ref _stopTimestamp, stopTimestamp);
+
+        if (localErrorCode == null && IsSystemLoopback)
+        {
+            try
+            {
+                PadLoopbackToTimestamp(stopTimestamp, finalize: true);
+            }
+            catch (Exception ex)
+            {
+                localErrorCode = "audio_loopback_timeline_failed";
+                localReason = "Failed to finalize loopback timeline: " + ex.Message;
+                localPartialPath = _paths.PartialPath;
+            }
+        }
 
         WaveFileWriter? writer;
         lock (_writerLock)
@@ -1341,8 +1726,10 @@ internal sealed class CaptureSession : IDisposable
             FirstSampleAnchorTicks = anchorTicks,
             TimestampFrequency = Stopwatch.Frequency,
             BytesWritten = bytesWritten,
-            CaptureMethod = "WASAPI_SHARED_CAPTURE",
-            CaptureEngine = "wasapi-direct"
+            AudioSourceKind = AudioSourceKindNames.ToCliValue(_options.SourceKind),
+            CaptureMethod = CaptureMethodForSource(),
+            CaptureEngine = "wasapi-direct",
+            CaptureStrategy = IsSystemLoopback ? "wasapi-loopback" : ""
         };
         ApplyHfpMetadata(info);
         _events.Started(info);
@@ -1350,6 +1737,8 @@ internal sealed class CaptureSession : IDisposable
 
     private void TryEmitProgress(long bytesWritten, long firstCallbackTimestamp, bool force = false, bool allowDuringRecovery = false)
     {
+        if (Volatile.Read(ref _terminalEventRaised) != 0)
+            return;
         if (!allowDuringRecovery && Volatile.Read(ref _runtimeRecoveryInProgress) != 0)
             return;
 
@@ -1411,6 +1800,10 @@ internal sealed class CaptureSession : IDisposable
             Channels = format?.Channels ?? 0,
             BitsPerSample = format?.BitsPerSample ?? 0,
             BytesWritten = bytesWritten,
+            AudioSourceKind = AudioSourceKindNames.ToCliValue(_options.SourceKind),
+            CaptureMethod = CaptureMethodForSource(),
+            CaptureEngine = "wasapi-direct",
+            CaptureStrategy = IsSystemLoopback ? "wasapi-loopback" : "",
             ElapsedMs = elapsedMs,
             WallElapsedMs = wallElapsedMs,
             EstimatedGapMs = estimatedGapMs,
@@ -1445,6 +1838,10 @@ internal sealed class CaptureSession : IDisposable
         var info = new AudioHelperEventInfo
         {
             RecordingId = _options.RecordingId,
+            AudioSourceKind = AudioSourceKindNames.ToCliValue(_options.SourceKind),
+            CaptureMethod = CaptureMethodForSource(),
+            CaptureEngine = "wasapi-direct",
+            CaptureStrategy = IsSystemLoopback ? "wasapi-loopback" : "",
             ErrorCode = errorCode,
             Reason = reason,
             Hresult = hresult ?? "",
@@ -1474,12 +1871,12 @@ internal sealed class CaptureSession : IDisposable
             ? _options.HfpRenderEndpointId
             : _resolvedHfpRenderEndpointId;
 
-    private bool IsHfpMode => !string.IsNullOrEmpty(EffectiveHfpRenderEndpointId) &&
+    private bool IsHfpMode => !IsSystemLoopback && !string.IsNullOrEmpty(EffectiveHfpRenderEndpointId) &&
                                _options.CaptureEngine == AudioCaptureEngine.WasapiDirect;
 
     private void EnsureAutomaticHfpPairResolved()
     {
-        if (!_options.AutoHfpPairDiscovery ||
+        if (IsSystemLoopback || !_options.AutoHfpPairDiscovery ||
             _options.CaptureEngine != AudioCaptureEngine.WasapiDirect ||
             !string.IsNullOrEmpty(_options.HfpRenderEndpointId) ||
             Interlocked.Exchange(ref _autoHfpPairResolutionAttempted, 1) != 0)
@@ -1501,6 +1898,9 @@ internal sealed class CaptureSession : IDisposable
 
     private void ApplyHfpMetadata(AudioHelperEventInfo info)
     {
+        if (IsSystemLoopback)
+            return;
+
         info.AutoHfpPairStatus = DiscoveryStatusText(_autoHfpPairResult.Status);
         info.AutoHfpPairResultCode = _autoHfpPairResult.ResultCode ?? "";
         info.AutoHfpPairTransportClassification = TransportClassificationText(
@@ -1548,6 +1948,13 @@ internal sealed class CaptureSession : IDisposable
 
     private AudioInputOpenResult OpenInput(TimeSpan budget)
     {
+        if (IsSystemLoopback)
+        {
+            return _inputFactory != null
+                ? AudioInputOpenResult.FromTuple(_inputFactory(budget), "LoopbackOpen")
+                : WasapiLoopbackAudioInput.Open(_options.EndpointId, budget);
+        }
+
         EnsureAutomaticHfpPairResolved();
         if (_autoHfpPairResult.IsBlockingFailure)
         {
@@ -1594,11 +2001,17 @@ internal sealed class CaptureSession : IDisposable
         catch { /* best effort */ }
     }
 
+    private bool IsSystemLoopback => _options.SourceKind == AudioSourceKind.SystemLoopback;
+
+    private string CaptureMethodForSource()
+        => IsSystemLoopback ? "WASAPI_SHARED_LOOPBACK" : "WASAPI_SHARED_CAPTURE";
+
     public void Dispose()
     {
         RequestStop();
         StopStallMonitor();
         DisarmFirstPacketTimer();
+        StopLoopbackProgressMonitor();
 
         try
         {

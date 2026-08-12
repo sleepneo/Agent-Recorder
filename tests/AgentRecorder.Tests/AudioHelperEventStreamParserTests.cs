@@ -794,4 +794,207 @@ public class AudioHelperEventStreamParserTests
         Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
         Assert.Contains(summary.ValidationErrors, e => e.Contains("Duplicate terminal"));
     }
+
+    [Fact]
+    public void ParseAndValidate_SystemLoopbackSource_PropagatesAllowlistedValue()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            "RESULT: STARTED",
+            "RecordingId: rec_loopback",
+            "AudioSourceKind: system-loopback",
+            "SampleRate: 48000",
+            "Channels: 2",
+            "BitsPerSample: 32",
+            "FirstSampleAnchorTicks: 100",
+            "TimestampFrequency: 10000000",
+            "BytesWritten: 0",
+            "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+            "CaptureEngine: wasapi-direct",
+            "",
+            "RESULT: STOPPED",
+            "AudioSourceKind: system-loopback",
+            "DurationMs: 1000",
+            "BytesWritten: 192000",
+            "EstimatedGapMs: 0",
+            "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+            "CaptureEngine: wasapi-direct",
+            "MaxEstimatedGapMs: 0",
+            ""
+        });
+
+        var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+        Assert.Equal("system-loopback", summary.AudioSourceKind);
+        Assert.Equal("WASAPI_SHARED_LOOPBACK", summary.CaptureMethod);
+    }
+
+    [Theory]
+    [InlineData("screen")]
+    [InlineData("SYSTEM-LOOPBACK")]
+    public void ParseAndValidate_UnknownOrNonCanonicalSource_IsMalformed(string source)
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            "RESULT: STARTED",
+            "RecordingId: rec_source",
+            $"AudioSourceKind: {source}",
+            "SampleRate: 48000",
+            "Channels: 2",
+            "BitsPerSample: 32",
+            "FirstSampleAnchorTicks: 100",
+            "TimestampFrequency: 10000000",
+            "BytesWritten: 0",
+            "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+            "CaptureEngine: wasapi-direct",
+            "",
+            "RESULT: FAIL",
+            "ErrorCode: audio_capture_error",
+            $"AudioSourceKind: {source}",
+            ""
+        });
+
+        var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("AudioSourceKind"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_SourceConflictBetweenStartedAndTerminal_IsMalformed()
+    {
+        var started = MakeStartedEvent("rec_source_conflict");
+        started.AudioSourceKind = "microphone";
+        var stopped = new AudioHelperEvent
+        {
+            Result = AudioHelperEventResult.Stopped,
+            AudioSourceKind = "system-loopback",
+            DurationMs = 100,
+            BytesWritten = 100,
+            EstimatedGapMs = 0,
+            MaxEstimatedGapMs = 0
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent> { started, stopped });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("AudioSourceKind mismatch"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_OldFixtureWithoutSourceKind_RemainsCompatible()
+    {
+        var started = MakeStartedEvent("rec_old_fixture");
+        var stopped = new AudioHelperEvent
+        {
+            Result = AudioHelperEventResult.Stopped,
+            DurationMs = 100,
+            BytesWritten = 100,
+            EstimatedGapMs = 0,
+            MaxEstimatedGapMs = 0
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent> { started, stopped });
+
+        Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+        Assert.Null(summary.AudioSourceKind);
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_LoopbackHfpMetadataOrMethodConflict_IsMalformed()
+    {
+        var started = MakeStartedEvent("rec_loopback_hfp");
+        started.AudioSourceKind = "system-loopback";
+        started.CaptureMethod = "WASAPI_SHARED_LOOPBACK";
+        started.PairEvidence = "hfp-must-not-appear";
+        var stopped = new AudioHelperEvent
+        {
+            Result = AudioHelperEventResult.Stopped,
+            AudioSourceKind = "system-loopback",
+            CaptureMethod = "WASAPI_SHARED_CAPTURE",
+            DurationMs = 100,
+            BytesWritten = 100,
+            EstimatedGapMs = 0,
+            MaxEstimatedGapMs = 0
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent> { started, stopped });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("HFP metadata"));
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("CaptureMethod"));
+    }
+
+    [Fact]
+    public void ParseAndValidate_DuplicateAudioSourceKindInDeclarativeFail_IsMalformed()
+    {
+        var stdout = string.Join("\n", new[]
+        {
+            "RESULT: STARTED",
+            "RecordingId: rec_duplicate_source",
+            "AudioSourceKind: system-loopback",
+            "SampleRate: 48000",
+            "Channels: 2",
+            "BitsPerSample: 32",
+            "FirstSampleAnchorTicks: 100",
+            "TimestampFrequency: 10000000",
+            "BytesWritten: 0",
+            "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+            "CaptureEngine: wasapi-direct",
+            "",
+            "RESULT: FAIL",
+            "ErrorCode: audio_capture_error",
+            "AudioSourceKind: system-loopback",
+            "AudioSourceKind: microphone",
+            ""
+        });
+
+        var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout);
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("Duplicate AudioSourceKind"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_SourceAwareStreamMissingTerminalSource_IsMalformed()
+    {
+        var started = MakeStartedEvent("rec_half_new");
+        started.AudioSourceKind = "system-loopback";
+        started.CaptureMethod = "WASAPI_SHARED_LOOPBACK";
+        started.CaptureEngine = "wasapi-direct";
+        var stopped = new AudioHelperEvent
+        {
+            Result = AudioHelperEventResult.Stopped,
+            DurationMs = 100,
+            BytesWritten = 100,
+            EstimatedGapMs = 0,
+            MaxEstimatedGapMs = 0
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent> { started, stopped });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("missing AudioSourceKind"));
+    }
+
+    [Fact]
+    public void ValidateAndSummarize_LegacyStreamIntroducingSource_IsMalformed()
+    {
+        var started = MakeStartedEvent("rec_half_old");
+        var stopped = new AudioHelperEvent
+        {
+            Result = AudioHelperEventResult.Stopped,
+            AudioSourceKind = "microphone",
+            DurationMs = 100,
+            BytesWritten = 100,
+            EstimatedGapMs = 0,
+            MaxEstimatedGapMs = 0
+        };
+
+        var summary = AudioHelperEventStreamParser.ValidateAndSummarize(new List<AudioHelperEvent> { started, stopped });
+
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Contains(summary.ValidationErrors, error => error.Contains("introduced AudioSourceKind"));
+    }
 }

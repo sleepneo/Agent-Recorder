@@ -17,6 +17,7 @@ public class AudioHelperRuntimeRecoveryTests
     private sealed class ScriptedAudioInput : IAudioInput
     {
         public WaveFormat? Format { get; set; } = new WaveFormat(16000, 16, 1);
+        public AudioSourceKind SourceKind { get; set; } = AudioSourceKind.Microphone;
         public event EventHandler<WaveInEventArgs>? DataAvailable;
         public event EventHandler<StoppedEventArgs>? RecordingStopped;
 

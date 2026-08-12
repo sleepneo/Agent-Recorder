@@ -56,6 +56,9 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private long _finalValidated;
     private AudioHelperSessionSummary? _terminalSummary;
     private AudioHelperEvent? _startedEvent;
+    private string? _audioSourceKind;
+    // -1 = no STARTED seen, 0 = legacy stream, 1 = source-aware stream.
+    private int _sourceAwareStream = -1;
     private string? _expectedRecordingId;
 
     private readonly List<AudioHelperEvent> _events = new();
@@ -445,6 +448,52 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             return;
         }
 
+        if (evt.AudioSourceKindDuplicate)
+        {
+            RaiseProtocolError("protocol_duplicate_audio_source_kind", "AudioSourceKind appeared more than once in one event block.");
+            return;
+        }
+
+        if (evt.AudioSourceKind != null &&
+            evt.AudioSourceKind is not "microphone" and not "system-loopback")
+        {
+            RaiseProtocolError("protocol_invalid_audio_source_kind", "AudioSourceKind was not in the allowed list.");
+            return;
+        }
+
+        if (evt.AudioSourceKind != null && _audioSourceKind != null &&
+            !string.Equals(_audioSourceKind, evt.AudioSourceKind, StringComparison.Ordinal))
+        {
+            RaiseProtocolError("protocol_audio_source_kind_conflict", "AudioSourceKind changed within one event stream.");
+            return;
+        }
+        if (evt.AudioSourceKind != null)
+            _audioSourceKind = evt.AudioSourceKind;
+
+        if (evt.Result == AudioHelperEventResult.Started)
+        {
+            Interlocked.Exchange(ref _sourceAwareStream, evt.AudioSourceKind != null ? 1 : 0);
+        }
+        else
+        {
+            int sourceMode = Volatile.Read(ref _sourceAwareStream);
+            if (sourceMode < 0 && evt.AudioSourceKind != null && evt.Result != AudioHelperEventResult.Fail)
+            {
+                RaiseProtocolError("protocol_audio_source_before_started", "AudioSourceKind appeared before STARTED.");
+                return;
+            }
+            if (sourceMode == 1 && evt.AudioSourceKind == null)
+            {
+                RaiseProtocolError("protocol_missing_audio_source_kind", "Source-aware stream event omitted AudioSourceKind.");
+                return;
+            }
+            if (sourceMode == 0 && evt.AudioSourceKind != null)
+            {
+                RaiseProtocolError("protocol_legacy_audio_source_kind", "Legacy stream introduced AudioSourceKind after STARTED.");
+                return;
+            }
+        }
+
         if (evt.Result == AudioHelperEventResult.Started)
         {
             ProcessStartedEvent(evt);
@@ -563,7 +612,9 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             validationErrors.Add($"TimestampFrequency mismatch: helper={evt.TimestampFrequency.Value}, host={Stopwatch.Frequency}");
 
         bool nativeMediaCapture = string.Equals(evt.CaptureEngine, "windows-mediacapture", StringComparison.OrdinalIgnoreCase);
-        if (!evt.BytesWritten.HasValue || evt.BytesWritten.Value < 0 || (!nativeMediaCapture && evt.BytesWritten.Value <= 0))
+        bool loopback = string.Equals(evt.AudioSourceKind, "system-loopback", StringComparison.Ordinal);
+        if (!evt.BytesWritten.HasValue || evt.BytesWritten.Value < 0 ||
+            (!nativeMediaCapture && !loopback && evt.BytesWritten.Value <= 0))
             validationErrors.Add("STARTED event missing or invalid field: BytesWritten");
 
         if (string.IsNullOrEmpty(evt.CaptureMethod))
@@ -721,6 +772,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private static void CopySummaryMetadata(AudioHelperSessionSummary source, AudioHelperSessionSummary target)
     {
         target.RecordingId = source.RecordingId;
+        target.AudioSourceKind = source.AudioSourceKind;
         target.SampleRate = source.SampleRate;
         target.Channels = source.Channels;
         target.BitsPerSample = source.BitsPerSample;
@@ -764,6 +816,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             sb.AppendLine($"State: {summary.State}");
             if (!string.IsNullOrEmpty(summary.ErrorCode))
                 sb.AppendLine($"ErrorCode: {summary.ErrorCode}");
+            if (!string.IsNullOrEmpty(summary.AudioSourceKind))
+                sb.AppendLine($"AudioSourceKind: {summary.AudioSourceKind}");
             if (!string.IsNullOrEmpty(summary.Reason))
                 sb.AppendLine($"Reason: {summary.Reason}");
             if (!string.IsNullOrEmpty(summary.CaptureStrategy))

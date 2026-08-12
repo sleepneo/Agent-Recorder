@@ -222,6 +222,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
 
     [Theory]
     [InlineData("--duplicate-started")]
+    [InlineData("--duplicate-source-fail")]
     [InlineData("--malformed-progress ElapsedMs")]
     [InlineData("--progress-regress")]
     [InlineData("--duplicate-terminal")]

@@ -14,6 +14,7 @@ namespace AgentRecorder.AudioHelper;
 internal interface IAudioInput : IDisposable
 {
     WaveFormat? Format { get; }
+    AudioSourceKind SourceKind { get; }
     event EventHandler<WaveInEventArgs>? DataAvailable;
     event EventHandler<StoppedEventArgs>? RecordingStopped;
 

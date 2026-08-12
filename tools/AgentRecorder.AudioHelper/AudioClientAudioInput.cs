@@ -12,7 +12,7 @@ namespace AgentRecorder.AudioHelper;
 /// and <see cref="StopRecording"/> requests a graceful stop. All COM objects
 /// are owned by this instance and released on disposal.
 /// </summary>
-internal sealed class AudioClientAudioInput : IAudioInput
+internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionSource
 {
     private const long ReftimesPerSec = 10000000L;
     private const long ReftimesPerMillisec = 10000L;
@@ -22,6 +22,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
     private readonly IAudioClient _audioClient;
     private readonly IAudioCaptureClient _captureClient;
     private readonly WaveFormat _waveFormat;
+    private readonly AudioSourceKind _sourceKind;
     private readonly int _bufferMilliseconds;
     private readonly SynchronizationContext? _syncContext;
     private readonly TimeSpan _joinTimeout;
@@ -45,6 +46,8 @@ internal sealed class AudioClientAudioInput : IAudioInput
 
     public WaveFormat? Format => _waveFormat;
 
+    public AudioSourceKind SourceKind => _sourceKind;
+
     /// <summary>
     /// Number of packets that arrived with the WASAPI DataDiscontinuity flag.
     /// Read-only, thread-safe; never reset over the input's lifetime.
@@ -59,6 +62,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
     public bool DisposeCompletedSuccessfully => _disposeCompleted == 1;
 
     public event EventHandler<WaveInEventArgs>? DataAvailable;
+    public event EventHandler<AudioPacketEventArgs>? PacketPositionAvailable;
     public event EventHandler<StoppedEventArgs>? RecordingStopped;
 
     private enum State
@@ -78,12 +82,14 @@ internal sealed class AudioClientAudioInput : IAudioInput
         WaveFormat waveFormat,
         int bufferMilliseconds,
         TimeSpan? joinTimeout = null,
-        bool eventDriven = false)
+        bool eventDriven = false,
+        AudioSourceKind sourceKind = AudioSourceKind.Microphone)
     {
         _device = device ?? throw new ArgumentNullException(nameof(device));
         _audioClient = audioClient ?? throw new ArgumentNullException(nameof(audioClient));
         _captureClient = captureClient ?? throw new ArgumentNullException(nameof(captureClient));
         _waveFormat = waveFormat ?? throw new ArgumentNullException(nameof(waveFormat));
+        _sourceKind = sourceKind;
         _bufferMilliseconds = bufferMilliseconds;
         _syncContext = SynchronizationContext.Current;
         _joinTimeout = joinTimeout ?? DefaultThreadJoinTimeout;
@@ -423,9 +429,11 @@ internal sealed class AudioClientAudioInput : IAudioInput
                 IntPtr buffer;
                 int frames;
                 AudioClientBufferFlags flags;
+                long devicePosition;
+                long qpcPosition;
                 try
                 {
-                    buffer = _captureClient.GetBuffer(out frames, out flags);
+                    buffer = _captureClient.GetBuffer(out frames, out flags, out devicePosition, out qpcPosition);
                 }
                 catch (Exception ex)
                 {
@@ -440,7 +448,7 @@ internal sealed class AudioClientAudioInput : IAudioInput
                 {
                     int bytesAvailable = checked(frames * _bytesPerFrame);
                     if (bytesAvailable > 0)
-                        ReadPacket(buffer, bytesAvailable, flags);
+                        ReadPacket(buffer, bytesAvailable, frames, flags, devicePosition, qpcPosition);
                 }
                 catch (Exception ex)
                 {
@@ -479,7 +487,14 @@ internal sealed class AudioClientAudioInput : IAudioInput
         }
         finally
         {
-            try { StopAudioClient(); } catch { }
+            var stopFailure = StopAudioClient();
+            if (stopFailure != null)
+            {
+                if (runtimeException == null)
+                    runtimeException = stopFailure;
+                else
+                    runtimeException.TryAttachSecondaryFailure(stopFailure.Stage, stopFailure);
+            }
 
             TransitionToStopped(runtimeException);
 
@@ -497,9 +512,22 @@ internal sealed class AudioClientAudioInput : IAudioInput
         }
     }
 
-    private void ReadPacket(IntPtr source, int bytesAvailable, AudioClientBufferFlags flags)
+    private void ReadPacket(
+        IntPtr source,
+        int bytesAvailable,
+        int framesAvailable,
+        AudioClientBufferFlags flags,
+        long devicePosition,
+        long qpcPosition)
     {
         bool silent = (flags & AudioClientBufferFlags.Silent) == AudioClientBufferFlags.Silent;
+        bool positionValid = devicePosition >= 0 && qpcPosition > 0 &&
+                             (flags & AudioClientBufferFlags.TimestampError) == 0;
+        long callbackTimestamp = Stopwatch.GetTimestamp();
+        long packetStartTimestamp = positionValid
+            ? AudioPacketPositionMath.ConvertQpcToStopwatchTicks(
+                qpcPosition, callbackTimestamp, Stopwatch.Frequency)
+            : 0;
 
         if (silent)
         {
@@ -511,7 +539,15 @@ internal sealed class AudioClientAudioInput : IAudioInput
             {
                 int chunkSize = Math.Min(_recordBuffer.Length, bytesAvailable - silentOffset);
                 Array.Fill(_recordBuffer, (byte)0, 0, chunkSize);
-                DataAvailable?.Invoke(this, new WaveInEventArgs(_recordBuffer, chunkSize));
+                PublishPacket(
+                    _recordBuffer,
+                    chunkSize,
+                    framesAvailable,
+                    silentOffset,
+                    devicePosition,
+                    qpcPosition,
+                    packetStartTimestamp,
+                    positionValid);
                 silentOffset += chunkSize;
             }
             return;
@@ -531,22 +567,67 @@ internal sealed class AudioClientAudioInput : IAudioInput
         {
             int chunkBytes = Math.Min(_recordBuffer.Length, bytesAvailable - readOffset);
             Marshal.Copy(source + readOffset, _recordBuffer, 0, chunkBytes);
-            DataAvailable?.Invoke(this, new WaveInEventArgs(_recordBuffer, chunkBytes));
+            PublishPacket(
+                _recordBuffer,
+                chunkBytes,
+                framesAvailable,
+                readOffset,
+                devicePosition,
+                qpcPosition,
+                packetStartTimestamp,
+                positionValid);
             readOffset += chunkBytes;
         }
     }
 
-    private void StopAudioClient()
+    private void PublishPacket(
+        byte[] buffer,
+        int bytesRecorded,
+        int framesAvailable,
+        int byteOffset,
+        long devicePosition,
+        long qpcPosition,
+        long packetStartTimestamp,
+        bool positionValid)
+    {
+        int framesOffset = byteOffset / _bytesPerFrame;
+        int framesRecorded = bytesRecorded / _bytesPerFrame;
+        long chunkDevicePosition = devicePosition >= 0
+            ? checked(devicePosition + framesOffset)
+            : -1;
+        long chunkQpcPosition = qpcPosition > 0 && _waveFormat.SampleRate > 0
+            ? checked(qpcPosition + AudioPacketPositionMath.FramesToTimestampTicks(
+                framesOffset, _waveFormat.SampleRate, AudioPacketPositionMath.QpcUnitsPerSecond))
+            : 0;
+        long chunkTimestamp = packetStartTimestamp > 0 && _waveFormat.SampleRate > 0
+            ? checked(packetStartTimestamp + AudioPacketPositionMath.FramesToTimestampTicks(
+                framesOffset, _waveFormat.SampleRate, Stopwatch.Frequency))
+            : 0;
+
+        PacketPositionAvailable?.Invoke(this, new AudioPacketEventArgs(
+            buffer,
+            bytesRecorded,
+            framesRecorded,
+            chunkDevicePosition,
+            chunkQpcPosition,
+            chunkTimestamp,
+            positionValid));
+        DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytesRecorded));
+    }
+
+    private AudioCaptureRuntimeException? StopAudioClient()
     {
         try { _captureEvent?.Set(); } catch { }
         try
         {
             _audioClient.Stop();
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort; the client may already be stopped or disposed.
+            return AudioCaptureRuntimeException.FromException("Stop", ex);
         }
+
+        return null;
     }
 
     private void StopAudioClientAndTransitionToStopped()

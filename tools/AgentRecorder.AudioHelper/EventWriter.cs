@@ -33,6 +33,7 @@ internal sealed class EventWriter
             WriteLine("RESULT", "STARTED");
             WriteLine("Stage", "AudioCapturing");
             WriteLine("RecordingId", info.RecordingId);
+            WriteLine("AudioSourceKind", info.AudioSourceKind);
             WriteLine("SampleRate", info.SampleRate);
             WriteLine("Channels", info.Channels);
             WriteLine("BitsPerSample", info.BitsPerSample);
@@ -52,6 +53,7 @@ internal sealed class EventWriter
         {
             WriteLine("RESULT", "PROGRESS");
             WriteLine("Stage", "AudioCapturing");
+            WriteLine("AudioSourceKind", info.AudioSourceKind);
             WriteLine("ElapsedMs", info.ElapsedMs);
             WriteLine("WallElapsedMs", info.WallElapsedMs);
             WriteLine("BytesWritten", info.BytesWritten);
@@ -78,6 +80,7 @@ internal sealed class EventWriter
             WriteLine("DurationMs", info.DurationMs);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
+            WriteLine("AudioSourceKind", info.AudioSourceKind);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
             WriteHfpMetadata(info);
@@ -95,6 +98,7 @@ internal sealed class EventWriter
             WriteLine("DurationMs", info.DurationMs);
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("EstimatedGapMs", info.EstimatedGapMs);
+            WriteLine("AudioSourceKind", info.AudioSourceKind);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
             WriteHfpMetadata(info);
@@ -128,6 +132,8 @@ internal sealed class EventWriter
                 WriteLine("CaptureMethod", info.CaptureMethod);
             if (!string.IsNullOrEmpty(info.CaptureEngine))
                 WriteLine("CaptureEngine", info.CaptureEngine);
+            if (!string.IsNullOrEmpty(info.AudioSourceKind))
+                WriteLine("AudioSourceKind", info.AudioSourceKind);
             WriteHfpMetadata(info);
             WriteTerminalMetrics(info);
             EndBlock();
@@ -151,6 +157,9 @@ internal sealed class EventWriter
 
     private void WriteHfpMetadata(AudioHelperEventInfo info)
     {
+        if (info.AudioSourceKind == AudioSourceKindNames.SystemLoopback)
+            return;
+
         if (!string.IsNullOrEmpty(info.CaptureStrategy))
             WriteLine("CaptureStrategy", info.CaptureStrategy);
         if (!string.IsNullOrEmpty(info.PairEvidence))
@@ -199,6 +208,7 @@ internal sealed class EventWriter
 internal sealed class AudioHelperEventInfo
 {
     public string RecordingId { get; set; } = "";
+    public string AudioSourceKind { get; set; } = AudioSourceKindNames.Microphone;
     public int SampleRate { get; set; }
     public int Channels { get; set; }
     public int BitsPerSample { get; set; }

@@ -10,10 +10,12 @@ namespace AgentRecorder.AudioHelper.Tests;
 
 public class AudioHelperCaptureSessionTests
 {
-    private class FakeAudioInput : IAudioInput
+    private class FakeAudioInput : IAudioInput, IAudioPacketPositionSource
     {
         public WaveFormat? Format { get; set; } = new WaveFormat(16000, 16, 1);
+        public AudioSourceKind SourceKind { get; set; } = AudioSourceKind.Microphone;
         public event EventHandler<WaveInEventArgs>? DataAvailable;
+        public event EventHandler<AudioPacketEventArgs>? PacketPositionAvailable;
         public event EventHandler<StoppedEventArgs>? RecordingStopped;
 
         public bool Started { get; private set; }
@@ -52,6 +54,23 @@ public class AudioHelperCaptureSessionTests
         public void InjectData(byte[] buffer, int bytesRecorded)
         {
             DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytesRecorded));
+        }
+
+        public void InjectPositionedPacket(
+            byte[] buffer,
+            long devicePosition,
+            long packetStartTimestampTicks,
+            bool positionValid = true)
+        {
+            int blockAlign = Math.Max(1, Format?.BlockAlign ?? 1);
+            PacketPositionAvailable?.Invoke(this, new AudioPacketEventArgs(
+                buffer,
+                buffer.Length,
+                buffer.Length / blockAlign,
+                devicePosition,
+                qpcPosition: 1,
+                packetStartTimestampTicks: packetStartTimestampTicks,
+                positionValid: positionValid));
         }
 
         public void InjectError(Exception ex)
@@ -140,6 +159,56 @@ public class AudioHelperCaptureSessionTests
         session.Dispose();
         watcher.Dispose();
         Directory.Delete(dir, true);
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopbackWithoutPackets_StartsProgressAndPublishesNonEmptyWav()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, $"loopback.{Environment.ProcessId}.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput { SourceKind = AudioSourceKind.SystemLoopback };
+        var opts = Options("rec_loopback", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var events = new EventWriter(stdout, null);
+        var session = new CaptureSession(opts, paths, events, watcher, cts, _ => (input, null, null));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(output));
+            Assert.False(File.Exists(partial));
+            Assert.True(new FileInfo(output).Length > 44, "A silent loopback session must publish non-empty WAV data");
+
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+            Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+            Assert.Equal("system-loopback", summary.AudioSourceKind);
+            Assert.Equal("WASAPI_SHARED_LOOPBACK", summary.CaptureMethod);
+            Assert.True(summary.BytesWritten > 0);
+            Assert.Contains("RESULT: STARTED", stdout.ToString());
+            Assert.Contains("RESULT: STOPPED", stdout.ToString());
+            Assert.Contains("AudioSourceKind: system-loopback", stdout.ToString());
+            Assert.DoesNotContain("PairEvidence:", stdout.ToString());
+            Assert.DoesNotContain("AutoHfpPairStatus:", stdout.ToString());
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
     }
 
     [Fact]
@@ -921,6 +990,7 @@ public class AudioHelperCaptureSessionTests
     private sealed class CountedDevice : IDevice
     {
         public DeviceState State { get; set; } = DeviceState.Active;
+        public DataFlow DataFlow { get; set; } = DataFlow.Capture;
         public Func<IAudioClient>? CreateAudioClientCallback { get; set; }
         private int _disposeCount;
         public int DisposeCount => _disposeCount;

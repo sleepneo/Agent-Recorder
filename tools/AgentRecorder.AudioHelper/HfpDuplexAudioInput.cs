@@ -42,8 +42,11 @@ internal sealed class AudioInputOpenResult
     public string PairEvidence { get; }
     public string CaptureStrategy { get; }
 
-    public static AudioInputOpenResult Success(IAudioInput input, string pairEvidence = "unverified")
-        => new(input, null, "", null, "", pairEvidence, "hfp-duplex-prime-classic");
+    public static AudioInputOpenResult Success(
+        IAudioInput input,
+        string pairEvidence = "unverified",
+        string captureStrategy = "hfp-duplex-prime-classic")
+        => new(input, null, "", null, "", pairEvidence, captureStrategy);
 
     public static AudioInputOpenResult Failure(string errorCode, string reason, string failureStage,
         int? hresult = null, string pairEvidence = "unverified", string captureStrategy = "hfp-duplex-prime-classic")
@@ -569,6 +572,7 @@ internal sealed class HfpDuplexAudioInput : IAudioInput, IHfpAudioInputMetadata
     }
 
     public WaveFormat? Format => _capture.Format;
+    public AudioSourceKind SourceKind => AudioSourceKind.Microphone;
     public long DiscontinuityCount => _capture.DiscontinuityCount;
     public string CaptureStrategy => "hfp-duplex-prime-classic";
     public string PairEvidence { get; }
