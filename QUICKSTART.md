@@ -118,7 +118,7 @@ recording-control windows.
 AgentRecorder.App\                 desktop application and local UI
 AgentRecorder.Headless\            advanced non-interactive service host
 AgentRecorder.Cli\                 agent startup/readiness helper
-AgentRecorder.AudioHelper\         isolated WASAPI microphone helper
+AgentRecorder.AudioHelper\         isolated Windows WASAPI audio helper
 README.md                          English overview
 QUICKSTART.md                      this guide
 AGENT-INSTRUCTIONS.zh-CN.md        agent operating instructions

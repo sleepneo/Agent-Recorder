@@ -93,9 +93,11 @@ Agents should use the paths returned by `ensure-running` or
   pair their matching render endpoint and hold the duplex HFP link; AirPods Pro
   and Focal Bathys have passed supervised product-path recording. Compatibility
   is still device/driver dependent. FFmpeg dshow remains an explicit diagnostic
-  fallback. A WASAPI loopback helper vertical slice exists internally, but it
-  has not completed real-device recording, A/V muxing, consent UI, or public API
-  acceptance; public system-audio requests therefore remain unavailable.
+  fallback. The internal WASAPI loopback helper has completed a supervised
+  10-second real-device WAV capture, including packet-position/QPC continuity
+  and atomic output publication. A/V muxing, consent UI, and public API
+  acceptance are still incomplete, so public system-audio requests remain
+  unavailable.
 - The experimental native WGC continuous pipeline supports eligible display,
   window, and selected-region targets behind separate local environment switches. It provides
   non-capturing availability probes, short-lived success caching, authenticated

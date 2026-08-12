@@ -212,6 +212,50 @@ public class AudioHelperCaptureSessionTests
     }
 
     [Fact]
+    public async Task Run_SystemLoopbackAdjacentQpcOverlap_StopsWithoutPositionFailure()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_qpc_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput { SourceKind = AudioSourceKind.SystemLoopback };
+        var opts = Options("rec_loopback_qpc", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts, _ => (input, null, null));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+            var anchor = (long)(typeof(CaptureSession)
+                .GetField("_firstSampleAnchorTicks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session) ?? 0L);
+            input.InjectPositionedPacket(Enumerable.Repeat((byte)0x12, 200).ToArray(), 0, anchor);
+            input.InjectPositionedPacket(Enumerable.Repeat((byte)0x34, 200).ToArray(), 100, anchor + 62_000);
+            session.RequestStop();
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var events = AudioHelperEventStreamParser.ParseEvents(stdout.ToString());
+            Assert.Equal(0, exitCode);
+            Assert.DoesNotContain(events, evt => evt.ErrorCode == "audio_loopback_packet_position_invalid");
+            Assert.Single(events, evt => evt.Result == AudioHelperEventResult.Stopped);
+            Assert.True(File.Exists(output));
+            Assert.False(File.Exists(partial));
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
     public void Run_InputOpenFailure_EmitsFail()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"ah_test_{Guid.NewGuid():N}");

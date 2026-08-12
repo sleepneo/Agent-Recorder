@@ -1372,7 +1372,8 @@ internal sealed class CaptureSession : IDisposable
                 packet.PacketStartTimestampTicks,
                 packet.PositionValid,
                 (buffer, offset, count) => writer.Write(buffer, offset, count),
-                (buffer, count) => writer.Write(buffer, 0, count));
+                (buffer, count) => writer.Write(buffer, 0, count),
+                packet.DataDiscontinuity);
             Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
             if (result.ZeroBytesWritten > 0)
             {

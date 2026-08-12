@@ -30,10 +30,15 @@ internal sealed class LoopbackTimeline
     private readonly WaveFormat _format;
     private readonly long _timestampFrequency;
     private readonly long _frameTimestampTicks;
+    private readonly long _qpcJitterToleranceTicks;
     private long _anchorTimestamp;
+    private long _anchorDevicePosition = -1;
+    private long _anchorDeviceMediaBytes;
     private long _mediaBytes;
+    private long _lastDeviceStart = -1;
     private long _lastDeviceEnd = -1;
-    private long _lastPacketTimestamp = -1;
+    private long _lastPacketStartTimestamp = -1;
+    private long _lastPacketEndTimestamp = -1;
 
     public LoopbackTimeline(WaveFormat format, long timestampFrequency, TimeSpan paddingTolerance)
     {
@@ -48,6 +53,13 @@ internal sealed class LoopbackTimeline
         _timestampFrequency = timestampFrequency;
         _frameTimestampTicks = AudioPacketPositionMath.FramesToTimestampTicks(
             1, _format.SampleRate, timestampFrequency);
+        var qpcQuantizationTicks = Math.Max(1L,
+            (long)Math.Ceiling(timestampFrequency / (double)AudioPacketPositionMath.QpcUnitsPerSecond));
+        // One audio frame is the maximum unexplained boundary jitter accepted
+        // here. It covers frame-to-tick truncation and QPC 100-ns quantization,
+        // while remaining tied to the negotiated format rather than a large
+        // arbitrary wall-clock tolerance.
+        _qpcJitterToleranceTicks = Math.Max(_frameTimestampTicks, qpcQuantizationTicks);
         // Keep the constructor seam for existing internal call sites. Ordinary
         // progress ticks no longer pad, so tolerance cannot cover real packets.
         _ = paddingTolerance;
@@ -57,6 +69,7 @@ internal sealed class LoopbackTimeline
     public long AnchorTimestamp => Interlocked.Read(ref _anchorTimestamp);
     public long MediaBytes => Interlocked.Read(ref _mediaBytes);
     public long LastDeviceEnd => Interlocked.Read(ref _lastDeviceEnd);
+    internal long QpcJitterToleranceTicks => _qpcJitterToleranceTicks;
 
     public void Start(long anchorTimestamp)
     {
@@ -79,7 +92,8 @@ internal sealed class LoopbackTimeline
         long packetStartTimestampTicks,
         bool positionValid,
         Action<byte[], int, int> writePacket,
-        Action<byte[], int> writeZeros)
+        Action<byte[], int> writeZeros,
+        bool dataDiscontinuity = false)
     {
         if (!IsStarted)
             throw new LoopbackTimelineException("Loopback packet arrived before the successful Start boundary");
@@ -103,7 +117,10 @@ internal sealed class LoopbackTimeline
             throw new LoopbackTimelineException("WASAPI packet timestamp overflowed the media clock");
         }
 
+        long previousDeviceStart = Interlocked.Read(ref _lastDeviceStart);
         long previousDeviceEnd = Interlocked.Read(ref _lastDeviceEnd);
+        long previousPacketStart = Interlocked.Read(ref _lastPacketStartTimestamp);
+        long previousPacketEnd = Interlocked.Read(ref _lastPacketEndTimestamp);
         if (previousDeviceEnd >= 0)
         {
             if (devicePosition > previousDeviceEnd)
@@ -112,26 +129,59 @@ internal sealed class LoopbackTimeline
                 long maxGapFrames = checked((long)_format.SampleRate * 120L);
                 if (deviceGap > maxGapFrames)
                     throw new LoopbackTimelineException(
-                        $"WASAPI loopback device position discontinuity: gap_frames={deviceGap}");
+                        $"WASAPI loopback device position discontinuity: device_gap_frames={deviceGap}; max_gap_frames={maxGapFrames}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
             }
-            else if (packetStartTimestampTicks > Interlocked.Read(ref _lastPacketTimestamp) &&
-                     devicePosition + framesRecorded < previousDeviceEnd)
+            else if (devicePosition < previousDeviceStart)
             {
                 throw new LoopbackTimelineException(
-                    "WASAPI loopback device position regressed without an overlapping packet");
+                    $"WASAPI loopback device position regressed without a legal overlap: device_position={devicePosition}; previous_device_start={previousDeviceStart}; previous_device_end={previousDeviceEnd}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
             }
         }
 
-        long previousPacketTimestamp = Interlocked.Read(ref _lastPacketTimestamp);
-        if (previousPacketTimestamp >= 0 && packetStartTimestampTicks < previousPacketTimestamp &&
-            devicePosition >= previousDeviceEnd)
+        if (previousPacketStart >= 0)
         {
-            throw new LoopbackTimelineException("WASAPI loopback QPC position regressed");
+            long deviceDeltaFrames = checked(devicePosition - previousDeviceStart);
+            long expectedQpcDeltaTicks = AudioPacketPositionMath.FramesToTimestampTicks(
+                deviceDeltaFrames, _format.SampleRate, _timestampFrequency);
+            long qpcDeltaTicks = checked(packetStartTimestampTicks - previousPacketStart);
+            long qpcDriftTicks = checked(qpcDeltaTicks - expectedQpcDeltaTicks);
+            if (qpcDriftTicks > _qpcJitterToleranceTicks ||
+                qpcDriftTicks < -_qpcJitterToleranceTicks)
+            {
+                throw new LoopbackTimelineException(
+                    $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
+            }
         }
 
         long anchor = AnchorTimestamp;
-        long mediaStartTimestamp = Math.Max(anchor, packetStartTimestampTicks);
-        long packetStartBytes = TimestampToBytes(mediaStartTimestamp - anchor);
+        long packetStartBytes;
+        long leadingTrimBytes = 0;
+        long anchorDevicePosition = Interlocked.Read(ref _anchorDevicePosition);
+        if (anchorDevicePosition < 0)
+        {
+            long mediaStartTimestamp = Math.Max(anchor, packetStartTimestampTicks);
+            packetStartBytes = TimestampToBytes(mediaStartTimestamp - anchor);
+            if (packetStartTimestampTicks < anchor)
+            {
+                leadingTrimBytes = Math.Min(bytesRecorded,
+                    TimestampToBytes(Math.Min(packetEndTimestamp, anchor) - packetStartTimestampTicks));
+            }
+
+            var leadingTrimFrames = leadingTrimBytes / _format.BlockAlign;
+            Interlocked.Exchange(ref _anchorDevicePosition,
+                checked(devicePosition + leadingTrimFrames));
+            Interlocked.Exchange(ref _anchorDeviceMediaBytes, packetStartBytes);
+            anchorDevicePosition = Interlocked.Read(ref _anchorDevicePosition);
+        }
+        else
+        {
+            long deviceOffsetFrames = checked(devicePosition - anchorDevicePosition);
+            long deviceOffsetBytes = checked(deviceOffsetFrames * _format.BlockAlign);
+            packetStartBytes = checked(Interlocked.Read(ref _anchorDeviceMediaBytes) + deviceOffsetBytes);
+            if (packetStartBytes < 0)
+                packetStartBytes = 0;
+        }
+
         long currentBytes = MediaBytes;
         long zeroBytes = 0;
         if (packetStartBytes > currentBytes)
@@ -140,9 +190,7 @@ internal sealed class LoopbackTimeline
         }
 
         currentBytes = MediaBytes;
-        long overlapBytes = packetStartTimestampTicks < anchor
-            ? TimestampToBytes(Math.Min(packetEndTimestamp, anchor) - packetStartTimestampTicks)
-            : 0;
+        long overlapBytes = leadingTrimBytes;
         if (currentBytes > packetStartBytes)
             overlapBytes = Math.Max(overlapBytes, currentBytes - packetStartBytes);
 
@@ -159,8 +207,12 @@ internal sealed class LoopbackTimeline
             writePacket(buffer, writeOffset, writeCount);
 
         Interlocked.Exchange(ref _mediaBytes, MediaBytes + writeCount);
-        Interlocked.Exchange(ref _lastDeviceEnd, checked(devicePosition + framesRecorded));
-        Interlocked.Exchange(ref _lastPacketTimestamp, Math.Max(previousPacketTimestamp, packetEndTimestamp));
+        Interlocked.Exchange(ref _lastDeviceStart, devicePosition);
+        Interlocked.Exchange(ref _lastDeviceEnd,
+            Math.Max(previousDeviceEnd, checked(devicePosition + framesRecorded)));
+        Interlocked.Exchange(ref _lastPacketStartTimestamp, packetStartTimestampTicks);
+        Interlocked.Exchange(ref _lastPacketEndTimestamp,
+            Math.Max(Interlocked.Read(ref _lastPacketEndTimestamp), packetEndTimestamp));
 
         return new LoopbackPacketAppendResult(zeroBytes, writeCount, overlapBytes);
     }

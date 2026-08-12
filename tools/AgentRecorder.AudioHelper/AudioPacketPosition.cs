@@ -21,7 +21,8 @@ internal sealed class AudioPacketEventArgs : EventArgs
         long devicePosition,
         long qpcPosition,
         long packetStartTimestampTicks,
-        bool positionValid)
+        bool positionValid,
+        bool dataDiscontinuity = false)
     {
         Buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
         if (bytesRecorded < 0 || bytesRecorded > buffer.Length)
@@ -35,6 +36,7 @@ internal sealed class AudioPacketEventArgs : EventArgs
         QpcPosition = qpcPosition;
         PacketStartTimestampTicks = packetStartTimestampTicks;
         PositionValid = positionValid;
+        DataDiscontinuity = dataDiscontinuity;
     }
 
     public byte[] Buffer { get; }
@@ -44,10 +46,11 @@ internal sealed class AudioPacketEventArgs : EventArgs
     public long QpcPosition { get; }
     public long PacketStartTimestampTicks { get; }
     public bool PositionValid { get; }
+    public bool DataDiscontinuity { get; }
 
     public AudioPacketEventArgs Clone()
         => new(Buffer[..BytesRecorded], BytesRecorded, FramesRecorded, DevicePosition,
-            QpcPosition, PacketStartTimestampTicks, PositionValid);
+            QpcPosition, PacketStartTimestampTicks, PositionValid, DataDiscontinuity);
 }
 
 internal static class AudioPacketPositionMath

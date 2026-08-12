@@ -547,7 +547,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                     devicePosition,
                     qpcPosition,
                     packetStartTimestamp,
-                    positionValid);
+                    positionValid,
+                    (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity);
                 silentOffset += chunkSize;
             }
             return;
@@ -575,7 +576,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 devicePosition,
                 qpcPosition,
                 packetStartTimestamp,
-                positionValid);
+                positionValid,
+                (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity);
             readOffset += chunkBytes;
         }
     }
@@ -588,7 +590,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         long devicePosition,
         long qpcPosition,
         long packetStartTimestamp,
-        bool positionValid)
+        bool positionValid,
+        bool dataDiscontinuity)
     {
         int framesOffset = byteOffset / _bytesPerFrame;
         int framesRecorded = bytesRecorded / _bytesPerFrame;
@@ -611,7 +614,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
             chunkDevicePosition,
             chunkQpcPosition,
             chunkTimestamp,
-            positionValid));
+            positionValid,
+            dataDiscontinuity));
         DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytesRecorded));
     }
 

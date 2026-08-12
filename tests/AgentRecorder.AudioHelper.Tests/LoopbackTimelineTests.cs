@@ -99,6 +99,138 @@ public sealed class LoopbackTimelineTests
     }
 
     [Fact]
+    public void ContinuousDevicePosition_AllowsQpcStartSlightlyBeforePreviousEstimatedEnd()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        var first = Enumerable.Repeat((byte)0x11, 200).ToArray();
+        var second = Enumerable.Repeat((byte)0x22, 200).ToArray();
+        var output = new List<byte>();
+
+        timeline.AppendPacket(first, first.Length, 100, 0, 1_000_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+        var result = timeline.AppendPacket(second, second.Length, 100, 100, 1_099_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        Assert.Equal(0, result.PacketBytesSkipped);
+        Assert.Equal(200, result.PacketBytesWritten);
+        Assert.Equal(first.Concat(second).ToArray(), output.ToArray());
+    }
+
+    [Fact]
+    public void ContinuousDevicePosition_AllowsOneFrameQpcQuantizationJitter()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 0, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var result = timeline.AppendPacket(new byte[200], 200, 100, 100, 1_100_500, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        Assert.Equal(200, result.PacketBytesWritten);
+    }
+
+    [Fact]
+    public void LegalDeviceOverlap_WithQpcJitter_SkipsOnlyConfirmedFrames()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 100, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var result = timeline.AppendPacket(new byte[200], 200, 100, 150, 1_050_500, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        Assert.Equal(100, result.PacketBytesSkipped);
+        Assert.Equal(100, result.PacketBytesWritten);
+    }
+
+    [Fact]
+    public void ContinuousDevicePosition_QpcLargeRegressionFailsClosedWithDiagnostics()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 0, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var ex = Assert.Throws<LoopbackTimelineException>(() => timeline.AppendPacket(
+            new byte[200], 200, 100, 100, 1_050_000, true,
+            (_, _, _) => { }, (_, _) => { }));
+
+        Assert.Contains("qpc_delta_ticks=", ex.Message);
+        Assert.Contains("qpc_drift_ticks=", ex.Message);
+        Assert.Contains("qpc_jitter_tolerance_ticks=", ex.Message);
+    }
+
+    [Fact]
+    public void DevicePositionClearlyBackwardsWithoutOverlap_FailsClosedWithDiagnostics()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 100, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var ex = Assert.Throws<LoopbackTimelineException>(() => timeline.AppendPacket(
+            new byte[200], 200, 100, 0, 900_000, true,
+            (_, _, _) => { }, (_, _) => { }));
+
+        Assert.Contains("device position regressed", ex.Message);
+        Assert.Contains("previous_device_start=100", ex.Message);
+    }
+
+    [Fact]
+    public void DeviceGapAndQpcGapAgree_PadsConfirmedFramesBeforePacket()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        var output = new List<byte>();
+        timeline.AppendPacket(new byte[200], 200, 100, 0, 1_000_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        var result = timeline.AppendPacket(Enumerable.Repeat((byte)0x44, 200).ToArray(), 200, 100, 200, 1_200_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        Assert.Equal(200, result.ZeroBytesWritten);
+        Assert.Equal(200, result.PacketBytesWritten);
+        Assert.Equal(Enumerable.Repeat((byte)0, 200).Concat(new byte[200]).Concat(Enumerable.Repeat((byte)0x44, 200)).ToArray(), output.ToArray());
+    }
+
+    [Fact]
+    public void DeviceGapAndQpcGapConflict_FailsClosed()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 0, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var ex = Assert.Throws<LoopbackTimelineException>(() => timeline.AppendPacket(
+            new byte[200], 200, 100, 200, 1_050_000, true,
+            (_, _, _) => { }, (_, _) => { }));
+
+        Assert.Contains("QPC/device position conflict", ex.Message);
+        Assert.Contains("device_delta_frames=200", ex.Message);
+    }
+
+    [Fact]
+    public void DataDiscontinuityWithConsistentPositions_IsAcceptedAndPreservesEvidencePath()
+    {
+        var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
+        timeline.Start(1_000_000);
+        timeline.AppendPacket(new byte[200], 200, 100, 0, 1_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var result = timeline.AppendPacket(new byte[200], 200, 100, 100, 1_100_000, true,
+            (_, _, _) => { }, (_, _) => { }, dataDiscontinuity: true);
+
+        Assert.Equal(200, result.PacketBytesWritten);
+    }
+
+    [Fact]
     public void InvalidPacketPosition_FailsClosed()
     {
         var timeline = new LoopbackTimeline(Format, Frequency, TimeSpan.Zero);
