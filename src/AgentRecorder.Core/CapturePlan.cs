@@ -1,4 +1,5 @@
 using System;
+using AgentRecorder.Capture;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.Core;
@@ -27,7 +28,11 @@ public sealed class CapturePlan
         string? targetDisplayIdentity = null,
         CapturePlanBounds? displayBounds = null,
         string? targetDisplayId = null,
-        DisplayIdentityResolutionStatus targetDisplayIdentityStatus = DisplayIdentityResolutionStatus.Unresolved)
+        DisplayIdentityResolutionStatus targetDisplayIdentityStatus = DisplayIdentityResolutionStatus.Unresolved,
+        AudioCaptureSourceKind audioSourceKind = AudioCaptureSourceKind.None,
+        string? audioEndpointId = null,
+        string? audioEndpointName = null,
+        bool? audioEndpointIsDefault = null)
     {
         RequestedBackend = string.IsNullOrWhiteSpace(requestedBackend)
             ? "default"
@@ -54,6 +59,10 @@ public sealed class CapturePlan
                 ? DisplayIdentityResolutionStatus.Resolved
                 : targetDisplayIdentityStatus;
         FallbackOccurred = evidence.Fallback;
+        AudioSourceKind = audioSourceKind;
+        AudioEndpointId = string.IsNullOrWhiteSpace(audioEndpointId) ? null : audioEndpointId;
+        AudioEndpointName = string.IsNullOrWhiteSpace(audioEndpointName) ? null : audioEndpointName;
+        AudioEndpointIsDefault = audioEndpointIsDefault;
     }
 
     public string RequestedBackend { get; }
@@ -74,6 +83,10 @@ public sealed class CapturePlan
     public string? TargetDisplayId { get; }
     public CapturePlanBounds? DisplayBounds { get; }
     public bool FallbackOccurred { get; }
+    public AudioCaptureSourceKind AudioSourceKind { get; }
+    public string? AudioEndpointId { get; }
+    public string? AudioEndpointName { get; }
+    public bool? AudioEndpointIsDefault { get; }
 
     public bool IsWindowSurface => string.Equals(CaptureSemantics, "window_surface", StringComparison.Ordinal);
 }

@@ -224,6 +224,7 @@ public class RuntimeRecoveryMetadataTests : IDisposable
             GapFilledBytes = 96000,
             GapFilledMs = 3000,
             DiscontinuityCount = 4,
+            QpcOutlierCount = 1,
             MaxEstimatedGapMs = 3050,
             EstimatedGapMs = 20,
             DurationMs = 2100,
@@ -254,6 +255,7 @@ public class RuntimeRecoveryMetadataTests : IDisposable
         Assert.Equal(96000, meta.AudioGapFilledBytes);
         Assert.Equal(3000, meta.AudioGapFilledMs);
         Assert.Equal(4, meta.AudioDiscontinuityCount);
+        Assert.Equal(1, meta.AudioQpcOutlierCount);
         Assert.Equal(3050, meta.AudioMaxEstimatedGapMs);
         Assert.Equal(16000, meta.AudioSampleRate);
     }

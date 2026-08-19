@@ -2,8 +2,10 @@ namespace AgentRecorder.Capture;
 
 /// <summary>
 /// Default production implementation of <see cref="IAvWorkerFactory"/>.
-/// Selects the audio backend using the AGENT_RECORDER_AUDIO_BACKEND environment
-/// variable: "wasapi-helper" (default) or "dshow". Unknown values fail closed.
+/// The AGENT_RECORDER_AUDIO_BACKEND environment variable is a microphone-only
+/// preference: "wasapi-helper" (default) or "dshow". Unknown values fail
+/// closed for microphone workers; system loopback always uses WASAPI and never
+/// reads this preference.
 /// </summary>
 public sealed class AvWorkerFactory : IAvWorkerFactory
 {
@@ -22,6 +24,21 @@ public sealed class AvWorkerFactory : IAvWorkerFactory
 
     public IAudioCaptureWorker CreateAudioWorker()
     {
+        return CreateAudioWorker(AudioCaptureSourceKind.Microphone);
+    }
+
+    public IAudioCaptureWorker CreateAudioWorker(AudioCaptureSourceKind sourceKind)
+    {
+        if (sourceKind == AudioCaptureSourceKind.SystemLoopback)
+        {
+            // System loopback is always WASAPI. The microphone backend
+            // preference, including dshow, must not change this selection.
+            return new WasapiAudioCaptureWorker();
+        }
+
+        if (sourceKind != AudioCaptureSourceKind.Microphone)
+            throw new InvalidOperationException($"Audio worker source '{sourceKind}' is not supported.");
+
         var backend = GetBackend();
         return backend switch
         {

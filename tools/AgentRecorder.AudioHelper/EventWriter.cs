@@ -64,6 +64,7 @@ internal sealed class EventWriter
             WriteLine("GapFilledBytes", info.GapFilledBytes);
             WriteLine("GapFilledMs", info.GapFilledMs);
             WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
+            WriteLine("QpcOutlierCount", info.QpcOutlierCount);
             WriteLine("ContinuityStatus", string.IsNullOrEmpty(info.ContinuityStatus) ? "continuous" : info.ContinuityStatus);
             WriteLine("CaptureEngine", info.CaptureEngine);
             WriteHfpMetadata(info);
@@ -153,6 +154,7 @@ internal sealed class EventWriter
         WriteLine("GapFilledMs", info.GapFilledMs);
         WriteLine("DiscontinuityCount", info.DiscontinuityCount);
         WriteLine("MaxEstimatedGapMs", info.MaxEstimatedGapMs);
+        WriteLine("QpcOutlierCount", info.QpcOutlierCount);
     }
 
     private void WriteHfpMetadata(AudioHelperEventInfo info)
@@ -243,5 +245,6 @@ internal sealed class AudioHelperEventInfo
     public long GapFilledBytes { get; set; }
     public long GapFilledMs { get; set; }
     public long MaxEstimatedGapMs { get; set; }
+    public long QpcOutlierCount { get; set; }
     public string ContinuityStatus { get; set; } = "continuous";
 }

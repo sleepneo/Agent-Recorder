@@ -146,6 +146,25 @@ public class RecordingPreflightCheckerTests : IDisposable
         };
     }
 
+    private static Recording DisplayRecordingWithSystemLoopback(string outputPath)
+    {
+        return new Recording
+        {
+            SourceType = "display",
+            SourceTitle = "Display 1",
+            OutputPath = outputPath,
+            AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+            Config = new AgentRecorder.Capture.CaptureConfig
+            {
+                SourceKind = "display",
+                Bounds = (0, 0, 1920, 1080),
+                OutputPath = outputPath,
+                AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+                SystemLoopbackEndpoint = "system-endpoint"
+            }
+        };
+    }
+
     [Fact]
     public void CheckBeforeConfirmation_OutputDirectoryWritable_PassesAndCleansTempFile()
     {
@@ -355,6 +374,75 @@ public class RecordingPreflightCheckerTests : IDisposable
 
         Assert.False(result.Passed);
         Assert.Equal("audio_helper_unavailable", result.ErrorCode);
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_SystemLoopback_DshowPreferenceStillRequiresHelper()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "system-out.mp4");
+        var rec = DisplayRecordingWithSystemLoopback(outputPath);
+        var originalBackend = Environment.GetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName);
+        try
+        {
+            Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, AvWorkerFactory.DshowBackend);
+            RecordingPreflightChecker.ShouldUseWasapiBackend = () => false;
+            RecordingPreflightChecker.AudioHelperPathResolver = () => null;
+
+            var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+            Assert.False(result.Passed);
+            Assert.Equal("audio_helper_unavailable", result.ErrorCode);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, originalBackend);
+        }
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_MicrophoneDshow_DoesNotProbeHelper()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "mic-dshow-out.mp4");
+        var rec = DisplayRecordingWithMicrophone(outputPath, micDevice: "fake-mic");
+        var originalBackend = Environment.GetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName);
+        bool probed = false;
+        try
+        {
+            Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, AvWorkerFactory.DshowBackend);
+            RecordingPreflightChecker.ShouldUseWasapiBackend = () => false;
+            RecordingPreflightChecker.AudioHelperPathResolver = () =>
+            {
+                probed = true;
+                return Path.Combine(_tmp.Path, "helper.exe");
+            };
+
+            var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+            Assert.True(result.Passed);
+            Assert.False(probed);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, originalBackend);
+        }
+    }
+
+    [Fact]
+    public void CheckBeforeConfirmation_NoAudio_DoesNotProbeHelper()
+    {
+        var outputPath = Path.Combine(_tmp.Path, "no-audio-out.mp4");
+        var rec = DisplayRecording(outputPath);
+        bool probed = false;
+        RecordingPreflightChecker.AudioHelperPathResolver = () =>
+        {
+            probed = true;
+            return null;
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.True(result.Passed);
+        Assert.False(probed);
     }
 
     [Fact]

@@ -101,6 +101,11 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
 
     public void Start(CaptureConfig cfg, string outputPath)
     {
+        // Lifecycle tests may inject a non-capture command such as -version;
+        // that seam deliberately has no physical desktop bounds. Real gdigrab
+        // argument construction still validates before any FFmpeg process.
+        if (TestArgumentsOverride == null)
+            DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         ResetForStart();
         OutputPath = outputPath;
         var dir = Path.GetDirectoryName(outputPath);
@@ -291,10 +296,14 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
         args.Add("-i");
         args.Add("desktop");
 
-        if (cfg.SourceKind == "display" && (w > 1920 || h > 1080))
+        if (string.Equals(cfg.SourceKind, "display", StringComparison.OrdinalIgnoreCase))
         {
-            args.Add("-vf");
-            args.Add("scale=1920:1080:force_original_aspect_ratio=decrease");
+            var scaleFilter = DisplayScaleGeometry.BuildFilter(w, h);
+            if (scaleFilter != null)
+            {
+                args.Add("-vf");
+                args.Add(scaleFilter);
+            }
         }
 
         args.Add("-an"); // no audio

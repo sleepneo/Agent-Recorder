@@ -57,6 +57,7 @@ public sealed class AudioHelperEvent
     public long? GapFilledBytes { get; set; }
     public long? GapFilledMs { get; set; }
     public long? MaxEstimatedGapMs { get; set; }
+    public long? QpcOutlierCount { get; set; }
     public string? ContinuityStatus { get; set; }
 
     public bool SampleRateParseFailed { get; set; }
@@ -76,6 +77,7 @@ public sealed class AudioHelperEvent
     public bool GapFilledBytesParseFailed { get; set; }
     public bool GapFilledMsParseFailed { get; set; }
     public bool MaxEstimatedGapMsParseFailed { get; set; }
+    public bool QpcOutlierCountParseFailed { get; set; }
     public bool RenderPrimeReadyMsParseFailed { get; set; }
     public bool DuplicateField { get; set; }
     public bool AudioSourceKindDuplicate { get; set; }
@@ -99,5 +101,6 @@ public sealed class AudioHelperEvent
         GapFilledBytesParseFailed ||
         GapFilledMsParseFailed ||
         MaxEstimatedGapMsParseFailed ||
+        QpcOutlierCountParseFailed ||
         RenderPrimeReadyMsParseFailed;
 }

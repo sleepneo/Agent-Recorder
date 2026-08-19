@@ -141,6 +141,7 @@ internal sealed class CaptureSession : IDisposable
     private long _gapFilledBytesTotal;
     private long _gapFilledMsTotal;
     private long _maxEstimatedGapMsObserved;
+    private long _qpcOutlierCount;
     private long _lastStreamResumeTimestamp;
     private long _discontinuityCountCarry;
     private int _inputFinalizationInProgress;
@@ -602,6 +603,17 @@ internal sealed class CaptureSession : IDisposable
                 }
 
                 AppendLoopbackPacketLocked(packet);
+
+                // Update the last callback timestamp when a packet is successfully
+                // accepted and enters the loopback timeline. This keeps the
+                // LastCallbackAgeMs telemetry bounded during continuous packet
+                // delivery. We use the callback arrival timestamp (Stopwatch),
+                // not the packet media timestamp, so the metric correctly reflects
+                // the age of the most recent callback.
+                // Stale senders, terminal-claimed sessions, and failed appends
+                // (which throw before reaching here) do not update this health
+                // state.
+                Interlocked.Exchange(ref _lastCallbackTimestamp, Stopwatch.GetTimestamp());
             }
         }
         catch (Exception ex)
@@ -1293,6 +1305,7 @@ internal sealed class CaptureSession : IDisposable
         Interlocked.Exchange(ref _firstSampleAnchorTicks, 0);
         Interlocked.Exchange(ref _startRecordingTimestamp, 0);
         Interlocked.Exchange(ref _lastStreamResumeTimestamp, 0);
+        Interlocked.Exchange(ref _qpcOutlierCount, 0);
     }
 
     private bool ConfirmLoopbackStart()
@@ -1375,6 +1388,9 @@ internal sealed class CaptureSession : IDisposable
                 (buffer, count) => writer.Write(buffer, 0, count),
                 packet.DataDiscontinuity);
             Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
+            Interlocked.Exchange(ref _qpcOutlierCount, timeline.QpcOutlierCount);
+            if (result.QpcOutlierAccepted)
+                Volatile.Write(ref _continuityDegraded, 1);
             if (result.ZeroBytesWritten > 0)
             {
                 Interlocked.Add(ref _gapFilledBytesTotal, result.ZeroBytesWritten);
@@ -1819,6 +1835,7 @@ internal sealed class CaptureSession : IDisposable
             GapFilledBytes = Interlocked.Read(ref _gapFilledBytesTotal),
             GapFilledMs = Interlocked.Read(ref _gapFilledMsTotal),
             MaxEstimatedGapMs = Interlocked.Read(ref _maxEstimatedGapMsObserved),
+            QpcOutlierCount = Interlocked.Read(ref _qpcOutlierCount),
             ContinuityStatus = Volatile.Read(ref _continuityDegraded) != 0 ? "degraded" : "continuous"
         };
         ApplyHfpMetadata(info);
@@ -1856,6 +1873,7 @@ internal sealed class CaptureSession : IDisposable
             GapFilledBytes = Interlocked.Read(ref _gapFilledBytesTotal),
             GapFilledMs = Interlocked.Read(ref _gapFilledMsTotal),
             MaxEstimatedGapMs = Interlocked.Read(ref _maxEstimatedGapMsObserved),
+            QpcOutlierCount = Interlocked.Read(ref _qpcOutlierCount),
             ContinuityStatus = continuity
         };
         ApplyHfpMetadata(info);

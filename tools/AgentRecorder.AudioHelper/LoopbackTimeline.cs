@@ -5,7 +5,8 @@ namespace AgentRecorder.AudioHelper;
 internal readonly record struct LoopbackPacketAppendResult(
     long ZeroBytesWritten,
     long PacketBytesWritten,
-    long PacketBytesSkipped)
+    long PacketBytesSkipped,
+    bool QpcOutlierAccepted = false)
 {
     public long TotalBytesWritten => ZeroBytesWritten + PacketBytesWritten;
 }
@@ -31,6 +32,7 @@ internal sealed class LoopbackTimeline
     private readonly long _timestampFrequency;
     private readonly long _frameTimestampTicks;
     private readonly long _qpcJitterToleranceTicks;
+    private readonly long _maxDeviceGapFrames;
     private long _anchorTimestamp;
     private long _anchorDevicePosition = -1;
     private long _anchorDeviceMediaBytes;
@@ -39,6 +41,11 @@ internal sealed class LoopbackTimeline
     private long _lastDeviceEnd = -1;
     private long _lastPacketStartTimestamp = -1;
     private long _lastPacketEndTimestamp = -1;
+    private long _lastTrustedQpcTimestamp = -1;
+    private long _lastTrustedDeviceStart = -1;
+    private long _qpcOutlierCount;
+    private int _consecutiveQpcOutliers;
+    private int _continuityDegraded;
 
     public LoopbackTimeline(WaveFormat format, long timestampFrequency, TimeSpan paddingTolerance)
     {
@@ -60,16 +67,20 @@ internal sealed class LoopbackTimeline
         // while remaining tied to the negotiated format rather than a large
         // arbitrary wall-clock tolerance.
         _qpcJitterToleranceTicks = Math.Max(_frameTimestampTicks, qpcQuantizationTicks);
-        // Keep the constructor seam for existing internal call sites. Ordinary
-        // progress ticks no longer pad, so tolerance cannot cover real packets.
-        _ = paddingTolerance;
+        var maxDeviceGap = _format.SampleRate * paddingTolerance.TotalSeconds;
+        if (maxDeviceGap > long.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(paddingTolerance));
+        _maxDeviceGapFrames = Math.Max(0L, (long)Math.Floor(maxDeviceGap));
     }
 
     public bool IsStarted => Interlocked.Read(ref _anchorTimestamp) != 0;
     public long AnchorTimestamp => Interlocked.Read(ref _anchorTimestamp);
     public long MediaBytes => Interlocked.Read(ref _mediaBytes);
     public long LastDeviceEnd => Interlocked.Read(ref _lastDeviceEnd);
+    public long QpcOutlierCount => Interlocked.Read(ref _qpcOutlierCount);
+    public bool ContinuityDegraded => Volatile.Read(ref _continuityDegraded) != 0;
     internal long QpcJitterToleranceTicks => _qpcJitterToleranceTicks;
+    internal long MaxDeviceGapFrames => _maxDeviceGapFrames;
 
     public void Start(long anchorTimestamp)
     {
@@ -98,7 +109,8 @@ internal sealed class LoopbackTimeline
         if (!IsStarted)
             throw new LoopbackTimelineException("Loopback packet arrived before the successful Start boundary");
         if (!positionValid || devicePosition < 0 || packetStartTimestampTicks <= 0)
-            throw new LoopbackTimelineException("WASAPI loopback packet position/QPC evidence is invalid");
+            throw new LoopbackTimelineException(
+                $"WASAPI loopback packet position/QPC evidence is invalid: device_position={devicePosition}; packet_start_ticks={packetStartTimestampTicks}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}");
         if (buffer == null || bytesRecorded < 0 || bytesRecorded > buffer.Length ||
             bytesRecorded % _format.BlockAlign != 0 ||
             framesRecorded < 0 || framesRecorded * _format.BlockAlign != bytesRecorded)
@@ -119,38 +131,78 @@ internal sealed class LoopbackTimeline
 
         long previousDeviceStart = Interlocked.Read(ref _lastDeviceStart);
         long previousDeviceEnd = Interlocked.Read(ref _lastDeviceEnd);
-        long previousPacketStart = Interlocked.Read(ref _lastPacketStartTimestamp);
         long previousPacketEnd = Interlocked.Read(ref _lastPacketEndTimestamp);
+        long trustedQpc = Interlocked.Read(ref _lastTrustedQpcTimestamp);
+        long trustedDeviceStart = Interlocked.Read(ref _lastTrustedDeviceStart);
+        long currentDeviceGap = 0;
+        bool deviceGapOutOfBounds = false;
         if (previousDeviceEnd >= 0)
         {
             if (devicePosition > previousDeviceEnd)
             {
-                long deviceGap = devicePosition - previousDeviceEnd;
-                long maxGapFrames = checked((long)_format.SampleRate * 120L);
-                if (deviceGap > maxGapFrames)
-                    throw new LoopbackTimelineException(
-                        $"WASAPI loopback device position discontinuity: device_gap_frames={deviceGap}; max_gap_frames={maxGapFrames}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
+                currentDeviceGap = checked(devicePosition - previousDeviceEnd);
+                deviceGapOutOfBounds = currentDeviceGap > _maxDeviceGapFrames;
             }
             else if (devicePosition < previousDeviceStart)
             {
                 throw new LoopbackTimelineException(
-                    $"WASAPI loopback device position regressed without a legal overlap: device_position={devicePosition}; previous_device_start={previousDeviceStart}; previous_device_end={previousDeviceEnd}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
+                    $"WASAPI loopback device position regressed without a legal overlap: device_position={devicePosition}; previous_device_start={previousDeviceStart}; previous_device_end={previousDeviceEnd}; current_device_gap_frames={currentDeviceGap}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}");
             }
         }
 
-        if (previousPacketStart >= 0)
+        bool qpcOutlierAccepted = false;
+        if (trustedQpc >= 0)
         {
-            long deviceDeltaFrames = checked(devicePosition - previousDeviceStart);
+            long deviceDeltaFrames = checked(devicePosition - trustedDeviceStart);
             long expectedQpcDeltaTicks = AudioPacketPositionMath.FramesToTimestampTicks(
                 deviceDeltaFrames, _format.SampleRate, _timestampFrequency);
-            long qpcDeltaTicks = checked(packetStartTimestampTicks - previousPacketStart);
+            long qpcDeltaTicks = checked(packetStartTimestampTicks - trustedQpc);
             long qpcDriftTicks = checked(qpcDeltaTicks - expectedQpcDeltaTicks);
             if (qpcDriftTicks > _qpcJitterToleranceTicks ||
                 qpcDriftTicks < -_qpcJitterToleranceTicks)
             {
-                throw new LoopbackTimelineException(
-                    $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; packet_frames={framesRecorded}; data_discontinuity={dataDiscontinuity}");
+                if (_consecutiveQpcOutliers == 0 &&
+                    !dataDiscontinuity &&
+                    !deviceGapOutOfBounds)
+                {
+                    qpcOutlierAccepted = true;
+                    Interlocked.Increment(ref _qpcOutlierCount);
+                    Volatile.Write(ref _consecutiveQpcOutliers, 1);
+                    Volatile.Write(ref _continuityDegraded, 1);
+                }
+                else
+                {
+                    throw CreateQpcConflictException(
+                        qpcDeltaTicks,
+                        expectedQpcDeltaTicks,
+                        qpcDriftTicks,
+                        deviceDeltaFrames,
+                        currentDeviceGap,
+                        deviceGapOutOfBounds,
+                        packetStartTimestampTicks,
+                        previousPacketEnd,
+                        framesRecorded,
+                        positionValid,
+                        dataDiscontinuity,
+                        trustedQpc,
+                        trustedDeviceStart);
+                }
             }
+            else
+            {
+                // Recovery is complete only after a packet returns to the last
+                // trusted QPC/device trajectory. The outlier itself never moves
+                // this baseline.
+                Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
+                Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+                Volatile.Write(ref _consecutiveQpcOutliers, 0);
+            }
+        }
+
+        if (deviceGapOutOfBounds && !qpcOutlierAccepted)
+        {
+            throw new LoopbackTimelineException(
+                $"WASAPI loopback device position discontinuity: device_gap_frames={currentDeviceGap}; max_gap_frames={_maxDeviceGapFrames}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; qpc_outlier_count={QpcOutlierCount}");
         }
 
         long anchor = AnchorTimestamp;
@@ -214,7 +266,33 @@ internal sealed class LoopbackTimeline
         Interlocked.Exchange(ref _lastPacketEndTimestamp,
             Math.Max(Interlocked.Read(ref _lastPacketEndTimestamp), packetEndTimestamp));
 
-        return new LoopbackPacketAppendResult(zeroBytes, writeCount, overlapBytes);
+        if (trustedQpc < 0)
+        {
+            Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
+            Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+            Volatile.Write(ref _consecutiveQpcOutliers, 0);
+        }
+
+        return new LoopbackPacketAppendResult(zeroBytes, writeCount, overlapBytes, qpcOutlierAccepted);
+    }
+
+    private LoopbackTimelineException CreateQpcConflictException(
+        long qpcDeltaTicks,
+        long expectedQpcDeltaTicks,
+        long qpcDriftTicks,
+        long deviceDeltaFrames,
+        long currentDeviceGap,
+        bool deviceGapOutOfBounds,
+        long packetStartTimestampTicks,
+        long previousPacketEnd,
+        int framesRecorded,
+        bool positionValid,
+        bool dataDiscontinuity,
+        long trustedQpc,
+        long trustedDeviceStart)
+    {
+        return new LoopbackTimelineException(
+            $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; current_device_gap_frames={currentDeviceGap}; max_device_gap_frames={_maxDeviceGapFrames}; device_gap_out_of_bounds={deviceGapOutOfBounds}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}; consecutive_qpc_outliers={_consecutiveQpcOutliers}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; last_written_device_start={Interlocked.Read(ref _lastDeviceStart)}; last_written_device_end={Interlocked.Read(ref _lastDeviceEnd)}");
     }
 
     /// <summary>

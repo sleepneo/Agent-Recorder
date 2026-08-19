@@ -26,6 +26,8 @@ public sealed class RecordingBundleRequest
     public string AudioStatus { get; }
     public string? AudioContinuityStatus { get; }
     public string? AudioDeviceId { get; }
+    public string AudioSourceKind { get; }
+    public string? AudioDeviceName { get; }
     public long? AudioLostAtMs { get; }
 
     public string? NestedRole { get; }
@@ -64,7 +66,9 @@ public sealed class RecordingBundleRequest
         string container,
         string codec,
         int width,
-        int height)
+        int height,
+        string audioSourceKind = "none",
+        string? audioDeviceName = null)
     {
         RecordingId = recordingId ?? throw new ArgumentNullException(nameof(recordingId));
         ConfirmationId = confirmationId;
@@ -83,6 +87,8 @@ public sealed class RecordingBundleRequest
         AudioStatus = audioStatus ?? "not_requested";
         AudioContinuityStatus = audioContinuityStatus;
         AudioDeviceId = audioDeviceId;
+        AudioSourceKind = audioSourceKind ?? "none";
+        AudioDeviceName = audioDeviceName;
         AudioLostAtMs = audioLostAtMs;
         NestedRole = nestedRole;
         NestedSessionId = nestedSessionId;

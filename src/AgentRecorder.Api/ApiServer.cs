@@ -74,6 +74,10 @@ public sealed class ApiServer
     /// </summary>
     private IMicrophoneStatusProvider EffectiveMicrophoneStatusProvider => _engine.MicrophoneStatusProvider;
 
+    private ISystemAudioEndpointProvider EffectiveSystemAudioEndpointProvider => _engine.SystemAudioEndpointProvider;
+
+    private ISystemAudioExperimentFlag EffectiveSystemAudioExperimentFlag => _engine.SystemAudioExperimentFlag;
+
     public void Start()
     {
         _listener.Start();
@@ -506,13 +510,22 @@ public sealed class ApiServer
         }
 
         JsonObject cfg = BuildQuickRecordingConfig(body);
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null;
 
         // Resolve audio intent before any target resolution so microphone failures
         // (system audio, unknown device, no devices, enumeration unavailable) fail
         // fast without display/window enumeration or opening the region-selection UI.
         try
         {
-            ConfigParser.ResolveAudioIntent(cfg, EffectiveMicrophoneProvider, EffectiveMicrophoneStatusProvider);
+            var audioIntent = ConfigParser.ResolveAudioIntentDetails(
+                cfg,
+                EffectiveMicrophoneProvider,
+                EffectiveMicrophoneStatusProvider,
+                EffectiveSystemAudioEndpointProvider,
+                EffectiveSystemAudioExperimentFlag);
+            preResolvedSystemAudioEndpoint = audioIntent.SystemAudioEndpoint;
+            if (audioIntent.SystemAudioEndpoint != null)
+                ConfigParser.BindResolvedSystemAudioEndpoint(cfg, audioIntent.SystemAudioEndpoint);
         }
         catch (ApiException ex)
         {
@@ -532,7 +545,8 @@ public sealed class ApiServer
                             ["type"] = "display",
                             ["display_id"] = display.id
                         };
-                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var result = _engine.CreateRecording(
+                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
                         var resolved = new JsonObject
                         {
                             ["type"] = "display",
@@ -553,9 +567,18 @@ public sealed class ApiServer
                         // Pre-build to get the clamped capture bounds for the response.
                         // Use the engine's providers so active-window pre-build cannot
                         // diverge from the device list endpoint or the real recording path.
-                        var preBuilt = ConfigParser.Build(cfg, agent, out _, EffectiveMicrophoneProvider, EffectiveMicrophoneStatusProvider);
+                        var preBuilt = ConfigParser.Build(
+                            cfg,
+                            agent,
+                            out _,
+                            EffectiveMicrophoneProvider,
+                            EffectiveMicrophoneStatusProvider,
+                            EffectiveSystemAudioEndpointProvider,
+                            EffectiveSystemAudioExperimentFlag,
+                            preResolvedSystemAudioEndpoint);
                         var capBounds = preBuilt.Config.Bounds;
-                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var result = _engine.CreateRecording(
+                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
                         var resolved = new JsonObject
                         {
                             ["type"] = "window",
@@ -641,7 +664,8 @@ public sealed class ApiServer
                         RegionSelectionStateStore.Save(state);
                         lock (_regionLock) { _lastSelectedRegion = state; }
 
-                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var result = _engine.CreateRecording(
+                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
                         var resolved = new JsonObject
                         {
                             ["type"] = "region",
@@ -685,7 +709,8 @@ public sealed class ApiServer
                             }
                         };
 
-                        var result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+                        var result = _engine.CreateRecording(
+                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
                         var resolved = new JsonObject
                         {
                             ["type"] = "region",
@@ -755,14 +780,22 @@ public sealed class ApiServer
         if (nestedNode != null)
             cfg["nested"] = nestedNode.DeepClone();
 
-        var durationSec = body["duration_seconds"]?.GetValue<int?>();
-        if (durationSec.HasValue)
+        var stopConditionNode = body["stop_condition"];
+        if (stopConditionNode != null)
         {
-            cfg["stop_condition"] = new JsonObject
+            cfg["stop_condition"] = stopConditionNode.DeepClone();
+        }
+        else
+        {
+            var durationSec = body["duration_seconds"]?.GetValue<int?>();
+            if (durationSec.HasValue)
             {
-                ["type"] = "duration",
-                ["seconds"] = durationSec.Value
-            };
+                cfg["stop_condition"] = new JsonObject
+                {
+                    ["type"] = "duration",
+                    ["seconds"] = durationSec.Value
+                };
+            }
         }
 
         return cfg;

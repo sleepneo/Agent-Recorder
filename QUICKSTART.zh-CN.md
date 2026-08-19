@@ -94,6 +94,23 @@ X-Agent-Recorder-Key: <api-key>
 
 托盘菜单提供中文/English 语言选择，设置保存在本机，并应用于后续打开的选区、确认和录制控制窗口。
 
+## 受控系统声音预览
+
+本版包含默认关闭的系统声音预览能力，供本机受监督体验。启动 Agent Recorder
+时设置 `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`，然后在请求中加入：
+
+```json
+{
+  "target": { "type": "selected_region" },
+  "duration_seconds": 30,
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+未指定设备时使用当前 Windows 多媒体默认输出端点；也可显式提供 render
+endpoint ID。单次录制不能同时启用麦克风和系统声音。由于该能力尚未升级为公开
+契约，默认 `/capabilities`、`/permissions` 和 `/audio/devices` 仍会报告系统声音未开放。
+
 ## 发布包里有什么
 
 ```text

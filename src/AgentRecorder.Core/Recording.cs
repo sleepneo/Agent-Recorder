@@ -15,6 +15,10 @@ public sealed class Recording
     public bool Microphone { get; set; }
     public string? MicrophoneDeviceId { get; set; }
     public string? MicrophoneDeviceName { get; set; }
+    public AudioCaptureSourceKind AudioSourceKind { get; set; } = AudioCaptureSourceKind.None;
+    public string? SystemAudioEndpointId { get; set; }
+    public string? SystemAudioEndpointName { get; set; }
+    public bool? SystemAudioEndpointIsDefault { get; set; }
     public string OutputPath { get; set; } = "";
     public DateTime StartedAtUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }

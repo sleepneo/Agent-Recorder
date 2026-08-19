@@ -53,12 +53,30 @@ public class AvWorkerFactoryTests : IDisposable
     }
 
     [Theory]
+    [InlineData(AvWorkerFactory.DshowBackend, AudioCaptureSourceKind.SystemLoopback, typeof(WasapiAudioCaptureWorker))]
+    [InlineData(AvWorkerFactory.DshowBackend, AudioCaptureSourceKind.Microphone, typeof(AudioCaptureWorker))]
+    [InlineData(AvWorkerFactory.WasapiBackend, AudioCaptureSourceKind.SystemLoopback, typeof(WasapiAudioCaptureWorker))]
+    [InlineData(AvWorkerFactory.WasapiBackend, AudioCaptureSourceKind.Microphone, typeof(WasapiAudioCaptureWorker))]
+    [InlineData("invalid", AudioCaptureSourceKind.SystemLoopback, typeof(WasapiAudioCaptureWorker))]
+    public void CreateAudioWorker_SourceAwareSelection_MatchesMicrophonePreferenceOnly(
+        string backend,
+        AudioCaptureSourceKind sourceKind,
+        Type expectedType)
+    {
+        Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, backend);
+
+        var worker = new AvWorkerFactory().CreateAudioWorker(sourceKind);
+
+        Assert.IsType(expectedType, worker);
+    }
+
+    [Theory]
     [InlineData("wasapi")]
     [InlineData("wasapi-helper-extra")]
     [InlineData("dsHOW")]
     [InlineData("dshowx")]
     [InlineData("invalid")]
-    public void CreateAudioWorker_InvalidBackend_ThrowsInvalidOperationException(string value)
+    public void CreateAudioWorker_MicrophoneInvalidBackend_ThrowsInvalidOperationException(string value)
     {
         Environment.SetEnvironmentVariable(AvWorkerFactory.BackendEnvVarName, value);
 

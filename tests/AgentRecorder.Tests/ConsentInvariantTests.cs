@@ -28,12 +28,23 @@ public class ConsentInvariantTests : IDisposable
 {
     private sealed class CaptureAuditLogger : AuditLogger
     {
-        public List<(DateTime Time, string Event, JsonElement Payload)> Events { get; } = new();
+        private readonly object _eventsLock = new();
+        private readonly List<(DateTime Time, string Event, JsonElement Payload)> _events = new();
+
+        public List<(DateTime Time, string Event, JsonElement Payload)> Events
+        {
+            get
+            {
+                lock (_eventsLock)
+                    return _events.ToList();
+            }
+        }
 
         public override void Log(string evt, object payload)
         {
             var json = JsonSerializer.Serialize(payload);
-            Events.Add((DateTime.UtcNow, evt, JsonDocument.Parse(json).RootElement));
+            lock (_eventsLock)
+                _events.Add((DateTime.UtcNow, evt, JsonDocument.Parse(json).RootElement));
             base.Log(evt, payload);
         }
     }

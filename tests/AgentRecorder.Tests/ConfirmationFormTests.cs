@@ -1580,4 +1580,54 @@ public class ConfirmationFormTests
             form.CloseWithoutResult();
         });
     }
+
+    [Theory]
+    [InlineData(UiLanguage.ZhCn, "系统声音：开启（默认系统输出：Speakers with a deliberately long name）", "default")]
+    [InlineData(UiLanguage.EnUs, "System audio: On (Default output: Speakers with a deliberately long name)", "default")]
+    [InlineData(UiLanguage.ZhCn, "系统声音：开启（所选系统输出：Headphones）", "selected")]
+    [InlineData(UiLanguage.EnUs, "System audio: On (Selected output: Headphones)", "selected")]
+    public void Form_SystemAudioSummary_IsLocalizedAndLongNameStaysInsideLayout(
+        UiLanguage language,
+        string expected,
+        string outputSelection)
+    {
+        RunOnSta(() =>
+        {
+            var summary = new
+            {
+                source = "region: test",
+                source_type = "region",
+                source_title = "test",
+                audio = "System audio: On (Default output: Speakers with a deliberately long name)",
+                audio_source_kind = "system-loopback",
+                audio_system_default_output = outputSelection == "selected"
+                    ? null
+                    : "Speakers with a deliberately long name",
+                audio_system_output_name = outputSelection == "selected"
+                    ? "Headphones"
+                    : "Speakers with a deliberately long name",
+                audio_system_output_selection = outputSelection,
+                duration = "15s",
+                output = "out.mp4",
+                nested_role = "none",
+                recording_id = "rec_system",
+                confirmation_id = "conf_system",
+                timeout_seconds = 60,
+                expires_at = "2026-01-01T00:00:00Z"
+            };
+
+            var item = new PendingConfirmationItem("conf_system", "rec_system", summary, _ => { }, 60);
+            using var form = new ConfirmationForm(item, 1, 1, textProvider: new UiTextProvider(language));
+            form.Show();
+
+            Assert.Contains(form.GetInfoRowTextsForTests(), row => row.Value == expected);
+            var main = form.MainContentPanelBoundsForTests;
+            foreach (var row in form.GetInfoRowBoundsForTests())
+            {
+                Assert.True(main.Contains(row.LabelBounds));
+                Assert.True(main.Contains(row.ValueBounds));
+            }
+            form.CloseWithoutResult();
+        });
+    }
 }

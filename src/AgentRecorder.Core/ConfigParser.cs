@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -22,10 +24,14 @@ public static class ConfigParser
     /// </summary>
     private static readonly IMicrophoneDeviceProvider EmptyProvider = new EmptyMicrophoneProvider();
     private static readonly IMicrophoneStatusProvider NullStatusProvider = NullMicrophoneStatusProvider.Instance;
+    private static readonly ISystemAudioEndpointProvider EmptySystemAudioProvider = new EmptySystemAudioEndpointProvider();
 
     public static Recording Build(JsonNode cfg, string agent, out object summary,
         IMicrophoneDeviceProvider? microphoneProvider = null,
-        IMicrophoneStatusProvider? microphoneStatusProvider = null)
+        IMicrophoneStatusProvider? microphoneStatusProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
+        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
         RejectUnsupportedContinuousFeatures(cfg);
 
@@ -36,7 +42,14 @@ public static class ConfigParser
         // enumeration unavailable, system audio requested, muted device) fail
         // fast and cheap.
         // =====================================================================
-        var resolvedMic = ResolveAudioIntent(cfg, microphoneProvider, microphoneStatusProvider);
+        var resolvedAudio = ResolveAudioIntentDetails(
+            cfg,
+            microphoneProvider,
+            microphoneStatusProvider,
+            systemAudioEndpointProvider,
+            systemAudioExperimentFlag,
+            preResolvedSystemAudioEndpoint);
+        var resolvedMic = resolvedAudio.Microphone;
 
         // =====================================================================
         // Step 1: nested.role validation MUST come before source enumeration.
@@ -247,6 +260,23 @@ public static class ConfigParser
             cap.MicDeviceName = resolvedMic.Name;
         }
 
+        if (resolvedAudio.SystemAudioEndpoint != null)
+        {
+            rec.AudioSourceKind = AudioCaptureSourceKind.SystemLoopback;
+            rec.SystemAudioEndpointId = resolvedAudio.SystemAudioEndpoint.Id;
+            rec.SystemAudioEndpointName = resolvedAudio.SystemAudioEndpoint.Name;
+            rec.SystemAudioEndpointIsDefault = resolvedAudio.SystemAudioEndpoint.IsDefaultMultimedia;
+            cap.AudioSourceKind = AudioCaptureSourceKind.SystemLoopback;
+            cap.SystemLoopbackEndpoint = resolvedAudio.SystemAudioEndpoint.Id;
+            cap.SystemLoopbackEndpointName = resolvedAudio.SystemAudioEndpoint.Name;
+            cap.SystemLoopbackEndpointIsDefault = resolvedAudio.SystemAudioEndpoint.IsDefaultMultimedia;
+        }
+        else if (rec.Microphone)
+        {
+            rec.AudioSourceKind = AudioCaptureSourceKind.Microphone;
+            cap.AudioSourceKind = AudioCaptureSourceKind.Microphone;
+        }
+
         var v = cfg["video"];
         int fps = v?["fps"]?.GetValue<int>() ?? 30;
         if (!AllowedFps.Contains(fps)) throw Inv("fps must be one of 15, 24, 30, 60");
@@ -292,7 +322,24 @@ public static class ConfigParser
         summary = new
         {
             source = $"{rec.SourceType}: {rec.SourceTitle}",
-            audio = rec.Microphone ? $"Microphone: {rec.MicrophoneDeviceName}" : "No audio",
+            audio = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                ? rec.SystemAudioEndpointIsDefault == true
+                    ? $"System audio: On (Default output: {rec.SystemAudioEndpointName})"
+                    : $"System audio: On (Selected output: {rec.SystemAudioEndpointName})"
+                : rec.Microphone ? $"Microphone: {rec.MicrophoneDeviceName}" : "No audio",
+            audio_source_kind = rec.AudioSourceKind switch
+            {
+                AudioCaptureSourceKind.Microphone => "microphone",
+                AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+                _ => "none"
+            },
+            audio_system_enabled = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback,
+            audio_system_default_output = rec.SystemAudioEndpointIsDefault == true
+                ? rec.SystemAudioEndpointName
+                : null,
+            audio_system_output_name = rec.SystemAudioEndpointName,
+            audio_system_output_is_default = rec.SystemAudioEndpointIsDefault,
+            audio_system_output_selection = rec.SystemAudioEndpointIsDefault == true ? "default" : "selected",
             audio_device = rec.Microphone ? rec.MicrophoneDeviceName : null,
             audio_volume_percent = rec.Microphone ? resolvedMic?.VolumePercent : null,
             duration = rec.DurationSeconds is int s ? $"{s}s" : "Manual stop",
@@ -356,14 +403,54 @@ public static class ConfigParser
     /// </summary>
     public static MicrophoneDeviceInfo? ResolveAudioIntent(JsonNode cfg,
         IMicrophoneDeviceProvider? provider = null,
-        IMicrophoneStatusProvider? statusProvider = null)
+        IMicrophoneStatusProvider? statusProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
+        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
+        => ResolveAudioIntentDetails(
+            cfg,
+            provider,
+            statusProvider,
+            systemAudioEndpointProvider,
+            systemAudioExperimentFlag,
+            preResolvedSystemAudioEndpoint).Microphone;
+
+    /// <summary>
+    /// Resolves the complete audio intent before target enumeration or UI.
+    /// The returned endpoint is a stable snapshot that callers may bind into
+    /// the request before the existing region-selection/confirmation flow.
+    /// </summary>
+    public static AudioIntentResolution ResolveAudioIntentDetails(JsonNode cfg,
+        IMicrophoneDeviceProvider? provider = null,
+        IMicrophoneStatusProvider? statusProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
+        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
-        RejectUnsupportedAudioFeatures(cfg);
+        var flag = systemAudioExperimentFlag ?? DisabledSystemAudioExperimentFlag.Instance;
+        RejectUnsupportedAudioFeatures(cfg, flag);
 
         var micNode = cfg["audio"]?["microphone"];
-        bool enabled = micNode?["enabled"]?.GetValue<bool>() ?? false;
-        if (!enabled)
-            return null;
+        var systemNode = cfg["audio"]?["system_audio"];
+        bool microphoneEnabled = micNode?["enabled"]?.GetValue<bool>() ?? false;
+        bool systemEnabled = systemNode?["enabled"]?.GetValue<bool>() ?? false;
+
+        if (microphoneEnabled && systemEnabled)
+            throw new ApiException(400, "UNSUPPORTED_FEATURE",
+                "Microphone and system audio cannot be enabled together in this controlled flow.",
+                new { suggested_action = "choose_one_audio_source" });
+
+        SystemAudioEndpointInfo? resolvedSystem = null;
+
+        if (systemEnabled)
+        {
+            resolvedSystem = preResolvedSystemAudioEndpoint == null
+                ? ResolveSystemAudioEndpoint(systemNode, systemAudioEndpointProvider)
+                : ValidatePreResolvedSystemAudioEndpoint(systemNode, preResolvedSystemAudioEndpoint);
+        }
+
+        if (!microphoneEnabled)
+            return new AudioIntentResolution(null, resolvedSystem);
 
         var actualProvider = provider ?? EmptyProvider;
         var actualStatusProvider = statusProvider ?? NullStatusProvider;
@@ -396,7 +483,7 @@ public static class ConfigParser
                 new { suggested_action = "unmute_microphone_in_windows_settings", device_id = device.Id });
         }
 
-        return device;
+        return new AudioIntentResolution(device, resolvedSystem);
     }
 
     private static IReadOnlyList<MicrophoneDeviceInfo> EnumerateMicrophoneDevices(IMicrophoneDeviceProvider provider)
@@ -466,13 +553,150 @@ public static class ConfigParser
     /// path construction so that the failure is fast and cheap.
     /// Microphone is implemented; system audio remains blocked.
     /// </summary>
-    public static void RejectUnsupportedAudioFeatures(JsonNode cfg)
+    public static void RejectUnsupportedAudioFeatures(
+        JsonNode cfg,
+        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null)
     {
         var sys = cfg["audio"]?["system_audio"];
-        if (sys?["enabled"]?.GetValue<bool>() == true)
+        if (sys?["enabled"]?.GetValue<bool>() == true &&
+            !(systemAudioExperimentFlag ?? DisabledSystemAudioExperimentFlag.Instance).IsEnabled)
             throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",
-                "System audio recording is not implemented in this version.",
+                "System audio recording is disabled for the controlled experiment.",
                 new { capability = "system_audio", suggested_action = "retry_without_audio" });
+    }
+
+    private static SystemAudioEndpointInfo ResolveSystemAudioEndpoint(
+        JsonNode? systemNode,
+        ISystemAudioEndpointProvider? provider)
+    {
+        if (systemNode == null)
+            throw new ApiException(400, "INVALID_ARGUMENT", "audio.system_audio is required when system audio is enabled.");
+
+        var endpointProvider = provider ?? EmptySystemAudioProvider;
+        var requestedId = Str(systemNode["device_id"]);
+        bool explicitId = systemNode["device_id"] != null;
+        if (explicitId && string.IsNullOrWhiteSpace(requestedId))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "audio.system_audio.device_id must be a non-empty exact render endpoint id.",
+                new { suggested_action = "use_the_current_default_output_or_a_valid_render_endpoint_id" });
+
+        SystemAudioEndpointInfo? endpoint;
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(DeviceEnumerationTimeout);
+            endpoint = (explicitId
+                    ? endpointProvider.GetEndpointAsync(requestedId!, cts.Token)
+                    : endpointProvider.GetDefaultMultimediaRenderEndpointAsync(cts.Token))
+                .WaitAsync(DeviceEnumerationTimeout).GetAwaiter().GetResult();
+        }
+        catch (SystemAudioEndpointEnumerationException ex)
+        {
+            throw new ApiException(503, ex.ErrorCode,
+                "The system-audio output endpoint could not be enumerated.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+        }
+        catch (OperationCanceledException)
+        {
+            throw new ApiException(503, "system_audio_endpoint_enumeration_timeout",
+                "Timed out while resolving the system-audio output endpoint.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+        }
+        catch (Exception)
+        {
+            throw new ApiException(503, "system_audio_endpoint_enumeration_unavailable",
+                "The system-audio output endpoint could not be enumerated.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+        }
+
+        if (endpoint == null)
+            throw new ApiException(explicitId ? 404 : 503,
+                explicitId ? "SYSTEM_AUDIO_ENDPOINT_NOT_FOUND" : "SYSTEM_AUDIO_DEFAULT_ENDPOINT_NOT_FOUND",
+                explicitId
+                    ? "The requested system-audio render endpoint was not found."
+                    : "The current default multimedia render endpoint is unavailable.",
+                new { suggested_action = "refresh_audio_output_devices" });
+
+        if (!string.Equals(endpoint.Direction, "render", StringComparison.OrdinalIgnoreCase))
+            throw new ApiException(400, "SYSTEM_AUDIO_ENDPOINT_WRONG_DIRECTION",
+                "System audio requires an output render endpoint.",
+                new { suggested_action = "select_a_render_endpoint" });
+
+        if (!string.Equals(endpoint.State, "active", StringComparison.OrdinalIgnoreCase))
+            throw new ApiException(503, "SYSTEM_AUDIO_ENDPOINT_INACTIVE",
+                "The selected system-audio output endpoint is not active.",
+                new { suggested_action = "activate_or_reconnect_the_output_device", device_id = endpoint.Id });
+
+        if (!explicitId && !endpoint.IsDefaultMultimedia)
+            throw new ApiException(503, "SYSTEM_AUDIO_DEFAULT_ENDPOINT_NOT_FOUND",
+                "The endpoint provider did not return the current multimedia default output.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+
+        if (string.IsNullOrWhiteSpace(endpoint.Id) || string.IsNullOrWhiteSpace(endpoint.Name))
+            throw new ApiException(503, "SYSTEM_AUDIO_ENDPOINT_METADATA_UNAVAILABLE",
+                "The system-audio output endpoint did not provide safe display metadata.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+
+        return endpoint;
+    }
+
+    private static SystemAudioEndpointInfo ValidatePreResolvedSystemAudioEndpoint(
+        JsonNode? systemNode,
+        SystemAudioEndpointInfo endpoint)
+    {
+        var requestedId = Str(systemNode?["device_id"]);
+        if (!string.IsNullOrWhiteSpace(requestedId) &&
+            !string.Equals(requestedId, endpoint.Id, StringComparison.Ordinal))
+        {
+            throw new ApiException(409, "SYSTEM_AUDIO_ENDPOINT_CHANGED",
+                "The approved system-audio endpoint no longer matches the request.",
+                new { suggested_action = "retry_after_refreshing_audio_output_devices" });
+        }
+
+        if (string.IsNullOrWhiteSpace(endpoint.Id) || string.IsNullOrWhiteSpace(endpoint.Name))
+            throw new ApiException(503, "SYSTEM_AUDIO_ENDPOINT_METADATA_UNAVAILABLE",
+                "The approved system-audio output endpoint did not provide safe display metadata.",
+                new { suggested_action = "retry_after_checking_the_default_output_device" });
+
+        if (!string.Equals(endpoint.Direction, "render", StringComparison.OrdinalIgnoreCase))
+            throw new ApiException(400, "SYSTEM_AUDIO_ENDPOINT_WRONG_DIRECTION",
+                "System audio requires an output render endpoint.",
+                new { suggested_action = "select_a_render_endpoint" });
+
+        if (!string.Equals(endpoint.State, "active", StringComparison.OrdinalIgnoreCase))
+            throw new ApiException(503, "SYSTEM_AUDIO_ENDPOINT_INACTIVE",
+                "The selected system-audio output endpoint is not active.",
+                new { suggested_action = "activate_or_reconnect_the_output_device", device_id = endpoint.Id });
+
+        return endpoint;
+    }
+
+    public sealed record AudioIntentResolution(
+        MicrophoneDeviceInfo? Microphone,
+        SystemAudioEndpointInfo? SystemAudioEndpoint);
+
+    /// <summary>
+    /// Binds the already validated endpoint snapshot into the private request
+    /// copy used by quick-recording target resolution. The subsequent Build()
+    /// therefore validates and plans the exact same endpoint, even if the
+    /// Windows default output changes while the region selector is visible.
+    /// </summary>
+    public static void BindResolvedSystemAudioEndpoint(JsonNode cfg, SystemAudioEndpointInfo endpoint)
+    {
+        if (cfg["audio"] is not JsonObject audio ||
+            audio["system_audio"] is not JsonObject systemAudio)
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "audio.system_audio is required when system audio is enabled.");
+
+        systemAudio["device_id"] = endpoint.Id;
+    }
+
+    private sealed class EmptySystemAudioEndpointProvider : ISystemAudioEndpointProvider
+    {
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(null);
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(null);
     }
 
     /// <summary>

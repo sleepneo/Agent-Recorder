@@ -264,6 +264,12 @@ public static class AudioHelperEventStreamParser
                     else
                         evt.MaxEstimatedGapMsParseFailed = true;
                     break;
+                case "QpcOutlierCount":
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var qoc))
+                        evt.QpcOutlierCount = qoc;
+                    else
+                        evt.QpcOutlierCountParseFailed = true;
+                    break;
                 case "ContinuityStatus":
                     evt.ContinuityStatus = value;
                     break;
@@ -301,6 +307,7 @@ public static class AudioHelperEventStreamParser
         summary.GapFilledBytes = evt.GapFilledBytes;
         summary.GapFilledMs = evt.GapFilledMs;
         summary.MaxEstimatedGapMs = evt.MaxEstimatedGapMs;
+        summary.QpcOutlierCount = evt.QpcOutlierCount;
         summary.ContinuityStatus = evt.ContinuityStatus;
     }
 
@@ -790,6 +797,7 @@ public sealed class AudioHelperSessionSummary
     public long? GapFilledBytes { get; set; }
     public long? GapFilledMs { get; set; }
     public long? MaxEstimatedGapMs { get; set; }
+    public long? QpcOutlierCount { get; set; }
 
     /// <summary>"continuous" or "degraded" as declared by the helper; null when not reported.</summary>
     public string? ContinuityStatus { get; set; }

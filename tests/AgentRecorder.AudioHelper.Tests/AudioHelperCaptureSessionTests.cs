@@ -60,7 +60,8 @@ public class AudioHelperCaptureSessionTests
             byte[] buffer,
             long devicePosition,
             long packetStartTimestampTicks,
-            bool positionValid = true)
+            bool positionValid = true,
+            bool dataDiscontinuity = false)
         {
             int blockAlign = Math.Max(1, Format?.BlockAlign ?? 1);
             PacketPositionAvailable?.Invoke(this, new AudioPacketEventArgs(
@@ -70,7 +71,8 @@ public class AudioHelperCaptureSessionTests
                 devicePosition,
                 qpcPosition: 1,
                 packetStartTimestampTicks: packetStartTimestampTicks,
-                positionValid: positionValid));
+                positionValid: positionValid,
+                dataDiscontinuity: dataDiscontinuity));
         }
 
         public void InjectError(Exception ex)
@@ -245,6 +247,129 @@ public class AudioHelperCaptureSessionTests
             Assert.DoesNotContain(events, evt => evt.ErrorCode == "audio_loopback_packet_position_invalid");
             Assert.Single(events, evt => evt.Result == AudioHelperEventResult.Stopped);
             Assert.True(File.Exists(output));
+            Assert.False(File.Exists(partial));
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_IsolatedQpcOutlierRecoversToStoppedDegradedAndCompleteWav()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_qpc_recovery_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var opts = Options("rec_loopback_qpc_recovery", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts, _ => (input, null, null));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+            var anchor = (long)(typeof(CaptureSession)
+                .GetField("_firstSampleAnchorTicks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session) ?? 0L);
+            var expectedTwoPackets = AudioPacketPositionMath.FramesToTimestampTicks(960, 48_000, Stopwatch.Frequency);
+            var expectedThreePackets = AudioPacketPositionMath.FramesToTimestampTicks(1_440, 48_000, Stopwatch.Frequency);
+            var first = Enumerable.Repeat((byte)0x11, 960).ToArray();
+            var outlier = Enumerable.Repeat((byte)0x22, 960).ToArray();
+            var recovered = Enumerable.Repeat((byte)0x33, 960).ToArray();
+
+            input.InjectPositionedPacket(first, 0, anchor);
+            input.InjectPositionedPacket(outlier, 960, anchor + expectedTwoPackets + 1_164_385);
+            input.InjectPositionedPacket(recovered, 1_440, anchor + expectedThreePackets);
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+
+            Assert.Equal(0, exitCode);
+            Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+            Assert.Equal("degraded", summary.ContinuityStatus);
+            Assert.Equal(1, summary.QpcOutlierCount);
+            Assert.Equal(3_840, summary.BytesWritten);
+            Assert.Equal(960, summary.GapFilledBytes);
+            Assert.True(File.Exists(output));
+            Assert.False(File.Exists(partial));
+            Assert.True(new FileInfo(output).Length >= 44 + 3_840);
+            using var reader = new WaveFileReader(output);
+            var pcm = new byte[reader.Length];
+            var read = reader.Read(pcm, 0, pcm.Length);
+            Assert.Equal(pcm.Length, read);
+            Assert.True(pcm.Length >= 3_840);
+            pcm = pcm.Take(3_840).ToArray();
+            Assert.Equal(first.Concat(new byte[960]).Concat(outlier).Concat(recovered).ToArray(), pcm);
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_ContinuousQpcConflictFailsClosedWithoutFinalWav()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_qpc_conflict_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var opts = Options("rec_loopback_qpc_conflict", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts, _ => (input, null, null));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+            var anchor = (long)(typeof(CaptureSession)
+                .GetField("_firstSampleAnchorTicks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session) ?? 0L);
+            var expectedTwoPackets = AudioPacketPositionMath.FramesToTimestampTicks(960, 48_000, Stopwatch.Frequency);
+            var expectedThreePackets = AudioPacketPositionMath.FramesToTimestampTicks(1_440, 48_000, Stopwatch.Frequency);
+
+            input.InjectPositionedPacket(new byte[960], 0, anchor);
+            input.InjectPositionedPacket(new byte[960], 960, anchor + expectedTwoPackets + 1_164_385);
+            input.InjectPositionedPacket(new byte[960], 1_440, anchor + expectedThreePackets + 1_164_385);
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+            var events = AudioHelperEventStreamParser.ParseEvents(stdout.ToString());
+            var terminal = events.Last(evt => evt.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+
+            Assert.NotEqual(0, exitCode);
+            Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
+            Assert.Equal("audio_loopback_packet_position_invalid", terminal.ErrorCode);
+            Assert.Contains("qpc_outlier_count=1", terminal.Reason);
+            Assert.Contains("last_trusted_qpc_ticks=", terminal.Reason);
+            Assert.Contains("last_trusted_device_start=0", terminal.Reason);
+            Assert.False(File.Exists(output));
             Assert.False(File.Exists(partial));
         }
         finally

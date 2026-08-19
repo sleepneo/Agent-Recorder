@@ -50,6 +50,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
     public void Start(CaptureConfig cfg)
     {
+        DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         _cfg = cfg;
         _output = cfg.OutputPath;
 
@@ -412,6 +413,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
     internal static List<string> BuildArgs(CaptureConfig cfg)
     {
+        DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         var args = new List<string>();
 
         // Global options.
@@ -502,10 +504,14 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     private static void AppendOutputArgs(List<string> args, CaptureConfig cfg)
     {
         var (_, _, capW, capH) = cfg.Bounds;
-        if (cfg.SourceKind == "display" && (capW > 1920 || capH > 1080))
+        if (string.Equals(cfg.SourceKind, "display", StringComparison.OrdinalIgnoreCase))
         {
-            args.Add("-vf");
-            args.Add("scale=1920:1080:force_original_aspect_ratio=decrease");
+            var scaleFilter = DisplayScaleGeometry.BuildFilter(capW, capH);
+            if (scaleFilter != null)
+            {
+                args.Add("-vf");
+                args.Add(scaleFilter);
+            }
         }
 
         // With microphone enabled the dshow audio input is index 0 and the
@@ -702,10 +708,13 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     public static OutputMeta Probe(string path)
     {
         var m = new OutputMeta();
+        m.OutputPath = string.IsNullOrWhiteSpace(path) ? null : path;
+        bool fileExists = false;
         try
         {
             var fi = new FileInfo(path);
-            m.SizeBytes = fi.Exists ? fi.Length : 0;
+            fileExists = fi.Exists;
+            m.SizeBytes = fileExists ? fi.Length : 0;
         }
         catch { }
 
@@ -725,8 +734,19 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             if (p != null)
             {
                 var json = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(3000);
+                if (!p.WaitForExit(3000))
+                {
+                    try { p.Kill(true); } catch { }
+                    return m;
+                }
+
+                if (p.ExitCode != 0)
+                    return m;
+
                 var root = JsonNode.Parse(json);
+                if (root == null)
+                    return m;
+
                 m.DurationSeconds = double.TryParse(
                     root?["format"]?["duration"]?.GetValue<string>(),
                     NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d : 0;
@@ -735,28 +755,60 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
                 m.Container = NormalizeContainer(root?["format"]?["format_name"]?.GetValue<string>());
 
                 var streams = root?["streams"]?.AsArray();
-                var vs = streams?.FirstOrDefault(s => s?["codec_type"]?.GetValue<string>() == "video");
-                if (vs != null)
+                if (streams != null)
                 {
-                    m.Width = vs["width"]?.GetValue<int>() ?? 0;
-                    m.Height = vs["height"]?.GetValue<int>() ?? 0;
-                    m.Codec = NormalizeCodec(vs["codec_name"]?.GetValue<string>());
-                    var fr = vs["r_frame_rate"]?.GetValue<string>() ?? "30/1";
-                    var parts = fr.Split('/');
-                    if (parts.Length == 2 && int.TryParse(parts[1], out var den) && den != 0)
-                        m.Fps = (int)Math.Round(double.Parse(parts[0]) / den);
+                    var infos = new List<ProbeStreamInfo>();
+                    JsonNode? videoNode = null;
+                    JsonNode? audioNode = null;
+                    foreach (var s in streams)
+                    {
+                        if (s == null) continue;
+                        var info = new ProbeStreamInfo
+                        {
+                            Index = s["index"]?.GetValue<int>() ?? -1,
+                            CodecType = s["codec_type"]?.GetValue<string>(),
+                            CodecName = s["codec_name"]?.GetValue<string>(),
+                            StartTimeSeconds = TryParseProbeDouble(s["start_time"]?.GetValue<string>()),
+                            DurationSeconds = TryParseProbeDouble(s["duration"]?.GetValue<string>())
+                        };
+                        infos.Add(info);
+
+                        if (info.CodecType == "video" && videoNode == null)
+                            videoNode = s;
+                        else if (info.CodecType == "audio" && audioNode == null)
+                            audioNode = s;
+                    }
+                    m.ProbeStreams = infos.ToArray();
+
+                    if (videoNode != null)
+                    {
+                        m.Width = videoNode["width"]?.GetValue<int>() ?? 0;
+                        m.Height = videoNode["height"]?.GetValue<int>() ?? 0;
+                        m.Codec = NormalizeCodec(videoNode["codec_name"]?.GetValue<string>());
+                        var fr = videoNode["r_frame_rate"]?.GetValue<string>() ?? "30/1";
+                        var parts = fr.Split('/');
+                        if (parts.Length == 2 && int.TryParse(parts[1], out var den) && den != 0)
+                            m.Fps = (int)Math.Round(double.Parse(parts[0]) / den);
+                    }
+
+                    // Detect whether an audio stream was actually produced.
+                    if (audioNode != null)
+                    {
+                        m.HasAudioStream = true;
+                        m.AudioCodec = audioNode["codec_name"]?.GetValue<string>();
+                    }
                 }
 
-                // Detect whether an audio stream was actually produced.
-                var audioStream = streams?.FirstOrDefault(s => s?["codec_type"]?.GetValue<string>() == "audio");
-                if (audioStream != null)
-                {
-                    m.HasAudioStream = true;
-                    m.AudioCodec = audioStream["codec_name"]?.GetValue<string>();
-                }
+                // OutputFileExists is a probe result, not merely a directory
+                // existence check: a file that cannot be parsed by ffprobe is
+                // not a valid successful output.
+                m.OutputFileExists = fileExists;
             }
         }
-        catch { }
+        catch
+        {
+            m.OutputFileExists = false;
+        }
         return m;
     }
 
@@ -779,6 +831,15 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         if (string.IsNullOrWhiteSpace(codecName))
             return null;
         return codecName.ToLowerInvariant();
+    }
+
+    private static double? TryParseProbeDouble(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var d))
+            return d;
+        return null;
     }
 
     public void Dispose() { try { _proc?.Dispose(); } catch { } }

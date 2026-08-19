@@ -86,7 +86,7 @@ POST /api/v1/recordings/quick
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退 |
-| 系统声音 | 内部竖切 | 隔离 WASAPI loopback helper、packet position/QPC 时间线与原子 WAV 输出已完成，并通过 10 秒真实设备 WAV 录音验收；尚未完成音视频合流、确认 UI 和公共 API 验收，因此用户请求仍返回未实现 |
+| 系统声音 | 受控预览 | 隔离 WASAPI loopback、音视频分离采集、AAC 合流、确认 UI、倒计时和连续性诊断已接通；选区产品路径通过 12 秒真实设备音画验收。默认仍关闭，仅在 `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true` 时可用，因此本版公开能力契约继续报告未开放 |
 | WGC 连续录制 | 实验性实现 | 已支持符合条件的 display/window/region 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败、稳定显示器身份、topology 复核、GPU 区域裁剪和 FFmpeg 自动回退；display 稳定性、遮挡窗口及 10 秒选区录制已通过真实桌面验收；默认关闭，未作为公共 API 能力开放 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 

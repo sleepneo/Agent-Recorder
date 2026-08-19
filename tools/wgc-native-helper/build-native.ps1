@@ -68,8 +68,22 @@ function Get-FileSha256 {
     $maxRetries = 10
     for ($i = 0; $i -lt $maxRetries; $i++) {
         try {
-            $hash = Get-FileHash -Path $Path -Algorithm SHA256 -ErrorAction Stop
-            return $hash.Hash
+            $stream = $null
+            $sha256 = $null
+            try {
+                $stream = [System.IO.File]::Open(
+                    $Path,
+                    [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read,
+                    [System.IO.FileShare]::ReadWrite)
+                $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                $bytes = $sha256.ComputeHash($stream)
+                return ([System.BitConverter]::ToString($bytes)).Replace("-", "")
+            }
+            finally {
+                if ($null -ne $sha256) { $sha256.Dispose() }
+                if ($null -ne $stream) { $stream.Dispose() }
+            }
         } catch {
             if ($i -eq $maxRetries - 1) { throw }
             Start-Sleep -Milliseconds 100

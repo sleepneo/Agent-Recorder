@@ -336,6 +336,151 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         Assert.False(File.Exists(stopSignal), "Stop signal was not cleaned up");
     }
 
+    // --- P0-1: Real WasapiAudioCaptureWorker source-kind (requested vs observed) validation ---
+    // These start the production worker against the fake helper and control the
+    // AudioSourceKind reported in the STARTED event via the
+    // AGENT_RECORDER_FAKE_SOURCE_KIND environment variable (a test-only hook that
+    // never enters the production argument set).
+
+    [Fact]
+    public void SystemLoopbackRequested_HelperReportsMicrophone_RaisesProtocolErrorAndNoAudioReady()
+    {
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithLoopback(),
+            reportedSourceKind: "microphone",
+            out int audioReadyCount);
+
+        Assert.Equal(0, audioReadyCount);
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Equal("audio_helper_protocol_error", summary.ErrorCode);
+        // The detailed requested-vs-observed mismatch text is carried in the
+        // terminal summary's validation errors (not in the Reason field, which
+        // holds the stable protocol reason "protocol_invalid_started").
+        Assert.Contains(summary.ValidationErrors, v => v.Contains("AudioSourceKind mismatch"));
+        Assert.Contains(summary.ValidationErrors, v => v.Contains("expected 'system-loopback', got 'microphone'"));
+    }
+
+    [Fact]
+    public void MicrophoneRequested_HelperReportsSystemLoopback_RaisesProtocolErrorAndNoAudioReady()
+    {
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithMic(),
+            reportedSourceKind: "system-loopback",
+            out int audioReadyCount);
+
+        Assert.Equal(0, audioReadyCount);
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Equal("audio_helper_protocol_error", summary.ErrorCode);
+        Assert.Contains(summary.ValidationErrors, v => v.Contains("AudioSourceKind mismatch"));
+        Assert.Contains(summary.ValidationErrors, v => v.Contains("expected 'microphone', got 'system-loopback'"));
+    }
+
+    [Fact]
+    public void SystemLoopbackRequested_HelperReportsSystemLoopback_RaisesAudioReadyExactlyOnce()
+    {
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithLoopback(),
+            reportedSourceKind: "system-loopback",
+            out int audioReadyCount);
+
+        Assert.Equal(1, audioReadyCount);
+        Assert.True(summary.State == AudioHelperSessionState.Success || summary.State == AudioHelperSessionState.Stopped,
+            $"Expected success/stopped terminal state, got {summary.State}. ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
+        Assert.Equal("system-loopback", summary.AudioSourceKind);
+    }
+
+    [Fact]
+    public void MicrophoneRequested_HelperReportsMicrophone_RaisesAudioReadyExactlyOnce()
+    {
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithMic(),
+            reportedSourceKind: "microphone",
+            out int audioReadyCount);
+
+        Assert.Equal(1, audioReadyCount);
+        Assert.True(summary.State == AudioHelperSessionState.Success || summary.State == AudioHelperSessionState.Stopped,
+            $"Expected success/stopped terminal state, got {summary.State}. ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
+        Assert.Equal("microphone", summary.AudioSourceKind);
+    }
+
+    [Fact]
+    public void SystemLoopbackRequested_HelperOmitsSourceKind_FailsClosedAndNoAudioReady()
+    {
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithLoopback(),
+            reportedSourceKind: null,
+            out int audioReadyCount);
+
+        Assert.Equal(0, audioReadyCount);
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+        Assert.Equal("audio_helper_protocol_error", summary.ErrorCode);
+        Assert.Contains(summary.ValidationErrors, v => v.Contains("AudioSourceKind"));
+    }
+
+    [Fact]
+    public void MicrophoneRequested_HelperOmitsSourceKind_AllowsLegacyReadyPath()
+    {
+        // Microphone is the legacy flow: a missing AudioSourceKind is tolerated
+        // (unlike system-loopback, which fails closed).
+        var summary = RunRealWorkerSourceKindScenario(
+            CaptureConfigWithMic(),
+            reportedSourceKind: null,
+            out int audioReadyCount);
+
+        Assert.Equal(1, audioReadyCount);
+        Assert.True(summary.State == AudioHelperSessionState.Success || summary.State == AudioHelperSessionState.Stopped,
+            $"Expected success/stopped terminal state, got {summary.State}. ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
+    }
+
+    private static AudioHelperSessionSummary RunRealWorkerSourceKindScenario(
+        CaptureConfig cfg,
+        string? reportedSourceKind,
+        out int audioReadyCount)
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"wasapi-src-kind-{Guid.NewGuid():N}.wav");
+        var original = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", reportedSourceKind);
+
+            var worker = new WasapiAudioCaptureWorker
+            {
+                HelperExePathOverride = FakeHelperExePath(),
+                SkipMicrophoneStatusMonitor = true
+            };
+
+            int ready = 0;
+            worker.AudioReady += () => Interlocked.Increment(ref ready);
+
+            worker.Start(cfg, outputPath);
+            Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(10)),
+                "Worker did not exit for source-kind scenario");
+
+            audioReadyCount = Volatile.Read(ref ready);
+
+            try { worker.Dispose(); } catch { }
+
+            var summary = worker.GetTerminalSummary();
+            Assert.NotNull(summary);
+            return summary!;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", original);
+            try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+        }
+    }
+
+    private static CaptureConfig CaptureConfigWithLoopback()
+    {
+        return new CaptureConfig
+        {
+            AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+            SystemLoopbackEndpoint = @"\\?\@device_render_{0.0.0.00000000}.{12345678-1234-1234-1234-123456789012}",
+            DurationSeconds = 300
+        };
+    }
+
     private static WasapiAudioCaptureWorker CreateWorker(string helperArgs)
     {
         return new WasapiAudioCaptureWorker

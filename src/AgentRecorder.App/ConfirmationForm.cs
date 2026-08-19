@@ -296,6 +296,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         return result;
     }
 
+    internal IReadOnlyList<(string Label, string Value)> GetInfoRowTextsForTests()
+    {
+        var result = new List<(string, string)>();
+        foreach (var (label, value) in _infoRows)
+            result.Add((label.Text, value.Text));
+        return result;
+    }
+
     internal IReadOnlyList<(Rectangle LabelBounds, Rectangle ValueBounds)> GetInfoRowBoundsRelativeToInfoPanelForTests()
     {
         var result = new List<(Rectangle, Rectangle)>();
@@ -790,10 +798,31 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), GetString(s, "source_title"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), GetString(s, "duration"));
         var rawAudio = GetString(s, "audio");
-        var audioDisplayValue = TryGetString(s, "audio_device", out var audioDeviceName)
-            ? audioDeviceName
-            : (rawAudio == "No audio" ? _text.Get("Confirmation_Info_NoAudio") : rawAudio);
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Audio"), audioDisplayValue);
+        var audioSourceKind = GetString(s, "audio_source_kind");
+        string audioLabel;
+        string audioDisplayValue;
+        if (string.Equals(audioSourceKind, "system-loopback", StringComparison.Ordinal))
+        {
+            var outputName = TryGetString(s, "audio_system_output_name", out var systemOutputName)
+                ? systemOutputName
+                : GetString(s, "audio_system_default_output");
+            var outputSelection = GetString(s, "audio_system_output_selection");
+            audioLabel = _text.Get("Confirmation_Info_SystemAudio");
+            audioDisplayValue = string.Format(
+                System.Globalization.CultureInfo.CurrentCulture,
+                string.Equals(outputSelection, "selected", StringComparison.Ordinal)
+                    ? _text.Get("Confirmation_Info_SystemAudioSelectedOn")
+                    : _text.Get("Confirmation_Info_SystemAudioOn"),
+                outputName);
+        }
+        else
+        {
+            audioLabel = _text.Get("Confirmation_Info_Audio");
+            audioDisplayValue = TryGetString(s, "audio_device", out var audioDeviceName)
+                ? audioDeviceName
+                : (rawAudio == "No audio" ? _text.Get("Confirmation_Info_NoAudio") : rawAudio);
+        }
+        AddInfoRow(_infoTable, row++, audioLabel, audioDisplayValue);
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), GetString(s, "nested_role"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_RecordingId"), GetString(s, "recording_id"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), GetString(s, "confirmation_id"));

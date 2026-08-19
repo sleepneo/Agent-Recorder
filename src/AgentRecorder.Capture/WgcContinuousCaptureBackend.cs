@@ -250,6 +250,9 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         if (cfg == null)
             throw new ArgumentNullException(nameof(cfg));
 
+        // Keep direct backend callers compatible with the historical
+        // Microphone=true field while the product path uses AudioSourceKind.
+        cfg.NormalizeAudioSource();
         ValidateConfig(cfg);
 
         // Atomic reservation: only one Start can leave Created.
@@ -797,10 +800,13 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                 "WGC continuous backend Fps must be between 1 and 60.");
         }
 
-        if (cfg.Microphone)
+        if (cfg.AudioRequested)
         {
+            string audioSource = cfg.IsMicrophone
+                ? "microphone"
+                : cfg.IsSystemLoopback ? "system audio" : "audio";
             throw new ApiException(400, "UNSUPPORTED_FEATURE",
-                "WGC continuous backend does not support microphone audio.");
+                $"WGC continuous backend does not support {audioSource} capture.");
         }
 
         if (string.IsNullOrWhiteSpace(cfg.OutputPath))

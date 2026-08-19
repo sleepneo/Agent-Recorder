@@ -330,7 +330,17 @@ internal static class RecordingPreflightChecker
 
     private static RecordingPreflightResult CheckWasapiHelperPreflight(Recording rec)
     {
-        if (!rec.Config.Microphone || !ShouldUseWasapiBackend())
+        // Preserve the legacy CaptureConfig.Microphone=true contract for
+        // callers that construct a config directly instead of going through
+        // ConfigParser/CaptureBackendSelector normalization.
+        rec.Config.NormalizeAudioSource();
+        // System loopback has exactly one legal worker: WASAPI. It must probe
+        // the helper even when the process-wide microphone preference is dshow.
+        // Microphone keeps the existing environment-driven choice, and no
+        // audio skips the helper entirely.
+        bool usesWasapiHelper = rec.Config.IsSystemLoopback ||
+            (rec.Config.IsMicrophone && ShouldUseWasapiBackend());
+        if (!rec.Config.AudioRequested || !usesWasapiHelper)
             return Pass(new List<string>());
 
         var helperPath = AudioHelperPathResolver();
@@ -381,7 +391,7 @@ internal static class RecordingPreflightChecker
                 "update_audio_helper");
         }
 
-        if (!string.IsNullOrEmpty(rec.Config.MicDevice) &&
+        if (rec.Config.IsMicrophone && !string.IsNullOrEmpty(rec.Config.MicDevice) &&
             rec.Config.MicDevice.IndexOf(@"\wave_", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             string? endpointId;

@@ -48,6 +48,7 @@ public sealed class OutputMeta
     public string? VideoEncoderSelectionReason;
 
     // Microphone audio outcome tracking.
+    public string? AudioSourceKind; // "none" | "microphone" | "system-loopback"
     public string? AudioStatus; // "not_requested" | "recorded" | "start_failed" | "lost" | "missing_audio_track"
     public bool HasAudioStream;
     public string? AudioCodec;
@@ -157,10 +158,42 @@ public sealed class OutputMeta
     /// <summary>WASAPI DataDiscontinuity packets observed by the helper.</summary>
     public long? AudioDiscontinuityCount;
 
+    /// <summary>Isolated loopback QPC outliers recovered using device position.</summary>
+    public long? AudioQpcOutlierCount;
+
     /// <summary>
     /// Stable error code from the WASAPI helper, normalized to the allowlist
     /// of machine-readable codes. Null when no helper was used or no error
     /// was reported.
     /// </summary>
     public string? AudioHelperErrorCode;
+
+    /// <summary>
+    /// Structured per-stream probe evidence (index, codec type/name, start time
+    /// and duration) parsed from the ffprobe JSON for the muxed output. Used by
+    /// post-mux validation to verify actual stream order and final A/V timeline
+    /// rather than relying on pre-mux WAV duration estimates.
+    /// </summary>
+    public ProbeStreamInfo[] ProbeStreams = Array.Empty<ProbeStreamInfo>();
+}
+
+/// <summary>
+/// Per-stream metadata parsed from structured ffprobe JSON output.
+/// </summary>
+public sealed class ProbeStreamInfo
+{
+    /// <summary>Stream index within the container (0-based).</summary>
+    public int Index = -1;
+
+    /// <summary>Stream type: "video", "audio", "data", ...</summary>
+    public string? CodecType;
+
+    /// <summary>Codec name as reported by ffprobe (e.g. "h264", "aac").</summary>
+    public string? CodecName;
+
+    /// <summary>Stream start time in seconds, or null when absent/unparseable.</summary>
+    public double? StartTimeSeconds;
+
+    /// <summary>Stream duration in seconds, or null when absent/unparseable.</summary>
+    public double? DurationSeconds;
 }

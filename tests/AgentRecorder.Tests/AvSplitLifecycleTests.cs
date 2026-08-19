@@ -22,11 +22,13 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private readonly bool _holdFileOpen;
     private readonly string? _holdFileOpenCopyFrom;
     private readonly int _naturalExitDelayMs;
-    private readonly string _stderrLog;
+    private string _stderrLog;
     private readonly long _runtimeAudioLostAtMs;
+    private readonly string? _reportedSourceKind;
     private FileStream? _fileStream;
     private int _audioReadyRaised;
     private AudioHelperSessionSummary? _terminalSummary;
+    private bool _protocolErrorRaised;
 
     public event Action? AudioReady;
     public event Action<int, string>? NaturalExit;
@@ -43,6 +45,7 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     public bool IsFileHandleReleased => _fileStream == null;
     public bool SuppressExit { get; set; }
     public bool SuppressHandleRelease { get; set; }
+    public bool ProtocolErrorRaised => _protocolErrorRaised;
 
     public FakeAudioCaptureWorker(
         bool raiseAudioReadyOnStart = false,
@@ -51,7 +54,8 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         string? holdFileOpenCopyFrom = null,
         int naturalExitDelayMs = -1,
         string stderrLog = "",
-        long runtimeAudioLostAtMs = 0)
+        long runtimeAudioLostAtMs = 0,
+        string? reportedSourceKind = null)
     {
         _raiseAudioReadyOnStart = raiseAudioReadyOnStart;
         _audioReadyDelayMs = audioReadyDelayMs;
@@ -60,11 +64,31 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         _naturalExitDelayMs = naturalExitDelayMs;
         _stderrLog = stderrLog;
         _runtimeAudioLostAtMs = runtimeAudioLostAtMs;
+        _reportedSourceKind = reportedSourceKind;
     }
 
     public void Start(CaptureConfig cfg, string outputPath)
     {
         OutputPath = outputPath;
+
+        // Simulate requested-vs-observed source kind mismatch.
+        // When the fake helper reports a different source kind than the config
+        // requested, set a protocol error and do not raise AudioReady.
+        if (_reportedSourceKind != null)
+        {
+            var expectedKind = cfg.IsSystemLoopback ? "system-loopback" : "microphone";
+            if (!string.Equals(_reportedSourceKind, expectedKind, StringComparison.Ordinal))
+            {
+                _protocolErrorRaised = true;
+                _stderrLog = $"protocol_invalid_started: AudioSourceKind mismatch: expected '{expectedKind}', got '{_reportedSourceKind}'";
+                HasExited = true;
+                ExitCode = 1;
+                try { NaturalExit?.Invoke(1, _stderrLog); }
+                catch { }
+                return;
+            }
+        }
+
         if (_holdFileOpen)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
@@ -304,8 +328,27 @@ internal sealed class FakeAvWorkerFactory : IAvWorkerFactory
     public FakeAudioCaptureWorker? AudioWorker { get; set; }
     public FakeVideoCaptureWorker? VideoWorker { get; set; }
 
-    public IAudioCaptureWorker CreateAudioWorker() => AudioWorker ?? new FakeAudioCaptureWorker();
-    public IVideoCaptureWorker CreateVideoWorker() => VideoWorker ?? new FakeVideoCaptureWorker();
+    public int CreateAudioWorkerCount { get; private set; }
+    public AudioCaptureSourceKind? LastAudioSourceKind { get; private set; }
+    public int CreateVideoWorkerCount { get; private set; }
+
+    public IAudioCaptureWorker CreateAudioWorker()
+    {
+        CreateAudioWorkerCount++;
+        return AudioWorker ?? new FakeAudioCaptureWorker();
+    }
+
+    public IAudioCaptureWorker CreateAudioWorker(AudioCaptureSourceKind sourceKind)
+    {
+        LastAudioSourceKind = sourceKind;
+        return CreateAudioWorker();
+    }
+
+    public IVideoCaptureWorker CreateVideoWorker()
+    {
+        CreateVideoWorkerCount++;
+        return VideoWorker ?? new FakeVideoCaptureWorker();
+    }
 }
 
 /// <summary>
@@ -318,6 +361,8 @@ internal sealed class FakeExternalProcessRunner : IExternalProcessRunner
     private readonly int _exitCode;
     private readonly string _stderr;
     private readonly ManualResetEventSlim? _blockBeforeRun;
+    private readonly bool _throwCancellationAfterWrite;
+    private readonly bool _throwExceptionAfterWrite;
 
     public int RunCallCount { get; private set; }
     public string? LastFileName { get; private set; }
@@ -330,13 +375,17 @@ internal sealed class FakeExternalProcessRunner : IExternalProcessRunner
         string? outputFileToCopy = null,
         int exitCode = 0,
         string stderr = "",
-        ManualResetEventSlim? blockBeforeRun = null)
+        ManualResetEventSlim? blockBeforeRun = null,
+        bool throwCancellationAfterWrite = false,
+        bool throwExceptionAfterWrite = false)
     {
         _simulateTimeout = simulateTimeout;
         _outputFileToCopy = outputFileToCopy;
         _exitCode = exitCode;
         _stderr = stderr;
         _blockBeforeRun = blockBeforeRun;
+        _throwCancellationAfterWrite = throwCancellationAfterWrite;
+        _throwExceptionAfterWrite = throwExceptionAfterWrite;
     }
 
     public async Task<ExternalProcessResult> RunAsync(
@@ -353,6 +402,28 @@ internal sealed class FakeExternalProcessRunner : IExternalProcessRunner
         LastTimeout = timeout;
 
         _blockBeforeRun?.Wait();
+
+        if (_throwCancellationAfterWrite || _throwExceptionAfterWrite)
+        {
+            // Simulate the production runner surfacing the caller's cancellation
+            // or an unexpected failure only after it has already begun writing to
+            // the mux temp path (the last argument). The finalizer must still
+            // clean up the partial mux file and never touch a pre-existing final.
+            if (!string.IsNullOrEmpty(_outputFileToCopy) && argumentList.Count > 0)
+            {
+                var outputPath = argumentList.Last();
+                try
+                {
+                    if (File.Exists(outputPath)) File.Delete(outputPath);
+                    File.Copy(_outputFileToCopy, outputPath);
+                }
+                catch { }
+            }
+
+            if (_throwCancellationAfterWrite)
+                throw new OperationCanceledException("simulated caller cancellation after partial write");
+            throw new InvalidOperationException("simulated runner failure after partial write");
+        }
 
         if (_simulateTimeout)
         {
@@ -428,6 +499,362 @@ public sealed class AvSplitLifecycleTests : IDisposable
             Bounds = (0, 0, 320, 240),
             OutputPath = Path.Combine(_tempDir, $"final-{Guid.NewGuid():N}.mp4")
         };
+    }
+
+    private CaptureConfig CreateSystemLoopbackConfig(string? endpoint = null)
+    {
+        return new CaptureConfig
+        {
+            SourceKind = "display",
+            AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+            SystemLoopbackEndpoint = endpoint ?? "{0.0.0.00000000}.{00000000-0000-0000-0000-000000000000}",
+            Fps = 30,
+            Bounds = (0, 0, 320, 240),
+            OutputPath = Path.Combine(_tempDir, $"final-{Guid.NewGuid():N}.mp4")
+        };
+    }
+
+    // ============================================================
+    // System loopback lifecycle tests
+    // ============================================================
+
+    [Fact]
+    public void SystemLoopback_CallsMux_WithCorrectFfmpegArgs()
+    {
+        var validAudio = CreateValidAudio();
+        var validVideo = CreateValidVideo();
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            holdFileOpen: true,
+            holdFileOpenCopyFrom: validAudio,
+            stderrLog: "audio-stderr");
+        var video = new FakeVideoCaptureWorker(stderrLog: "video-stderr");
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var runner = new FakeExternalProcessRunner(outputFileToCopy: validVideo);
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+        Assert.Equal(AudioCaptureSourceKind.SystemLoopback, factory.LastAudioSourceKind);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+
+        video.EmitNaturalExit(0, "video-stderr");
+
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited && runner.RunCallCount > 0, TimeSpan.FromSeconds(5)));
+        Assert.True(runner.RunCallCount > 0, "Mux must be called (system loopback must not take the no-audio quick path)");
+
+        var lastArgs = runner.LastArgs;
+        Assert.NotNull(lastArgs);
+        var argsStr = string.Join(" ", lastArgs!);
+        Assert.Contains("-map 0:v:0", argsStr);
+        Assert.Contains("-map [a]", argsStr);
+        Assert.Contains("-c:v copy", argsStr);
+        Assert.Contains("-c:a aac", argsStr);
+        Assert.Contains("128k", argsStr);
+        Assert.Contains("atrim", argsStr);
+        Assert.Contains("asetpts", argsStr);
+    }
+
+    [Fact]
+    public void SystemLoopback_MuxFailure_DoesNotWriteRecorded()
+    {
+        var validAudio = CreateValidAudio();
+        var validVideo = CreateValidVideo();
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            holdFileOpen: true,
+            holdFileOpenCopyFrom: validAudio);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        // Simulate mux failure (exit code 1)
+        var runner = new FakeExternalProcessRunner(exitCode: 1, stderr: "mux-failed");
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+
+        video.EmitNaturalExit(0, "");
+
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited, TimeSpan.FromSeconds(5)));
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        Assert.DoesNotContain("system_loopback_recorded", meta!.AudioStatus ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mux-failed", meta.StderrLog ?? "");
+        Assert.Equal("system-loopback", meta.AudioSourceKind);
+    }
+
+    [Fact]
+    public void SystemLoopback_MuxTimeout_DoesNotWriteRecorded()
+    {
+        var validAudio = CreateValidAudio();
+        var validVideo = CreateValidVideo();
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            holdFileOpen: true,
+            holdFileOpenCopyFrom: validAudio);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        // Simulate mux timeout
+        var runner = new FakeExternalProcessRunner(simulateTimeout: true, stderr: "mux-timeout");
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+
+        video.EmitNaturalExit(0, "");
+
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited, TimeSpan.FromSeconds(5)));
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        Assert.DoesNotContain("system_loopback_recorded", meta!.AudioStatus ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("system-loopback", meta.AudioSourceKind);
+    }
+
+    [Fact]
+    public void SystemLoopback_Metadata_HasCorrectSourceKind()
+    {
+        var validAudio = CreateValidAudio();
+        var validVideo = CreateValidVideo();
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            holdFileOpen: true,
+            holdFileOpenCopyFrom: validAudio);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var runner = new FakeExternalProcessRunner(outputFileToCopy: validVideo);
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+
+        video.EmitNaturalExit(0, "");
+
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited, TimeSpan.FromSeconds(5)));
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        Assert.Equal("system-loopback", meta!.AudioSourceKind);
+        // Must not use microphone keys
+        if (meta.AudioStatus != null)
+            Assert.DoesNotContain("microphone", meta.AudioStatus, StringComparison.OrdinalIgnoreCase);
+        if (meta.AudioCaptureBackend != null)
+            Assert.DoesNotContain("microphone", meta.AudioCaptureBackend, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SystemLoopback_Start_RejectsIllegalCombinations()
+    {
+        // Illegal audio configurations must fail during Start() and must not
+        // create the backend temp directory or any worker (the audio
+        // validate/normalize runs before any output side effects).
+        string BackendTempDir() => Path.Combine(_tempDir, "temp");
+
+        // Microphone + SystemLoopback conflict
+        {
+            var cfg = new CaptureConfig
+            {
+                SourceKind = "display",
+                Microphone = true,
+                MicDevice = "fake-mic",
+                AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+                SystemLoopbackEndpoint = "{endpoint}",
+                OutputPath = Path.Combine(_tempDir, "conflict.mp4")
+            };
+            var backend = new AvSplitCaptureBackend(
+                new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            Assert.Contains("cannot both", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
+        }
+
+        // SystemLoopback without endpoint
+        {
+            var cfg = CreateSystemLoopbackConfig(endpoint: null);
+            // Clear the endpoint to create an invalid config
+            cfg.SystemLoopbackEndpoint = null;
+            var backend = new AvSplitCaptureBackend(
+                new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            Assert.Contains("requires", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
+        }
+
+        // SystemLoopback with MicDevice set
+        {
+            var cfg = CreateSystemLoopbackConfig();
+            cfg.MicDevice = "unexpected-mic";
+            var backend = new AvSplitCaptureBackend(
+                new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            Assert.Contains("MicDevice", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
+        }
+    }
+
+    [Fact]
+    public void SystemLoopback_NoAudioQuickPath_NotTaken()
+    {
+        // Verify that system loopback does NOT take the no-audio copy quick path.
+        // When audio file is missing, the backend will fail at the WAV stability
+        // check (wav_file_not_stable) rather than silently producing a video-only
+        // output. The key is that AudioStatus is NOT "not_requested".
+        var validVideo = CreateValidVideo();
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            stderrLog: "audio-stderr");
+        var video = new FakeVideoCaptureWorker(stderrLog: "video-stderr");
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var runner = new FakeExternalProcessRunner(outputFileToCopy: validVideo);
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+
+        video.EmitNaturalExit(0, "video-stderr");
+
+        Assert.True(SpinWait.SpinUntil(() => backend.HasExited, TimeSpan.FromSeconds(5)));
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        // Must NOT be "not_requested" (the no-audio quick path label)
+        Assert.NotEqual("not_requested", meta!.AudioStatus);
+        // Must report the WAV stability failure
+        Assert.Contains("wav_file_not_stable", meta.StderrLog ?? "");
+    }
+
+    // ============================================================
+    // Audio source kind mismatch tests (P0-3)
+    // ============================================================
+
+    [Fact]
+    public void SystemLoopback_SourceKindMismatch_ProtocolError()
+    {
+        // Request system-loopback, but the worker reports microphone.
+        // The fake worker detects the mismatch during Start() and fires
+        // NaturalExit synchronously, causing the backend to conclude
+        // before the video worker is started.
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            reportedSourceKind: "microphone");
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+
+        // The NaturalExit fires synchronously during Start() because the
+        // source mismatch is detected immediately. The backend concludes
+        // before StartVideo() is called.
+        Assert.True(backend.HasExited, "Backend should conclude immediately on source mismatch");
+        Assert.True(audio.ProtocolErrorRaised);
+        Assert.False(backend.IsAudioReady);
+
+        // StartVideo must be a no-op when the backend is already concluded.
+        backend.StartVideo();
+        Assert.Null(video.OutputPath);
+        Assert.False(video.HasExited);
+
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        Assert.Contains("protocol_invalid_started", meta!.StderrLog ?? "");
+        Assert.Contains("audio_worker_exited_before_video_started", meta.Warnings ?? Array.Empty<string>());
+    }
+
+    [Fact]
+    public void Microphone_SourceKindMismatch_ProtocolError()
+    {
+        // Request microphone, but the worker reports system-loopback.
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            reportedSourceKind: "system-loopback");
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+
+        var cfg = CreateConfig();
+        backend.Start(cfg);
+
+        Assert.True(backend.HasExited, "Backend should conclude immediately on source mismatch");
+        Assert.True(audio.ProtocolErrorRaised);
+        Assert.False(backend.IsAudioReady);
+
+        backend.StartVideo();
+        Assert.Null(video.OutputPath);
+        Assert.False(video.HasExited);
+
+        var meta = backend.LastMeta;
+        Assert.NotNull(meta);
+        Assert.Contains("protocol_invalid_started", meta!.StderrLog ?? "");
+        Assert.Contains("audio_worker_exited_before_video_started", meta.Warnings ?? Array.Empty<string>());
+    }
+
+    [Fact]
+    public void SystemLoopback_SourceKindMatch_Ready()
+    {
+        // Request system-loopback, and the worker also reports system-loopback.
+        // No protocol error; AudioReady is raised normally.
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            reportedSourceKind: "system-loopback");
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+
+        var cfg = CreateSystemLoopbackConfig();
+        backend.Start(cfg);
+
+        Assert.True(SpinWait.SpinUntil(() => backend.IsAudioReady, TimeSpan.FromSeconds(2)));
+        Assert.False(audio.ProtocolErrorRaised);
+
+        // Video worker can still be started normally.
+        backend.StartVideo();
+        Assert.NotNull(video.OutputPath);
+        Assert.False(video.HasExited);
+    }
+
+    [Fact]
+    public void Microphone_SourceKindMatch_Ready()
+    {
+        // Request microphone, and the worker also reports microphone.
+        var audio = new FakeAudioCaptureWorker(
+            raiseAudioReadyOnStart: true,
+            reportedSourceKind: "microphone");
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+
+        var cfg = CreateConfig();
+        backend.Start(cfg);
+
+        Assert.True(SpinWait.SpinUntil(() => backend.IsAudioReady, TimeSpan.FromSeconds(2)));
+        Assert.False(audio.ProtocolErrorRaised);
+
+        backend.StartVideo();
+        Assert.NotNull(video.OutputPath);
+        Assert.False(video.HasExited);
     }
 
     [Fact]

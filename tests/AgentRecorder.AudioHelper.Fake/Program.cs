@@ -29,6 +29,14 @@ internal static class Program
             return 1;
         }
 
+        // Test hook: control the AudioSourceKind reported in the STARTED event.
+        // This is an environment variable (not a command-line arg) so it never
+        // enters the production argument set — system-loopback production args
+        // are closed and must not carry arbitrary extra arguments.
+        string? sourceKind = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND");
+        if (!string.IsNullOrWhiteSpace(sourceKind))
+            sourceKind = sourceKind.Trim();
+
         string? endpointId = null;
         string? outputPath = null;
         string? stopSignalPath = null;
@@ -204,11 +212,11 @@ internal static class Program
             EmitProgress(recordingId, bytesWritten, 0);
         }
 
-        EmitStarted(recordingId, startAnchor, bytesWritten, missingStartedField, badFrequency);
+        EmitStarted(recordingId, startAnchor, bytesWritten, missingStartedField, badFrequency, sourceKind);
 
         if (duplicateStarted)
         {
-            EmitStarted(recordingId, startAnchor, bytesWritten, missingStartedField, badFrequency);
+            EmitStarted(recordingId, startAnchor, bytesWritten, missingStartedField, badFrequency, sourceKind);
         }
 
         if (floodEvents.HasValue)
@@ -240,7 +248,7 @@ internal static class Program
             return 1;
         }
 
-        EmitOk(recordingId, bytesWritten, estimatedGapDecrease ? 100 : 0);
+        EmitOk(recordingId, bytesWritten, estimatedGapDecrease ? 100 : 0, sourceKind);
 
         if (duplicateTerminal)
         {
@@ -287,10 +295,12 @@ internal static class Program
         return totalBytes;
     }
 
-    private static void EmitStarted(string recordingId, long anchorTicks, long bytesWritten, string? missingField, bool badFrequency)
+    private static void EmitStarted(string recordingId, long anchorTicks, long bytesWritten, string? missingField, bool badFrequency, string? sourceKind = null)
     {
         WriteLine("RESULT", "STARTED");
         WriteLine("Stage", "AudioCapturing");
+        if (sourceKind != null)
+            WriteLine("AudioSourceKind", sourceKind);
         if (!string.Equals(missingField, "RecordingId", StringComparison.OrdinalIgnoreCase))
             WriteLine("RecordingId", recordingId);
         if (!string.Equals(missingField, "SampleRate", StringComparison.OrdinalIgnoreCase))
@@ -305,7 +315,9 @@ internal static class Program
         if (!string.Equals(missingField, "BytesWritten", StringComparison.OrdinalIgnoreCase))
             WriteLine("BytesWritten", bytesWritten);
         if (!string.Equals(missingField, "CaptureMethod", StringComparison.OrdinalIgnoreCase))
-            WriteLine("CaptureMethod", "FAKE_WASAPI_CAPTURE");
+            WriteLine("CaptureMethod", sourceKind == "system-loopback" ? "WASAPI_SHARED_LOOPBACK" : "FAKE_WASAPI_CAPTURE");
+        if (sourceKind == "system-loopback")
+            WriteLine("CaptureEngine", "wasapi-direct");
         EndBlock();
     }
 
@@ -314,10 +326,13 @@ internal static class Program
         long bytesWritten,
         long elapsedMs,
         long estimatedGapMs = 0,
-        long maxEstimatedGapMs = 0)
+        long maxEstimatedGapMs = 0,
+        string? sourceKind = null)
     {
         WriteLine("RESULT", "PROGRESS");
         WriteLine("Stage", "AudioCapturing");
+        if (sourceKind != null)
+            WriteLine("AudioSourceKind", sourceKind);
         WriteLine("ElapsedMs", elapsedMs);
         WriteLine("WallElapsedMs", elapsedMs);
         WriteLine("BytesWritten", bytesWritten);
@@ -350,11 +365,13 @@ internal static class Program
         EndBlock();
     }
 
-    private static void EmitOk(string recordingId, long bytesWritten, long maxEstimatedGapMs = 0)
+    private static void EmitOk(string recordingId, long bytesWritten, long maxEstimatedGapMs = 0, string? sourceKind = null)
     {
         long durationMs = (long)(bytesWritten / (double)(SampleRate * Channels * BytesPerSample) * 1000.0);
         WriteLine("RESULT", "OK");
         WriteLine("Stage", "Complete");
+        if (sourceKind != null)
+            WriteLine("AudioSourceKind", sourceKind);
         WriteLine("DurationMs", durationMs);
         WriteLine("BytesWritten", bytesWritten);
         WriteLine("EstimatedGapMs", 0);

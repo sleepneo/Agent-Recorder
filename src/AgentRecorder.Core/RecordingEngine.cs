@@ -52,6 +52,8 @@ public sealed class RecordingEngine
     private readonly IRecordingBundleGenerator? _bundleGenerator;
     private readonly IMicrophoneDeviceProvider _microphoneProvider;
     private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
+    private readonly ISystemAudioEndpointProvider _systemAudioEndpointProvider;
+    private readonly ISystemAudioExperimentFlag _systemAudioExperimentFlag;
     private readonly IDisplayTopologyProvider _displayTopologyProvider;
     private bool _usesDefaultBackendFactory = true;
     private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
@@ -143,13 +145,18 @@ public sealed class RecordingEngine
         IRecordingBundleGenerator? bundleGenerator = null,
         IMicrophoneDeviceProvider? microphoneProvider = null,
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
-        IDisplayTopologyProvider? displayTopologyProvider = null)
+        IDisplayTopologyProvider? displayTopologyProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
+        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _bundleGenerator = bundleGenerator;
         _microphoneProvider = microphoneProvider ?? new EmptyMicrophoneProvider();
         _microphoneStatusProvider = microphoneStatusProvider ?? NullMicrophoneStatusProvider.Instance;
+        _systemAudioEndpointProvider = systemAudioEndpointProvider ?? new CoreAudioSystemAudioEndpointProvider();
+        _systemAudioExperimentFlag = systemAudioExperimentFlag
+            ?? global::AgentRecorder.Core.SystemAudioExperimentFlag.FromEnvironment();
         _displayTopologyProvider = displayTopologyProvider ?? SystemQueryDisplayTopologyProvider.Instance;
     }
 
@@ -167,6 +174,10 @@ public sealed class RecordingEngine
     /// instance; tests get <see cref="NullMicrophoneStatusProvider"/> by default.
     /// </summary>
     public IMicrophoneStatusProvider MicrophoneStatusProvider => _microphoneStatusProvider;
+
+    public ISystemAudioEndpointProvider SystemAudioEndpointProvider => _systemAudioEndpointProvider;
+
+    public ISystemAudioExperimentFlag SystemAudioExperimentFlag => _systemAudioExperimentFlag;
 
     public void SetTray(ITrayContext tray) => _tray = tray;
 
@@ -243,13 +254,21 @@ public sealed class RecordingEngine
         return reason.Trim();
     }
 
+    private static string AudioSourceKindName(AudioCaptureSourceKind sourceKind) => sourceKind switch
+    {
+        AudioCaptureSourceKind.Microphone => "microphone",
+        AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+        _ => "none"
+    };
+
     /// <summary>
     /// Computes a stable, finite, non-sensitive machine error code for a failed
     /// terminal recording. Never returns free-text messages, paths, or ffmpeg args.
     /// </summary>
-    private static string ResolveTerminalErrorCode(string? backendType, bool microphoneRequested, OutputMeta meta, int exitCode,
+    private static string ResolveTerminalErrorCode(string? backendType, AudioCaptureSourceKind audioSourceKind, OutputMeta meta, int exitCode,
         bool fileOk, bool durationOk, bool rangeOk, bool exitOk, bool allowWgcLifecycleReason)
     {
+        bool audioRequested = audioSourceKind != AudioCaptureSourceKind.None;
         // Native WGC lifecycle reasons are already authenticated by the
         // helper and must outrank generic exit/file heuristics.
         if (IsWgcContinuousBackend(backendType) &&
@@ -267,17 +286,21 @@ public sealed class RecordingEngine
         // AvSplit backend types (ffmpeg-av-split, ffmpeg-region-av-split,
         // ffmpeg-window-region-av-split), not only for a fictional wasapi-helper
         // backend type.
-        if (microphoneRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
+        if (audioRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
             return meta.AudioHelperErrorCode;
 
         // Microphone-specific outcomes take precedence over generic validation so
         // callers get a stable, actionable code when audio evidence is missing.
-        if (microphoneRequested)
+        if (audioRequested)
         {
             if (string.Equals(meta.AudioStatus, "missing_audio_track", StringComparison.OrdinalIgnoreCase))
-                return "microphone_missing_audio_track";
+                return audioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                    ? "system_audio_missing_audio_track"
+                    : "microphone_missing_audio_track";
             if (string.Equals(meta.AudioStatus, "start_failed", StringComparison.OrdinalIgnoreCase))
-                return "microphone_start_failed";
+                return audioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                    ? "system_audio_start_failed"
+                    : "microphone_start_failed";
         }
 
         if (!exitOk) return "non_zero_exit";
@@ -291,6 +314,20 @@ public sealed class RecordingEngine
         state is RecState.completed or RecState.failed or RecState.cancelled
             or RecState.rejected or RecState.expired;
 
+    private static string AudioStatusFor(Recording rec, OutputMeta? meta)
+    {
+        if (!rec.Config.AudioRequested)
+            return "not_requested";
+        return meta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending");
+    }
+
+    private static string AudioContinuityFor(Recording rec, OutputMeta? meta)
+    {
+        if (!rec.Config.AudioRequested)
+            return "not_checked";
+        return meta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending");
+    }
+
     /// <summary>
     /// Sets the bundle snapshot to not_applicable for recordings that did not
     /// successfully complete with a bundle-eligible FFmpeg MP4. Called on every
@@ -302,7 +339,13 @@ public sealed class RecordingEngine
         rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
     }
 
-    public object CreateRecording(JsonNode cfg, string agent, ITrayContext tray, string? traceId = null, string? endpoint = null)
+    public object CreateRecording(
+        JsonNode cfg,
+        string agent,
+        ITrayContext tray,
+        string? traceId = null,
+        string? endpoint = null,
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
         traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
         endpoint ??= "recordings";
@@ -388,7 +431,15 @@ public sealed class RecordingEngine
         object summary;
         try
         {
-            rec = ConfigParser.Build(cfg, agent, out summary, _microphoneProvider, _microphoneStatusProvider);
+            rec = ConfigParser.Build(
+                cfg,
+                agent,
+                out summary,
+                _microphoneProvider,
+                _microphoneStatusProvider,
+                _systemAudioEndpointProvider,
+                _systemAudioExperimentFlag,
+                preResolvedSystemAudioEndpoint);
         }
         catch (ApiException ex)
         {
@@ -517,6 +568,10 @@ public sealed class RecordingEngine
             recording_id = rec.Id,
             agent, source_type = rec.SourceType,
             audio_microphone = rec.Microphone,
+            audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
+            audio_endpoint_id = rec.SystemAudioEndpointId ?? "",
+            audio_endpoint_name = rec.SystemAudioEndpointName ?? "",
+            audio_endpoint_is_default = rec.SystemAudioEndpointIsDefault,
             audio_device_id = rec.MicrophoneDeviceId ?? "",
             requires_confirmation = true,
             nested_role = rec.NestedRole ?? "none",
@@ -541,6 +596,12 @@ public sealed class RecordingEngine
             {
                 source = GetSummaryField(summary, "source"),
                 audio = GetSummaryField(summary, "audio"),
+                audio_source_kind = GetSummaryField(summary, "audio_source_kind"),
+                audio_system_enabled = GetSummaryField(summary, "audio_system_enabled"),
+                audio_system_default_output = GetSummaryField(summary, "audio_system_default_output"),
+                audio_system_output_name = GetSummaryField(summary, "audio_system_output_name"),
+                audio_system_output_is_default = GetSummaryField(summary, "audio_system_output_is_default"),
+                audio_system_output_selection = GetSummaryField(summary, "audio_system_output_selection"),
                 duration = GetSummaryField(summary, "duration"),
                 output = GetSummaryField(summary, "output"),
                 nested_role = GetSummaryField(summary, "nested_role"),
@@ -742,6 +803,7 @@ public sealed class RecordingEngine
 
         DisplayTopologySnapshot? currentTopology = null;
         string? topologyFailure = null;
+        string? audioEndpointFailure = null;
         bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
         if (approvedRegion && !TryValidateApprovedRegionTopology(
                 approved,
@@ -754,9 +816,17 @@ public sealed class RecordingEngine
             // countdown, or output-directory side effect.
         }
 
+        if (topologyFailure == null && rec.Config.IsSystemLoopback &&
+            !IsApprovedSystemAudioEndpointCurrent(rec, out audioEndpointFailure))
+        {
+            // The approved endpoint is a capture-plan input. If it disappeared,
+            // became inactive, changed direction, or changed display identity,
+            // fail closed before backend construction.
+        }
+
         CapturePlan? revalidated = null;
         string? failureType = null;
-        if (topologyFailure == null)
+        if (topologyFailure == null && audioEndpointFailure == null)
         {
             try
             {
@@ -768,7 +838,7 @@ public sealed class RecordingEngine
             }
         }
 
-        bool changed = topologyFailure != null || revalidated == null || IsCapturePlanDrift(approved, revalidated);
+        bool changed = topologyFailure != null || audioEndpointFailure != null || revalidated == null || IsCapturePlanDrift(approved, revalidated);
         var approvedDisplayBounds = approved.DisplayBounds == null
             ? null
             : new
@@ -821,8 +891,12 @@ public sealed class RecordingEngine
                 topology_reason = approvedRegion
                     ? topologyFailure ?? "matched"
                     : "not_required",
+                approved_audio_source_kind = AudioSourceKindName(approved.AudioSourceKind),
+                approved_audio_endpoint_id = approved.AudioEndpointId ?? "",
+                approved_audio_endpoint_name = approved.AudioEndpointName ?? "",
+                audio_endpoint_status = audioEndpointFailure == null ? "matched" : audioEndpointFailure,
                 semantics_changed = changed,
-                failure_type = topologyFailure ?? failureType ?? ""
+                failure_type = topologyFailure ?? audioEndpointFailure ?? failureType ?? ""
             });
         }
         catch { }
@@ -889,6 +963,10 @@ public sealed class RecordingEngine
                 topology_reason = approvedRegion
                     ? topologyFailure ?? "matched"
                     : "not_required",
+                approved_audio_source_kind = AudioSourceKindName(approved.AudioSourceKind),
+                approved_audio_endpoint_id = approved.AudioEndpointId ?? "",
+                approved_audio_endpoint_name = approved.AudioEndpointName ?? "",
+                audio_endpoint_status = audioEndpointFailure == null ? "matched" : audioEndpointFailure,
                 error_code = errorCode
             });
         }
@@ -1052,6 +1130,12 @@ public sealed class RecordingEngine
 
     private static bool IsCapturePlanDrift(CapturePlan approved, CapturePlan current)
     {
+        if (approved.AudioSourceKind != current.AudioSourceKind ||
+            !string.Equals(approved.AudioEndpointId, current.AudioEndpointId, StringComparison.Ordinal) ||
+            !string.Equals(approved.AudioEndpointName, current.AudioEndpointName, StringComparison.Ordinal) ||
+            approved.AudioEndpointIsDefault != current.AudioEndpointIsDefault)
+            return true;
+
         bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
         bool currentRegion = string.Equals(current.SourceKind, "region", StringComparison.Ordinal);
         if (approvedRegion || currentRegion)
@@ -1097,6 +1181,60 @@ public sealed class RecordingEngine
         return approved.IsWindowSurface && !current.IsWindowSurface;
     }
 
+    private bool IsApprovedSystemAudioEndpointCurrent(Recording rec, out string? failure)
+    {
+        failure = null;
+        var endpointId = rec.Config.SystemLoopbackEndpoint;
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            failure = "system_audio_endpoint_missing";
+            return false;
+        }
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var endpoint = _systemAudioEndpointProvider.GetEndpointAsync(endpointId, cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+            if (endpoint == null)
+            {
+                failure = "system_audio_endpoint_not_found";
+                return false;
+            }
+
+            if (!string.Equals(endpoint.Id, endpointId, StringComparison.Ordinal) ||
+                !string.Equals(endpoint.Direction, "render", StringComparison.OrdinalIgnoreCase))
+            {
+                failure = "system_audio_endpoint_changed";
+                return false;
+            }
+
+            if (!string.Equals(endpoint.State, "active", StringComparison.OrdinalIgnoreCase))
+            {
+                failure = "system_audio_endpoint_inactive";
+                return false;
+            }
+
+            if (!string.Equals(endpoint.Name, rec.SystemAudioEndpointName, StringComparison.Ordinal))
+            {
+                failure = "system_audio_endpoint_changed";
+                return false;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            failure = "system_audio_endpoint_revalidation_timeout";
+            return false;
+        }
+        catch
+        {
+            failure = "system_audio_endpoint_revalidation_unavailable";
+            return false;
+        }
+    }
+
     private static string? ResolvedIdentityForAudit(DisplayTopologySnapshot? topology)
         => topology.HasValue &&
             topology.Value.IdentityStatus == DisplayIdentityResolutionStatus.Resolved
@@ -1130,7 +1268,16 @@ public sealed class RecordingEngine
                 selection_reason_code = plan.Evidence.SelectionReasonCode,
                 availability_source = plan.Evidence.AvailabilitySource,
                 availability_elapsed_ms = plan.Evidence.AvailabilityElapsedMs,
-                fallback = plan.FallbackOccurred
+                fallback = plan.FallbackOccurred,
+                audio_source_kind = plan.AudioSourceKind switch
+                {
+                    AudioCaptureSourceKind.Microphone => "microphone",
+                    AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+                    _ => "none"
+                },
+                audio_endpoint_id = plan.AudioEndpointId ?? "",
+                audio_endpoint_name = plan.AudioEndpointName ?? "",
+                audio_endpoint_is_default = plan.AudioEndpointIsDefault
             });
         }
         catch { }
@@ -1210,6 +1357,10 @@ public sealed class RecordingEngine
 
     private void StartCapture(Recording rec, string? traceId, ITrayContext tray)
     {
+        rec.Config.NormalizeAudioSource();
+        if (rec.AudioSourceKind == AudioCaptureSourceKind.None)
+            rec.AudioSourceKind = rec.Config.AudioSourceKind;
+
         // Production creates the backend only from the already-approved plan.
         // Legacy test seams may still supply a concrete selection or factory.
         CaptureBackendSelection? selectionEvidence = null;
@@ -1312,7 +1463,7 @@ public sealed class RecordingEngine
         // Split A/V backends with a microphone first warm up the audio worker.
         // Subscribe to AudioReady BEFORE starting the backend so a synchronous
         // ready signal cannot be missed, then check IsAudioReady for catch-up.
-        if (rec.Backend is IAudioReadyBackend audioReady && rec.Microphone)
+        if (rec.Backend is IAudioReadyBackend audioReady && rec.Config.AudioRequested)
         {
             audioReady.AudioReady += () => OnAudioReady(rec, traceId, tray);
         }
@@ -1323,7 +1474,7 @@ public sealed class RecordingEngine
         // countdown reaches zero, so nothing is captured during the countdown.
         // The authorization completion is pure audit; failures surface through
         // the normal first-frame timeout / natural-exit paths.
-        bool useDeferredCountdown = !rec.Microphone && rec.Backend is IDeferredCaptureStartBackend;
+        bool useDeferredCountdown = !rec.Config.AudioRequested && rec.Backend is IDeferredCaptureStartBackend;
         if (rec.Backend is IDeferredCaptureStartBackend deferredObservable)
         {
             deferredObservable.CaptureAuthorizationCompleted += ok => OnCaptureAuthorizationCompleted(rec, ok);
@@ -1361,7 +1512,7 @@ public sealed class RecordingEngine
 
             // After the backend has started, catch the race where AudioReady fired
             // before the subscription above was attached.
-            if (rec.Backend is IAudioReadyBackend audioReadyBackend && rec.Microphone && audioReadyBackend.IsAudioReady)
+            if (rec.Backend is IAudioReadyBackend audioReadyBackend && rec.Config.AudioRequested && audioReadyBackend.IsAudioReady)
             {
                 OnAudioReady(rec, traceId, tray);
             }
@@ -1383,14 +1534,20 @@ public sealed class RecordingEngine
             }
             // Split A/V backends with a microphone: show preparing UI and wait
             // for AudioReady before the 3-2-1 countdown.
-            else if (rec.Backend is IAudioReadyBackend && rec.Microphone)
+            else if (rec.Backend is IAudioReadyBackend && rec.Config.AudioRequested)
             {
-                _tracer.MicrophonePrepareStarted(traceId ?? "trace_unknown", rec.Id);
-                _audit.Log("recording.microphone_prepare_started", new
+                if (rec.Microphone)
+                    _tracer.MicrophonePrepareStarted(traceId ?? "trace_unknown", rec.Id);
+                _audit.Log(rec.Microphone
+                    ? "recording.microphone_prepare_started"
+                    : "recording.system_audio_prepare_started", new
                 {
                     recording_id = rec.Id,
                     device_id = rec.MicrophoneDeviceId ?? "",
-                    device_name = rec.MicrophoneDeviceName ?? ""
+                    device_name = rec.MicrophoneDeviceName ?? "",
+                    audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
+                    endpoint_id = rec.SystemAudioEndpointId ?? "",
+                    endpoint_name = rec.SystemAudioEndpointName ?? ""
                 });
                 tray.SetPreparing(rec);
             }
@@ -1605,13 +1762,17 @@ public sealed class RecordingEngine
             BumpStateVersion();
         }
 
-        _tracer.MicrophoneReady(traceId ?? "trace_unknown", rec.Id);
+        if (rec.Microphone)
+            _tracer.MicrophoneReady(traceId ?? "trace_unknown", rec.Id);
         _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
         _audit.Log("recording.countdown_started", new
         {
             recording_id = rec.Id,
-            trigger = "microphone_ready",
-            microphone_ready_at = Iso(rec.CountdownStartedAtUtc.Value)
+            trigger = rec.Microphone ? "microphone_ready" : "system_audio_ready",
+            audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
+            audio_ready_at = Iso(rec.CountdownStartedAtUtc.Value),
+            endpoint_id = rec.SystemAudioEndpointId ?? "",
+            endpoint_name = rec.SystemAudioEndpointName ?? ""
         });
 
         var op = new CountdownOperation();
@@ -1982,10 +2143,22 @@ public sealed class RecordingEngine
             bool rangeOk = !natural || expected == 0 || (meta.DurationSeconds >= expected * 0.3 && meta.DurationSeconds <= expected * 1.5);
             bool exitOk = exitCode == 0;
 
-            bool microphoneRequested = rec.Microphone;
-            bool audioOk = !microphoneRequested ||
-                           string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
-                           string.Equals(meta.AudioStatus, "lost", StringComparison.OrdinalIgnoreCase);
+            // Keep recordings created by older direct callers compatible with
+            // the legacy Recording.Microphone field. Product parsing already
+            // populates both fields; this bridge only matters for test and
+            // embedding seams that set the legacy field after construction.
+            if (rec.Microphone)
+                rec.Config.Microphone = true;
+            rec.Config.NormalizeAudioSource();
+            if (rec.AudioSourceKind == AudioCaptureSourceKind.None)
+                rec.AudioSourceKind = rec.Config.AudioSourceKind;
+
+            bool audioRequested = rec.Config.AudioRequested;
+            bool audioOk = !audioRequested ||
+                           (rec.Config.IsMicrophone
+                               ? string.Equals(meta.AudioStatus, "recorded", StringComparison.OrdinalIgnoreCase) ||
+                                 string.Equals(meta.AudioStatus, "lost", StringComparison.OrdinalIgnoreCase)
+                               : string.Equals(meta.AudioStatus, "system_loopback_recorded", StringComparison.OrdinalIgnoreCase));
             bool wgcContinuousOutputValidationFailed =
                 IsWgcContinuousBackend(rec.BackendType) &&
                 IsWgcContinuousOutputValidationFailure(meta.StopReason);
@@ -1994,7 +2167,7 @@ public sealed class RecordingEngine
             // recording, even when the probed temp files look healthy and the
             // audio status is a recoverable-looking "lost". The helper's own
             // terminal verdict takes precedence over file heuristics.
-            if (microphoneRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
+            if (audioRequested && !string.IsNullOrEmpty(meta.AudioHelperErrorCode))
                 audioOk = false;
 
             bool success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
@@ -2005,7 +2178,7 @@ public sealed class RecordingEngine
                 if (!durationOk) rec.Warnings.Add($"zero_duration: ffprobe returned duration=0");
                 if (!rangeOk && expected > 0) rec.Warnings.Add($"duration_out_of_range: expected ~{expected}s got {meta.DurationSeconds:F1}s");
                 if (!exitOk) rec.Warnings.Add($"non_zero_exit: ffmpeg exit_code={exitCode}");
-                if (!audioOk) rec.Warnings.Add($"microphone_audio_failed: audio_status={meta.AudioStatus ?? "unknown"}");
+                if (!audioOk) rec.Warnings.Add($"{AudioSourceKindName(rec.AudioSourceKind)}_audio_failed: audio_status={meta.AudioStatus ?? "unknown"}");
             }
 
             // Merge backend-produced warnings (e.g. microphone failure evidence)
@@ -2053,8 +2226,11 @@ public sealed class RecordingEngine
                     height = meta.Height,
                     ffmpeg_exit_code = exitCode,
                     audio_microphone = rec.Microphone,
-                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
-                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
+                    audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
+                    audio_endpoint_id = rec.SystemAudioEndpointId ?? "",
+                    audio_endpoint_name = rec.SystemAudioEndpointName ?? "",
+                    audio_status = AudioStatusFor(rec, meta),
+                    audio_continuity_status = AudioContinuityFor(rec, meta),
                     audio_capture_strategy = meta.AudioCaptureStrategy ?? "",
                     audio_pair_evidence = meta.AudioPairEvidence ?? "",
                     audio_auto_hfp_pair_status = meta.AudioAutoHfpPairStatus ?? "",
@@ -2069,7 +2245,8 @@ public sealed class RecordingEngine
                     audio_recovery_count = meta.AudioRecoveryCount,
                     audio_recovery_attempts = meta.AudioRecoveryAttempts,
                     audio_gap_filled_ms = meta.AudioGapFilledMs,
-                    audio_discontinuity_count = meta.AudioDiscontinuityCount
+                    audio_discontinuity_count = meta.AudioDiscontinuityCount,
+                    audio_qpc_outlier_count = meta.AudioQpcOutlierCount
                 });
             }
             else
@@ -2082,7 +2259,7 @@ public sealed class RecordingEngine
                         ? meta.StopReason
                         : "unexpected_exit";
                 }
-                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.Microphone, meta, exitCode, fileOk, durationOk, rangeOk, exitOk, natural);
+                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.AudioSourceKind, meta, exitCode, fileOk, durationOk, rangeOk, exitOk, natural);
                 rec.Error = stableErrorCode;
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 rec.State = RecState.failed;
@@ -2107,8 +2284,11 @@ public sealed class RecordingEngine
                     duration_seconds = meta.DurationSeconds,
                     stderr_excerpt = rec.StderrExcerpt ?? "",
                     audio_microphone = rec.Microphone,
-                    audio_status = meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
-                    audio_continuity_status = meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
+                    audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
+                    audio_endpoint_id = rec.SystemAudioEndpointId ?? "",
+                    audio_endpoint_name = rec.SystemAudioEndpointName ?? "",
+                    audio_status = AudioStatusFor(rec, meta),
+                    audio_continuity_status = AudioContinuityFor(rec, meta),
                     audio_capture_strategy = meta.AudioCaptureStrategy ?? "",
                     audio_pair_evidence = meta.AudioPairEvidence ?? "",
                     audio_auto_hfp_pair_status = meta.AudioAutoHfpPairStatus ?? "",
@@ -2123,7 +2303,8 @@ public sealed class RecordingEngine
                     audio_recovery_count = meta.AudioRecoveryCount,
                     audio_recovery_attempts = meta.AudioRecoveryAttempts,
                     audio_gap_filled_ms = meta.AudioGapFilledMs,
-                    audio_discontinuity_count = meta.AudioDiscontinuityCount
+                    audio_discontinuity_count = meta.AudioDiscontinuityCount,
+                    audio_qpc_outlier_count = meta.AudioQpcOutlierCount
                 });
             }
         }
@@ -2262,9 +2443,9 @@ public sealed class RecordingEngine
             backend: rec.BackendType,
             stopReason: rec.StopReason ?? "duration_reached",
             audioMicrophone: rec.Microphone,
-            audioStatus: meta.AudioStatus ?? (rec.Microphone ? "unknown" : "not_requested"),
-            audioContinuityStatus: meta.AudioContinuityStatus ?? (rec.Microphone ? "not_checked" : "not_checked"),
-            audioDeviceId: rec.MicrophoneDeviceId,
+            audioStatus: AudioStatusFor(rec, meta),
+            audioContinuityStatus: AudioContinuityFor(rec, meta),
+            audioDeviceId: rec.MicrophoneDeviceId ?? rec.SystemAudioEndpointId,
             audioLostAtMs: meta.AudioLostAtMs,
             nestedRole: rec.NestedRole,
             nestedSessionId: rec.NestedSessionId,
@@ -2273,7 +2454,9 @@ public sealed class RecordingEngine
             container: meta.Container ?? "mp4",
             codec: meta.Codec ?? "h264",
             width: meta.Width,
-            height: meta.Height);
+            height: meta.Height,
+            audioSourceKind: AudioSourceKindName(rec.AudioSourceKind),
+            audioDeviceName: rec.MicrophoneDeviceName ?? rec.SystemAudioEndpointName);
         return true;
     }
 
@@ -2458,16 +2641,13 @@ public sealed class RecordingEngine
             elapsed_seconds = elapsed,
             audio = new
             {
+                source_kind = AudioSourceKindName(rec.AudioSourceKind),
                 microphone = new
                 {
                     enabled = rec.Microphone,
                     device_id = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
-                    status = rec.Microphone
-                        ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
-                        : "not_requested",
-                    continuity_status = rec.Microphone
-                        ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
-                        : "not_checked",
+                    status = rec.Microphone ? AudioStatusFor(rec, rec.LastMeta) : "not_requested",
+                    continuity_status = rec.Microphone ? AudioContinuityFor(rec, rec.LastMeta) : "not_checked",
                     capture_strategy = rec.LastMeta?.AudioCaptureStrategy ?? "",
                     pair_evidence = rec.LastMeta?.AudioPairEvidence ?? "",
                     auto_hfp_pair_status = rec.LastMeta?.AudioAutoHfpPairStatus ?? "",
@@ -2477,6 +2657,19 @@ public sealed class RecordingEngine
                     helper_failure_stage = rec.LastMeta?.AudioHelperFailureStage ?? "",
                     helper_failure_hresult = rec.LastMeta?.AudioHelperFailureHresult ?? "",
                     render_prime_ready_ms = rec.LastMeta?.AudioRenderPrimeReadyMs
+                },
+                system_audio = new
+                {
+                    enabled = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback,
+                    endpoint_id = (object?)(rec.SystemAudioEndpointId ?? "") ?? "",
+                    endpoint_name = (object?)(rec.SystemAudioEndpointName ?? "") ?? "",
+                    is_default_multimedia = rec.SystemAudioEndpointIsDefault,
+                    status = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                        ? AudioStatusFor(rec, rec.LastMeta)
+                        : "not_requested",
+                    continuity_status = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                        ? AudioContinuityFor(rec, rec.LastMeta)
+                        : "not_checked"
                 }
             },
             output = new
@@ -2651,16 +2844,13 @@ public sealed class RecordingEngine
             ElapsedSeconds = elapsed,
             Audio = new
             {
+                SourceKind = AudioSourceKindName(rec.AudioSourceKind),
                 Microphone = new
                 {
                     Enabled = rec.Microphone,
                     DeviceId = (object?)(rec.MicrophoneDeviceId ?? "") ?? "",
-                    Status = rec.Microphone
-                        ? (rec.LastMeta?.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
-                        : "not_requested",
-                    ContinuityStatus = rec.Microphone
-                        ? (rec.LastMeta?.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
-                        : "not_checked",
+                    Status = rec.Microphone ? AudioStatusFor(rec, rec.LastMeta) : "not_requested",
+                    ContinuityStatus = rec.Microphone ? AudioContinuityFor(rec, rec.LastMeta) : "not_checked",
                     CaptureStrategy = rec.LastMeta?.AudioCaptureStrategy ?? "",
                     PairEvidence = rec.LastMeta?.AudioPairEvidence ?? "",
                     AutoHfpPairStatus = rec.LastMeta?.AudioAutoHfpPairStatus ?? "",
@@ -2670,6 +2860,19 @@ public sealed class RecordingEngine
                     HelperFailureStage = rec.LastMeta?.AudioHelperFailureStage ?? "",
                     HelperFailureHresult = rec.LastMeta?.AudioHelperFailureHresult ?? "",
                     RenderPrimeReadyMs = rec.LastMeta?.AudioRenderPrimeReadyMs
+                },
+                SystemAudio = new
+                {
+                    Enabled = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback,
+                    EndpointId = (object?)(rec.SystemAudioEndpointId ?? "") ?? "",
+                    EndpointName = (object?)(rec.SystemAudioEndpointName ?? "") ?? "",
+                    IsDefaultMultimedia = rec.SystemAudioEndpointIsDefault,
+                    Status = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                        ? AudioStatusFor(rec, rec.LastMeta)
+                        : "not_requested",
+                    ContinuityStatus = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+                        ? AudioContinuityFor(rec, rec.LastMeta)
+                        : "not_checked"
                 }
             },
             Output = new
@@ -2792,15 +2995,27 @@ public sealed class RecordingEngine
                 warnings.Add("Duration is 0 - no video content was captured. FFmpeg/gdigrab may have failed silently.");
         }
 
-        var audioStatus = rec.Microphone
-            ? (m.AudioStatus ?? (IsTerminalState(rec.State) ? "unknown" : "pending"))
-            : "not_requested";
-        var audioContinuityStatus = rec.Microphone
-            ? (m.AudioContinuityStatus ?? (IsTerminalState(rec.State) ? "not_checked" : "pending"))
-            : "not_checked";
+        var audioStatus = AudioStatusFor(rec, m);
+        var audioContinuityStatus = AudioContinuityFor(rec, m);
+        var audioSourceKind = AudioSourceKindName(rec.AudioSourceKind);
 
         if (!full)
-            return new { path = actualPath, size_bytes = m.SizeBytes, duration_seconds = m.DurationSeconds, container, codec, encoder_mode = m.VideoEncoderMode ?? "", encoder_selection_reason = m.VideoEncoderSelectionReason ?? "", audio_status = audioStatus, audio_continuity_status = audioContinuityStatus, warnings };
+            return new
+            {
+                path = actualPath,
+                size_bytes = m.SizeBytes,
+                duration_seconds = m.DurationSeconds,
+                container,
+                codec,
+                encoder_mode = m.VideoEncoderMode ?? "",
+                encoder_selection_reason = m.VideoEncoderSelectionReason ?? "",
+                audio_source_kind = audioSourceKind,
+                audio_status = audioStatus,
+                audio_continuity_status = audioContinuityStatus,
+                audio_codec = m.AudioCodec ?? "",
+                has_audio_stream = m.HasAudioStream,
+                warnings
+            };
         return new
         {
             path = actualPath, exists, size_bytes = m.SizeBytes,
@@ -2812,8 +3027,19 @@ public sealed class RecordingEngine
             command_args = rec.Config?.CommandArgs ?? "",
             backend = rec.BackendType,
             source_type = rec.SourceType,
+            audio_source_kind = audioSourceKind,
             audio_status = audioStatus,
             audio_continuity_status = audioContinuityStatus,
+            audio_codec = m.AudioCodec ?? "",
+            has_audio_stream = m.HasAudioStream,
+            probe_streams = m.ProbeStreams.Select(s => new
+            {
+                index = s.Index,
+                codec_type = s.CodecType ?? "",
+                codec_name = s.CodecName ?? "",
+                start_time_seconds = s.StartTimeSeconds,
+                duration_seconds = s.DurationSeconds
+            }).ToArray(),
             audio_capture_strategy = m.AudioCaptureStrategy ?? "",
             audio_pair_evidence = m.AudioPairEvidence ?? "",
             audio_auto_hfp_pair_status = m.AudioAutoHfpPairStatus ?? "",

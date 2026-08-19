@@ -52,6 +52,7 @@ public static class CaptureBackendSelector
     {
         if (cfg == null) throw new ArgumentNullException(nameof(cfg));
         if (displayProbe == null) throw new ArgumentNullException(nameof(displayProbe));
+        cfg.NormalizeAudioSource();
         if (!IsKnownSourceKind(cfg.SourceKind))
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
@@ -81,7 +82,11 @@ public static class CaptureBackendSelector
                     cfg.DisplayBounds.Value.h)
                 : null,
             cfg.SourceKind is "region" or "display" ? cfg.DisplayId : null,
-            cfg.DisplayIdentityStatus);
+            cfg.DisplayIdentityStatus,
+            cfg.AudioSourceKind,
+            cfg.SystemLoopbackEndpoint,
+            cfg.SystemLoopbackEndpointName,
+            cfg.SystemLoopbackEndpointIsDefault);
     }
 
     public static CaptureBackendSelection SelectWithEvidence(CaptureConfig cfg) =>
@@ -149,7 +154,7 @@ public static class CaptureBackendSelector
         if (string.Equals(cfg.SourceKind, "region", StringComparison.Ordinal))
             return DetermineRegion(cfg, displayProbe);
 
-        string regionBackend = cfg.Microphone ? "ffmpeg-region-av-split" : "ffmpeg-region";
+        string regionBackend = cfg.AudioRequested ? "ffmpeg-region-av-split" : "ffmpeg-region";
         return DefaultDecision(regionBackend, "default_backend");
     }
 
@@ -157,7 +162,7 @@ public static class CaptureBackendSelector
         CaptureConfig cfg,
         IWgcContinuousAvailabilityProbe probe)
     {
-        string fallbackBackend = cfg.Microphone ? "ffmpeg-region-av-split" : "ffmpeg-region";
+        string fallbackBackend = cfg.AudioRequested ? "ffmpeg-region-av-split" : "ffmpeg-region";
         string? flag = Environment.GetEnvironmentVariable(RegionBackendEnvVar);
         if (!string.Equals(flag, WgcContinuousBackend, StringComparison.Ordinal))
         {
@@ -173,8 +178,11 @@ public static class CaptureBackendSelector
         }
 
         const string requestedBackend = WgcContinuousBackend;
-        if (cfg.Microphone)
-            return FallbackDecision(fallbackBackend, requestedBackend, "microphone_not_eligible");
+        if (cfg.AudioRequested)
+            return FallbackDecision(
+                fallbackBackend,
+                requestedBackend,
+                cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
         if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
             return FallbackDecision(fallbackBackend, requestedBackend, "duration_not_eligible");
         if (cfg.Fps is < 1 or > 60)
@@ -241,14 +249,17 @@ public static class CaptureBackendSelector
 
         if (!string.Equals(flag, WgcContinuousBackend, StringComparison.OrdinalIgnoreCase))
         {
-            string backendType = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
+            string backendType = cfg.AudioRequested ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
             return DefaultDecision(backendType, "window_backend_selected");
         }
 
         const string requestedBackend = WgcContinuousBackend;
-        string fallbackBackend = cfg.Microphone ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
-        if (cfg.Microphone)
-            return FallbackDecision(fallbackBackend, requestedBackend, "microphone_not_eligible");
+        string fallbackBackend = cfg.AudioRequested ? "ffmpeg-window-region-av-split" : "ffmpeg-window-region";
+        if (cfg.AudioRequested)
+            return FallbackDecision(
+                fallbackBackend,
+                requestedBackend,
+                cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
         if (cfg.WindowHandle == nint.Zero)
             return FallbackDecision(fallbackBackend, requestedBackend, "window_handle_not_eligible");
         if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
@@ -311,7 +322,7 @@ public static class CaptureBackendSelector
 
         if (!experimentEnabled)
         {
-            string backendType = cfg.Microphone ? "ffmpeg-av-split" : "ffmpeg";
+            string backendType = cfg.AudioRequested ? "ffmpeg-av-split" : "ffmpeg";
             return new BackendDecision(
                 backendType,
                 new CaptureBackendSelectionEvidence(
@@ -323,8 +334,11 @@ public static class CaptureBackendSelector
                     false));
         }
 
-        if (cfg.Microphone)
-            return FallbackDecision("ffmpeg-av-split", requestedBackend, "microphone_not_eligible");
+        if (cfg.AudioRequested)
+            return FallbackDecision(
+                "ffmpeg-av-split",
+                requestedBackend,
+                cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
         if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
             return FallbackDecision("ffmpeg", requestedBackend, "duration_not_eligible");
         if (cfg.Fps is < 1 or > 60)

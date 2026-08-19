@@ -130,9 +130,18 @@ internal static class Program
         // seconds do not repeatedly spawn FFmpeg device-enumeration processes.
         var micProvider = new CachingMicrophoneDeviceProvider(new FfmpegDshowMicrophoneProvider());
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
+        var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
+        var systemAudioExperimentFlag = SystemAudioExperimentFlag.FromEnvironment();
 
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
-        var engine = new RecordingEngine(audit, perfTracer, bundleGenerator, micProvider, micStatusProvider);
+        var engine = new RecordingEngine(
+            audit,
+            perfTracer,
+            bundleGenerator,
+            micProvider,
+            micStatusProvider,
+            systemAudioEndpointProvider: systemAudioEndpointProvider,
+            systemAudioExperimentFlag: systemAudioExperimentFlag);
         var tray = new TrayContext(engine, audit, perfTracer);
         engine.SetTray(tray);
 

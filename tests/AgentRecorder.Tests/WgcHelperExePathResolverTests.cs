@@ -245,7 +245,7 @@ public sealed class WgcHelperExePathResolverTests : IDisposable
         using Process process = Process.Start(startInfo)!;
         Assert.True(process.WaitForExit(30000), "helper synchronization test mode timed out");
         string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        Assert.Equal(0, process.ExitCode);
+        Assert.True(process.ExitCode == 0, output);
         Assert.Contains("external OutputExeDir cannot leave canonical helper stale", output, StringComparison.Ordinal);
     }
 

@@ -105,6 +105,14 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
     public void Start(CaptureConfig cfg)
     {
+        // Normalize and validate the audio source BEFORE creating the temp
+        // directory or computing any output side effects. An illegal audio
+        // configuration must fail without creating directories or workers.
+        cfg.NormalizeAudioSource();
+        var validationError = cfg.ValidateAudioSource();
+        if (validationError != null)
+            throw new ArgumentException($"Invalid audio source configuration: {validationError}", nameof(cfg));
+
         _cfg = cfg;
         _finalOutputPath = cfg.OutputPath;
 
@@ -115,10 +123,12 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         _tempVideoPath = Path.Combine(tempDir, recordingId + "_video.mp4");
         _tempAudioPath = Path.Combine(tempDir, recordingId + "_audio.wav");
 
-        if (cfg.Microphone && !string.IsNullOrEmpty(cfg.MicDevice))
+        var audioRequested = cfg.AudioRequested;
+
+        if (audioRequested)
         {
-            _audioWorker = _workerFactory.CreateAudioWorker();
-            _audioWorker.SetMicrophoneStatusProvider(_microphoneStatusProvider);
+            _audioWorker = _workerFactory.CreateAudioWorker(cfg.AudioSourceKind);
+            _audioWorker.SetMicrophoneStatusProvider(cfg.IsMicrophone ? _microphoneStatusProvider : null);
             _audioWorker.AudioReady += OnAudioReady;
             _audioWorker.NaturalExit += OnAudioNaturalExit;
             _audioWorker.Start(cfg, _tempAudioPath);
@@ -431,6 +441,32 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     public int ExitCode => _videoWorker?.ExitCode ?? 0;
 
     /// <summary>
+    /// Bounded diagnostics exposed for the internal manual media-pipeline
+    /// acceptance entry. These are read-only observations; they do not alter
+    /// the worker lifecycle or provide a second recording implementation.
+    /// </summary>
+    public string? TempVideoPath => _tempVideoPath;
+    public string? TempAudioPath => _tempAudioPath;
+    public string? FailedArtifactsDirectory
+    {
+        get
+        {
+            var recordingId = Path.GetFileNameWithoutExtension(_finalOutputPath);
+            return string.IsNullOrEmpty(recordingId)
+                ? null
+                : Path.Combine(DataDirResolver.Resolve(), "failed", recordingId);
+        }
+    }
+
+    public string GetStderrLog()
+    {
+        var video = _videoWorker?.GetStderrLog() ?? "";
+        var audio = _audioWorker?.GetStderrLog() ?? "";
+        return string.IsNullOrEmpty(video) ? audio :
+            string.IsNullOrEmpty(audio) ? video : video + "\n" + audio;
+    }
+
+    /// <summary>
     /// Unified finalization path used by both natural video exit and manual Stop().
     /// Must only be called by the convergence owner. Raises CaptureEnded exactly
     /// once, stops and drains the audio worker, verifies the WAV file is stable,
@@ -482,7 +518,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         // Wait for the WAV file to be closed and stable before muxing.
         var tempAudioPath = _tempAudioPath;
         bool wavStable = true;
-        bool audioRequested = _cfg?.Microphone == true && !string.IsNullOrEmpty(tempAudioPath);
+        bool audioRequested = _cfg?.AudioRequested == true && !string.IsNullOrEmpty(tempAudioPath);
         if (audioRequested)
         {
             if (!File.Exists(tempAudioPath))
@@ -535,6 +571,12 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             var videoMeta = FfmpegCaptureBackend.Probe(_tempVideoPath ?? "");
             videoMeta.StderrLog = preconditionsStderr;
             videoMeta.AudioStatus = audioRequested ? "lost" : "not_requested";
+            videoMeta.AudioSourceKind = _cfg?.AudioSourceKind switch
+            {
+                AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+                AudioCaptureSourceKind.Microphone => "microphone",
+                _ => "none"
+            };
             string warningKey;
             if (!videoExited) warningKey = "video_worker_exit_timeout";
             else if (!videoStable) warningKey = "video_file_not_stable";
@@ -643,6 +685,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             {
                 ["recording_id"] = recordingId,
                 ["created_at_utc"] = DateTime.UtcNow.ToString("o"),
+                ["audio_source_kind"] = meta.AudioSourceKind,
                 ["audio_capture_backend"] = meta.AudioCaptureBackend,
                 ["audio_helper_protocol"] = meta.AudioHelperProtocol,
                 ["audio_helper_error_code"] = meta.AudioHelperErrorCode,
@@ -655,6 +698,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 ["audio_gap_filled_bytes"] = meta.AudioGapFilledBytes,
                 ["audio_gap_filled_ms"] = meta.AudioGapFilledMs,
                 ["audio_discontinuity_count"] = meta.AudioDiscontinuityCount,
+                ["audio_qpc_outlier_count"] = meta.AudioQpcOutlierCount,
                 ["audio_capture_method"] = meta.AudioCaptureMethod,
                 ["audio_capture_strategy"] = meta.AudioCaptureStrategy,
                 ["audio_pair_evidence"] = meta.AudioPairEvidence,
@@ -713,9 +757,12 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         video.StderrLog = videoStderr;
         var audioExists = !string.IsNullOrEmpty(tempAudioPath) && File.Exists(tempAudioPath);
 
-        if (cfg?.Microphone != true || !audioExists)
+        if (cfg?.AudioRequested != true || (!audioExists && cfg?.IsSystemLoopback != true))
         {
             // No audio requested or available: just move/copy the video file.
+            // System loopback with missing audio must still go through the
+            // finalizer so it can report a proper mux failure rather than
+            // silently producing a video-only output.
             try
             {
                 if (File.Exists(_finalOutputPath)) File.Delete(_finalOutputPath);
@@ -732,7 +779,18 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             video.OutputPath = _finalOutputPath;
             video.AudioStatus = "not_requested";
             video.AudioContinuityStatus = "not_checked";
-            return (video, File.Exists(_finalOutputPath) && video.DurationSeconds > 0);
+            try
+            {
+                var finalFile = new FileInfo(_finalOutputPath);
+                video.SizeBytes = finalFile.Exists ? finalFile.Length : 0;
+                video.OutputFileExists = finalFile.Exists && finalFile.Length > 0;
+            }
+            catch
+            {
+                video.SizeBytes = 0;
+                video.OutputFileExists = false;
+            }
+            return (video, video.OutputFileExists && video.DurationSeconds > 0);
         }
 
         // If the WASAPI helper already declared a terminal failure, do not run
@@ -792,16 +850,34 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             tempAudioPath!,
             _finalOutputPath,
             audioPreRoll,
-            microphoneRequested: true,
+            audioSourceKind: cfg?.AudioSourceKind ?? AudioCaptureSourceKind.None,
             applyContinuityCheck: ApplyContinuityCheck,
             audioStderr,
             videoAnchorAvailable: videoAnchor > 0,
             audioAnchorAvailable: audioAnchor > 0).GetAwaiter().GetResult();
 
         var meta = result.Meta;
+        meta.AudioSourceKind = _cfg?.AudioSourceKind switch
+        {
+            AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+            AudioCaptureSourceKind.Microphone => "microphone",
+            _ => "none"
+        };
         meta.AudioCaptureBackend = _audioWorker is WasapiAudioCaptureWorker ? "wasapi-helper" : "dshow";
         meta.AudioTimestampCompensationApplied = _audioWorker is not WasapiAudioCaptureWorker;
         meta.AudioHelperProtocol = _audioWorker is WasapiAudioCaptureWorker ? "audio-helper-v1" : null;
+
+        if (_cfg?.IsSystemLoopback == true)
+        {
+            // Only override AudioStatus on success; mux failure/timeout must
+            // preserve the finalizer's own failure status.
+            meta.AudioCaptureBackend = "wasapi-helper-loopback";
+            if (!result.TimedOut && string.IsNullOrEmpty(result.Error))
+            {
+                meta.AudioStatus = "system_loopback_recorded";
+                meta.AudioContinuityStatus ??= "continuous";
+            }
+        }
 
         if (_audioWorker is IAudioHelperSummaryProvider helperSummaryProvider)
         {
@@ -1018,6 +1094,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             meta.AudioGapFilledMs = summary.GapFilledMs;
         if (summary.DiscontinuityCount.HasValue)
             meta.AudioDiscontinuityCount = summary.DiscontinuityCount;
+        if (summary.QpcOutlierCount.HasValue)
+            meta.AudioQpcOutlierCount = summary.QpcOutlierCount;
     }
 
     /// <summary>

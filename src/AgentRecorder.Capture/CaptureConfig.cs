@@ -34,6 +34,94 @@ public sealed class CaptureConfig
     public bool Microphone;
     public string? MicDevice;
     public string? MicDeviceName;
+
+    /// <summary>
+    /// Strong-typed internal audio source. Defaults to <see cref="AudioCaptureSourceKind.None"/>
+    /// which is equivalent to no audio. When set to <see cref="AudioCaptureSourceKind.Microphone"/>,
+    /// the legacy <see cref="Microphone"/> and <see cref="MicDevice"/> fields are used.
+    /// When set to <see cref="AudioCaptureSourceKind.SystemLoopback"/>, the
+    /// <see cref="SystemLoopbackEndpoint"/> field is used instead.
+    /// </summary>
+    public AudioCaptureSourceKind AudioSourceKind = AudioCaptureSourceKind.None;
+
+    /// <summary>
+    /// Exact CoreAudio render endpoint id for system loopback capture.
+    /// Only used when <see cref="AudioSourceKind"/> is <see cref="AudioCaptureSourceKind.SystemLoopback"/>.
+    /// Must not be empty or whitespace in that mode.
+    /// </summary>
+    public string? SystemLoopbackEndpoint;
+    public string? SystemLoopbackEndpointName;
+    /// <summary>
+    /// Trusted snapshot of whether the selected render endpoint was the
+    /// current eRender/eMultimedia default when the intent was resolved.
+    /// </summary>
+    public bool? SystemLoopbackEndpointIsDefault;
+
+    // --- Backward-compatible normalization helpers ---
+
+    /// <summary>
+    /// Returns true when any audio source is requested (microphone or system loopback).
+    /// </summary>
+    public bool AudioRequested => AudioSourceKind != AudioCaptureSourceKind.None;
+
+    /// <summary>
+    /// Returns true when the effective audio source is microphone.
+    /// </summary>
+    public bool IsMicrophone => AudioSourceKind == AudioCaptureSourceKind.Microphone;
+
+    /// <summary>
+    /// Returns true when the effective audio source is system loopback.
+    /// </summary>
+    public bool IsSystemLoopback => AudioSourceKind == AudioCaptureSourceKind.SystemLoopback;
+
+    /// <summary>
+    /// Normalizes the legacy <see cref="Microphone"/> field into <see cref="AudioSourceKind"/>
+    /// if <see cref="AudioSourceKind"/> is still <see cref="AudioCaptureSourceKind.None"/>.
+    /// This ensures existing callers that only set <c>Microphone=true</c> continue to work
+    /// without being rewritten.
+    /// Call this once after all configuration has been set, before any audio worker starts.
+    /// </summary>
+    public void NormalizeAudioSource()
+    {
+        if (AudioSourceKind == AudioCaptureSourceKind.None && Microphone)
+        {
+            AudioSourceKind = AudioCaptureSourceKind.Microphone;
+        }
+    }
+
+    /// <summary>
+    /// Validates the audio source configuration. Returns null on success, or
+    /// an error message describing the illegal combination. Call this before
+    /// starting any audio worker.
+    /// </summary>
+    public string? ValidateAudioSource()
+    {
+        NormalizeAudioSource();
+
+        if (AudioSourceKind == AudioCaptureSourceKind.SystemLoopback)
+        {
+            if (Microphone)
+                return "Microphone and SystemLoopback cannot both be requested";
+            if (string.IsNullOrWhiteSpace(SystemLoopbackEndpoint))
+                return "SystemLoopback requires a valid SystemLoopbackEndpoint";
+            if (!string.IsNullOrEmpty(MicDevice))
+                return "MicDevice must not be set when using SystemLoopback";
+            return null;
+        }
+
+        if (AudioSourceKind == AudioCaptureSourceKind.Microphone)
+        {
+            if (!string.IsNullOrEmpty(SystemLoopbackEndpoint))
+                return "SystemLoopbackEndpoint must not be set when using Microphone";
+            if (string.IsNullOrWhiteSpace(MicDevice))
+                return "Microphone requires a valid MicDevice";
+            return null;
+        }
+
+        // None: no audio validation needed
+        return null;
+    }
+
     public int Fps = 30;
     public string Quality = "medium";
     public string OutputPath = "";

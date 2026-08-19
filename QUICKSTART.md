@@ -112,6 +112,26 @@ The tray menu provides a Chinese/English language selector. The choice is
 persisted locally and applies to newly opened selection, confirmation, and
 recording-control windows.
 
+## Controlled System-Audio Preview
+
+This release contains a default-off system-audio preview for supervised local
+evaluation. Start Agent Recorder with
+`AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`, then include:
+
+```json
+{
+  "target": { "type": "selected_region" },
+  "duration_seconds": 30,
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+The current Windows multimedia output endpoint is used unless an explicit
+render-endpoint ID is supplied. Microphone and system audio cannot be enabled in
+the same recording. Because this is not yet a public capability, the default
+`/capabilities`, `/permissions`, and `/audio/devices` contract continues to
+report system audio as unavailable.
+
 ## Portable Package Contents
 
 ```text

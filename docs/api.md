@@ -180,9 +180,9 @@ public request fields.
 
 Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
-The legacy `recording.audio` array is preserved for backward compatibility and now reports `["microphone"]`. System audio recording is **not implemented**; sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+The legacy `recording.audio` array is preserved for backward compatibility and reports `["microphone"]`. A controlled system-audio product path is present but disabled by default. Unless the process starts with `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`, sending `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED` before target resolution or local UI.
 
-`recording.audio_capabilities.microphone` reports `{ "supported": true, "status": "ready" }` when device enumeration succeeds and at least one active input is present, otherwise `{ "supported": true, "status": "no_devices" }` or `{ "supported": true, "status": "unavailable" }`. `system_audio` remains `{ "supported": false, "status": "not_implemented" }`.
+`recording.audio_capabilities.microphone` reports `{ "supported": true, "status": "ready" }` when device enumeration succeeds and at least one active input is present, otherwise `{ "supported": true, "status": "no_devices" }` or `{ "supported": true, "status": "unavailable" }`. The controlled preview does not change the public contract in this release, so `system_audio` remains `{ "supported": false, "status": "not_implemented" }`.
 
 Stop controls are reported under `interaction.stop_controls`:
 
@@ -436,7 +436,7 @@ The response includes a `context` object that provides a snapshot of system stat
 GET /permissions
 ```
 
-Returns the current permission status. Screen capture and output-directory selection are granted locally. Microphone is supported; its permission status honestly reflects device availability (`available`, `no_devices`, or `unavailable`). This version does not probe the real Windows microphone ACL, so it does not report `granted`. System audio is not implemented.
+Returns the current permission status. Screen capture and output-directory selection are granted locally. Microphone is supported; its permission status honestly reflects device availability (`available`, `no_devices`, or `unavailable`). This version does not probe the real Windows microphone ACL, so it does not report `granted`. The default public contract reports system audio as unavailable; the default-off controlled preview does not alter this response.
 
 ```json
 {
@@ -535,7 +535,7 @@ Use this endpoint first for common natural-language intents.
 }
 ```
 
-`audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the `id` from `GET /api/v1/audio/devices`. `audio.system_audio.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+`audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the `id` from `GET /api/v1/audio/devices`. System audio is disabled by default; without `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`, `audio.system_audio.enabled=true` returns `CAPABILITY_NOT_IMPLEMENTED`. With the controlled preview enabled, set `audio.system_audio.enabled=true` alone and optionally provide a render-endpoint `device_id`; omitting it selects the current Windows multimedia default output. Microphone and system audio are mutually exclusive.
 
 The default audio capture backend is the isolated WASAPI helper. Set the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow` before starting Agent Recorder to use the FFmpeg dshow diagnostic fallback instead; any other value is rejected.
 
@@ -684,7 +684,7 @@ Display source:
 }
 ```
 
-Microphone audio may be enabled with `audio.microphone.enabled: true`. Provide `audio.microphone.device_id` from `GET /audio/devices` when multiple active microphones are present; omit it to auto-select a single active device or the single CoreAudio multimedia default. `audio.system_audio.enabled` must be `false` or omitted; `true` returns `CAPABILITY_NOT_IMPLEMENTED`.
+Microphone audio may be enabled with `audio.microphone.enabled: true`. Provide `audio.microphone.device_id` from `GET /audio/devices` when multiple active microphones are present; omit it to auto-select a single active device or the single CoreAudio multimedia default. System audio follows the controlled-preview rules above and cannot be combined with microphone capture.
 
 Muted or inactive devices are rejected before any region-selection or confirmation UI is shown (`409 AUDIO_DEVICE_MUTED` and `503 AUDIO_DEVICE_NOT_AVAILABLE` respectively). Agent Recorder never automatically unmutes a device. Unknown state does not block.
 

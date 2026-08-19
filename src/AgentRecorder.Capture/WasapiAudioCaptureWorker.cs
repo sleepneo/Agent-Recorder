@@ -60,6 +60,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     // -1 = no STARTED seen, 0 = legacy stream, 1 = source-aware stream.
     private int _sourceAwareStream = -1;
     private string? _expectedRecordingId;
+    private string? _expectedAudioSourceKind;
 
     private readonly List<AudioHelperEvent> _events = new();
 
@@ -118,8 +119,23 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         if (Interlocked.Exchange(ref _startCalled, 1) != 0)
             throw new InvalidOperationException("WasapiAudioCaptureWorker.Start can only be called once.");
 
-        if (string.IsNullOrWhiteSpace(cfg.MicDevice))
-            throw new ArgumentException("Microphone device is required for WASAPI audio worker", nameof(cfg));
+        cfg.NormalizeAudioSource();
+        _expectedAudioSourceKind = cfg.IsSystemLoopback ? "system-loopback" : "microphone";
+
+        if (cfg.IsMicrophone)
+        {
+            if (string.IsNullOrWhiteSpace(cfg.MicDevice))
+                throw new ArgumentException("Microphone device is required for WASAPI audio worker", nameof(cfg));
+        }
+        else if (cfg.IsSystemLoopback)
+        {
+            if (string.IsNullOrWhiteSpace(cfg.SystemLoopbackEndpoint))
+                throw new ArgumentException("System loopback endpoint is required for WASAPI audio worker", nameof(cfg));
+        }
+        else
+        {
+            throw new ArgumentException("Audio source must be Microphone or SystemLoopback", nameof(cfg));
+        }
 
         OutputPath = outputPath;
         _outputPath = outputPath;
@@ -127,7 +143,21 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        var endpointId = EndpointIdOverride ?? CoreAudioCaptureStatusProvider.ToCoreAudioEndpointId(cfg.MicDevice);
+        string? endpointId;
+        if (EndpointIdOverride != null)
+        {
+            endpointId = EndpointIdOverride;
+        }
+        else if (cfg.IsSystemLoopback)
+        {
+            endpointId = cfg.SystemLoopbackEndpoint;
+        }
+        else
+        {
+            endpointId = cfg.MicDevice == null
+                ? null
+                : CoreAudioCaptureStatusProvider.ToCoreAudioEndpointId(cfg.MicDevice);
+        }
         if (string.IsNullOrWhiteSpace(endpointId))
             throw new ApiException(400, "audio_endpoint_id_unmappable", "Could not map microphone device id to CoreAudio endpoint id.");
 
@@ -141,7 +171,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
 
         var helperExe = HelperExePathOverride ?? AudioHelperExePathResolver.Resolve();
         var args = BuildArgs(endpointId, outputPath, _allowedRoot, _stopSignalPath, recordingId,
-            HelperArgumentsOverride, EnableAutomaticHfpPairDiscovery);
+            HelperArgumentsOverride, EnableAutomaticHfpPairDiscovery, cfg.IsSystemLoopback);
 
         _proc = new Process
         {
@@ -201,7 +231,9 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         _proc.BeginErrorReadLine();
         _stdoutReader = RunStdoutReader(_proc.StandardOutput);
 
-        StartMicrophoneMonitor(cfg);
+        // Only start microphone monitor for microphone source, not system loopback.
+        if (cfg.IsMicrophone)
+            StartMicrophoneMonitor(cfg);
 
         int timeoutMs = (cfg.DurationSeconds.HasValue && cfg.DurationSeconds > 0)
             ? (cfg.DurationSeconds.Value + 60) * 1000
@@ -337,7 +369,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     }
 
     internal static List<string> BuildArgs(string endpointId, string outputPath, string allowedRoot, string stopSignalPath,
-        string recordingId, string? extraArgs, bool enableAutomaticHfpPairDiscovery)
+        string recordingId, string? extraArgs, bool enableAutomaticHfpPairDiscovery, bool isSystemLoopback = false)
     {
         var args = new List<string>
         {
@@ -348,15 +380,23 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             "--recording-id", recordingId
         };
 
+        if (isSystemLoopback)
+        {
+            args.Add("--source-kind");
+            args.Add("system-loopback");
+            args.Add("--capture-engine");
+            args.Add("wasapi-direct");
+        }
+
         var extraTokens = string.IsNullOrWhiteSpace(extraArgs)
             ? new List<string>()
             : extraArgs.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).ToList();
 
-        if (enableAutomaticHfpPairDiscovery &&
+        if (!isSystemLoopback && enableAutomaticHfpPairDiscovery &&
             !extraTokens.Any(token => string.Equals(token, AutoHfpPairArgument, StringComparison.OrdinalIgnoreCase)))
             args.Add(AutoHfpPairArgument);
 
-        if (extraTokens.Count > 0)
+        if (!isSystemLoopback && extraTokens.Count > 0)
         {
             foreach (var token in extraTokens)
                 args.Add(token);
@@ -623,6 +663,23 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         if (evt.HasNumericParseError)
             validationErrors.Add("STARTED event contained malformed numeric fields");
 
+        // Validate requested vs observed audio source kind. System-loopback is a
+        // source-aware capture: if the helper omits AudioSourceKind, fail closed
+        // rather than silently treating the stream as a legacy microphone flow.
+        if (_expectedAudioSourceKind != null)
+        {
+            if (evt.AudioSourceKind == null &&
+                string.Equals(_expectedAudioSourceKind, "system-loopback", StringComparison.Ordinal))
+            {
+                validationErrors.Add("STARTED event missing required field: AudioSourceKind (system-loopback requires a source-aware stream)");
+            }
+            else if (evt.AudioSourceKind != null &&
+                     !string.Equals(_expectedAudioSourceKind, evt.AudioSourceKind, StringComparison.Ordinal))
+            {
+                validationErrors.Add($"AudioSourceKind mismatch: expected '{_expectedAudioSourceKind}', got '{evt.AudioSourceKind}'");
+            }
+        }
+
         if (validationErrors.Count > 0)
         {
             lock (_lock) _startedEvent = evt;
@@ -724,11 +781,29 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
                                         summary.State == AudioHelperSessionState.MalformedSequence;
 
         // Protocol error was already raised in real-time: keep the protocol error
-        // code but still record the final validation result.
+        // code but still record the final validation result. The real-time summary
+        // carries the specific requested-vs-observed diagnostics (e.g. the exact
+        // source-kind mismatch or the missing-AudioSourceKind message) which this
+        // lower-fidelity recompute over parsed events cannot reproduce. Re-apply
+        // those validation errors so the terminal summary never loses them.
         if (Interlocked.CompareExchange(ref _protocolErrorRaised, 0, 0) != 0)
         {
             summary.State = AudioHelperSessionState.MalformedSequence;
             summary.ErrorCode = "audio_helper_protocol_error";
+            lock (_lock)
+            {
+                var realTime = _terminalSummary;
+                if (realTime != null)
+                {
+                    foreach (var ve in realTime.ValidationErrors)
+                        if (!summary.ValidationErrors.Contains(ve))
+                            summary.ValidationErrors.Add(ve);
+                    if (string.IsNullOrEmpty(summary.Reason) && !string.IsNullOrEmpty(realTime.Reason))
+                        summary.Reason = realTime.Reason;
+                    if (string.IsNullOrEmpty(summary.FailureStage))
+                        summary.FailureStage = realTime.FailureStage;
+                }
+            }
         }
         // No terminal event from the stream: the helper exited without completing
         // the protocol. Cross-check the exit code.
@@ -803,6 +878,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         target.GapFilledBytes = source.GapFilledBytes;
         target.GapFilledMs = source.GapFilledMs;
         target.MaxEstimatedGapMs = source.MaxEstimatedGapMs;
+        target.QpcOutlierCount = source.QpcOutlierCount;
         target.ContinuityStatus = source.ContinuityStatus;
     }
 
@@ -894,7 +970,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
 
     private void StartMicrophoneMonitor(CaptureConfig cfg)
     {
-        if (SkipMicrophoneStatusMonitor || !cfg.Microphone || _microphoneStatusProvider == null)
+        if (SkipMicrophoneStatusMonitor || !cfg.IsMicrophone || _microphoneStatusProvider == null)
             return;
 
         var deviceId = string.IsNullOrEmpty(cfg.MicDevice) ? "default" : cfg.MicDevice;
