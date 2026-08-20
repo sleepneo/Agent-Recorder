@@ -67,6 +67,7 @@ Typical event categories:
 - confirmation created/approved/rejected/expired
 - region selection unavailable/cancelled/selected
 - FFmpeg prewarm status
+- chapter marks accepted during active recording; audit metadata excludes the label text
 
 ## Performance Diagnostics
 
@@ -97,6 +98,9 @@ Context files are written using a random temp file in the same directory and ato
 - Let the user complete selection and confirmation locally.
 - Never call blocked HTTP approval/rejection endpoints.
 - Stop polling and report clearly if the user rejects or confirmation expires.
+- Report a chapter mark only after the marks API accepts it. The local
+  `Ctrl+Shift+F11` hotkey is registered only during active capture and does not
+  start, stop, approve, extend, or shorten a recording.
 
 ## Known Limitations
 

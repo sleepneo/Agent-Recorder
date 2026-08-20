@@ -40,6 +40,28 @@ public interface ITrayContext
     string? GlobalStopHotkeyGesture => null;
 
     /// <summary>
+    /// Whether this host exposes the local Ctrl+Shift+F11 Chapter Marks gesture.
+    /// Headless hosts keep the marks API but do not claim a local gesture.
+    /// </summary>
+    bool SupportsChapterMarksLocalHotkey => false;
+
+    /// <summary>
+    /// Whether the local Chapter Marks hotkey is registered right now. The tray
+    /// implementation reports the dynamic while-recording state.
+    /// </summary>
+    bool IsChapterMarksHotkeyRegistered => false;
+
+    /// <summary>
+    /// Human-readable Chapter Marks gesture, or null when the host has no local UI.
+    /// </summary>
+    string? ChapterMarksHotkeyGesture => null;
+
+    /// <summary>
+    /// Registration policy for the local Chapter Marks gesture.
+    /// </summary>
+    string ChapterMarksHotkeyRegistrationPolicy => "while_recording";
+
+    /// <summary>
     /// 弹出录屏确认交互（确认窗体 + 托盘菜单，仅限本地用户操作）。
     /// callback 参数：<see cref="ConfirmationDecision"/> 描述用户在本机 UI 的确认结果，
     /// 包括是否批准、本次保存目录覆盖以及是否记住为默认目录。
@@ -59,6 +81,11 @@ public interface ITrayContext
     void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback);
 
     void SetRecording(object rec);
+    /// <summary>
+    /// Notifies the local host that a recording entered stopping before capture
+    /// finalization. Default no-op keeps existing host fakes source-compatible.
+    /// </summary>
+    void SetStopping(object rec) { }
     void SetIdle(object rec);
     void SetAllIdle();
     void ShowError(string text);

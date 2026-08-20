@@ -92,6 +92,24 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
+## 添加章节标记
+
+录制中按 `Ctrl+Shift+F11` 可添加章节标记。Agent Recorder 会短暂显示绿色应用内提示，不使用托盘气泡；如果 outer 和 inner 同时录制，一次按键会按各自的首帧时间轴分别添加标记。
+
+AI agent 也可以通过鉴权 API 为一条活动录制添加带名称的标记：
+
+```http
+POST /api/v1/recordings/{recording_id}/marks
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "label": "重要决定"
+}
+```
+
+成功完成 FFmpeg MP4 录制后，已接受的标记会写入 `<视频文件名>.bundle/marks.json`。
+
 托盘菜单提供中文/English 语言选择，设置保存在本机，并应用于后续打开的选区、确认和录制控制窗口。
 
 ## 受控系统声音预览

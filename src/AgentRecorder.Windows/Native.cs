@@ -14,6 +14,7 @@ public static class Native
     public const uint MOD_CONTROL = 0x0002;
     public const uint MOD_SHIFT = 0x0004;
     public const uint VK_F10 = 0x79;
+    public const uint VK_F11 = 0x7A;
 
     public static readonly IntPtr HWND_TOPMOST = new(-1);
     public static readonly IntPtr HWND_MESSAGE = new(-3);

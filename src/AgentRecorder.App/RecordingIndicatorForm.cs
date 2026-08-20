@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
@@ -468,6 +469,10 @@ internal sealed class RecordingIndicatorForm : Form
     private readonly Func<IUiTextProvider> _textProviderFactory;
     private System.Windows.Forms.Timer _timer = null!;
     private Label _label = null!;
+    private Label _feedbackLabel = null!;
+    private System.Windows.Forms.Timer _feedbackTimer = null!;
+    private string? _requestedFeedbackText;
+    private bool _feedbackVisible;
     private bool _displayAffinityApplied;
     private Exception? _displayAffinityError;
     private int _actualWindowDpi;
@@ -475,6 +480,7 @@ internal sealed class RecordingIndicatorForm : Form
     private int? _countdownValue;
 
     internal RecordingIndicatorBounds BoundsForTests => _bounds;
+    internal string RecordingIdForTests => _recordingId;
     internal int ActualWindowDpiForTests => _actualWindowDpi;
     internal bool TimerEnabledForTests => _timer?.Enabled ?? false;
     internal string LabelTextForTests => _label?.Text ?? "";
@@ -487,6 +493,18 @@ internal sealed class RecordingIndicatorForm : Form
     internal Rectangle[] BorderRectanglesForTests => _presentation.BorderRectangles;
     internal RecordingIndicatorPhase PhaseForTests => _phase;
     internal int? CountdownValueForTests => _countdownValue;
+    internal bool FeedbackVisibleForTests => _feedbackVisible;
+    internal string FeedbackTextForTests => _feedbackLabel?.Text ?? "";
+    internal string? RequestedFeedbackTextForTests => _requestedFeedbackText;
+    internal Rectangle FeedbackBoundsForTests => _feedbackLabel?.Bounds ?? Rectangle.Empty;
+    internal bool FeedbackTimerEnabledForTests => _feedbackTimer?.Enabled ?? false;
+    internal int FeedbackTimerIntervalForTests => _feedbackTimer?.Interval ?? 0;
+    internal bool FeedbackControlVisibleForTests => _feedbackLabel?.Visible ?? false;
+    internal bool FeedbackControlHandleCreatedForTests => _feedbackLabel?.IsHandleCreated ?? false;
+    internal bool FeedbackBoundsNonEmptyForTests => _feedbackLabel != null && !_feedbackLabel.Bounds.IsEmpty;
+    internal bool FeedbackBoundsInsideClientForTests => _feedbackLabel != null && ClientRectangle.Contains(_feedbackLabel.Bounds);
+    internal bool FeedbackIsFrontmostChildForTests => _feedbackLabel != null && Controls.GetChildIndex(_feedbackLabel) == 0;
+    internal bool FeedbackBackgroundOpaqueForTests => _feedbackLabel?.BackColor.A == 255;
 
     public RecordingIndicatorForm(
         string recordingId,
@@ -595,6 +613,26 @@ internal sealed class RecordingIndicatorForm : Form
         };
         Controls.Add(_label);
 
+        _feedbackLabel = new Label
+        {
+            AutoSize = false,
+            BackColor = Color.FromArgb(255, 0, 112, 64),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            Padding = new Padding(6, 3, 6, 3),
+            BorderStyle = BorderStyle.FixedSingle,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Visible = false,
+            TabStop = false
+        };
+        Controls.Add(_feedbackLabel);
+
+        _feedbackTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 1000
+        };
+        _feedbackTimer.Tick += (_, _) => ClearTransientFeedback();
+
         _timer = new System.Windows.Forms.Timer
         {
             Interval = 500
@@ -684,6 +722,7 @@ internal sealed class RecordingIndicatorForm : Form
     {
         base.OnShown(e);
         PositionLabel();
+        PositionFeedback();
         UpdateLabel();
         _timer.Start();
     }
@@ -729,6 +768,7 @@ internal sealed class RecordingIndicatorForm : Form
     {
         base.OnResize(e);
         PositionLabel();
+        PositionFeedback();
     }
 
     protected override void OnLoad(EventArgs e)
@@ -809,7 +849,10 @@ internal sealed class RecordingIndicatorForm : Form
         {
             _timer?.Stop();
             _timer?.Dispose();
+            _feedbackTimer?.Stop();
+            _feedbackTimer?.Dispose();
             _label?.Font?.Dispose();
+            _feedbackLabel?.Font?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -846,12 +889,169 @@ internal sealed class RecordingIndicatorForm : Form
         }
     }
 
+    private void PositionFeedback()
+    {
+        if (_feedbackLabel == null || !_feedbackLabel.Visible)
+            return;
+
+        var client = ClientRectangle;
+        var available = FindFeedbackAreas(client, _label?.Bounds ?? Rectangle.Empty)
+            .OrderByDescending(area => area.Width * area.Height)
+            .FirstOrDefault();
+        if (available.IsEmpty)
+            return;
+
+        _feedbackLabel.Bounds = FitFeedbackBounds(available, _feedbackLabel.Size);
+    }
+
+    private static Rectangle FitFeedbackBounds(Rectangle available, Size desired)
+    {
+        int width = Math.Max(1, Math.Min(available.Width, desired.Width));
+        int height = Math.Max(1, Math.Min(available.Height, desired.Height));
+        int x = Math.Max(available.Left, Math.Min(available.Right - width, available.Left));
+        int y = Math.Max(available.Top, Math.Min(available.Bottom - height, available.Top));
+        return new Rectangle(x, y, width, height);
+    }
+
+    private static Rectangle[] FindFeedbackAreas(Rectangle client, Rectangle avoid)
+    {
+        if (client.Width <= 0 || client.Height <= 0)
+            return Array.Empty<Rectangle>();
+
+        const int gap = 3;
+        var areas = new[]
+        {
+            new Rectangle(Math.Max(client.Left, avoid.Left), avoid.Bottom + gap,
+                Math.Max(0, client.Right - Math.Max(client.Left, avoid.Left)),
+                Math.Max(0, client.Bottom - (avoid.Bottom + gap))),
+            new Rectangle(avoid.Right + gap, Math.Max(client.Top, avoid.Top),
+                Math.Max(0, client.Right - (avoid.Right + gap)),
+                Math.Max(0, client.Bottom - Math.Max(client.Top, avoid.Top))),
+            new Rectangle(Math.Max(client.Left, avoid.Left), client.Top,
+                Math.Max(0, client.Right - Math.Max(client.Left, avoid.Left)),
+                Math.Max(0, avoid.Top - gap - client.Top)),
+            new Rectangle(client.Left, Math.Max(client.Top, avoid.Top),
+                Math.Max(0, avoid.Left - gap - client.Left),
+                Math.Max(0, client.Bottom - Math.Max(client.Top, avoid.Top)))
+        };
+
+        return areas
+            .Where(area => area.Width > 0 && area.Height > 0)
+            .ToArray();
+    }
+
+    private static string CompactFeedbackText(string text, UiLanguage language)
+    {
+        var count = new string(text.Where(char.IsDigit).ToArray());
+        if (language == UiLanguage.ZhCn)
+            return text.Contains("已标记", StringComparison.Ordinal) && count.Length > 0
+                ? $"已标记 {count}"
+                : "已添加";
+
+        return text.Contains("Marked", StringComparison.OrdinalIgnoreCase) && count.Length > 0
+            ? $"Marked {count}"
+            : "Added";
+    }
+
+    private static Size MeasureFeedbackText(string text, Font font, Padding padding)
+    {
+        var measured = TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.SingleLine);
+        return new Size(measured.Width + padding.Horizontal, measured.Height + padding.Vertical);
+    }
+
+    private void SetFeedbackFontSize(float size)
+    {
+        if (_feedbackLabel == null || Math.Abs(_feedbackLabel.Font.Size - size) < 0.1f)
+            return;
+
+        var previous = _feedbackLabel.Font;
+        _feedbackLabel.Font = new Font(previous.FontFamily, size, FontStyle.Bold);
+        previous.Dispose();
+    }
+
+    /// <summary>
+    /// Replaces the current badge and timer instead of stacking a new window or
+    /// timer. The badge is a child of the existing capture-safe indicator form.
+    /// If a small capture region cannot fit the full localized text, a shorter
+    /// localized phrase is used. The feedback never degrades to a symbol-only badge,
+    /// never resizes the indicator window, and never creates a second window.
+    /// </summary>
+    internal void ShowTransientFeedback(string text, TimeSpan duration)
+    {
+        if (_feedbackLabel == null || string.IsNullOrWhiteSpace(text))
+            return;
+
+        if (InvokeRequired)
+            throw new InvalidOperationException("Feedback must be submitted on the indicator UI thread.");
+
+        _requestedFeedbackText = text;
+        var client = ClientRectangle;
+        var available = FindFeedbackAreas(client, _label?.Bounds ?? Rectangle.Empty)
+            .OrderByDescending(area => area.Width * area.Height)
+            .FirstOrDefault();
+        if (available.IsEmpty)
+            throw new InvalidOperationException("No non-overlapping indicator client area is available.");
+
+        var provider = _textProviderFactory();
+        var displayText = text;
+        var fontSize = 9f;
+        SetFeedbackFontSize(fontSize);
+        var desired = MeasureFeedbackText(displayText, _feedbackLabel.Font, _feedbackLabel.Padding);
+
+        if (desired.Width > available.Width || desired.Height > available.Height)
+        {
+            displayText = CompactFeedbackText(text, provider.Language);
+            for (fontSize = 9f; fontSize >= 6f; fontSize -= 0.5f)
+            {
+                SetFeedbackFontSize(fontSize);
+                desired = MeasureFeedbackText(displayText, _feedbackLabel.Font, _feedbackLabel.Padding);
+                if (desired.Width <= available.Width && desired.Height <= available.Height)
+                    break;
+            }
+        }
+
+        desired = MeasureFeedbackText(displayText, _feedbackLabel.Font, _feedbackLabel.Padding);
+        _feedbackLabel.Text = displayText;
+        _feedbackLabel.Size = new Size(
+            Math.Max(1, Math.Min(available.Width, desired.Width)),
+            Math.Max(1, Math.Min(available.Height, desired.Height)));
+        _feedbackLabel.Visible = true;
+        _feedbackVisible = true;
+        PositionFeedback();
+        _feedbackLabel.BringToFront();
+
+        // The hotkey callback is already on the WinForms UI thread. Invalidate and
+        // synchronously update only the pixels; the timer remains message-driven and
+        // no sleep/blocking loop is used to keep the badge alive.
+        _feedbackLabel.Invalidate();
+        _feedbackLabel.Update();
+        Invalidate();
+        Update();
+
+        _feedbackTimer.Stop();
+        _feedbackTimer.Interval = Math.Clamp((int)Math.Round(duration.TotalMilliseconds), 1, 60_000);
+        _feedbackTimer.Start();
+    }
+
+    internal void ClearTransientFeedback()
+    {
+        _feedbackTimer?.Stop();
+        if (_feedbackLabel != null)
+        {
+            _feedbackLabel.Visible = false;
+            _feedbackLabel.Text = "";
+        }
+        _feedbackVisible = false;
+        _requestedFeedbackText = null;
+    }
+
     /// <summary>
     /// Switches the indicator to a non-recording phase (preparing, countdown, finalizing)
     /// and updates the label/border color accordingly. Safe to call multiple times.
     /// </summary>
     internal void SetPhase(RecordingIndicatorPhase phase, int? countdownValue = null)
     {
+        ClearTransientFeedback();
         _phase = phase;
         _countdownValue = countdownValue;
 

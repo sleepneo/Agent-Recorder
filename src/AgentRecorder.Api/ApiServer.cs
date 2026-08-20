@@ -164,6 +164,7 @@ public sealed class ApiServer
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         500 => "Internal Server Error",
         _ => "Unknown"
     };
@@ -333,6 +334,8 @@ public sealed class ApiServer
         if (seg.Length >= 2 && seg[0] == "recordings")
         {
             var id = seg[1];
+            if (seg.Length == 3 && method == "POST" && seg[2] == "marks")
+                return AddMark(id, reqBody, reqId);
             if (seg.Length == 2 && method == "GET")
             {
                 // Long-polling: wait_ms + since_status
@@ -349,6 +352,71 @@ public sealed class ApiServer
         }
 
         throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint: " + sub);
+    }
+
+    private string AddMark(string recordingId, string reqBody, string reqId)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(reqBody);
+        }
+        catch (JsonException)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body.");
+        }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new ApiException(400, "INVALID_ARGUMENT", "Mark body must be a JSON object.");
+
+            if (!root.TryGetProperty("label", out var labelElement))
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
+                    new { field = "label", reason = "required" });
+            }
+
+            if (labelElement.ValueKind != JsonValueKind.String)
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
+                    new { field = "label", reason = "must_be_string" });
+            }
+
+            var label = labelElement.GetString();
+            string source = "agent";
+            if (root.TryGetProperty("source", out var sourceElement))
+            {
+                if (sourceElement.ValueKind != JsonValueKind.String)
+                {
+                    throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
+                        new { field = "source", reason = "must_be_agent" });
+                }
+                source = sourceElement.GetString() ?? "";
+            }
+
+            // The domain operation also supports the local hotkey, but
+            // this authenticated remote endpoint must not let an agent claim
+            // that source.
+            if (!string.Equals(source, "agent", StringComparison.Ordinal))
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
+                    new { field = "source", allowed = new[] { "agent" } });
+            }
+
+            var mark = _engine.AddMark(recordingId, label!, source);
+            return ApiResponse.Ok(new
+            {
+                recording_id = recordingId,
+                mark = new
+                {
+                    t_ms = mark.TMs,
+                    label = mark.Label,
+                    source = mark.Source
+                }
+            }, reqId);
+        }
     }
 
     private string CreateRecording(HttpRequest req, string reqBody, string reqId)
@@ -955,6 +1023,18 @@ public sealed class ApiServer
                     supported = true,
                     max_concurrent = 2,
                     roles = new[] { "outer", "inner" }
+                }
+            },
+            chapter_marks = new
+            {
+                supported = true,
+                endpoint = "/api/v1/recordings/{recording_id}/marks",
+                local_hotkey = new
+                {
+                    supported = _tray.SupportsChapterMarksLocalHotkey,
+                    registered = _tray.SupportsChapterMarksLocalHotkey && _tray.IsChapterMarksHotkeyRegistered,
+                    gesture = _tray.SupportsChapterMarksLocalHotkey ? _tray.ChapterMarksHotkeyGesture : null,
+                    registration_policy = _tray.ChapterMarksHotkeyRegistrationPolicy
                 }
             },
             interaction = new

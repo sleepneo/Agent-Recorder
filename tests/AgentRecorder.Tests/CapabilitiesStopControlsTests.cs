@@ -27,6 +27,9 @@ public class CapabilitiesStopControlsTests
         public bool SupportsGlobalStopHotkey => true;
         public bool IsGlobalStopHotkeyRegistered { get; set; }
         public string? GlobalStopHotkeyGesture => "Ctrl+Shift+F10";
+        public bool SupportsChapterMarksLocalHotkey => true;
+        public bool IsChapterMarksHotkeyRegistered { get; set; }
+        public string? ChapterMarksHotkeyGesture => "Ctrl+Shift+F11";
 
         public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) =>
             callback(ConfirmationDecision.Approve());
@@ -109,6 +112,14 @@ public class CapabilitiesStopControlsTests
             Assert.True(hotkey.GetProperty("registered").GetBoolean());
             Assert.Equal("Ctrl+Shift+F10", hotkey.GetProperty("gesture").GetString());
             Assert.Equal("stop_all_active_recordings", hotkey.GetProperty("behavior").GetString());
+
+            var chapterMarks = doc.RootElement.GetProperty("data").GetProperty("chapter_marks");
+            Assert.True(chapterMarks.GetProperty("supported").GetBoolean());
+            var local = chapterMarks.GetProperty("local_hotkey");
+            Assert.True(local.GetProperty("supported").GetBoolean());
+            Assert.False(local.GetProperty("registered").GetBoolean());
+            Assert.Equal("Ctrl+Shift+F11", local.GetProperty("gesture").GetString());
+            Assert.Equal("while_recording", local.GetProperty("registration_policy").GetString());
         }
         finally
         {
@@ -137,6 +148,12 @@ public class CapabilitiesStopControlsTests
             Assert.True(hotkey.GetProperty("supported").GetBoolean());
             Assert.False(hotkey.GetProperty("registered").GetBoolean());
             Assert.Equal("Ctrl+Shift+F10", hotkey.GetProperty("gesture").GetString());
+
+            var chapterMarks = doc.RootElement.GetProperty("data").GetProperty("chapter_marks");
+            var local = chapterMarks.GetProperty("local_hotkey");
+            Assert.True(local.GetProperty("supported").GetBoolean());
+            Assert.False(local.GetProperty("registered").GetBoolean());
+            Assert.Equal("Ctrl+Shift+F11", local.GetProperty("gesture").GetString());
         }
         finally
         {
@@ -169,6 +186,14 @@ public class CapabilitiesStopControlsTests
             Assert.False(hotkey.GetProperty("registered").GetBoolean());
             Assert.Null(hotkey.GetProperty("gesture").GetString());
             Assert.Equal("stop_all_active_recordings", hotkey.GetProperty("behavior").GetString());
+
+            var chapterMarks = doc.RootElement.GetProperty("data").GetProperty("chapter_marks");
+            Assert.True(chapterMarks.GetProperty("supported").GetBoolean());
+            var local = chapterMarks.GetProperty("local_hotkey");
+            Assert.False(local.GetProperty("supported").GetBoolean());
+            Assert.False(local.GetProperty("registered").GetBoolean());
+            Assert.Null(local.GetProperty("gesture").GetString());
+            Assert.Equal("while_recording", local.GetProperty("registration_policy").GetString());
         }
         finally
         {

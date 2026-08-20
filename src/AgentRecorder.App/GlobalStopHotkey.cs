@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using AgentRecorder.Windows;
@@ -33,7 +34,9 @@ internal sealed class Win32HotkeyRegistrar : IHotkeyRegistrar
 internal interface IGlobalStopHotkey : IDisposable
 {
     bool Registered { get; }
-    bool Register(uint modifiers = GlobalStopHotkey.DefaultModifiers, uint key = GlobalStopHotkey.DefaultKey);
+    int LastErrorCode => 0;
+    bool Register();
+    bool Unregister();
 }
 
 /// <summary>
@@ -54,19 +57,31 @@ internal class GlobalStopHotkey : IGlobalStopHotkey
     private readonly Action _onPressed;
     private readonly Action<Exception>? _onError;
     private readonly int _hotkeyId;
+    private readonly uint _registrationKey;
     private bool _registered;
     private bool _disposed;
+    private bool _unregisterFailurePending;
+    private int _lastErrorCode;
 
     public virtual bool Registered => _registered;
     public int HotkeyId => _hotkeyId;
     public bool IsDisposed => _disposed;
+    public int LastErrorCode => _lastErrorCode;
+
+    protected virtual uint RegistrationKey => _registrationKey;
 
     public GlobalStopHotkey(Action onPressed, IHotkeyRegistrar? registrar = null, Action<Exception>? onError = null)
+        : this(onPressed, registrar, onError, DefaultKey)
+    {
+    }
+
+    protected GlobalStopHotkey(Action onPressed, IHotkeyRegistrar? registrar, Action<Exception>? onError, uint registrationKey)
     {
         _onPressed = onPressed;
         _onError = onError;
         _registrar = registrar ?? new Win32HotkeyRegistrar();
         _hotkeyId = Interlocked.Increment(ref _nextId);
+        _registrationKey = registrationKey;
         _window = new HotkeyMessageWindow(this);
     }
 
@@ -78,9 +93,64 @@ internal class GlobalStopHotkey : IGlobalStopHotkey
         if (_registered || _disposed)
             return _registered;
 
-        _registered = _registrar.RegisterHotKey(_window.Handle, _hotkeyId, modifiers, key);
+        try
+        {
+            _registered = _registrar.RegisterHotKey(_window.Handle, _hotkeyId, modifiers, key);
+            _lastErrorCode = _registered ? 0 : Marshal.GetLastWin32Error();
+        }
+        catch (Exception)
+        {
+            _registered = false;
+            _lastErrorCode = Marshal.GetLastWin32Error();
+        }
         return _registered;
     }
+
+    bool IGlobalStopHotkey.Register() => Register(DefaultModifiers, RegistrationKey);
+
+    /// <summary>
+    /// Explicitly unregisters the hotkey. The operation is idempotent and leaves the
+    /// message window alive so a later genuine recording transition can register it again.
+    /// </summary>
+    public virtual bool Unregister()
+    {
+        if (!_registered)
+        {
+            _lastErrorCode = 0;
+            return true;
+        }
+
+        try
+        {
+            var result = _registrar.UnregisterHotKey(_window.Handle, _hotkeyId);
+            if (result)
+            {
+                _registered = false;
+                _unregisterFailurePending = false;
+                _lastErrorCode = 0;
+                return true;
+            }
+
+            // Capture the native error immediately after the false result. Keep the
+            // conservative registered state until a later retry succeeds or the
+            // message window is destroyed.
+            var nativeError = Marshal.GetLastWin32Error();
+            _unregisterFailurePending = true;
+            _lastErrorCode = nativeError != 0 ? nativeError : 1;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _unregisterFailurePending = true;
+            var nativeError = Marshal.GetLastWin32Error();
+            _lastErrorCode = nativeError != 0
+                ? nativeError
+                : (ex.HResult != 0 ? ex.HResult : 1);
+            return false;
+        }
+    }
+
+    bool IGlobalStopHotkey.Unregister() => Unregister();
 
     internal void OnHotkeyReceived()
     {
@@ -112,15 +182,19 @@ internal class GlobalStopHotkey : IGlobalStopHotkey
 
         _disposed = true;
 
-        if (_registered)
+        // A failed explicit unregister has already been reported by the owner. Do
+        // not issue a second native attempt during retirement; destroying the
+        // message-only window is the release guarantee for this failed instance.
+        try
         {
-            try { _registrar.UnregisterHotKey(_window.Handle, _hotkeyId); }
-            catch { }
-            _registered = false;
+            if (!_unregisterFailurePending)
+                Unregister();
         }
+        catch { }
 
         try { _window.DestroyHandle(); }
         catch { }
+        finally { _registered = false; }
     }
 
     /// <summary>
@@ -153,4 +227,22 @@ internal class GlobalStopHotkey : IGlobalStopHotkey
             base.WndProc(ref m);
         }
     }
+}
+
+/// <summary>
+/// Reuses the stop hotkey's message-window implementation for the local Chapter Marks
+/// gesture. The only difference is the virtual key; the process-local id is still allocated
+/// by the shared base so F10 and F11 cannot collide.
+/// </summary>
+internal sealed class GlobalChapterMarkHotkey : GlobalStopHotkey
+{
+    public new const uint DefaultKey = Native.VK_F11;
+
+    public GlobalChapterMarkHotkey(Action onPressed, IHotkeyRegistrar? registrar = null, Action<Exception>? onError = null)
+        : base(onPressed, registrar, onError, DefaultKey)
+    {
+    }
+
+    public override bool Register(uint modifiers = GlobalStopHotkey.DefaultModifiers, uint key = DefaultKey) =>
+        base.Register(modifiers, key);
 }

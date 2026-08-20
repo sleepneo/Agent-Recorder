@@ -77,6 +77,40 @@ public sealed class Recording
     public int ExitCode = -1;
     public string BackendType { get; set; } = "ffmpeg";
 
+    private readonly object _marksLock = new();
+    private readonly List<RecordingMark> _marks = new();
+
+    /// <summary>
+    /// Stopwatch tick anchor captured with the trusted first-frame transition.
+    /// It is intentionally internal: it is not public recording metadata.
+    /// </summary>
+    internal long? MarkTimelineAnchorTicks { get; set; }
+
+    /// <summary>
+    /// Adds one accepted mark while holding the recording-local mark lock.
+    /// Callers must validate recording state and timestamp before invoking this.
+    /// </summary>
+    internal void AddMark(RecordingMark mark)
+    {
+        if (mark is null) throw new ArgumentNullException(nameof(mark));
+        lock (_marksLock)
+        {
+            _marks.Add(mark);
+        }
+    }
+
+    /// <summary>
+    /// Returns a detached, read-only snapshot in insertion order. The snapshot
+    /// is safe to hand to asynchronous bundle generation.
+    /// </summary>
+    public IReadOnlyList<RecordingMark> SnapshotMarks()
+    {
+        lock (_marksLock)
+        {
+            return Array.AsReadOnly(_marks.ToArray());
+        }
+    }
+
     /// <summary>
     /// The immutable, privacy-safe decision shown to the user before approval.
     /// It is reused after approval only after non-capturing revalidation.

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace AgentRecorder.Capture;
 
@@ -39,6 +41,7 @@ public sealed class RecordingBundleRequest
     public string Codec { get; }
     public int Width { get; }
     public int Height { get; }
+    public IReadOnlyList<RecordingMark> Marks { get; }
 
     public RecordingBundleRequest(
         string recordingId,
@@ -68,7 +71,8 @@ public sealed class RecordingBundleRequest
         int width,
         int height,
         string audioSourceKind = "none",
-        string? audioDeviceName = null)
+        string? audioDeviceName = null,
+        IEnumerable<RecordingMark>? marks = null)
     {
         RecordingId = recordingId ?? throw new ArgumentNullException(nameof(recordingId));
         ConfirmationId = confirmationId;
@@ -98,5 +102,8 @@ public sealed class RecordingBundleRequest
         Codec = codec ?? "h264";
         Width = width;
         Height = height;
+        // Copy and wrap the input so bundle generation cannot observe later
+        // mutations to the recording's live mark collection or its caller's list.
+        Marks = Array.AsReadOnly((marks ?? Array.Empty<RecordingMark>()).ToArray());
     }
 }

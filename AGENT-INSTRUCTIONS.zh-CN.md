@@ -383,6 +383,26 @@ X-Agent-Recorder-Key: <api-key>
 
 终态响应会包含 `stop_reason`：`duration_reached`（自然达到计划时长）、`floating_button`/`tray_menu`/`global_hotkey`（本地控件停止）、`user_requested`（API 停止）等。用户主动停止且输出有效时，状态仍为 `completed`，不会仅因实际时长短于计划时长而判为 `failed`；但文件过小、零时长、FFmpeg 非零退出等真实产物错误仍会失败。
 
+### 添加章节标记
+
+当用户说“做个标记”“标记这里”或给出具体标记名称时，AI agent 应对目标录制调用：
+
+```http
+POST /api/v1/recordings/{recording_id}/marks
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "label": "重要决定"
+}
+```
+
+- 只在目标状态为 `recording` 时调用；成功响应已经包含服务端接受的 `t_ms`，无需额外查询。
+- 不要设置 `source: "hotkey"`；远程调用省略 `source` 即可，服务端会记为 `agent`。
+- 用户也可以按 `Ctrl+Shift+F11` 本地标记当前所有活动录制。嵌套录制时，该热键会分别标记 outer 和 inner；API 调用则只标记路径中的指定 `recording_id`。
+- API 返回成功后再告知用户标记已添加；`409 RECORDING_NOT_ACTIVE` 表示录制尚未开始或已经进入停止/保存阶段，不应把它误报为成功。
+- 成功 FFmpeg MP4 录制的标记会写入对应 bundle 的 `marks.json`。
+
 ### 上下文快照（减少往返）
 
 服务启动后，优先调用 `/capabilities` 获取 `context` 快照，基于以下信息决策：

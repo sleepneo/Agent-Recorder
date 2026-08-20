@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using AgentRecorder.App;
@@ -41,9 +42,16 @@ public class GlobalStopHotkeyTests
         public bool UnregisterHotKey(IntPtr hWnd, int id)
         {
             Unregistrations.Add((hWnd, id));
-            return true;
+            if (ThrowOnUnregister)
+                throw new InvalidOperationException("unregister failed");
+            if (!ShouldUnregisterSucceed)
+                Marshal.SetLastPInvokeError(UnregisterErrorCode);
+            return ShouldUnregisterSucceed;
         }
         public bool ShouldSucceed { get; set; } = true;
+        public bool ShouldUnregisterSucceed { get; set; } = true;
+        public bool ThrowOnUnregister { get; set; }
+        public int UnregisterErrorCode { get; set; }
     }
 
     [Fact]
@@ -76,6 +84,56 @@ public class GlobalStopHotkeyTests
 
             Assert.False(result);
             Assert.False(hotkey.Registered);
+        });
+    }
+
+    [Fact]
+    public void Unregister_NativeFailure_RetainsRegisteredAndAllowsSuccessfulRetry()
+    {
+        RunOnSta(() =>
+        {
+            var registrar = new FakeRegistrar
+            {
+                ShouldUnregisterSucceed = false,
+                UnregisterErrorCode = 1234
+            };
+            using var hotkey = new GlobalStopHotkey(() => { }, registrar);
+            Assert.True(hotkey.Register());
+
+            Assert.False(hotkey.Unregister());
+            Assert.True(hotkey.Registered);
+            Assert.Equal(1234, hotkey.LastErrorCode);
+
+            registrar.ShouldUnregisterSucceed = true;
+            Assert.True(hotkey.Unregister());
+            Assert.False(hotkey.Registered);
+            Assert.Equal(0, hotkey.LastErrorCode);
+        });
+    }
+
+    [Fact]
+    public void Unregister_Exception_IsNonFatalWithStableDiagnostic_AndDisposeRetires()
+    {
+        RunOnSta(() =>
+        {
+            var registrar = new FakeRegistrar { ThrowOnUnregister = true };
+            int callbacks = 0;
+            var hotkey = new GlobalStopHotkey(() => callbacks++, registrar);
+            Assert.True(hotkey.Register());
+
+            Assert.False(hotkey.Unregister());
+            var errorCode = hotkey.LastErrorCode;
+            Assert.True(hotkey.Registered);
+            Assert.NotEqual(0, errorCode);
+            Assert.Equal(errorCode, hotkey.LastErrorCode);
+
+            hotkey.Dispose();
+            hotkey.Dispose();
+            hotkey.OnHotkeyReceived();
+
+            Assert.False(hotkey.Registered);
+            Assert.Equal(0, callbacks);
+            Assert.Single(registrar.Unregistrations);
         });
     }
 

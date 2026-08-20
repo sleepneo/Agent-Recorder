@@ -108,6 +108,29 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
+## Adding Chapter Marks
+
+While recording, press `Ctrl+Shift+F11` to add a chapter mark. Agent Recorder
+shows brief green in-app feedback; it does not use a tray balloon. If outer and
+inner recordings are active, one key press adds a mark to each recording on its
+own first-frame timeline.
+
+An agent can add a labeled mark to one active recording through the
+authenticated API:
+
+```http
+POST /api/v1/recordings/{recording_id}/marks
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "label": "Important decision"
+}
+```
+
+Accepted marks are written to `<video-stem>.bundle/marks.json` after a
+successful FFmpeg MP4 recording.
+
 The tray menu provides a Chinese/English language selector. The choice is
 persisted locally and applies to newly opened selection, confirmation, and
 recording-control windows.

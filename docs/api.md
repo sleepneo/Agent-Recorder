@@ -61,6 +61,7 @@ path.
 | `POST /recordings` | Yes |
 | `GET /recordings` | Yes |
 | `GET /recordings/{id}` | Yes |
+| `POST /recordings/{id}/marks` | Yes |
 | `POST /recordings/{id}/stop` | Yes |
 | `GET /confirmations/{id}` | Yes |
 
@@ -163,6 +164,7 @@ The response includes:
 - safety and auth policy
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
+- chapter-mark API and local-hotkey state (`chapter_marks`)
 
 A native `wgc-native-helper.exe`, managed continuous session, and
 capture-backend adapter are present in the repository. Guarded selectors can
@@ -208,6 +210,27 @@ Stop controls are reported under `interaction.stop_controls`:
 - `global_hotkey.supported`: whether the host supports a global stop hotkey.
 - `global_hotkey.registered`: whether the hotkey was successfully registered.
 - `global_hotkey.gesture`: the human-readable hotkey gesture.
+
+Chapter-mark capabilities are reported at the response root:
+
+```json
+{
+  "chapter_marks": {
+    "supported": true,
+    "endpoint": "/api/v1/recordings/{recording_id}/marks",
+    "local_hotkey": {
+      "supported": true,
+      "registered": false,
+      "gesture": "Ctrl+Shift+F11",
+      "registration_policy": "while_recording"
+    }
+  }
+}
+```
+
+The tray host registers the local hotkey only while at least one recording is
+in the exact `recording` state. The headless host reports API support but no
+local hotkey.
 
 Quick recipe fields:
 
@@ -940,6 +963,52 @@ POST /confirmations/{id}/approve
 
 returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
 
+## Chapter Marks
+
+Add a labeled mark to one active recording:
+
+```http
+POST /recordings/{recording_id}/marks
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "label": "Important decision"
+}
+```
+
+`source` may be omitted and defaults to `agent`; an authenticated API caller
+may explicitly send only `agent`. The reserved `hotkey` source is assigned by
+the local `Ctrl+Shift+F11` path and cannot be forged remotely.
+
+Success returns the accepted mark without requiring another GET:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "recording_id": "rec_xxx",
+    "mark": {
+      "t_ms": 1234,
+      "label": "Important decision",
+      "source": "agent"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+The endpoint accepts marks only in the exact `recording` state. `label` is
+trimmed after Unicode/control-character validation, must remain non-empty, and
+may contain at most 200 Unicode scalar values. `t_ms` is a non-negative integer
+on the recording's trusted first-frame monotonic timeline.
+
+| HTTP | Code | Meaning |
+| ---: | --- | --- |
+| 400 | `INVALID_ARGUMENT` | Invalid JSON, label, or source. |
+| 404 | `RECORDING_NOT_FOUND` | Recording ID does not exist. |
+| 409 | `RECORDING_NOT_ACTIVE` | Recording is not in the exact `recording` state or has no trusted first-frame anchor. |
+
 ## Recording Bundle
 
 Successful FFmpeg MP4 recordings automatically produce a structured bundle next
@@ -1073,16 +1142,22 @@ Stable bundle error codes:
 
 ### `marks.json`
 
-The marks file currently defines the versioned schema only; the `marks` array
-is empty until mouse/keyboard mark support is implemented.
+The versioned marks file contains every accepted chapter mark in insertion
+order. A recording with no marks keeps an empty array.
 
 ```json
 {
   "bundle_version": 1,
   "recording_id": "rec_xxx",
-  "marks": []
+  "marks": [
+    { "t_ms": 1234, "label": "Important decision", "source": "agent" }
+  ]
 }
 ```
+
+Bundle generation reads an immutable snapshot of the recording's marks. The
+`recording.mark_added` audit event includes recording ID, timestamp, and source,
+but deliberately excludes the label text.
 
 ## Common Error Codes
 

@@ -173,6 +173,13 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Indicator_Preparing"] = "正在准备麦克风…",
             ["Indicator_Finalizing"] = "正在保存…",
             ["Indicator_Countdown"] = "{0}",
+
+            // Chapter Marks local hotkey
+            ["ChapterMarks_DefaultLabel"] = "快捷标记",
+            ["ChapterMarks_Feedback_SuccessOne"] = "✓ 标记已添加",
+            ["ChapterMarks_Feedback_SuccessMany"] = "✓ 已标记 {0} 个录制",
+            ["ChapterMarks_Feedback_Partial"] = "✓ 已标记 {0}/{1} 个录制",
+            ["ChapterMarks_Feedback_Failed"] = "标记未添加",
         };
     }
 
@@ -307,6 +314,13 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Indicator_Preparing"] = "Preparing microphone...",
             ["Indicator_Finalizing"] = "Saving...",
             ["Indicator_Countdown"] = "{0}",
+
+            // Chapter Marks local hotkey
+            ["ChapterMarks_DefaultLabel"] = "Quick mark",
+            ["ChapterMarks_Feedback_SuccessOne"] = "✓ Mark added",
+            ["ChapterMarks_Feedback_SuccessMany"] = "✓ Marked {0} recordings",
+            ["ChapterMarks_Feedback_Partial"] = "✓ Marked {0}/{1} recordings",
+            ["ChapterMarks_Feedback_Failed"] = "Mark not added",
         };
     }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -380,7 +381,12 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         {
             bundle_version = RecordingBundleSnapshot.BundleVersion,
             recording_id = r.RecordingId,
-            marks = Array.Empty<object>()
+            marks = r.Marks.Select(mark => new
+            {
+                t_ms = mark.TMs,
+                label = mark.Label,
+                source = mark.Source
+            }).ToArray()
         };
     }
 

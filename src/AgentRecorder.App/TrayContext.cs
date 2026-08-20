@@ -19,6 +19,7 @@ namespace AgentRecorder.App;
 
 internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecordingFailureNotifier
 {
+    private static readonly TimeSpan ChapterMarkFeedbackDuration = TimeSpan.FromMilliseconds(1900);
     public string HostMode => "tray";
     public bool SupportsRegionSelectionUi => true;
     public bool SupportsFloatingStopButton => true;
@@ -26,6 +27,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     public bool SupportsGlobalStopHotkey => true;
     public bool IsGlobalStopHotkeyRegistered => _globalStopHotkey?.Registered ?? false;
     public string? GlobalStopHotkeyGesture => "Ctrl+Shift+F10";
+    public bool SupportsChapterMarksLocalHotkey => true;
+    public bool IsChapterMarksHotkeyRegistered => _chapterMarksHotkey?.Registered ?? false;
+    public string? ChapterMarksHotkeyGesture => "Ctrl+Shift+F11";
+    public string ChapterMarksHotkeyRegistrationPolicy => "while_recording";
 
     private readonly NotifyIcon _icon;
     private readonly RecordingEngine _engine;
@@ -35,6 +40,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly RecordingIndicatorManager _indicatorManager;
     private readonly TrayIconFactory _iconFactory;
     private readonly IGlobalStopHotkey? _globalStopHotkey;
+    private IGlobalStopHotkey? _chapterMarksHotkey;
+    private readonly Func<Action, IGlobalStopHotkey>? _chapterMarksHotkeyFactory;
+    private bool _chapterMarkRegistrationAttempted;
+    private bool _chapterMarkHadExactRecording;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _stopItem;
     private readonly ToolStripMenuItem _approveItem;
@@ -51,6 +60,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly ITrayBubblePolicy _bubblePolicy;
     private readonly ITrayBalloonTip _balloonTip;
     private readonly IIndicatorPresenter _indicatorPresenter;
+    private readonly IChapterMarkFeedbackPresenter _chapterMarkFeedbackPresenter;
     private readonly RecordingFailureNotificationManager _failureNotificationManager;
     private IUiTextProvider _uiText;
 
@@ -64,9 +74,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     {
     }
 
-    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null, IRecordingFailureNotificationPresenter? failureNotificationPresenter = null)
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null, IRecordingFailureNotificationPresenter? failureNotificationPresenter = null, Func<Action, IGlobalStopHotkey>? chapterMarksHotkeyFactory = null, IChapterMarkFeedbackPresenter? chapterMarkFeedbackPresenter = null)
     {
         _engine = engine; _audit = audit;
+        _chapterMarksHotkeyFactory = chapterMarksHotkeyFactory ?? hotkeyFactory;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _confirmationWindowActivator = confirmationWindowActivator ?? DefaultWindowActivator.Instance;
         _uiText = uiTextProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
@@ -142,6 +153,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             () => _activeRecordings.Count,
             failureNotificationPresenter);
 
+        _chapterMarkFeedbackPresenter = chapterMarkFeedbackPresenter ?? new RecordingIndicatorFeedbackPresenter(_indicatorManager);
+
         // Register global stop hotkey on the UI thread. Failure is logged but non-fatal.
         try
         {
@@ -158,6 +171,25 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         catch (Exception ex)
         {
             _audit.Log("tray.global_hotkey_error", new { error = ex.Message, gesture = GlobalStopHotkeyGesture });
+        }
+
+        // The mark hotkey uses the same message-window implementation but remains
+        // unregistered until an exact RecState.recording transition is observed.
+        try
+        {
+            _chapterMarksHotkey = _chapterMarksHotkeyFactory?.Invoke(OnChapterMarkHotkeyPressed)
+                ?? new GlobalChapterMarkHotkey(OnChapterMarkHotkeyPressed,
+                    onError: _ => _audit.Log("tray.chapter_mark_hotkey_callback_error", new { error_code = "callback_exception" }));
+        }
+        catch (Exception)
+        {
+            _chapterMarksHotkey = null;
+            _audit.Log("tray.chapter_mark_hotkey_error", new
+            {
+                gesture = ChapterMarksHotkeyGesture,
+                error_code = "initialization_failed",
+                active_recording_count = 0
+            });
         }
     }
 
@@ -549,6 +581,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             _indicatorManager.HideCountdownAndShowRecording(recording);
             _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
             // "Recording started" tray balloons are intentionally never shown;
             // recording state is communicated by the indicator border, REC label,
             // floating stop button and dynamic tray icon/text.
@@ -566,6 +599,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
             _indicatorManager.ShowPreparing(recording, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
         });
     }
 
@@ -588,6 +622,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
                 _indicatorManager.HideCountdownOverlay(recording);
             }
             UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
         });
     }
 
@@ -600,6 +635,20 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             _activeRecordings[recording.Id] = recording;
             _indicatorManager.ShowFinalizing(recording);
             UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
+        });
+    }
+
+    public void SetStopping(object rec)
+    {
+        var recording = rec as Recording;
+        if (recording == null) return;
+        RunOnUi(() =>
+        {
+            _activeRecordings[recording.Id] = recording;
+            _stoppingIds.Add(recording.Id);
+            UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
         });
     }
 
@@ -659,6 +708,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
                 SetAllIdleUi();
             else
                 UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
             _failureNotificationManager.ActiveRecordingCountChanged();
         });
     }
@@ -671,6 +721,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _confirmationQueue.Clear(invokeCallbacks: false); // Don't invoke callbacks, engine manages expiration
         HideConfirmationForm();
         SetAllIdleUi();
+        UpdateChapterMarkHotkeyRegistration();
         _failureNotificationManager.ActiveRecordingCountChanged();
     });
 
@@ -682,6 +733,176 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private void OnGlobalHotkeyPressed()
     {
         StopAll("global_hotkey");
+    }
+
+    private void UpdateChapterMarkHotkeyRegistration()
+    {
+        // This method is called only from RunOnUi callbacks. Reading the state while
+        // holding each recording's lock gives registration the same exact-state rule
+        // as the keypress snapshot without making the global dictionary lock-heavy.
+        bool hasRecording = _activeRecordings.Values.Any(IsExactRecording);
+        if (!hasRecording)
+        {
+            var hadExactRecording = _chapterMarkHadExactRecording;
+            _chapterMarkHadExactRecording = false;
+            _chapterMarkRegistrationAttempted = false;
+            if (!hadExactRecording || _chapterMarksHotkey?.Registered != true)
+                return;
+
+            var hotkey = _chapterMarksHotkey;
+            bool unregistered = false;
+            try { unregistered = hotkey.Unregister(); }
+            catch { }
+
+            var errorCode = unregistered ? 0 : hotkey.LastErrorCode;
+            if (!unregistered && errorCode == 0)
+                errorCode = 1;
+
+            if (!unregistered)
+            {
+                // The native registration may still be live, so retire the whole
+                // object. Destroying its message-only window releases any hotkey
+                // ownership and prevents a dead instance from blocking the next
+                // genuine zero-to-one transition.
+                try { hotkey.Dispose(); } catch { }
+                if (ReferenceEquals(_chapterMarksHotkey, hotkey))
+                    _chapterMarksHotkey = null;
+            }
+
+            _audit.Log("tray.chapter_mark_hotkey_state", new
+            {
+                action = "unregister",
+                registered = hotkey.Registered,
+                result_code = unregistered ? "unregistered" : "unregister_failed",
+                error_code = errorCode,
+                retired = !unregistered,
+                gesture = ChapterMarksHotkeyGesture,
+                active_recording_count = 0
+            });
+            return;
+        }
+
+        _chapterMarkHadExactRecording = true;
+
+        if (_chapterMarkRegistrationAttempted)
+            return;
+
+        _chapterMarkRegistrationAttempted = true;
+        try
+        {
+            _chapterMarksHotkey ??= _chapterMarksHotkeyFactory?.Invoke(OnChapterMarkHotkeyPressed)
+                ?? new GlobalChapterMarkHotkey(OnChapterMarkHotkeyPressed,
+                    onError: _ => _audit.Log("tray.chapter_mark_hotkey_callback_error", new { error_code = "callback_exception" }));
+
+            bool registered = _chapterMarksHotkey.Register();
+            _audit.Log("tray.chapter_mark_hotkey_state", new
+            {
+                action = "register",
+                registered,
+                result_code = registered ? "registered" : "registration_failed",
+                error_code = registered ? 0 : _chapterMarksHotkey.LastErrorCode,
+                gesture = ChapterMarksHotkeyGesture,
+                active_recording_count = _activeRecordings.Values.Count(IsExactRecording)
+            });
+        }
+        catch
+        {
+            _audit.Log("tray.chapter_mark_hotkey_state", new
+            {
+                action = "register",
+                registered = false,
+                result_code = "registration_failed",
+                error_code = "registration_exception",
+                gesture = ChapterMarksHotkeyGesture,
+                active_recording_count = _activeRecordings.Values.Count(IsExactRecording)
+            });
+        }
+    }
+
+    private static bool IsExactRecording(Recording recording)
+    {
+        lock (recording)
+        {
+            return recording.State == RecState.recording;
+        }
+    }
+
+    private Recording[] SnapshotExactRecordings()
+    {
+        return _activeRecordings.Values
+            .Where(IsExactRecording)
+            .ToArray();
+    }
+
+    private void OnChapterMarkHotkeyPressed()
+    {
+        try
+        {
+            var snapshot = SnapshotExactRecordings();
+            if (snapshot.Length == 0)
+                return;
+
+            // Resolve the localized label once, at the instant of the keypress.
+            // It is then passed unchanged to the single domain operation for every
+            // recording in this stable UI-thread snapshot.
+            var label = _uiText.Get("ChapterMarks_DefaultLabel");
+            int successCount = 0;
+            foreach (var recording in snapshot)
+            {
+                try
+                {
+                    _engine.AddMark(recording.Id, label, "hotkey");
+                    successCount++;
+                }
+                catch
+                {
+                    // One state race or per-recording domain failure must not stop
+                    // the remaining eligible recordings from being attempted.
+                }
+            }
+
+            int failedCount = snapshot.Length - successCount;
+            _audit.Log("tray.chapter_mark_hotkey_result", new
+            {
+                attempted_count = snapshot.Length,
+                successful_count = successCount,
+                failed_count = failedCount,
+                active_recording_count = _activeRecordings.Values.Count(IsExactRecording)
+            });
+
+            string feedback = successCount == snapshot.Length
+                ? (successCount == 1
+                    ? _uiText.Get("ChapterMarks_Feedback_SuccessOne")
+                    : _uiText.Format("ChapterMarks_Feedback_SuccessMany", successCount))
+                : successCount > 0
+                    ? _uiText.Format("ChapterMarks_Feedback_Partial", successCount, snapshot.Length)
+                    : _uiText.Get("ChapterMarks_Feedback_Failed");
+
+            var feedbackTarget = snapshot.FirstOrDefault(recording =>
+                string.Equals(recording.NestedRole, "outer", StringComparison.OrdinalIgnoreCase))
+                ?? snapshot[0];
+
+            try
+            {
+                _chapterMarkFeedbackPresenter.Show(feedback, ChapterMarkFeedbackDuration, feedbackTarget.Id);
+            }
+            catch
+            {
+                _audit.Log("tray.chapter_mark_feedback_error", new
+                {
+                    error_code = "presentation_failed",
+                    recording_id = feedbackTarget.Id,
+                    attempted_count = snapshot.Length,
+                    successful_count = successCount
+                });
+            }
+        }
+        catch
+        {
+            // The hotkey callback is inside the Win32 message loop. No callback or
+            // presentation exception is allowed to escape back into WndProc.
+            _audit.Log("tray.chapter_mark_hotkey_callback_error", new { error_code = "callback_exception" });
+        }
     }
 
     private void StopAll(string trigger)
@@ -1117,6 +1338,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             return;
         _disposed = true;
 
+        try
+        {
+            if (_chapterMarksHotkey != null && !ReferenceEquals(_chapterMarksHotkey, _globalStopHotkey))
+                _chapterMarksHotkey.Dispose();
+        }
+        catch { }
         try { _globalStopHotkey?.Dispose(); } catch { }
         try { _failureNotificationManager.Dispose(); } catch { }
         _indicatorManager.CloseAll("recording.app_exit");

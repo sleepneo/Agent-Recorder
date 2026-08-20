@@ -74,6 +74,9 @@ Agents should use the paths returned by `ensure-running` or
 - A floating stop button next to each active recording; clicking it stops only
   that recording.
 - A global stop hotkey (`Ctrl+Shift+F10`) that stops all active recordings.
+- Chapter marks through the authenticated API or `Ctrl+Shift+F11` while
+  recording. The local hotkey marks every active nested recording, shows brief
+  in-app feedback, and writes the accepted marks to each bundle's `marks.json`.
 - Tray menu stop entry that adapts to one or multiple active recordings.
 - Chinese and English local UI with DPI-aware confirmation, selection, recording
   indicators, and stop controls.

@@ -17,6 +17,9 @@ public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifie
     public bool SupportsGlobalStopHotkey => false;
     public bool IsGlobalStopHotkeyRegistered => false;
     public string? GlobalStopHotkeyGesture => null;
+    public bool SupportsChapterMarksLocalHotkey => false;
+    public bool IsChapterMarksHotkeyRegistered => false;
+    public string? ChapterMarksHotkeyGesture => null;
 
     private readonly AuditLogger _audit;
 

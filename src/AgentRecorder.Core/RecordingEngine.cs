@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
@@ -62,6 +63,25 @@ public sealed class RecordingEngine
         null;
     private readonly object _lock = new();
     private ITrayContext? _tray;
+
+    /// <summary>
+    /// Injectable only for deterministic mark timestamp tests. Production uses
+    /// the current UTC wall clock for public metadata; mark positions use the
+    /// separate monotonic provider below.
+    /// </summary>
+    internal Func<DateTime> UtcNowForTests { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>
+    /// Narrow test seam for the monotonic media timeline. Production uses
+    /// Stopwatch.GetTimestamp and never exposes this provider through HTTP.
+    /// </summary>
+    internal Func<long> MonotonicTimestampProviderForTests { get; set; } = Stopwatch.GetTimestamp;
+
+    /// <summary>
+    /// Test-only frequency seam paired with MonotonicTimestampProviderForTests.
+    /// Production remains Stopwatch.Frequency.
+    /// </summary>
+    internal long MonotonicFrequencyForTests { get; set; } = Stopwatch.Frequency;
 
     // State change notification: incremented on every recording/confirmation state transition,
     // used by GetConfirmationWait/GetStatusWait to detect changes via Monitor.Wait/PulseAll.
@@ -245,6 +265,129 @@ public sealed class RecordingEngine
             return 0;
 
         return (int)seconds;
+    }
+
+    /// <summary>
+    /// Adds a chapter mark to an actively recording session. This is the one
+    /// domain operation shared by the authenticated API and local hotkey path.
+    /// </summary>
+    public RecordingMark AddMark(string recordingId, string label, string source = "agent")
+    {
+        var rec = Get(recordingId);
+
+        if (!string.Equals(source, "agent", StringComparison.Ordinal) &&
+            !string.Equals(source, "hotkey", StringComparison.Ordinal))
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
+                new { field = "source", allowed = new[] { "agent", "hotkey" } });
+        }
+
+        if (label is null)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
+                new { field = "label", reason = "required" });
+        }
+
+        RecordingMark mark;
+        lock (rec)
+        {
+            if (rec.State != RecState.recording)
+            {
+                throw RecordingNotActive(rec);
+            }
+
+            // Both the UTC metadata and monotonic mark anchor are established
+            // by the trusted first-frame transition. Never synthesize either
+            // from request/approval/backend/countdown/bundle timestamps.
+            if (rec.StartedAtUtc == default ||
+                !rec.MarkTimelineAnchorTicks.HasValue ||
+                rec.MarkTimelineAnchorTicks.Value < 0)
+            {
+                throw new ApiException(409, "RECORDING_NOT_ACTIVE",
+                    "Recording timeline has not observed its first frame yet.",
+                    new
+                    {
+                        current_state = rec.State.ToString(),
+                        suggested_action = "wait_for_first_frame"
+                    });
+            }
+
+            long nowTicks;
+            try
+            {
+                nowTicks = MonotonicTimestampProviderForTests();
+            }
+            catch
+            {
+                throw TimelineNotReady(rec, "monotonic_clock_unavailable");
+            }
+
+            if (!TryConvertMonotonicDeltaToMilliseconds(
+                    rec.MarkTimelineAnchorTicks.Value, nowTicks,
+                    MonotonicFrequencyForTests, out var tMs))
+            {
+                throw TimelineNotReady(rec, "monotonic_clock_invalid");
+            }
+
+            try
+            {
+                mark = new RecordingMark(tMs, label, source);
+            }
+            catch (ArgumentException)
+            {
+                // Do not copy the label or constructor text into an API error.
+                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
+                    new { field = "label", reason = "must_be_valid_unicode_text" });
+            }
+
+            rec.AddMark(mark);
+            _audit.Log("recording.mark_added", new
+            {
+                recording_id = rec.Id,
+                t_ms = mark.TMs,
+                source = mark.Source
+            });
+        }
+
+        return mark;
+    }
+
+    private static ApiException RecordingNotActive(Recording rec) =>
+        new(409, "RECORDING_NOT_ACTIVE",
+            "Marks can only be added while the recording is actively recording.",
+            new
+            {
+                current_state = rec.State.ToString(),
+                suggested_action = "add_mark_while_recording"
+            });
+
+    private static ApiException TimelineNotReady(Recording rec, string reason) =>
+        new(409, "RECORDING_NOT_ACTIVE",
+            "Recording timeline is not ready.",
+            new
+            {
+                current_state = rec.State.ToString(),
+                suggested_action = "wait_for_first_frame",
+                reason
+            });
+
+    private static bool TryConvertMonotonicDeltaToMilliseconds(
+        long anchorTicks, long nowTicks, long frequency, out long milliseconds)
+    {
+        milliseconds = 0;
+        if (anchorTicks < 0 || nowTicks < 0 || nowTicks < anchorTicks || frequency <= 0)
+            return false;
+
+        // Decimal keeps the product within a bounded exact range for the full
+        // non-negative long tick delta, then checked conversion rejects values
+        // that cannot be represented as a non-negative long millisecond value.
+        ulong deltaTicks = (ulong)(nowTicks - anchorTicks);
+        decimal elapsedMilliseconds = (decimal)deltaTicks * 1000m / frequency;
+        if (elapsedMilliseconds < 0 || elapsedMilliseconds > long.MaxValue)
+            return false;
+
+        milliseconds = checked((long)decimal.Truncate(elapsedMilliseconds));
+        return milliseconds >= 0;
     }
 
     private static string NormalizeStopReason(string? reason)
@@ -1642,8 +1785,25 @@ public sealed class RecordingEngine
             if (rec.State is not (RecState.preparing or RecState.countdown))
                 return;
 
+            long? monotonicAnchor = null;
+            try
+            {
+                var candidate = MonotonicTimestampProviderForTests();
+                if (candidate >= 0)
+                    monotonicAnchor = candidate;
+            }
+            catch
+            {
+                // A missing/invalid anchor is fail-closed for marks. Keep the
+                // trusted recording transition intact; AddMark will return the
+                // stable first-frame/timeline 409 until a future recording.
+            }
+
             rec.State = RecState.recording;
-            rec.StartedAtUtc = DateTime.UtcNow;
+            // Public wall-clock metadata and the private monotonic mark anchor
+            // are established by this same trusted first-frame transition.
+            rec.StartedAtUtc = UtcNowForTests();
+            rec.MarkTimelineAnchorTicks = monotonicAnchor;
             BumpStateVersion();
         }
 
@@ -2456,7 +2616,8 @@ public sealed class RecordingEngine
             width: meta.Width,
             height: meta.Height,
             audioSourceKind: AudioSourceKindName(rec.AudioSourceKind),
-            audioDeviceName: rec.MicrophoneDeviceName ?? rec.SystemAudioEndpointName);
+            audioDeviceName: rec.MicrophoneDeviceName ?? rec.SystemAudioEndpointName,
+            marks: rec.SnapshotMarks());
         return true;
     }
 
@@ -2531,6 +2692,7 @@ public sealed class RecordingEngine
     public object Stop(string id, string reason)
     {
         var rec = Get(id);
+        bool enteredStopping = false;
 
         lock (rec)
         {
@@ -2566,9 +2728,13 @@ public sealed class RecordingEngine
             {
                 rec.State = RecState.stopping;
                 rec.StopReason = NormalizeStopReason(reason);
+                enteredStopping = true;
                 BumpStateVersion();
             }
         }
+
+        if (enteredStopping)
+            _tray?.SetStopping(rec);
 
         CancelCountdown(rec.Id);
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
@@ -181,6 +182,102 @@ internal sealed class RecordingIndicatorManager
     /// Returns a snapshot of current stop-control forms for tests.
     /// </summary>
     internal IReadOnlyDictionary<string, RecordingStopControlForm> StopControlsForTests => new Dictionary<string, RecordingStopControlForm>(_stopControls);
+
+    /// <summary>
+    /// Shows one aggregate Chapter Marks result in the existing indicator layer.
+    /// A preferred recording (outer first, supplied by TrayContext) is used when
+    /// its indicator is actually visible; otherwise a deterministic visible
+    /// indicator is selected. No second popup or independent timer is created.
+    /// </summary>
+    internal void ShowChapterMarkFeedback(string text, TimeSpan duration, string? preferredRecordingId = null)
+    {
+        _audit.Log("tray.chapter_mark_feedback_presenter_called", new
+        {
+            preferred_recording_id = preferredRecordingId ?? "none",
+            duration_ms = Math.Clamp((int)Math.Round(duration.TotalMilliseconds), 1, 60_000)
+        });
+
+        var selected = SelectFeedbackIndicator(preferredRecordingId);
+        if (selected == null)
+        {
+            _audit.Log("tray.chapter_mark_feedback_error", new
+            {
+                recording_id = preferredRecordingId ?? "none",
+                error_code = "indicator_not_visible"
+            });
+            throw new InvalidOperationException("No visible recording indicator is available.");
+        }
+
+        var (recordingId, indicator) = selected.Value;
+        _audit.Log("tray.chapter_mark_feedback_indicator_selected", new
+        {
+            recording_id = recordingId,
+            indicator_visible = indicator.Visible,
+            indicator_handle_created = indicator.IsHandleCreated,
+            actual_window_dpi = indicator.ActualWindowDpiForTests,
+            capture_visibility_mode = indicator.CaptureVisibilityModeForTests.ToString().ToLowerInvariant()
+        });
+
+        try
+        {
+            indicator.ShowTransientFeedback(text, duration);
+        }
+        catch
+        {
+            _audit.Log("tray.chapter_mark_feedback_error", new
+            {
+                recording_id = recordingId,
+                error_code = "feedback_submission_failed"
+            });
+            throw;
+        }
+
+        if (!indicator.FeedbackVisibleForTests
+            || !indicator.FeedbackControlVisibleForTests
+            || !indicator.FeedbackBoundsInsideClientForTests
+            || !indicator.FeedbackBoundsNonEmptyForTests)
+        {
+            _audit.Log("tray.chapter_mark_feedback_error", new
+            {
+                recording_id = recordingId,
+                error_code = "feedback_not_visible_after_submit"
+            });
+            throw new InvalidOperationException("Chapter mark feedback was not visible after submission.");
+        }
+
+        _audit.Log("tray.chapter_mark_feedback_submitted", new
+        {
+            recording_id = recordingId,
+            feedback_visible = indicator.FeedbackVisibleForTests,
+            feedback_handle_created = indicator.FeedbackControlHandleCreatedForTests,
+            bounds_non_empty = indicator.FeedbackBoundsNonEmptyForTests,
+            bounds_inside_client = indicator.FeedbackBoundsInsideClientForTests,
+            frontmost_child = indicator.FeedbackIsFrontmostChildForTests,
+            opaque_background = indicator.FeedbackBackgroundOpaqueForTests,
+            actual_window_dpi = indicator.ActualWindowDpiForTests
+        });
+    }
+
+    private KeyValuePair<string, RecordingIndicatorForm>? SelectFeedbackIndicator(string? preferredRecordingId)
+    {
+        if (!string.IsNullOrEmpty(preferredRecordingId)
+            && _indicators.TryGetValue(preferredRecordingId, out var preferred)
+            && IsFeedbackIndicatorVisible(preferred))
+        {
+            return new KeyValuePair<string, RecordingIndicatorForm>(preferredRecordingId, preferred);
+        }
+
+        var selected = _indicators
+            .Where(pair => IsFeedbackIndicatorVisible(pair.Value))
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .FirstOrDefault();
+        return selected.Key == null ? null : selected;
+    }
+
+    private static bool IsFeedbackIndicatorVisible(RecordingIndicatorForm indicator)
+    {
+        return !indicator.IsDisposed && indicator.IsHandleCreated && indicator.Visible;
+    }
 
     /// <summary>
     /// Computes the combined presentation plan for the indicator and stop control before any UI

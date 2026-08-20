@@ -76,7 +76,8 @@ public class RecordingBundleTests : IDisposable
         string audioStatus = "not_requested",
         string? nestedRole = null,
         string? nestedSessionId = null,
-        string? parentRecordingId = null)
+        string? parentRecordingId = null,
+        IEnumerable<RecordingMark>? marks = null)
     {
         return new RecordingBundleRequest(
             recordingId: "rec_test",
@@ -104,7 +105,8 @@ public class RecordingBundleTests : IDisposable
             container: "mp4",
             codec: "h264",
             width: width,
-            height: height);
+            height: height,
+            marks: marks);
     }
 
     private static byte[] PngHeader() => new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
@@ -308,6 +310,48 @@ public class RecordingBundleTests : IDisposable
         Assert.Equal(1, doc.RootElement.GetProperty("bundle_version").GetInt32());
         Assert.Equal("rec_test", doc.RootElement.GetProperty("recording_id").GetString());
         Assert.Empty(doc.RootElement.GetProperty("marks").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task GenerateAsync_MarksSchema_WritesOrderedUnicodeMarks()
+    {
+        var mediaPath = MediaPath("marks-unicode");
+        File.WriteAllBytes(mediaPath, new byte[] { 0 });
+
+        var marks = new[]
+        {
+            new RecordingMark(1234, "重要决定 😀", "agent"),
+            new RecordingMark(5678, "第二章", "hotkey")
+        };
+        var generator = new FfmpegRecordingBundleGenerator(new FakeExternalProcessRunner().WithSuccess(), ffmpegPathProvider: FakeFfmpegPathProvider);
+        await generator.GenerateAsync(BuildRequest(mediaPath, marks: marks));
+
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(
+            Path.Combine(_tmpDir, "marks-unicode.bundle", "marks.json")));
+        var serialized = doc.RootElement.GetProperty("marks").EnumerateArray().ToArray();
+        Assert.Equal(2, serialized.Length);
+        Assert.Equal(1234, serialized[0].GetProperty("t_ms").GetInt64());
+        Assert.Equal("重要决定 😀", serialized[0].GetProperty("label").GetString());
+        Assert.Equal("agent", serialized[0].GetProperty("source").GetString());
+        Assert.Equal(5678, serialized[1].GetProperty("t_ms").GetInt64());
+        Assert.Equal("第二章", serialized[1].GetProperty("label").GetString());
+        Assert.Equal("hotkey", serialized[1].GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public void RecordingBundleRequest_CopiesMarksAndDoesNotExposeMutableList()
+    {
+        var source = new List<RecordingMark>
+        {
+            new(10, "before", "agent")
+        };
+        var request = BuildRequest(MediaPath("snapshot"), marks: source);
+        source.Add(new RecordingMark(20, "after", "agent"));
+
+        Assert.Single(request.Marks);
+        Assert.Equal("before", request.Marks[0].Label);
+        var mutableView = Assert.IsAssignableFrom<IList<RecordingMark>>(request.Marks);
+        Assert.Throws<NotSupportedException>(() => mutableView.Add(new RecordingMark(30, "blocked", "agent")));
     }
 
     [Fact]

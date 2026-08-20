@@ -11,28 +11,60 @@ namespace AgentRecorder.Tests;
 internal sealed class FakeGlobalStopHotkey : IGlobalStopHotkey
 {
     private readonly Action _onPressed;
+    private readonly bool _registrationResult;
     private bool _registered;
     private bool _disposed;
+    private bool _unregisterFailurePending;
 
     public FakeGlobalStopHotkey(Action onPressed, bool registered = true)
     {
         _onPressed = onPressed;
-        _registered = registered;
+        _registrationResult = registered;
     }
 
     public int RegisterCallCount { get; private set; }
     public int UnregisterCallCount { get; private set; }
     public int DisposeCallCount { get; private set; }
+    public bool UnregisterSucceeds { get; set; } = true;
+    public bool ThrowOnUnregister { get; set; }
+    public int LastErrorCode { get; set; }
 
     public bool Registered => _registered && !_disposed;
 
-    public bool Register(uint modifiers = GlobalStopHotkey.DefaultModifiers, uint key = GlobalStopHotkey.DefaultKey)
+    public bool Register()
     {
         if (_disposed)
             return false;
 
         RegisterCallCount++;
+        _registered = _registrationResult;
         return _registered;
+    }
+
+    public bool Unregister()
+    {
+        if (!_registered)
+            return true;
+
+        _registered = false;
+        UnregisterCallCount++;
+        if (ThrowOnUnregister)
+        {
+            _registered = true;
+            _unregisterFailurePending = true;
+            throw new InvalidOperationException("unregister failed");
+        }
+
+        if (!UnregisterSucceeds)
+        {
+            _registered = true;
+            _unregisterFailurePending = true;
+            return false;
+        }
+
+        _unregisterFailurePending = false;
+        LastErrorCode = 0;
+        return true;
     }
 
     public void SetRegistered(bool value) => _registered = value;
@@ -52,7 +84,12 @@ internal sealed class FakeGlobalStopHotkey : IGlobalStopHotkey
 
         _disposed = true;
         DisposeCallCount++;
-        UnregisterCallCount++;
+        try
+        {
+            if (!_unregisterFailurePending)
+                Unregister();
+        }
+        catch { }
         _registered = false;
     }
 }

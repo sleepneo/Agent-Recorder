@@ -251,7 +251,7 @@ AgentRecorder.Cli.exe autostart <status|enable|disable> [options]
 GET /capabilities
 ```
 
-用途：确认服务已启动，并读取是否支持 `display`、`window`、`region`、嵌套录制和确认机制。
+用途：确认服务已启动，并读取是否支持 `display`、`window`、`region`、嵌套录制、Chapter Marks 和确认机制。
 
 该接口不需要 API key。
 
@@ -305,6 +305,28 @@ GET /capabilities
 - `global_hotkey.supported`：是否支持全局停止热键。
 - `global_hotkey.registered`：热键是否实际注册成功（tray 模式通常为 true，冲突时可能为 false）。
 - `global_hotkey.gesture`：热键组合，如 `Ctrl+Shift+F10`。
+
+Chapter Marks 的能力位于返回顶层 `chapter_marks`：
+
+```json
+{
+  "chapter_marks": {
+    "supported": true,
+    "endpoint": "/api/v1/recordings/{recording_id}/marks",
+    "local_hotkey": {
+      "supported": true,
+      "registered": false,
+      "gesture": "Ctrl+Shift+F11",
+      "registration_policy": "while_recording"
+    }
+  }
+}
+```
+
+- `chapter_marks.supported` 表示 marks API/domain/bundle 能力，独立于本地 UI 是否存在。
+- tray 宿主的 `local_hotkey.supported=true`；`registered` 只在至少一条录制处于 exact `recording` 状态时可能为 true，空闲、准备、倒计时、停止或保存状态均为 false。
+- 本地按一次 `Ctrl+Shift+F11` 会对 UI 线程快照中所有 exact `recording` 录制各添加一个标记；outer/inner 并发录制各使用自己的首帧单调时间轴。准备中或 finalizing 的条目会被忽略。
+- headless 宿主仍报告 `chapter_marks.supported=true`，但 `local_hotkey.supported=false`、`registered=false`、`gesture=null`，不得据此声称存在本地热键。
 
 返回中还包含 `host.autostart` 字段，提供自启状态：
 
@@ -1281,6 +1303,60 @@ X-Agent-Recorder-Key: <api-key>
 
 用户主动停止且输出基本有效时，状态仍为 `completed`，不会仅因实际时长短于计划时长而判为 `failed`；但零时长、文件过小、FFmpeg 非零退出等真实产物错误仍会失败。
 
+## 8.1 Chapter Marks（录制标记）
+
+### 添加标记
+
+```http
+POST /api/v1/recordings/{recording_id}/marks
+Content-Type: application/json
+X-Agent-Recorder-Key: <api-key>
+
+{
+  "label": "Important decision",
+  "source": "agent"
+}
+```
+
+该接口是鉴权的元数据写入操作，只接受目标录制处于 `recording` 状态时的请求，不会启动、停止、批准、延长或缩短录制。`source` 可以省略（默认 `agent`），或显式传 `agent`；远程 agent 不得伪造本地 `hotkey` 来源。
+
+成功响应会直接返回服务端接受的时间戳，不需要再次 GET：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "recording_id": "rec_xxx",
+    "mark": {
+      "t_ms": 1234,
+      "label": "Important decision",
+      "source": "agent"
+    }
+  },
+  "request_id": "req_xxx"
+}
+```
+
+约束：
+
+- `label` 必填；服务端先检查原始提交文本的 UTF-16/Unicode scalar 结构，任何控制字符（包括首尾 CR/LF/TAB/NUL）都会拒绝，不会被 trim 掩盖。通过后才 trim 允许的外围空白；trim 后不能为空，最多 200 个 Unicode scalar value，且不会静默截断。
+- `t_ms` 来自可信首帧转换时建立的私有单调 Stopwatch anchor，以 anchor 后的单调 tick delta 换算为非负整数毫秒；`StartedAtUtc` 仍是同一转换时记录的公开 UTC 元数据。它不使用请求创建、批准、后端启动、倒计时或 bundle 生成时间。首帧或单调 anchor 尚未有效建立时不会伪造标记时间。
+- 标记在录制对象内按插入顺序并发安全保存；准备 bundle 时复制不可变快照，后续修改不会改变正在异步生成的 bundle。
+
+### 本地 Chapter Marks 热键
+
+tray 宿主在第一条录制进入 exact `recording` 时，在 WinForms UI 线程注册 `Ctrl+Shift+F11`；最后一条 exact `recording` 离开该状态时 unregister。注册失败不影响录制，能力状态保持 `registered=false`，并通过稳定审计事件记录结果；同一活动窗口不会循环重试，下一次真实的零到一条录制转换可以再次尝试。F10 全局停止热键保持独立生命周期。
+
+热键回调在 UI 线程取得 `_activeRecordings` 中 exact `recording` 条目的稳定快照，并逐条调用与 API 相同的 `RecordingEngine.AddMark(recording_id, localized_label, "hotkey")`。一次按键可能为并发 outer/inner 都添加标记；任一条失败不会阻止其他条目，领域审计仍是每个成功标记恰好一个 `recording.mark_added`，不含 label。反馈使用现有 REC 指示器层中的短暂 badge，不调用 `NotifyIcon.ShowBalloonTip` 或 Windows shell notification；重复按键替换同一 badge/timer，不改变 stop 控件几何或焦点策略。
+
+稳定错误：
+
+| HTTP | code | 说明 |
+|---:|---|---|
+| 400 | `INVALID_ARGUMENT` | JSON、`label` 或 `source` 无效；`source` 只允许省略或 `agent`。 |
+| 404 | `RECORDING_NOT_FOUND` | 目标录制不存在。 |
+| 409 | `RECORDING_NOT_ACTIVE` | 目标录制不在 `recording`，响应 details 包含 `current_state` 与建议动作。 |
+
 ## 9. 停止手动录制
 
 ```http
@@ -1440,15 +1516,19 @@ bundle 生成是 best-effort：即使 bundle 失败，录制状态仍保持 `com
 
 ### `marks.json`
 
-当前仅定义版本化空结构，`marks` 数组为空，待后续实现鼠标/键盘标记后填充。
+`marks.json` 保持现有版本化 envelope。录制没有标记时 `marks` 仍为空数组；录制中已接受的标记按插入顺序写入，支持中文和其他 Unicode 文本。写入使用首帧时间轴上的非负整数毫秒：
 
 ```json
 {
   "bundle_version": 1,
   "recording_id": "rec_xxx",
-  "marks": []
+  "marks": [
+    { "t_ms": 1234, "label": "重要决定", "source": "agent" }
+  ]
 }
 ```
+
+bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过程读取录制对象的活动集合。审计事件 `recording.mark_added` 只含 `recording_id`、`t_ms` 和 `source`，不含 `label` 原文。
 
 ## 11. 嵌套录制
 
