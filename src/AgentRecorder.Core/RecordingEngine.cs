@@ -15,7 +15,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Core;
 
-public sealed class RecordingEngine
+public sealed class RecordingEngine : IDisposable
 {
     internal readonly ConcurrentDictionary<string, Recording> _recs = new();
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
@@ -39,9 +39,24 @@ public sealed class RecordingEngine
         public CancellationTokenSource Cts { get; } = new();
         public int Phase = PhaseVisibleCountdown;
         public int CancelAuditEmitted;
+        public bool StartActionClaimed;
     }
 
     private readonly ConcurrentDictionary<string, CountdownOperation> _countdownOps = new();
+
+    private sealed class ScreenshotSeriesOperation
+    {
+        public CancellationTokenSource Cts { get; } = new();
+        public TaskCompletionSource<object?> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task Task => Completion.Task;
+        public bool StopRequested;
+        public int FrameInFlight;
+        public bool FinalizationClaimed;
+    }
+
+    private readonly ConcurrentDictionary<string, ScreenshotSeriesOperation> _seriesOps = new();
+    internal int ActiveScreenshotSeriesOperationCountForTests => _seriesOps.Count;
 
     /// <summary>
     /// Diagnostic seam for resource-lifecycle tests: number of countdown
@@ -58,7 +73,9 @@ public sealed class RecordingEngine
     private readonly IDisplayTopologyProvider _displayTopologyProvider;
     private bool _usesDefaultBackendFactory = true;
     private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
-        CaptureBackendSelector.BuildPlan;
+        cfg => cfg.IsScreenshotSeries
+            ? CaptureBackendSelector.BuildScreenshotSeriesPlan(cfg)
+            : CaptureBackendSelector.BuildPlan(cfg);
     private Func<CaptureConfig, CaptureBackendSelection>? _backendSelectionFactory =
         null;
     private readonly object _lock = new();
@@ -131,15 +148,53 @@ public sealed class RecordingEngine
     internal TimeSpan CountdownInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// Test seam: number of countdown steps. Production default is 3 (3-2-1).
+    /// Test-only override for countdown steps. Production uses the normalized
+    /// per-recording value; a non-null value is reserved for deterministic
+    /// lifecycle tests.
     /// </summary>
-    internal int CountdownSteps { get; set; } = 3;
+    internal int? CountdownSteps { get; set; }
+
+    /// <summary>
+    /// Deterministic scheduling seam used only by race tests. The callback is
+    /// invoked after countdown completion and immediately before the per-
+    /// recording start-action gate is entered. Production leaves it null.
+    /// </summary>
+    internal Action<Recording, string>? BeforeStartActionForTests { get; set; }
+
+    /// <summary>
+    /// Deterministic race-test seam invoked when Stop has obtained the recording
+    /// reference and is about to enter its lifecycle lock. Production leaves it
+    /// null.
+    /// </summary>
+    internal Action<Recording>? BeforeStopForTests { get; set; }
+
+    /// <summary>
+    /// Deterministic scheduling seam used only by startup-exception race tests.
+    /// The callback is invoked after a startup action throws and immediately
+    /// before the exception path attempts to claim the failed terminal state.
+    /// Production leaves it null.
+    /// </summary>
+    internal Action<Recording, string>? BeforeStartFailureForTests { get; set; }
 
     /// <summary>
     /// Test seam: timeout waiting for the first video frame after StartVideo.
     /// Production default is 10 seconds.
     /// </summary>
     internal TimeSpan FirstFrameTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    internal TimeSpan ScreenshotFrameTimeout { get; set; } = TimeSpan.FromSeconds(15);
+    internal Func<CaptureConfig, IScreenshotFrameRunner> ScreenshotFrameRunnerFactoryForTests { get; set; } =
+        _ => new FfmpegScreenshotFrameRunner();
+
+    /// <summary>
+    /// Deterministic screenshot-series race seams. The first callback runs
+    /// before the per-frame start claim; the second runs after the claim and
+    /// immediately before the runner is invoked.
+    /// </summary>
+    internal Action<Recording, int>? BeforeScreenshotFrameStartClaimForTests { get; set; }
+    internal Action<Recording, int>? BeforeScreenshotFrameRunnerForTests { get; set; }
+    internal Action<Recording, int>? BeforeScreenshotCountdownStepForTests { get; set; }
+    internal Func<long, CancellationToken, Task>? ScreenshotDelaySchedulerForTests { get; set; }
 
     /// <summary>
     /// Test seam for supplying a detailed selection result without replacing
@@ -291,6 +346,11 @@ public sealed class RecordingEngine
         RecordingMark mark;
         lock (rec)
         {
+            if (rec.IsScreenshotSeries)
+                throw new ApiException(409, "UNSUPPORTED_FEATURE",
+                    "Chapter marks are not applicable to screenshot_series recordings.",
+                    new { suggested_action = "use_video_recording_for_chapter_marks" });
+
             if (rec.State != RecState.recording)
             {
                 throw RecordingNotActive(rec);
@@ -456,6 +516,13 @@ public sealed class RecordingEngine
     private static bool IsTerminalState(RecState state) =>
         state is RecState.completed or RecState.failed or RecState.cancelled
             or RecState.rejected or RecState.expired;
+
+    private enum StartFailureOwnership
+    {
+        Failed,
+        Stop,
+        ExistingTerminal
+    }
 
     private static string AudioStatusFor(Recording rec, OutputMeta? meta)
     {
@@ -626,6 +693,8 @@ public sealed class RecordingEngine
         // confirmation is queued. Capability probing is allowed here; backend
         // construction and all pixel-producing work remain approval-gated.
         var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+        if (rec.IsScreenshotSeries)
+            ValidateScreenshotSeriesPlan(capturePlan, rec.Config);
         rec.ApprovedCapturePlan = capturePlan;
         rec.BackendType = capturePlan.PlannedBackend;
 
@@ -710,6 +779,9 @@ public sealed class RecordingEngine
         {
             recording_id = rec.Id,
             agent, source_type = rec.SourceType,
+            mode = rec.Mode,
+            series_interval_ms = rec.ScreenshotSeries?.IntervalMs,
+            series_planned_frame_count = rec.ScreenshotSeries?.PlannedFrameCount,
             audio_microphone = rec.Microphone,
             audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
             audio_endpoint_id = rec.SystemAudioEndpointId ?? "",
@@ -737,6 +809,7 @@ public sealed class RecordingEngine
             // Add metadata to summary for tray UI
             var summaryWithMeta = new
             {
+                mode = rec.Mode,
                 source = GetSummaryField(summary, "source"),
                 audio = GetSummaryField(summary, "audio"),
                 audio_source_kind = GetSummaryField(summary, "audio_source_kind"),
@@ -746,7 +819,14 @@ public sealed class RecordingEngine
                 audio_system_output_is_default = GetSummaryField(summary, "audio_system_output_is_default"),
                 audio_system_output_selection = GetSummaryField(summary, "audio_system_output_selection"),
                 duration = GetSummaryField(summary, "duration"),
+                countdown_seconds = rec.CountdownSeconds,
                 output = GetSummaryField(summary, "output"),
+                series = GetSummaryField(summary, "series"),
+                series_interval_ms = rec.ScreenshotSeries?.IntervalMs,
+                series_max_count = rec.ScreenshotSeries?.MaxCount,
+                series_max_duration_seconds = rec.ScreenshotSeries?.MaxDurationSeconds,
+                series_planned_frame_count = rec.ScreenshotSeries?.PlannedFrameCount,
+                output_kind = rec.IsScreenshotSeries ? "png_sequence_directory" : "mp4_file",
                 nested_role = GetSummaryField(summary, "nested_role"),
                 recording_id = rec.Id,
                 confirmation_id = conf.Id,
@@ -757,10 +837,10 @@ public sealed class RecordingEngine
                 source_application = rec.SourceApplication,
                 window_id = capturePlan.TargetIdentity,
                 trace_id = traceId,
-                coordinate_space = "virtual_screen",
+                coordinate_space = capturePlan.CoordinateSpace,
                 capture_semantics = capturePlan.CaptureSemantics,
                 planned_backend = capturePlan.PlannedBackend,
-                preview_semantics = capturePlan.CaptureSemantics,
+                preview_semantics = capturePlan.PreviewSemantics,
                 selection_reason_code = capturePlan.Evidence.SelectionReasonCode,
                 selection_availability_source = capturePlan.Evidence.AvailabilitySource,
                 selection_fallback = capturePlan.FallbackOccurred,
@@ -870,13 +950,16 @@ public sealed class RecordingEngine
         }
 
         StartCapture(rec, traceId, tray);
-        return new
-        {
-            recording_id = rec.Id, status = "recording",
-            started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
-            bundle = BundleObj(rec),
-            performance_trace_id = traceId
-        };
+            return new
+            {
+                recording_id = rec.Id, mode = rec.Mode,
+                status = rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : "recording",
+                started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
+                config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
+                series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
+                bundle = BundleObj(rec),
+                performance_trace_id = traceId
+            };
     }
 
     private bool ApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId)
@@ -891,7 +974,9 @@ public sealed class RecordingEngine
         {
             PolicyEngine.ValidateDirectory(decision.OutputDirectory);
             Directory.CreateDirectory(decision.OutputDirectory);
-            var newPath = OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory);
+            var newPath = rec.IsScreenshotSeries
+                ? OutputPathResolver.MoveScreenshotSeriesToDirectory(rec.OutputPath, decision.OutputDirectory, rec)
+                : OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory);
             rec.OutputPath = newPath;
             if (rec.Config != null)
                 rec.Config.OutputPath = newPath;
@@ -948,7 +1033,10 @@ public sealed class RecordingEngine
         string? topologyFailure = null;
         string? audioEndpointFailure = null;
         bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
-        if (approvedRegion && !TryValidateApprovedRegionTopology(
+        bool screenshotDisplay = rec.IsScreenshotSeries &&
+            string.Equals(approved.SourceKind, "display", StringComparison.Ordinal);
+        bool topologyRequired = approvedRegion || screenshotDisplay;
+        if (topologyRequired && !TryValidateApprovedRegionTopology(
                 approved,
                 rec.Config,
                 out currentTopology,
@@ -974,6 +1062,8 @@ public sealed class RecordingEngine
             try
             {
                 revalidated = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+                if (rec.IsScreenshotSeries)
+                    ValidateScreenshotSeriesPlan(revalidated, rec.Config);
             }
             catch (Exception ex)
             {
@@ -1016,9 +1106,13 @@ public sealed class RecordingEngine
                 source_type = rec.SourceType,
                 approved_backend = approved.PlannedBackend,
                 approved_semantics = approved.CaptureSemantics,
+                approved_preview_semantics = approved.PreviewSemantics,
+                approved_coordinate_space = approved.CoordinateSpace,
                 approved_reason_code = approved.Evidence.SelectionReasonCode,
                 revalidated_backend = revalidated?.PlannedBackend ?? "unavailable",
                 revalidated_semantics = revalidated?.CaptureSemantics ?? "unavailable",
+                revalidated_preview_semantics = revalidated?.PreviewSemantics ?? "unavailable",
+                revalidated_coordinate_space = revalidated?.CoordinateSpace ?? "unavailable",
                 revalidated_reason_code = revalidated?.Evidence.SelectionReasonCode ?? "plan_unavailable",
                 revalidated_availability_source = revalidated?.Evidence.AvailabilitySource ?? "not_run",
                 approved_display_id = approved.TargetDisplayId ?? "",
@@ -1028,10 +1122,10 @@ public sealed class RecordingEngine
                     ?? revalidated?.TargetDisplayIdentity ?? "",
                 approved_display_bounds = approvedDisplayBounds,
                 revalidated_display_bounds = currentDisplayBounds,
-                topology_status = approvedRegion
+                topology_status = topologyRequired
                     ? topologyFailure == null ? "passed" : "failed"
                     : "not_required",
-                topology_reason = approvedRegion
+                topology_reason = topologyRequired
                     ? topologyFailure ?? "matched"
                     : "not_required",
                 approved_audio_source_kind = AudioSourceKindName(approved.AudioSourceKind),
@@ -1089,9 +1183,11 @@ public sealed class RecordingEngine
                 source_type = rec.SourceType,
                 approved_backend = approved.PlannedBackend,
                 approved_semantics = approved.CaptureSemantics,
+                approved_coordinate_space = approved.CoordinateSpace,
                 approved_reason_code = approved.Evidence.SelectionReasonCode,
                 revalidated_backend = revalidated?.PlannedBackend ?? "unavailable",
                 revalidated_semantics = revalidated?.CaptureSemantics ?? "unavailable",
+                revalidated_coordinate_space = revalidated?.CoordinateSpace ?? "unavailable",
                 revalidated_reason_code = revalidated?.Evidence.SelectionReasonCode ?? "plan_unavailable",
                 approved_display_id = approved.TargetDisplayId ?? "",
                 revalidated_display_id = currentTopology?.PublicId ?? revalidated?.TargetDisplayId ?? "",
@@ -1100,10 +1196,10 @@ public sealed class RecordingEngine
                     ?? revalidated?.TargetDisplayIdentity ?? "",
                 approved_display_bounds = approvedDisplayBounds,
                 revalidated_display_bounds = currentDisplayBounds,
-                topology_status = approvedRegion
+                topology_status = topologyRequired
                     ? topologyFailure == null ? "passed" : "failed"
                     : "not_required",
-                topology_reason = approvedRegion
+                topology_reason = topologyRequired
                     ? topologyFailure ?? "matched"
                     : "not_required",
                 approved_audio_source_kind = AudioSourceKindName(approved.AudioSourceKind),
@@ -1273,6 +1369,15 @@ public sealed class RecordingEngine
 
     private static bool IsCapturePlanDrift(CapturePlan approved, CapturePlan current)
     {
+        if (!string.Equals(approved.PreviewSemantics, current.PreviewSemantics, StringComparison.Ordinal))
+            return true;
+
+        // Bounds are meaningful only in their approved coordinate space. A
+        // backend that preserves the other semantic fields must still fail
+        // closed when that space changes after confirmation.
+        if (!string.Equals(approved.CoordinateSpace, current.CoordinateSpace, StringComparison.Ordinal))
+            return true;
+
         if (approved.AudioSourceKind != current.AudioSourceKind ||
             !string.Equals(approved.AudioEndpointId, current.AudioEndpointId, StringComparison.Ordinal) ||
             !string.Equals(approved.AudioEndpointName, current.AudioEndpointName, StringComparison.Ordinal) ||
@@ -1299,7 +1404,21 @@ public sealed class RecordingEngine
         bool approvedWindow = string.Equals(approved.SourceKind, "window", StringComparison.Ordinal);
         bool currentWindow = string.Equals(current.SourceKind, "window", StringComparison.Ordinal);
         if (!approvedWindow && !currentWindow)
-            return false;
+        {
+            bool approvedDisplay = string.Equals(approved.SourceKind, "display", StringComparison.Ordinal);
+            bool currentDisplay = string.Equals(current.SourceKind, "display", StringComparison.Ordinal);
+            if (!approvedDisplay && !currentDisplay)
+                return false;
+            if (!approvedDisplay || !currentDisplay)
+                return true;
+            return !string.Equals(approved.TargetDisplayId, current.TargetDisplayId, StringComparison.Ordinal)
+                || !string.Equals(approved.TargetDisplayIdentity, current.TargetDisplayIdentity, StringComparison.Ordinal)
+                || approved.TargetDisplayIdentityStatus != current.TargetDisplayIdentityStatus
+                || approved.DisplayBounds != current.DisplayBounds
+                || approved.Bounds != current.Bounds
+                || !string.Equals(approved.PlannedBackend, current.PlannedBackend, StringComparison.Ordinal)
+                || !string.Equals(approved.CaptureSemantics, current.CaptureSemantics, StringComparison.Ordinal);
+        }
         if (!approvedWindow || !currentWindow)
             return true;
 
@@ -1313,6 +1432,9 @@ public sealed class RecordingEngine
         if (approved.WindowHandle != current.WindowHandle)
             return true;
 
+        if (approved.Bounds != current.Bounds)
+            return true;
+
         if (!string.Equals(approved.PlannedBackend, current.PlannedBackend, StringComparison.Ordinal))
             return true;
 
@@ -1322,6 +1444,43 @@ public sealed class RecordingEngine
         // A window-surface promise may never degrade to a desktop rectangle,
         // even if another selector result would otherwise be startable.
         return approved.IsWindowSurface && !current.IsWindowSurface;
+    }
+
+    private static void ValidateScreenshotSeriesPlan(CapturePlan plan, CaptureConfig cfg)
+    {
+        string expectedSemantics = cfg.SourceKind switch
+        {
+            "display" => "display_surface",
+            "region" => "region_rectangle",
+            "window" => "screen_rectangle",
+            _ => ""
+        };
+
+        bool valid = string.Equals(plan.PlannedBackend, "ffmpeg-single-frame", StringComparison.Ordinal)
+            && string.Equals(plan.SourceKind, cfg.SourceKind, StringComparison.Ordinal)
+            && string.Equals(plan.CaptureSemantics, expectedSemantics, StringComparison.Ordinal)
+            && string.Equals(plan.PreviewSemantics, expectedSemantics, StringComparison.Ordinal)
+            && string.Equals(plan.CoordinateSpace, "virtual_screen", StringComparison.Ordinal)
+            && plan.Bounds is not null
+            && plan.Bounds.X == cfg.Bounds.x
+            && plan.Bounds.Y == cfg.Bounds.y
+            && plan.Bounds.Width == cfg.Bounds.w
+            && plan.Bounds.Height == cfg.Bounds.h
+            && plan.AudioSourceKind == AudioCaptureSourceKind.None
+            && !plan.IsWindowSurface;
+
+        if (!valid)
+        {
+            throw new ApiException(400, "UNSUPPORTED_FEATURE",
+                "The approved screenshot-series capture plan is not supported by the single-frame runner.",
+                new
+                {
+                    mode = ScreenshotSeriesConfig.ModeName,
+                    planned_backend = plan.PlannedBackend,
+                    capture_semantics = plan.CaptureSemantics,
+                    suggested_action = "retry_with_a_supported_screenshot_target"
+                });
+        }
     }
 
     private bool IsApprovedSystemAudioEndpointCurrent(Recording rec, out string? failure)
@@ -1396,7 +1555,7 @@ public sealed class RecordingEngine
                 requested_backend = plan.RequestedBackend,
                 planned_backend = plan.PlannedBackend,
                 capture_semantics = plan.CaptureSemantics,
-                preview_semantics = plan.CaptureSemantics,
+                preview_semantics = plan.PreviewSemantics,
                 target_display_id = plan.TargetDisplayId ?? "",
                 target_display_identity_fingerprint = plan.TargetDisplayIdentity ?? "",
                 target_display_bounds = plan.DisplayBounds == null
@@ -1501,8 +1660,15 @@ public sealed class RecordingEngine
     private void StartCapture(Recording rec, string? traceId, ITrayContext tray)
     {
         rec.Config.NormalizeAudioSource();
+        NormalizeRecordingCountdown(rec);
         if (rec.AudioSourceKind == AudioCaptureSourceKind.None)
             rec.AudioSourceKind = rec.Config.AudioSourceKind;
+
+        if (rec.IsScreenshotSeries)
+        {
+            StartScreenshotSeries(rec, traceId, tray);
+            return;
+        }
 
         // Production creates the backend only from the already-approved plan.
         // Legacy test seams may still supply a concrete selection or factory.
@@ -1612,12 +1778,15 @@ public sealed class RecordingEngine
         }
 
         // No-microphone backends capable of deferred capture start (WGC
-        // continuous) take the 3-2-1 countdown path: the helper process is
+        // continuous) take the configurable countdown path: the helper process is
         // launched now but capture authorization is withheld until the
         // countdown reaches zero, so nothing is captured during the countdown.
         // The authorization completion is pure audit; failures surface through
         // the normal first-frame timeout / natural-exit paths.
         bool useDeferredCountdown = !rec.Config.AudioRequested && rec.Backend is IDeferredCaptureStartBackend;
+        bool useOrdinaryFfmpegCountdown = !rec.Config.AudioRequested &&
+            !useDeferredCountdown &&
+            CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType);
         if (rec.Backend is IDeferredCaptureStartBackend deferredObservable)
         {
             deferredObservable.CaptureAuthorizationCompleted += ok => OnCaptureAuthorizationCompleted(rec, ok);
@@ -1627,8 +1796,18 @@ public sealed class RecordingEngine
         // has begun, but no REC UI, no elapsed timer, and no user-visible start
         // until credible first-frame evidence arrives.
         rec.State = RecState.preparing;
-        rec.BackendStartAtUtc = DateTime.UtcNow;
         BumpStateVersion();
+
+        // Ordinary no-audio FFmpeg must not be started and discarded during
+        // the countdown: its first backend.Start happens only at countdown
+        // zero. This path still uses the same first-frame and cancellation
+        // machinery as audio/deferred recordings.
+        if (useOrdinaryFfmpegCountdown)
+        {
+            tray.SetPreparing(rec);
+            BeginOrdinaryFfmpegCountdown(rec, traceId, tray);
+            return;
+        }
 
         // Start the backend FIRST to populate CommandArgs,
         // THEN record audit with the actual ffmpeg_args.
@@ -1641,9 +1820,16 @@ public sealed class RecordingEngine
                 rec.Config.DeferCaptureStart = true;
             }
 
-            _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
-            rec.Backend.Start(rec.Config);
-            _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+            lock (rec)
+            {
+                if (rec.IsFinalized)
+                    return;
+
+                rec.BackendStartAtUtc = DateTime.UtcNow;
+                _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                rec.Backend.Start(rec.Config);
+                _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+            }
 
             _audit.Log("recording.started", new
             {
@@ -1708,14 +1894,33 @@ public sealed class RecordingEngine
         }
         catch (Exception ex)
         {
-            _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
-                rec.BackendType ?? "unknown", "backend_start_exception", ex.GetType().Name);
+            BeforeStartFailureForTests?.Invoke(rec, "preparation.backend.start");
+            var ownership = TryClaimStartFailure(
+                rec,
+                error: ex.Message,
+                warning: "launch_error: " + ex.Message,
+                stopReason: "unexpected_exit");
 
-            // If the backend already finalized itself inside Start(), do NOT
-            // overwrite its terminal state, error, stop reason, output metadata,
-            // or audit/tray state. Record a non-terminal diagnostic audit only.
-            if (rec.IsFinalized)
+            if (ownership == StartFailureOwnership.Failed)
             {
+                EmitStartFailure(
+                    rec,
+                    traceId,
+                    tray,
+                    errorCode: "backend_start_exception",
+                    errorType: ex.GetType().Name,
+                    stopReason: "unexpected_exit",
+                    error: "Recording failed: " + ex.Message,
+                    stage: null);
+            }
+            else if (ownership == StartFailureOwnership.ExistingTerminal && rec.IsFinalized)
+            {
+                // Preserve the existing non-terminal diagnostic for a backend
+                // that finalized itself synchronously and then threw. A Stop-
+                // owned cancellation returns StartFailureOwnership.Stop and
+                // emits no failed tracer/audit/UI evidence.
+                _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+                    rec.BackendType ?? "unknown", "backend_start_exception", ex.GetType().Name);
                 _audit.Log("recording.backend_start_exception_after_terminal", new
                 {
                     recording_id = rec.Id,
@@ -1723,31 +1928,463 @@ public sealed class RecordingEngine
                     final_state = rec.State.ToString(),
                     exception_type = ex.GetType().Name
                 });
-                return;
+            }
+        }
+    }
+
+    private void StartScreenshotSeries(Recording rec, string? traceId, ITrayContext tray)
+    {
+        var config = rec.Config.ScreenshotSeries
+            ?? throw new InvalidOperationException("Screenshot-series configuration is missing.");
+
+        var plan = rec.ApprovedCapturePlan
+            ?? (_capturePlanFactory ?? CaptureBackendSelector.BuildScreenshotSeriesPlan)(rec.Config);
+        ValidateScreenshotSeriesPlan(plan, rec.Config);
+        rec.ApprovedCapturePlan = plan;
+
+        var runtime = rec.ScreenshotSeries ??= new ScreenshotSeriesRuntime
+        {
+            IntervalMs = config.IntervalMs,
+            MaxCount = config.MaxCount,
+            MaxDurationSeconds = config.MaxDurationSeconds,
+            PlannedFrameCount = config.PlannedFrameCount,
+            OutputDirectory = rec.OutputPath,
+            Status = "preparing"
+        };
+        runtime.OutputDirectory = rec.OutputPath;
+        rec.BackendType = plan.PlannedBackend;
+        rec.State = RecState.preparing;
+        BumpStateVersion();
+
+        var op = new ScreenshotSeriesOperation();
+        if (!_seriesOps.TryAdd(rec.Id, op))
+            throw new InvalidOperationException("A screenshot-series worker is already active for this recording.");
+
+        tray.SetPreparing(rec);
+        // Never pass the operation CTS as Task.Run's scheduling token. Stop can
+        // cancel before the delegate is scheduled; the worker must still start,
+        // observe ownership, and retire the operation deterministically.
+        _ = Task.Run(() => RunScreenshotSeriesAsync(rec, op, traceId, tray));
+    }
+
+    private async Task RunScreenshotSeriesAsync(
+        Recording rec,
+        ScreenshotSeriesOperation op,
+        string? traceId,
+        ITrayContext tray)
+    {
+        var runtime = rec.ScreenshotSeries!;
+        var config = rec.Config.ScreenshotSeries!;
+        try
+        {
+            runtime.StagingDirectory = ScreenshotSeriesArtifacts.CreateStagingDirectory(rec.Id);
+            await RunScreenshotSeriesCountdownAsync(rec, op, tray).ConfigureAwait(false);
+            op.Cts.Token.ThrowIfCancellationRequested();
+
+            var firstFrameDueTicks = ScreenshotMonotonicNow();
+            var frequency = MonotonicFrequencyForTests;
+            if (frequency <= 0)
+                throw new ScreenshotSeriesFailureException("screenshot_clock_invalid");
+
+            for (int index = 1; index <= config.PlannedFrameCount; index++)
+            {
+                var offsetMs = (long)(index - 1) * config.IntervalMs;
+                long anchorTicks;
+                bool durationElapsed;
+                lock (rec)
+                {
+                    if (rec.IsFinalized || op.StopRequested)
+                        throw new OperationCanceledException(op.Cts.Token);
+                    durationElapsed = index > 1 && IsScreenshotDurationElapsed(runtime, config, frequency);
+                    if (durationElapsed)
+                    {
+                        runtime.NextCaptureDueAtUtc = null;
+                        anchorTicks = 0;
+                    }
+                    else
+                    {
+                        anchorTicks = runtime.StartedAtUtc.HasValue ? runtime.AnchorTicks : firstFrameDueTicks;
+                    }
+                }
+
+                if (durationElapsed)
+                    break;
+
+                var dueTicks = anchorTicks + (long)((decimal)offsetMs * frequency / 1000m);
+                runtime.NextCaptureDueAtUtc = ScreenshotDueAtUtc(dueTicks, frequency);
+
+                await DelayUntilScreenshotTicksAsync(dueTicks, op.Cts.Token).ConfigureAwait(false);
+                op.Cts.Token.ThrowIfCancellationRequested();
+
+                long captureClaimTicks = 0;
+                DateTime captureClaimAtUtc = default;
+                BeforeScreenshotFrameStartClaimForTests?.Invoke(rec, index);
+                lock (rec)
+                {
+                    if (rec.IsFinalized || op.StopRequested)
+                        throw new OperationCanceledException(op.Cts.Token);
+                    durationElapsed = index > 1 && IsScreenshotDurationElapsed(runtime, config, frequency);
+                    if (durationElapsed)
+                        runtime.NextCaptureDueAtUtc = null;
+                    else
+                    {
+                        // This is the single ownership claim for the frame.
+                        // Lateness starts here, before process launch and
+                        // excludes the frame's own capture/encode duration.
+                        captureClaimTicks = ScreenshotMonotonicNow();
+                        captureClaimAtUtc = UtcNowForTests();
+                        op.FrameInFlight = 1;
+                    }
+                }
+
+                if (durationElapsed)
+                    break;
+
+                var tempPath = Path.Combine(runtime.StagingDirectory!, $"frame-{index:0000}.tmp");
+                var runner = ScreenshotFrameRunnerFactoryForTests(rec.Config);
+                BeforeScreenshotFrameRunnerForTests?.Invoke(rec, index);
+                ScreenshotFrameResult result;
+                try
+                {
+                    result = await runner.CaptureAsync(
+                        new ScreenshotFrameRequest(
+                            rec.Config,
+                            tempPath,
+                            ScreenshotFrameTimeout,
+                            index,
+                            rec.ApprovedCapturePlan!.PlannedBackend,
+                            rec.ApprovedCapturePlan.CaptureSemantics,
+                            rec.ApprovedCapturePlan.SourceKind,
+                            rec.ApprovedCapturePlan.TargetIdentity,
+                            rec.ApprovedCapturePlan.CoordinateSpace),
+                        op.Cts.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lock (rec) { op.FrameInFlight = 0; }
+                }
+
+                if (!result.Success)
+                    throw new ScreenshotSeriesFailureException(result.ErrorCode);
+
+                if (op.StopRequested || op.Cts.IsCancellationRequested)
+                {
+                    try { File.Delete(tempPath); } catch { }
+                    throw new OperationCanceledException(op.Cts.Token);
+                }
+
+                if (!ScreenshotSeriesArtifacts.TryValidatePng(tempPath, out var width, out var height, out var size) ||
+                    width != rec.Config.Bounds.w || height != rec.Config.Bounds.h)
+                    throw new ScreenshotSeriesFailureException("invalid_png_frame");
+
+                var finalName = $"frame-{index:0000}.png";
+                var finalPath = Path.Combine(runtime.StagingDirectory!, finalName);
+                File.Move(tempPath, finalPath, overwrite: false);
+                // The valid PNG is now atomically submitted to the series. The
+                // duration intentionally ends here, before hashing and manifest
+                // serialization, so it describes capture/encode/validation and
+                // file submission rather than unrelated finalization work.
+                var capturedTicks = ScreenshotMonotonicNow();
+                var capturedAt = UtcNowForTests();
+                var frameHash = ScreenshotSeriesArtifacts.Sha256File(finalPath);
+                var captureDurationMs = ElapsedScreenshotMilliseconds(
+                    captureClaimTicks, capturedTicks, frequency);
+                long capturedOffsetMs;
+                long latenessMs;
+                int frameCount;
+                DateTime? nextDueAtUtc;
+
+                lock (rec)
+                {
+                    // Stop wins until the validated PNG is committed. Once the
+                    // frame is committed, the same worker owns finalization and
+                    // may publish a truthful partial series.
+                    if (runtime.StartedAtUtc == null && (op.StopRequested || rec.IsFinalized))
+                    {
+                        try { File.Delete(finalPath); } catch { }
+                        throw new OperationCanceledException(op.Cts.Token);
+                    }
+
+                    if (runtime.StartedAtUtc == null)
+                    {
+                        // The first successful atomic rename is the timeline
+                        // anchor. Capture duration therefore cannot consume any
+                        // part of the interval before frame two is scheduled.
+                        runtime.StartedAtUtc = capturedAt;
+                        runtime.AnchorTicks = capturedTicks;
+                        runtime.Status = "capturing";
+                        rec.StartedAtUtc = capturedAt;
+                        rec.MarkTimelineAnchorTicks = capturedTicks;
+                        rec.State = RecState.recording;
+                        BumpStateVersion();
+                        _audit.Log("recording.started", new
+                        {
+                            recording_id = rec.Id,
+                            mode = ScreenshotSeriesConfig.ModeName,
+                            planned_frame_count = runtime.PlannedFrameCount
+                        });
+                        capturedOffsetMs = 0;
+                        latenessMs = 0;
+                    }
+                    else
+                    {
+                        capturedOffsetMs = Math.Max(0, (long)((decimal)(capturedTicks - runtime.AnchorTicks) * 1000m / frequency));
+                        latenessMs = Math.Max(0, (long)((decimal)Math.Max(0, captureClaimTicks - dueTicks) * 1000m / frequency));
+                    }
+
+                    runtime.Frames.Add(new ScreenshotSeriesFrame
+                    {
+                        Index = index,
+                        FileName = finalName,
+                        ScheduledOffsetMs = offsetMs,
+                        CapturedOffsetMs = capturedOffsetMs,
+                        LatenessMs = latenessMs,
+                        CaptureDurationMs = captureDurationMs,
+                        CaptureStartedAtUtc = captureClaimAtUtc,
+                        CompletedAtUtc = capturedAt,
+                        CapturedAtUtc = capturedAt,
+                        Width = width,
+                        Height = height,
+                        SizeBytes = size,
+                        Sha256 = frameHash
+                    });
+                    frameCount = runtime.Frames.Count;
+                    nextDueAtUtc = index < config.PlannedFrameCount &&
+                        !IsScreenshotDurationElapsed(runtime, config, frequency)
+                        ? ScreenshotDueAtUtc(runtime.AnchorTicks +
+                            (long)((decimal)index * config.IntervalMs * frequency / 1000m), frequency)
+                        : null;
+                    runtime.NextCaptureDueAtUtc = nextDueAtUtc;
+                }
+
+                _audit.Log("recording.frame_captured", new
+                {
+                    recording_id = rec.Id,
+                    frame_index = index,
+                    scheduled_offset_ms = offsetMs,
+                    captured_offset_ms = capturedOffsetMs,
+                    lateness_ms = latenessMs,
+                    capture_duration_ms = captureDurationMs,
+                    width,
+                    height,
+                    size_bytes = size
+                });
+                tray.SetSeriesProgress(rec, frameCount, runtime.PlannedFrameCount, nextDueAtUtc);
             }
 
-            // Backend.Start() threw before any terminal state was reached:
-            // transition to failed with a single terminal event and one user error.
-            lock (rec)
-            {
-                MarkBundleNotApplicable(rec);
-                rec.CompletedAtUtc = DateTime.UtcNow;
-                rec.Error = ex.Message;
-                rec.Warnings.Add("launch_error: " + ex.Message);
-                rec.State = RecState.failed;
-                BumpStateVersion();
-            }
-            _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
-                stopReason: "unexpected_exit", errorCode: "backend_start_exception");
-            _audit.Log("recording.failed", new
-            {
-                recording_id = rec.Id,
-                backend = rec.BackendType,
-                error = ex.Message
-            });
-            tray.SetIdle(rec);
-            tray.ShowError("Recording failed: " + ex.Message);
+            FinishScreenshotSeries(rec, op, tray, "completed", null, null);
         }
+        catch (OperationCanceledException)
+        {
+            FinishScreenshotSeries(rec, op, tray, "cancelled", null, rec.StopReason ?? "user_requested");
+        }
+        catch (ScreenshotSeriesFailureException ex)
+        {
+            FinishScreenshotSeries(rec, op, tray, "failed", ex.ErrorCode, null);
+        }
+        catch
+        {
+            FinishScreenshotSeries(rec, op, tray, "failed", "series_worker_failed", null);
+        }
+        finally
+        {
+            _seriesOps.TryRemove(rec.Id, out _);
+            try { op.Cts.Dispose(); } catch { }
+            op.Completion.TrySetResult(null);
+        }
+    }
+
+    private async Task RunScreenshotSeriesCountdownAsync(Recording rec, ScreenshotSeriesOperation op, ITrayContext tray)
+    {
+        int seconds = rec.CountdownSeconds;
+        if (seconds <= 0)
+        {
+            tray.SetCountdown(rec, null);
+            return;
+        }
+
+        lock (rec)
+        {
+            if (op.StopRequested || rec.IsFinalized)
+                throw new OperationCanceledException(op.Cts.Token);
+            rec.State = RecState.countdown;
+            rec.CountdownStartedAtUtc = UtcNowForTests();
+            BumpStateVersion();
+        }
+        int steps = CountdownSteps ?? seconds;
+        for (int remaining = steps; remaining > 0; remaining--)
+        {
+            op.Cts.Token.ThrowIfCancellationRequested();
+            tray.SetCountdown(rec, remaining);
+            BeforeScreenshotCountdownStepForTests?.Invoke(rec, remaining);
+            await Task.Delay(CountdownInterval, op.Cts.Token).ConfigureAwait(false);
+        }
+        lock (rec)
+        {
+            if (op.StopRequested || rec.IsFinalized)
+                throw new OperationCanceledException(op.Cts.Token);
+            tray.SetCountdown(rec, null);
+            rec.State = RecState.preparing;
+            BumpStateVersion();
+        }
+    }
+
+    private long ScreenshotMonotonicNow()
+    {
+        long value;
+        try { value = MonotonicTimestampProviderForTests(); }
+        catch { throw new ScreenshotSeriesFailureException("screenshot_clock_invalid"); }
+        if (value < 0)
+            throw new ScreenshotSeriesFailureException("screenshot_clock_invalid");
+        return value;
+    }
+
+    private static long ElapsedScreenshotMilliseconds(long startTicks, long endTicks, long frequency)
+    {
+        if (endTicks <= startTicks || frequency <= 0)
+            return 0;
+
+        // Milliseconds are an integer public contract. Round a positive
+        // sub-millisecond capture upward so a real completed frame is never
+        // reported as zero duration.
+        return Math.Max(1, (long)Math.Ceiling((decimal)(endTicks - startTicks) * 1000m / frequency));
+    }
+
+    private DateTime ScreenshotDueAtUtc(long dueTicks, long frequency)
+    {
+        var remaining = Math.Max(0d, (double)(dueTicks - ScreenshotMonotonicNow()) * 1000d / frequency);
+        return UtcNowForTests().AddMilliseconds(remaining);
+    }
+
+    private async Task DelayUntilScreenshotTicksAsync(long dueTicks, CancellationToken token)
+    {
+        if (ScreenshotDelaySchedulerForTests is { } scheduler)
+        {
+            await scheduler(dueTicks, token).ConfigureAwait(false);
+            return;
+        }
+
+        while (true)
+        {
+            var remaining = dueTicks - ScreenshotMonotonicNow();
+            if (remaining <= 0) return;
+            var ms = (int)Math.Min(100, Math.Max(1, remaining * 1000d / MonotonicFrequencyForTests));
+            await Task.Delay(ms, token).ConfigureAwait(false);
+        }
+    }
+
+    private long ScreenshotDurationDeadlineTicks(
+        ScreenshotSeriesRuntime runtime,
+        ScreenshotSeriesConfig config,
+        long frequency)
+    {
+        if (!runtime.StartedAtUtc.HasValue || !config.MaxDurationSeconds.HasValue)
+            return long.MaxValue;
+
+        return checked(runtime.AnchorTicks +
+            (long)((decimal)config.MaxDurationSeconds.Value * frequency));
+    }
+
+    private bool IsScreenshotDurationElapsed(
+        ScreenshotSeriesRuntime runtime,
+        ScreenshotSeriesConfig config,
+        long frequency)
+    {
+        if (!config.MaxDurationSeconds.HasValue || !runtime.StartedAtUtc.HasValue)
+            return false;
+        return ScreenshotMonotonicNow() >= ScreenshotDurationDeadlineTicks(runtime, config, frequency);
+    }
+
+    private void FinishScreenshotSeries(
+        Recording rec,
+        ScreenshotSeriesOperation op,
+        ITrayContext tray,
+        string status,
+        string? errorCode,
+        string? stopReason)
+    {
+        var runtime = rec.ScreenshotSeries!;
+        ScreenshotSeriesFrame[] frameSnapshot;
+        string? finalStopReason;
+        lock (rec)
+        {
+            if (rec.IsFinalized || op.FinalizationClaimed) return;
+            op.FinalizationClaimed = true;
+            runtime.Status = status;
+            runtime.ErrorCode = errorCode;
+            runtime.StopReason = stopReason ?? rec.StopReason;
+            runtime.CompletedAtUtc = DateTime.UtcNow;
+            rec.CompletedAtUtc = runtime.CompletedAtUtc;
+            rec.Error = errorCode;
+            if (stopReason != null) rec.StopReason = stopReason;
+            rec.State = RecState.finalizing;
+            frameSnapshot = runtime.Frames.ToArray();
+            finalStopReason = rec.StopReason;
+            BumpStateVersion();
+        }
+
+        string terminalStatus = status;
+        try
+        {
+            if (status == "completed" || (status == "cancelled" && frameSnapshot.Length > 0))
+            {
+                ScreenshotSeriesArtifacts.WriteManifest(rec, runtime, status, errorCode, finalStopReason, frameSnapshot);
+                ScreenshotSeriesArtifacts.Publish(rec, runtime, rec.Config.OutputConflictPolicy);
+            }
+            else
+            {
+                ScreenshotSeriesArtifacts.DeleteStaging(runtime);
+            }
+        }
+        catch
+        {
+            terminalStatus = "failed";
+            runtime.Status = terminalStatus;
+            runtime.ErrorCode = "series_publish_failed";
+            rec.Error = runtime.ErrorCode;
+            ScreenshotSeriesArtifacts.DeleteStaging(runtime);
+        }
+
+        lock (rec)
+        {
+            if (terminalStatus == "completed")
+                runtime.Status = "completed";
+            rec.State = terminalStatus switch
+            {
+                "completed" => RecState.completed,
+                "cancelled" => RecState.cancelled,
+                _ => RecState.failed
+            };
+            rec.IsFinalized = true;
+            MarkBundleNotApplicable(rec);
+            BumpStateVersion();
+        }
+
+        _audit.Log(terminalStatus == "completed" ? "recording.completed" : terminalStatus == "cancelled" ? "recording.cancelled" : "recording.failed", new
+        {
+            recording_id = rec.Id,
+            mode = ScreenshotSeriesConfig.ModeName,
+            frame_count = frameSnapshot.Length,
+            planned_frame_count = runtime.PlannedFrameCount,
+            error_code = runtime.ErrorCode ?? "",
+            stop_reason = rec.StopReason ?? ""
+        });
+        _audit.Log(terminalStatus == "completed" ? "recording.series_completed" : terminalStatus == "cancelled" ? "recording.series_cancelled" : "recording.series_failed", new
+        {
+            recording_id = rec.Id,
+            frame_count = frameSnapshot.Length,
+            planned_frame_count = runtime.PlannedFrameCount,
+            error_code = runtime.ErrorCode ?? ""
+        });
+        _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id,
+            status: rec.State.ToString(), errorCode: runtime.ErrorCode, stopReason: rec.StopReason);
+        tray.SetIdle(rec);
+    }
+
+    private sealed class ScreenshotSeriesFailureException : Exception
+    {
+        public string ErrorCode { get; }
+        public ScreenshotSeriesFailureException(string errorCode) => ErrorCode = string.IsNullOrWhiteSpace(errorCode) ? "frame_capture_failed" : errorCode;
     }
 
     private void OnFirstFrameObserved(Recording rec, FirstFrameObservation obs, string? traceId, ITrayContext tray)
@@ -1907,68 +2544,173 @@ public sealed class RecordingEngine
     }
 
     /// <summary>
-    /// Invoked when a split A/V backend reports that the microphone is ready.
-    /// Starts the 3-2-1 countdown and then launches the video worker.
-    /// </summary>
-    private void OnAudioReady(Recording rec, string? traceId, ITrayContext tray)
+    private static void NormalizeRecordingCountdown(Recording rec)
     {
+        // Production parser assigns both fields. The small reconciliation rule
+        // keeps direct test-created Recording instances useful when only the
+        // CaptureConfig value is populated.
+        int seconds = rec.CountdownSeconds;
+        if (seconds == CaptureConfig.DefaultCountdownSeconds &&
+            rec.Config.CountdownSeconds != CaptureConfig.DefaultCountdownSeconds)
+        {
+            seconds = rec.Config.CountdownSeconds;
+        }
+
+        seconds = Math.Clamp(seconds, CaptureConfig.MinCountdownSeconds, CaptureConfig.MaxCountdownSeconds);
+        rec.CountdownSeconds = seconds;
+        rec.Config.CountdownSeconds = seconds;
+    }
+
+    private int CountdownStepsFor(Recording rec) => Math.Clamp(
+        CountdownSteps ?? rec.CountdownSeconds,
+        CaptureConfig.MinCountdownSeconds,
+        CaptureConfig.MaxCountdownSeconds);
+
+    private static string CountdownTriggerFor(Recording rec)
+    {
+        if (rec.Config.AudioRequested)
+            return rec.Microphone ? "microphone_ready" : "system_audio_ready";
+        if (rec.Backend is IDeferredCaptureStartBackend)
+            return "deferred_capture_start";
+        return "ordinary_ffmpeg";
+    }
+
+    /// <summary>
+    /// Invoked when a split A/V backend reports that the microphone or system
+    /// audio input is ready. A positive value shows the configurable countdown;
+    /// zero keeps the existing immediate video-start path without visible
+    /// countdown events.
+    /// </summary>
+    private CountdownOperation? TryClaimCountdownOperation(
+        Recording rec,
+        int steps,
+        bool visibleCountdown,
+        out DateTime? countdownStartedAtUtc)
+    {
+        countdownStartedAtUtc = null;
+
         lock (rec)
         {
-            if (rec.State != RecState.preparing || rec.IsFinalized)
-                return;
+            if (rec.IsFinalized || rec.State != RecState.preparing)
+                return null;
 
-            rec.State = RecState.countdown;
-            rec.CountdownStartedAtUtc = DateTime.UtcNow;
+            // The dictionary is consulted and updated while holding the same
+            // per-recording lock used by Stop and the start-action gate. This
+            // makes AudioReady event/catch-up delivery exactly-once without a
+            // last-writer-wins replacement of an existing operation.
+            if (_countdownOps.ContainsKey(rec.Id))
+                return null;
+
+            if (visibleCountdown)
+            {
+                rec.State = RecState.countdown;
+                rec.CountdownStartedAtUtc = DateTime.UtcNow;
+                countdownStartedAtUtc = rec.CountdownStartedAtUtc;
+            }
+
+            var op = new CountdownOperation
+            {
+                Phase = visibleCountdown
+                    ? CountdownOperation.PhaseVisibleCountdown
+                    : CountdownOperation.PhaseFirstFrameWait
+            };
+            if (!_countdownOps.TryAdd(rec.Id, op))
+                return null;
+
             BumpStateVersion();
+            return op;
         }
+    }
+
+    private void OnAudioReady(Recording rec, string? traceId, ITrayContext tray)
+    {
+        int steps = CountdownStepsFor(rec);
+        var op = TryClaimCountdownOperation(rec, steps, visibleCountdown: steps > 0, out var countdownStartedAt);
+        if (op == null)
+            return;
 
         if (rec.Microphone)
             _tracer.MicrophoneReady(traceId ?? "trace_unknown", rec.Id);
+
+        if (steps == 0)
+        {
+            _ = Task.Run(() => RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: false));
+            return;
+        }
+
+        var visibleCountdownStartedAt = countdownStartedAt ?? DateTime.UtcNow;
         _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
         _audit.Log("recording.countdown_started", new
         {
             recording_id = rec.Id,
-            trigger = rec.Microphone ? "microphone_ready" : "system_audio_ready",
+            trigger = CountdownTriggerFor(rec),
+            backend = rec.BackendType,
+            countdown_seconds = rec.CountdownSeconds,
             audio_source_kind = AudioSourceKindName(rec.AudioSourceKind),
-            audio_ready_at = Iso(rec.CountdownStartedAtUtc.Value),
-            endpoint_id = rec.SystemAudioEndpointId ?? "",
-            endpoint_name = rec.SystemAudioEndpointName ?? ""
+            audio_ready_at = Iso(visibleCountdownStartedAt)
         });
 
-        var op = new CountdownOperation();
-        _countdownOps[rec.Id] = op;
-        _ = RunCountdownAsync(rec, traceId, tray, op);
+        _ = Task.Run(() => RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: true));
     }
 
     /// <summary>
-    /// Starts the 3-2-1 countdown for a no-microphone deferred-start backend
+    /// Starts the configurable countdown for a no-microphone deferred-start backend
     /// (WGC continuous). The backend process is already prepared but has not
     /// been authorized to capture; authorization is requested when the
     /// countdown reaches zero inside <see cref="RunCountdownAsync"/>.
     /// </summary>
     private void BeginDeferredCountdown(Recording rec, string? traceId, ITrayContext tray)
     {
-        lock (rec)
-        {
-            if (rec.State != RecState.preparing || rec.IsFinalized)
-                return;
+        int steps = CountdownStepsFor(rec);
+        var op = TryClaimCountdownOperation(rec, steps, visibleCountdown: steps > 0, out var countdownStartedAt);
+        if (op == null)
+            return;
 
-            rec.State = RecState.countdown;
-            rec.CountdownStartedAtUtc = DateTime.UtcNow;
-            BumpStateVersion();
+        if (steps == 0)
+        {
+            _ = RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: false);
+            return;
         }
 
+        var visibleCountdownStartedAt = countdownStartedAt ?? DateTime.UtcNow;
         _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
         _audit.Log("recording.countdown_started", new
         {
             recording_id = rec.Id,
             trigger = "deferred_capture_start",
-            countdown_started_at = Iso(rec.CountdownStartedAtUtc.Value)
+            backend = rec.BackendType,
+            countdown_seconds = rec.CountdownSeconds,
+            countdown_started_at = Iso(visibleCountdownStartedAt)
         });
 
-        var op = new CountdownOperation();
-        _countdownOps[rec.Id] = op;
-        _ = RunCountdownAsync(rec, traceId, tray, op);
+        _ = RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: true);
+    }
+
+    private void BeginOrdinaryFfmpegCountdown(Recording rec, string? traceId, ITrayContext tray)
+    {
+        int steps = CountdownStepsFor(rec);
+        var op = TryClaimCountdownOperation(rec, steps, visibleCountdown: steps > 0, out var countdownStartedAt);
+        if (op == null)
+            return;
+
+        if (steps == 0)
+        {
+            _ = RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: false, startBackendAtZero: true);
+            return;
+        }
+
+        var visibleCountdownStartedAt = countdownStartedAt ?? DateTime.UtcNow;
+        _tracer.CountdownStarted(traceId ?? "trace_unknown", rec.Id);
+        _audit.Log("recording.countdown_started", new
+        {
+            recording_id = rec.Id,
+            trigger = "ordinary_ffmpeg",
+            backend = rec.BackendType,
+            countdown_seconds = rec.CountdownSeconds,
+            countdown_started_at = Iso(visibleCountdownStartedAt)
+        });
+
+        _ = RunCountdownAsync(rec, traceId, tray, op, visibleCountdown: true, startBackendAtZero: true);
     }
 
     /// <summary>
@@ -1996,12 +2738,158 @@ public sealed class RecordingEngine
         }
     }
 
+    private bool TryStartBackendAtCountdownZero(
+        Recording rec,
+        string? traceId,
+        ITrayContext tray,
+        CountdownOperation op)
+    {
+        try
+        {
+            return TryClaimAndRunStartAction(rec, op, () =>
+            {
+                rec.BackendStartAtUtc = DateTime.UtcNow;
+                _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                rec.Backend!.Start(rec.Config);
+                _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+
+                _audit.Log("recording.started", new
+                {
+                    recording_id = rec.Id,
+                    output_path = rec.OutputPath,
+                    backend = rec.BackendType,
+                    ffmpeg_args = rec.Config.CommandArgs ?? ""
+                });
+            });
+        }
+        catch (Exception ex)
+        {
+            BeforeStartFailureForTests?.Invoke(rec, "countdown.backend.start");
+            var ownership = TryClaimStartFailure(
+                rec,
+                error: ex.Message,
+                warning: "launch_error: " + ex.Message,
+                stopReason: "unexpected_exit");
+            if (ownership != StartFailureOwnership.Failed)
+                return false;
+
+            EmitStartFailure(
+                rec,
+                traceId,
+                tray,
+                errorCode: "backend_start_exception",
+                errorType: ex.GetType().Name,
+                stopReason: "unexpected_exit",
+                error: "Recording failed: " + ex.Message,
+                stage: "backend_start");
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Drives the 3-2-1 countdown overlay and starts video capture when it reaches zero.
+    /// Claims and executes one real start action under the recording's own
+    /// monitor. Stop/finalize uses the same monitor: it either wins before this
+    /// method claims the action, or waits until the already-started action
+    /// returns and then cancels/stops that backend. There is no global lock, so
+    /// nested recordings retain independent lifecycle concurrency.
+    /// </summary>
+    private bool TryClaimAndRunStartAction(
+        Recording rec,
+        CountdownOperation op,
+        Action action)
+    {
+        lock (rec)
+        {
+            if (rec.IsFinalized || rec.State is not (RecState.preparing or RecState.countdown))
+                return false;
+
+            if (op.StartActionClaimed)
+                return false;
+
+            op.StartActionClaimed = true;
+            action();
+            return !rec.IsFinalized;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to own the failed terminal transition for a startup exception.
+    /// The ownership decision and all terminal recording mutations happen under
+    /// the same per-recording monitor used by Stop and the start-action gate.
+    /// External tracer/audit/tray effects are deliberately emitted only by the
+    /// caller that receives <see cref="StartFailureOwnership.Failed"/>.
+    /// </summary>
+    private StartFailureOwnership TryClaimStartFailure(
+        Recording rec,
+        string error,
+        string warning,
+        string stopReason)
+    {
+        lock (rec)
+        {
+            // Stop can hold the recording in stopping while it is outside the
+            // monitor performing backend teardown. That state is already owned
+            // by Stop even though IsFinalized has not been written yet.
+            if (rec.State == RecState.stopping ||
+                (rec.State == RecState.cancelled && rec.IsFinalized && !string.IsNullOrEmpty(rec.StopReason)))
+            {
+                return StartFailureOwnership.Stop;
+            }
+
+            // Natural exit/finalization or an earlier terminal transition owns
+            // the lifecycle already. Never overwrite its state, timestamps,
+            // error, warnings, stop reason, or bundle snapshot.
+            if (rec.IsFinalized || IsTerminalState(rec.State) || rec.State == RecState.finalizing)
+                return StartFailureOwnership.ExistingTerminal;
+
+            MarkBundleNotApplicable(rec);
+            rec.CompletedAtUtc = DateTime.UtcNow;
+            rec.StopReason = stopReason;
+            rec.Error = error;
+            rec.Warnings.Add(warning);
+            rec.State = RecState.failed;
+            rec.IsFinalized = true;
+            BumpStateVersion();
+            return StartFailureOwnership.Failed;
+        }
+    }
+
+    private void EmitStartFailure(
+        Recording rec,
+        string? traceId,
+        ITrayContext tray,
+        string errorCode,
+        string errorType,
+        string stopReason,
+        string error,
+        string? stage)
+    {
+        _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
+            rec.BackendType ?? "unknown", errorCode, errorType);
+        _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
+            stopReason: stopReason, errorCode: errorCode);
+
+        _audit.Log("recording.failed", new
+        {
+            recording_id = rec.Id,
+            backend = rec.BackendType,
+            error,
+            stage = stage ?? ""
+        });
+        tray.SetIdle(rec);
+        tray.ShowError(error);
+    }
+
+    /// <summary>
+    /// Drives the configurable countdown overlay and starts capture when it
+    /// reaches zero. A zero-second operation skips all visible countdown UI
+    /// and audit events but still uses the same first-frame wait/cancellation
+    /// contract.
     /// Keeps the recording in the countdown state until real first-frame evidence is
     /// observed. Uses Task.Delay so the UI thread is never blocked.
     /// </summary>
-    private async Task RunCountdownAsync(Recording rec, string? traceId, ITrayContext tray, CountdownOperation op)
+    private async Task RunCountdownAsync(Recording rec, string? traceId, ITrayContext tray,
+        CountdownOperation op, bool visibleCountdown, bool startBackendAtZero = false)
     {
         var ct = op.Cts.Token;
         Action<FirstFrameObservation>? firstFrameHandler = null;
@@ -2009,12 +2897,21 @@ public sealed class RecordingEngine
 
         try
         {
+            // A backend may synchronously raise AudioReady from inside its
+            // initial Backend.Start() call, which itself is protected by the
+            // recording monitor. Yield before any zero-countdown start action
+            // so StartVideo/StartCapture exceptions and Stop can contend at
+            // the normal per-recording boundary rather than under that
+            // reentrant callback stack.
             try
             {
-                for (int remaining = CountdownSteps; remaining >= 1; remaining--)
+                if (visibleCountdown)
                 {
-                    tray.SetCountdown(rec, remaining);
-                    await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
+                    for (int remaining = CountdownStepsFor(rec); remaining >= 1; remaining--)
+                    {
+                        tray.SetCountdown(rec, remaining);
+                        await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -2024,63 +2921,79 @@ public sealed class RecordingEngine
 
             lock (rec)
             {
-                if (rec.State != RecState.countdown || rec.IsFinalized)
+                bool validState = visibleCountdown
+                    ? rec.State == RecState.countdown
+                    : rec.State == RecState.preparing;
+                if (!validState || rec.IsFinalized)
                     return;
 
-                // The visible countdown has completed normally. Transition the
-                // operation into the first-frame-wait phase atomically with the
-                // state check: a Stop from here on cancels the wait promptly
-                // but must not report the visible countdown as cancelled.
+                // The visible countdown has completed normally (or the zero
+                // path is entering first-frame wait). Transition the operation
+                // atomically with the state check so Stop cannot report a
+                // completed visible countdown as cancelled.
                 Volatile.Write(ref op.Phase, CountdownOperation.PhaseFirstFrameWait);
             }
 
-            _audit.Log("recording.countdown_completed", new
+            if (visibleCountdown)
             {
-                recording_id = rec.Id,
-                backend = rec.BackendType
-            });
+                _audit.Log("recording.countdown_completed", new
+                {
+                    recording_id = rec.Id,
+                    backend = rec.BackendType,
+                    trigger = CountdownTriggerFor(rec),
+                    countdown_seconds = rec.CountdownSeconds
+                });
 
-            tray.SetCountdown(rec, null);
+                tray.SetCountdown(rec, null);
+            }
 
             // Late-terminal guard: a stop/finalize that won the race after the
             // phase transition must not trigger a late StartVideo/StartCapture
             // or further UI updates from this operation.
             lock (rec)
             {
-                if (rec.State != RecState.countdown || rec.IsFinalized)
+                bool validState = visibleCountdown
+                    ? rec.State == RecState.countdown
+                    : rec.State == RecState.preparing;
+                if (!validState || rec.IsFinalized)
                     return;
             }
 
-            if (rec.Backend is IAudioReadyBackend audioReady)
+            if (startBackendAtZero)
+            {
+                BeforeStartActionForTests?.Invoke(rec, "backend.start");
+                if (!TryStartBackendAtCountdownZero(rec, traceId, tray, op))
+                    return;
+            }
+            else if (rec.Backend is IAudioReadyBackend audioReady)
             {
                 try
                 {
-                    audioReady.StartVideo();
+                    BeforeStartActionForTests?.Invoke(rec, "start_video");
+                    if (!TryClaimAndRunStartAction(rec, op, audioReady.StartVideo))
+                        return;
                 }
                 catch (Exception ex)
                 {
-                    _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
-                        rec.BackendType ?? "unknown", "video_start_failed", ex.GetType().Name);
-                    lock (rec)
-                    {
-                        MarkBundleNotApplicable(rec);
-                        rec.CompletedAtUtc = DateTime.UtcNow;
-                        rec.Error = "Failed to start video capture: " + ex.Message;
-                        rec.Warnings.Add("video_start_failed: " + ex.Message);
-                        rec.State = RecState.failed;
-                        BumpStateVersion();
-                    }
-                    _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
-                        stopReason: "video_start_failed", errorCode: "video_start_failed");
-                    _audit.Log("recording.failed", new
-                    {
-                        recording_id = rec.Id,
-                        backend = rec.BackendType,
-                        error = rec.Error,
-                        stage = "video_start"
-                    });
-                    tray.SetIdle(rec);
-                    tray.ShowError(rec.Error);
+                    var error = "Failed to start video capture: " + ex.Message;
+                    BeforeStartFailureForTests?.Invoke(rec, "countdown.start_video");
+                    var ownership = TryClaimStartFailure(
+                        rec,
+                        error,
+                        warning: "video_start_failed: " + ex.Message,
+                        stopReason: "video_start_failed");
+                    if (ownership != StartFailureOwnership.Failed)
+                        return;
+
+                    EmitStartFailure(
+                        rec,
+                        traceId,
+                        tray,
+                        errorCode: "video_start_failed",
+                        errorType: ex.GetType().Name,
+                        stopReason: "video_start_failed",
+                        error: error,
+                        stage: "video_start");
                     return;
                 }
             }
@@ -2088,41 +3001,58 @@ public sealed class RecordingEngine
             {
                 // Countdown reached zero: authorize the prepared helper to start
                 // capturing now. Nothing was captured during the countdown.
-                _audit.Log("recording.capture_authorization_requested", new
-                {
-                    recording_id = rec.Id,
-                    backend = rec.BackendType
-                });
                 try
                 {
-                    deferred.StartCapture();
+                    BeforeStartActionForTests?.Invoke(rec, "start_capture");
+                    if (!TryClaimAndRunStartAction(rec, op, () =>
+                    {
+                        // This audit is deliberately adjacent to the real
+                        // authorization call and occurs only after the start
+                        // action claim has been acquired. A Stop-before-claim
+                        // path therefore cannot claim that authorization was
+                        // requested when StartCapture was never invoked.
+                        _audit.Log("recording.capture_authorization_requested", new
+                        {
+                            recording_id = rec.Id,
+                            backend = rec.BackendType
+                        });
+                        deferred.StartCapture();
+                    }))
+                        return;
                 }
                 catch (Exception ex)
                 {
-                    _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
-                        rec.BackendType ?? "unknown", "capture_start_failed", ex.GetType().Name);
-                    lock (rec)
-                    {
-                        MarkBundleNotApplicable(rec);
-                        rec.CompletedAtUtc = DateTime.UtcNow;
-                        rec.Error = "Failed to authorize capture start: " + ex.Message;
-                        rec.Warnings.Add("capture_start_failed: " + ex.Message);
-                        rec.State = RecState.failed;
-                        BumpStateVersion();
-                    }
-                    _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
-                        stopReason: "capture_start_failed", errorCode: "capture_start_failed");
-                    _audit.Log("recording.failed", new
-                    {
-                        recording_id = rec.Id,
-                        backend = rec.BackendType,
-                        error = rec.Error,
-                        stage = "capture_start"
-                    });
-                    tray.SetIdle(rec);
-                    tray.ShowError(rec.Error);
+                    var error = "Failed to authorize capture start: " + ex.Message;
+                    BeforeStartFailureForTests?.Invoke(rec, "countdown.start_capture");
+                    var ownership = TryClaimStartFailure(
+                        rec,
+                        error,
+                        warning: "capture_start_failed: " + ex.Message,
+                        stopReason: "capture_start_failed");
+                    if (ownership != StartFailureOwnership.Failed)
+                        return;
+
+                    EmitStartFailure(
+                        rec,
+                        traceId,
+                        tray,
+                        errorCode: "capture_start_failed",
+                        errorType: ex.GetType().Name,
+                        stopReason: "capture_start_failed",
+                        error: error,
+                        stage: "capture_start");
                     return;
                 }
+            }
+
+            // Preserve the established fallback for test/custom backends that
+            // do not expose first-frame evidence. Observable production paths
+            // remain anchored to a credible frame; a non-observable backend is
+            // considered recording once its real start action returns.
+            if (rec.Backend is not IFirstFrameObservableCaptureBackend)
+            {
+                TransitionToRecording(rec, traceId, tray, firstFrameEvidence: null);
+                return;
             }
 
             // Wait for real first-frame evidence before showing REC. If no first frame
@@ -2185,7 +3115,7 @@ public sealed class RecordingEngine
                 // Timeout: clean up and fail the recording.
                 lock (rec)
                 {
-                    if (rec.IsFinalized || rec.State != RecState.countdown)
+                    if (rec.IsFinalized || rec.State is not (RecState.countdown or RecState.preparing))
                         return;
 
                     MarkBundleNotApplicable(rec);
@@ -2562,7 +3492,14 @@ public sealed class RecordingEngine
         if (wasVisibleCountdown &&
             Interlocked.CompareExchange(ref op.CancelAuditEmitted, 1, 0) == 0)
         {
-            _audit.Log("recording.countdown_cancelled", new { recording_id = recordingId });
+            _recs.TryGetValue(recordingId, out var rec);
+            _audit.Log("recording.countdown_cancelled", new
+            {
+                recording_id = recordingId,
+                backend = rec?.BackendType ?? "unknown",
+                trigger = rec == null ? "unknown" : CountdownTriggerFor(rec),
+                countdown_seconds = rec?.CountdownSeconds ?? CaptureConfig.DefaultCountdownSeconds
+            });
         }
     }
 
@@ -2692,6 +3629,10 @@ public sealed class RecordingEngine
     public object Stop(string id, string reason)
     {
         var rec = Get(id);
+        BeforeStopForTests?.Invoke(rec);
+        if (rec.IsScreenshotSeries)
+            return StopScreenshotSeries(rec, reason);
+
         bool enteredStopping = false;
 
         lock (rec)
@@ -2759,8 +3700,51 @@ public sealed class RecordingEngine
         return BuildStopResponse(rec, meta);
     }
 
+    private object StopScreenshotSeries(Recording rec, string reason)
+    {
+        ScreenshotSeriesOperation? op;
+        lock (rec)
+        {
+            if (IsTerminalState(rec.State))
+                return BuildStopResponse(rec);
+            if (rec.State == RecState.finalizing)
+                return BuildStoppingResponse(rec);
+            if (!_seriesOps.TryGetValue(rec.Id, out op))
+            {
+                rec.State = RecState.cancelled;
+                rec.StopReason = NormalizeStopReason(reason);
+                rec.CompletedAtUtc = DateTime.UtcNow;
+                rec.IsFinalized = true;
+                rec.ScreenshotSeries!.Status = "cancelled";
+                rec.ScreenshotSeries.StopReason = rec.StopReason;
+                rec.ScreenshotSeries.CompletedAtUtc = rec.CompletedAtUtc;
+                MarkBundleNotApplicable(rec);
+                BumpStateVersion();
+                _audit.Log("recording.cancelled", new { recording_id = rec.Id, mode = ScreenshotSeriesConfig.ModeName, reason = rec.StopReason });
+                _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
+                _tray?.SetIdle(rec);
+                return BuildStopResponse(rec);
+            }
+
+            if (rec.State == RecState.stopping)
+                return BuildStoppingResponse(rec);
+
+            rec.State = RecState.stopping;
+            rec.StopReason = NormalizeStopReason(reason);
+            op.StopRequested = true;
+            BumpStateVersion();
+        }
+
+        try { op!.Cts.Cancel(); } catch { }
+        try { op.Task?.Wait(TimeSpan.FromSeconds(10)); } catch { }
+        return IsTerminalState(rec.State) ? BuildStopResponse(rec) : BuildStoppingResponse(rec);
+    }
+
     private object BuildStopResponse(Recording rec, OutputMeta? meta = null)
     {
+        if (rec.IsScreenshotSeries)
+            return BuildScreenshotSeriesResponse(rec);
+
         var m = meta ?? rec.LastMeta;
         if (m == null)
             m = FfmpegCaptureBackend.Probe(rec.OutputPath);
@@ -2768,9 +3752,11 @@ public sealed class RecordingEngine
         return new
         {
             recording_id = rec.Id,
+            mode = rec.Mode,
             status = rec.State.ToString(),
             stop_reason = rec.StopReason ?? "",
             output = OutputObj(rec, m),
+            series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
             bundle = BundleObj(rec)
         };
     }
@@ -2780,13 +3766,91 @@ public sealed class RecordingEngine
         recording_id = rec.Id,
         status = rec.State.ToString(),
         stop_reason = rec.StopReason ?? "",
-        output = (object?)null,
+        output = rec.IsScreenshotSeries ? ScreenshotSeriesOutput(rec) : (object?)null,
+        mode = rec.Mode,
+        series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
         bundle = BundleObj(rec)
     };
+
+    private static string PublicScreenshotSeriesStatus(Recording rec)
+    {
+        if (rec.State == RecState.recording) return "capturing";
+        if (rec.State == RecState.preparing) return "preparing";
+        if (rec.State == RecState.countdown) return "countdown";
+        if (rec.State == RecState.finalizing) return "finalizing";
+        return rec.ScreenshotSeries?.Status ?? rec.State.ToString();
+    }
+
+    private static object ScreenshotSeriesStatus(Recording rec)
+    {
+        lock (rec)
+        {
+            var series = rec.ScreenshotSeries;
+            if (series == null) return new { };
+            return new
+            {
+                interval_ms = series.IntervalMs,
+                max_count = series.MaxCount,
+                max_duration_seconds = series.MaxDurationSeconds,
+                planned_frame_count = series.PlannedFrameCount,
+                captured_frame_count = series.Frames.Count,
+                next_capture_due_at = series.NextCaptureDueAtUtc.HasValue ? Iso(series.NextCaptureDueAtUtc.Value) : null,
+                output_directory = series.FinalDirectory ?? series.OutputDirectory,
+                staging = series.StagingDirectory != null,
+                started_at = series.StartedAtUtc.HasValue ? Iso(series.StartedAtUtc.Value) : null,
+                completed_at = series.CompletedAtUtc.HasValue ? Iso(series.CompletedAtUtc.Value) : null,
+                status = series.Status,
+                error_code = series.ErrorCode ?? ""
+            };
+        }
+    }
+
+    private static object ScreenshotSeriesOutput(Recording rec)
+    {
+        lock (rec)
+        {
+            var series = rec.ScreenshotSeries;
+            if (series == null)
+                return new { path = (string?)null, format = "png_sequence", frame_count = 0, manifest = (string?)null };
+            var final = series.FinalDirectory;
+            return new
+            {
+                path = final,
+                format = "png_sequence",
+                frame_count = series.Frames.Count,
+                manifest = final == null ? null : Path.Combine(final, "series.json"),
+                directory_published = final != null
+            };
+        }
+    }
+
+    private object BuildScreenshotSeriesResponse(Recording rec)
+    {
+        return new
+        {
+            recording_id = rec.Id,
+            mode = ScreenshotSeriesConfig.ModeName,
+            status = PublicScreenshotSeriesStatus(rec),
+            source = new { type = rec.SourceType, title = rec.SourceTitle },
+            backend = rec.BackendType,
+            config = new { countdown_seconds = rec.CountdownSeconds },
+            output = ScreenshotSeriesOutput(rec),
+            series = ScreenshotSeriesStatus(rec),
+            started_at = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
+            completed_at = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
+            elapsed_seconds = ComputeElapsedSeconds(rec),
+            stop_reason = rec.StopReason ?? "",
+            error = rec.Error ?? "",
+            warnings = rec.Warnings.ToArray(),
+            bundle = BundleObj(rec)
+        };
+    }
 
     public object GetStatus(string id)
     {
         var rec = Get(id);
+        if (rec.IsScreenshotSeries)
+            return BuildScreenshotSeriesResponse(rec);
         var elapsed = ComputeElapsedSeconds(rec);
 
         // Prefer the backend-reported output path when available.
@@ -2799,9 +3863,11 @@ public sealed class RecordingEngine
         return new
         {
             recording_id = rec.Id,
+            mode = rec.Mode,
             status = rec.State.ToString(),
             source = new { type = rec.SourceType, title = rec.SourceTitle },
             backend = rec.BackendType,
+            config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
             started_at = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             completed_at = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             elapsed_seconds = elapsed,
@@ -2869,6 +3935,18 @@ public sealed class RecordingEngine
     public object GetOutput(string id)
     {
         var rec = Get(id);
+        if (rec.IsScreenshotSeries)
+            return new
+            {
+                recording_id = rec.Id,
+                mode = ScreenshotSeriesConfig.ModeName,
+                output = ScreenshotSeriesOutput(rec),
+                series = ScreenshotSeriesStatus(rec),
+                stop_reason = rec.StopReason ?? "",
+                error = rec.Error ?? "",
+                warnings = rec.Warnings.ToArray(),
+                bundle = BundleObj(rec)
+            };
         // Prefer metadata already produced by the backend. Fall back to probing
         // the FFmpeg output path when no metadata is available.
         var meta = rec.LastMeta;
@@ -2879,7 +3957,9 @@ public sealed class RecordingEngine
         return new
         {
             recording_id = rec.Id,
+            mode = rec.Mode,
             output = OutputObj(rec, meta, full: true),
+            series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
             stop_reason = rec.StopReason ?? "",
             warnings = rec.Warnings.ToArray(),
             stderr_excerpt = rec.StderrExcerpt ?? "",
@@ -2945,10 +4025,14 @@ public sealed class RecordingEngine
         var rec = Get(id);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        bool timedOut = WaitForStateChange(() => !string.Equals(rec.State.ToString(), sinceStatus, StringComparison.OrdinalIgnoreCase), waitMs);
+        bool timedOut = WaitForStateChange(() => !string.Equals(
+            rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : rec.State.ToString(),
+            sinceStatus, StringComparison.OrdinalIgnoreCase), waitMs);
         sw.Stop();
 
-        bool changed = !string.Equals(rec.State.ToString(), sinceStatus, StringComparison.OrdinalIgnoreCase);
+        bool changed = !string.Equals(
+            rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : rec.State.ToString(),
+            sinceStatus, StringComparison.OrdinalIgnoreCase);
         var traceId = _tracer.ResolveTraceId(rec.Id);
         if (traceId != null)
         {
@@ -2990,6 +4074,24 @@ public sealed class RecordingEngine
 
     private object BuildStatusWaitResponse(Recording rec, int requestedMs, int elapsedMs, bool timedOut)
     {
+        if (rec.IsScreenshotSeries)
+        {
+            return new
+            {
+                recording_id = rec.Id,
+                mode = ScreenshotSeriesConfig.ModeName,
+                status = PublicScreenshotSeriesStatus(rec),
+                source = new { type = rec.SourceType, title = rec.SourceTitle },
+                output = ScreenshotSeriesOutput(rec),
+                series = ScreenshotSeriesStatus(rec),
+                stop_reason = rec.StopReason ?? "",
+                error = rec.Error ?? "",
+                wait = new { requested_ms = requestedMs, elapsed_ms = elapsedMs, timed_out = timedOut },
+                next_poll_hint_ms = IsTerminalState(rec.State) ? (int?)null : 1000,
+                bundle = BundleObj(rec)
+            };
+        }
+
         var elapsed = ComputeElapsedSeconds(rec);
         var meta = rec.LastMeta;
         string actualPath = meta?.OutputPath ?? rec.OutputPath;
@@ -3002,9 +4104,11 @@ public sealed class RecordingEngine
         return new
         {
             RecordingId = rec.Id,
+            Mode = rec.Mode,
             Status = rec.State.ToString(),
             Source = new { Type = rec.SourceType, Title = rec.SourceTitle },
             Backend = rec.BackendType,
+            Config = new { CountdownSeconds = rec.CountdownSeconds, DurationSeconds = rec.DurationSeconds },
             StartedAt = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             CompletedAt = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             ElapsedSeconds = elapsed,
@@ -3053,6 +4157,7 @@ public sealed class RecordingEngine
                 CaptureMethod = meta?.CaptureMethod ?? "",
                 FfmpegExitCode = rec.ExitCode
             },
+            Series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
             stop_reason = rec.StopReason ?? "",
             Warnings = rec.Warnings.ToArray(),
             StderrExcerpt = rec.StderrExcerpt ?? "",
@@ -3071,13 +4176,14 @@ public sealed class RecordingEngine
 
     public IEnumerable<object> List() => _recs.Values.Select(r => new
     {
-        recording_id = r.Id, status = r.State.ToString(),
+        recording_id = r.Id, mode = r.Mode, status = r.IsScreenshotSeries ? PublicScreenshotSeriesStatus(r) : r.State.ToString(),
         started_at = r.StartedAtUtc == default ? null : Iso(r.StartedAtUtc),
         completed_at = r.CompletedAtUtc.HasValue ? Iso(r.CompletedAtUtc.Value) : null,
         output_path = r.OutputPath,
         nested_role = r.NestedRole ?? "none",
         parent_recording_id = r.ParentRecordingId ?? "",
         nested_session_id = r.NestedSessionId ?? "",
+        series = r.IsScreenshotSeries ? ScreenshotSeriesStatus(r) : null,
         bundle = BundleObj(r)
     });
 
@@ -3096,6 +4202,38 @@ public sealed class RecordingEngine
     {
         foreach (var r in _recs.Values.Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording))
             try { Stop(r.Id, reason); } catch { }
+    }
+
+    public void Dispose()
+    {
+        foreach (var pair in _seriesOps)
+        {
+            var operation = pair.Value;
+            if (_recs.TryGetValue(pair.Key, out var rec))
+            {
+                lock (rec)
+                {
+                    if (!rec.IsFinalized && rec.State is (RecState.preparing or RecState.countdown or RecState.recording))
+                    {
+                        rec.State = RecState.stopping;
+                        rec.StopReason ??= "dispose";
+                        BumpStateVersion();
+                    }
+                    operation.StopRequested = true;
+                }
+            }
+            else
+            {
+                operation.StopRequested = true;
+            }
+
+            try { operation.Cts.Cancel(); } catch { }
+        }
+        foreach (var operation in _seriesOps.Values)
+        {
+            try { operation.Task?.Wait(TimeSpan.FromSeconds(10)); } catch { }
+        }
+        StopAllSync("dispose");
     }
 
     /// <summary>

@@ -869,8 +869,9 @@ public class RecordingBundleTests : IDisposable
         {
             SourceType = "region",
             BackendType = "ffmpeg",
+            CountdownSeconds = 0,
             OutputPath = MediaPath("start-exc"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("start-exc") }
+            Config = new CaptureConfig { SourceKind = "region", CountdownSeconds = 0, Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("start-exc") }
         };
         engine.BackendFactory = _ => (new ThrowingCaptureBackend(), "ffmpeg");
         engine.StartCaptureForTests(rec, new NoOpTray());
@@ -1047,8 +1048,9 @@ public class RecordingBundleTests : IDisposable
         {
             SourceType = "region",
             BackendType = "ffmpeg",
+            CountdownSeconds = 0,
             OutputPath = MediaPath("stopping"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("stopping") }
+            Config = new CaptureConfig { SourceKind = "region", CountdownSeconds = 0, Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("stopping") }
         };
         engine.StartCaptureForTests(rec, new NoOpTray());
 
@@ -1179,8 +1181,9 @@ public class RecordingBundleTests : IDisposable
         {
             SourceType = "region",
             BackendType = "ffmpeg",
+            CountdownSeconds = 0,
             OutputPath = MediaPath("race"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("race") }
+            Config = new CaptureConfig { SourceKind = "region", CountdownSeconds = 0, Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("race") }
         };
         var meta = new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 };
         rec.LastMeta = meta;

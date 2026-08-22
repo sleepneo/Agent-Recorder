@@ -353,6 +353,50 @@ public class RecordingIndicatorTests
         });
     }
 
+    [Theory]
+    [InlineData(UiLanguage.ZhCn, "截图")]
+    [InlineData(UiLanguage.EnUs, "SHOT")]
+    public void Form_ScreenshotSeriesLabel_IsLocalizedFits300Of300AndHasNoRec(UiLanguage language, string expectedPrefix)
+    {
+        RunOnSta(() =>
+        {
+            var bounds = new RecordingIndicatorBounds(100, 100, 800, 600);
+            using var planningFont = new Font("Segoe UI", 9, FontStyle.Bold);
+            var plannedSize = RecordingIndicatorForm.MeasureSeriesLabelSize(
+                planningFont,
+                new Padding(4, 2, 4, 2),
+                new DisplayDpiInfo("test_display", new Rectangle(0, 0, 1920, 1080), 96, 96, 1.0f, false, null));
+            var presentation = new RecordingIndicatorPresentation(
+                CaptureVisibilityMode.ExcludeFromCapture,
+                bounds,
+                bounds,
+                null,
+                Array.Empty<Rectangle>(),
+                new Rectangle(104, 104, plannedSize.Width, plannedSize.Height),
+                DisplayAffinityRequested: true,
+                FallbackReason: null);
+            var provider = new UiTextProvider(language);
+            using var form = new RecordingIndicatorForm(
+                "series-label",
+                presentation,
+                DateTime.UtcNow,
+                displayAffinity: null,
+                textProviderFactory: () => provider);
+
+            _ = form.Handle;
+            form.SetSeriesProgress(300, 300);
+
+            Assert.Equal($"{expectedPrefix} 300/300", form.LabelTextForTests);
+            Assert.DoesNotContain("REC", form.LabelTextForTests, StringComparison.OrdinalIgnoreCase);
+            using var font = new Font("Segoe UI", 9, FontStyle.Bold);
+            var measured = TextRenderer.MeasureText(form.LabelTextForTests, font, Size.Empty, TextFormatFlags.SingleLine);
+            Assert.True(form.LabelBoundsForTests.Width >= measured.Width + 8,
+                $"label={form.LabelBoundsForTests.Width} measured={measured.Width}");
+            Assert.True(form.LabelBoundsForTests.Height >= measured.Height + 4,
+                $"label={form.LabelBoundsForTests.Height} measured={measured.Height}");
+        });
+    }
+
     [Fact]
     public void Form_LabelText_WithDuration_ShowsTotal()
     {
@@ -747,6 +791,63 @@ public class RecordingIndicatorTests
             Assert.Equal(RecordingIndicatorPhase.Recording, indicator.PhaseForTests);
 
             ctx.SetIdle(rec);
+        });
+    }
+
+    [Fact]
+    public void CountdownOverlay_SupportsTwoDigitValueOnSmallBounds()
+    {
+        RunOnSta(() =>
+        {
+            using var overlay = new CountdownOverlayForm(new Rectangle(0, 0, 48, 48),
+                new WindowDisplayAffinity((hWnd, mode) => true, null));
+
+            overlay.SetNumber(10);
+
+            Assert.Equal("10", overlay.LabelTextForTests);
+            Assert.Equal(48, overlay.Width);
+            Assert.Equal(48, overlay.Height);
+            Assert.True(overlay.LabelTextFitsClientBoundsForTests);
+        });
+    }
+
+    [Theory]
+    [InlineData(0, 0, 32, 32, 0, 0, 1920, 1080)]
+    [InlineData(100, 200, 48, 48, 0, 0, 1920, 1080)]
+    [InlineData(1890, 1030, 48, 48, 0, 0, 1920, 1080)]
+    [InlineData(-1880, -180, 48, 48, -1920, -200, 3840, 2160)]
+    public void CountdownGeometry_IsContainedByTargetAndVirtualScreen(
+        int targetX,
+        int targetY,
+        int targetWidth,
+        int targetHeight,
+        int virtualX,
+        int virtualY,
+        int virtualWidth,
+        int virtualHeight)
+    {
+        var target = new Rectangle(targetX, targetY, targetWidth, targetHeight);
+        var virtualScreen = new Rectangle(virtualX, virtualY, virtualWidth, virtualHeight);
+
+        var result = RecordingIndicatorManager.ComputeCountdownBoundsForTests(target, virtualScreen);
+
+        Assert.True(result.Width > 0 && result.Height > 0);
+        Assert.True(target.Contains(result), $"{result} must be inside target {target}");
+        Assert.True(virtualScreen.Contains(result), $"{result} must be inside virtual screen {virtualScreen}");
+    }
+
+    [Fact]
+    public void CountdownOverlay_TwoDigitValueFitsThirtyTwoPixelClient()
+    {
+        RunOnSta(() =>
+        {
+            using var overlay = new CountdownOverlayForm(new Rectangle(0, 0, 32, 32),
+                new WindowDisplayAffinity((hWnd, mode) => true, null));
+
+            overlay.SetNumber(10);
+
+            Assert.Equal("10", overlay.LabelTextForTests);
+            Assert.True(overlay.LabelTextFitsClientBoundsForTests);
         });
     }
 

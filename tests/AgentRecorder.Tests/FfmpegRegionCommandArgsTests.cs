@@ -306,6 +306,7 @@ public class FfmpegRegionCommandArgsTests
             Config = new CaptureConfig
             {
                 SourceKind = "region",
+                CountdownSeconds = 0,
                 Bounds = (0, 0, 640, 480),
                 Fps = 15,
                 Quality = "medium",
@@ -370,6 +371,7 @@ public class FfmpegRegionCommandArgsTests
             Config = new CaptureConfig
             {
                 SourceKind = "region",
+                CountdownSeconds = 0,
                 Bounds = (100, 200, 800, 600),
                 Fps = 15,
                 Quality = "medium",

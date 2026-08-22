@@ -448,6 +448,14 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     }
 
     [Fact]
+    public void SemanticLock_CoordinateSpaceChangeFailsClosedBeforeBackendStart()
+    {
+        AssertRevalidationFailsBeforeStart(
+            Plan("wgc-continuous", "window_surface", "window_backend_selected", coordinateSpace: "virtual_screen"),
+            Plan("wgc-continuous", "window_surface", "window_backend_selected", coordinateSpace: "screen_pixels"));
+    }
+
+    [Fact]
     public void SemanticLock_SourceKindChangeFailsClosedBeforeStart()
     {
         AssertRevalidationFailsBeforeStart(
@@ -586,7 +594,8 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         nint windowHandle = (nint)12345,
         string? targetDisplayIdentity = null,
         CapturePlanBounds? sourceBounds = null,
-        CapturePlanBounds? displayBounds = null) =>
+        CapturePlanBounds? displayBounds = null,
+        string coordinateSpace = "virtual_screen") =>
         new(
             backend == "wgc-continuous" ? "wgc-continuous" : "wgc-continuous",
             backend,
@@ -605,7 +614,8 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             sourceKind == "region" ? targetDisplayIdentity : null,
             sourceKind == "region"
                 ? DisplayIdentityResolutionStatus.Resolved
-                : DisplayIdentityResolutionStatus.Unresolved);
+                : DisplayIdentityResolutionStatus.Unresolved,
+            coordinateSpace: coordinateSpace);
 
     private static object WindowSurfaceSummary() => new
     {
@@ -648,7 +658,8 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             1,
             1,
             previewProvider: screen,
-            dwmThumbnailProvider: dwm)
+            dwmThumbnailProvider: dwm,
+            textProvider: new UiTextProvider(UiLanguage.ZhCn))
         {
             EnableDelayedForegroundVerification = false
         };

@@ -9,8 +9,23 @@ using AgentRecorder.Infrastructure;
 
 namespace AgentRecorder.Tests;
 
-public class ConfirmationFormTests
+[Collection("NonParallel-AgentRecorderDataDir")]
+public class ConfirmationFormTests : IDisposable
 {
+    private readonly TempDirectory _uiDataDir = new();
+
+    public ConfirmationFormTests()
+    {
+        DataDirResolver.SetOverride(_uiDataDir.Path);
+        UiLanguageStore.Save(UiLanguage.ZhCn);
+    }
+
+    public void Dispose()
+    {
+        DataDirResolver.ClearOverride();
+        _uiDataDir.Dispose();
+    }
+
     private class FakePreviewProvider : IScreenPreviewProvider
     {
         public Bitmap Capture(CaptureBounds bounds, Size maxSize) => new Bitmap(maxSize.Width, maxSize.Height);
@@ -1174,7 +1189,7 @@ public class ConfirmationFormTests
             var infoPanelClient = form.InfoPanelClientRectangleForTests;
             var rows = form.GetInfoRowBoundsRelativeToInfoPanelForTests();
 
-            Assert.Equal(11, rows.Count);
+            Assert.Equal(12, rows.Count);
 
             for (int i = 0; i < rows.Count; i++)
             {
@@ -1491,7 +1506,7 @@ public class ConfirmationFormTests
 
             var mainContent = form.MainContentPanelBoundsForTests;
             var rows = form.GetInfoRowBoundsForTests();
-            Assert.Equal(11, rows.Count);
+            Assert.Equal(12, rows.Count);
 
             for (int i = 0; i < rows.Count; i++)
             {

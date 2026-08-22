@@ -7,6 +7,7 @@ using System.Windows.Forms;
 using AgentRecorder.App;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using Xunit;
 
@@ -16,8 +17,23 @@ namespace AgentRecorder.Tests;
 /// Tests for TrayContext stop-state machine, global hotkey integration, and menu/icon updates.
 /// All tests use a fake global hotkey so they never occupy the user's Ctrl+Shift+F10.
 /// </summary>
-public class TrayContextStopTests
+[Collection("NonParallel-AgentRecorderDataDir")]
+public class TrayContextStopTests : IDisposable
 {
+    private readonly TempDirectory _uiDataDir = new();
+
+    public TrayContextStopTests()
+    {
+        DataDirResolver.SetOverride(_uiDataDir.Path);
+        UiLanguageStore.Save(UiLanguage.ZhCn);
+    }
+
+    public void Dispose()
+    {
+        DataDirResolver.ClearOverride();
+        _uiDataDir.Dispose();
+    }
+
     private static void RunOnSta(Action action)
     {
         Exception? ex = null;

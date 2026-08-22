@@ -20,6 +20,8 @@ internal sealed class CountdownOverlayForm : Form
     internal bool DisplayAffinityAppliedForTests => _displayAffinityApplied;
     internal Exception? DisplayAffinityErrorForTests => _displayAffinityError;
     internal string LabelTextForTests => _label.Text;
+    internal bool LabelTextFitsClientBoundsForTests => TextFitsClientBounds(_label.Font);
+    internal Rectangle LabelClientBoundsForTests => _label.ClientRectangle;
 
     public CountdownOverlayForm(Rectangle bounds, IWindowDisplayAffinity? displayAffinity = null)
     {
@@ -57,7 +59,59 @@ internal sealed class CountdownOverlayForm : Form
     public void SetNumber(int value)
     {
         _label.Text = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        UpdateFontToFit();
         Invalidate();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        UpdateFontToFit();
+    }
+
+    private void UpdateFontToFit()
+    {
+        if (_label == null || _label.IsDisposed)
+            return;
+
+        int shortestSide = Math.Max(1, Math.Min(_label.ClientSize.Width, _label.ClientSize.Height));
+        float pointSize = Math.Clamp(shortestSide * 0.34f, 8f, 72f);
+        if (_label.Text.Length > 1)
+            pointSize *= 0.78f;
+
+        Font? next = null;
+        for (float candidate = pointSize; candidate >= 8f; candidate -= 0.5f)
+        {
+            var measured = new Font("Segoe UI", candidate, FontStyle.Bold);
+            if (TextFitsClientBounds(measured))
+            {
+                next = measured;
+                break;
+            }
+
+            measured.Dispose();
+        }
+
+        next ??= new Font("Segoe UI", 8f, FontStyle.Bold);
+        var previous = _label.Font;
+        _label.Font = next;
+        previous?.Dispose();
+    }
+
+    private bool TextFitsClientBounds(Font font)
+    {
+        if (_label == null || _label.IsDisposed)
+            return false;
+
+        var available = new Size(
+            Math.Max(1, _label.ClientSize.Width),
+            Math.Max(1, _label.ClientSize.Height));
+        var measured = TextRenderer.MeasureText(
+            _label.Text,
+            font,
+            available,
+            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+        return measured.Width <= available.Width && measured.Height <= available.Height;
     }
 
     protected override bool ShowWithoutActivation => true;

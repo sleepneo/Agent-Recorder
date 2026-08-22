@@ -32,7 +32,9 @@ public sealed class CapturePlan
         AudioCaptureSourceKind audioSourceKind = AudioCaptureSourceKind.None,
         string? audioEndpointId = null,
         string? audioEndpointName = null,
-        bool? audioEndpointIsDefault = null)
+        bool? audioEndpointIsDefault = null,
+        string? previewSemantics = null,
+        string coordinateSpace = "virtual_screen")
     {
         RequestedBackend = string.IsNullOrWhiteSpace(requestedBackend)
             ? "default"
@@ -44,6 +46,12 @@ public sealed class CapturePlan
         CaptureSemantics = string.IsNullOrWhiteSpace(captureSemantics)
             ? throw new ArgumentException("Capture semantics are required.", nameof(captureSemantics))
             : captureSemantics;
+        PreviewSemantics = string.IsNullOrWhiteSpace(previewSemantics)
+            ? CaptureSemantics
+            : previewSemantics;
+        CoordinateSpace = string.IsNullOrWhiteSpace(coordinateSpace)
+            ? throw new ArgumentException("Coordinate space is required.", nameof(coordinateSpace))
+            : coordinateSpace;
         SourceKind = string.IsNullOrWhiteSpace(sourceKind)
             ? throw new ArgumentException("Source kind is required.", nameof(sourceKind))
             : sourceKind;
@@ -69,6 +77,8 @@ public sealed class CapturePlan
     public string PlannedBackend { get; }
     public CaptureBackendSelectionEvidence Evidence { get; }
     public string CaptureSemantics { get; }
+    public string PreviewSemantics { get; }
+    public string CoordinateSpace { get; }
     public string SourceKind { get; }
     public string? TargetIdentity { get; }
     public nint WindowHandle { get; }

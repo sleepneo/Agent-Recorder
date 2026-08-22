@@ -25,15 +25,20 @@ namespace AgentRecorder.Tests;
 public class RecordingStopControlTests : IDisposable
 {
     private readonly ITestOutputHelper _output;
+    private readonly TempDirectory _uiDataDir = new();
 
     public RecordingStopControlTests(ITestOutputHelper output)
     {
         _output = output;
+        DataDirResolver.SetOverride(_uiDataDir.Path);
+        UiLanguageStore.Save(UiLanguage.ZhCn);
     }
 
     public void Dispose()
     {
         SystemQuery.SetDisplayProvider(null);
+        DataDirResolver.ClearOverride();
+        _uiDataDir.Dispose();
     }
 
     private static void RunOnSta(Action action)

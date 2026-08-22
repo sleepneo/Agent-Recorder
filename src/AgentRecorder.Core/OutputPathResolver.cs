@@ -16,6 +16,48 @@ namespace AgentRecorder.Core;
 /// </summary>
 internal static class OutputPathResolver
 {
+    public static string BuildScreenshotSeriesPath(JsonNode? output, Recording rec)
+    {
+        var directory = Str(output?["directory"]) is { } d && d != "default"
+            ? d
+            : Paths.DefaultOutputDir;
+        PolicyEngine.ValidateDirectory(directory);
+        var template = Str(output?["filename_template"]) ?? "screenshot-series-{datetime}-{id}";
+        var name = BuildSafeScreenshotSeriesName(ApplyTemplate(template, rec));
+        return Path.Combine(directory, name);
+    }
+
+    public static string MoveScreenshotSeriesToDirectory(string existingPath, string directory, Recording rec)
+    {
+        PolicyEngine.ValidateDirectory(directory);
+        var name = Path.GetFileName(existingPath);
+        if (string.IsNullOrWhiteSpace(name))
+            name = ApplyTemplate("screenshot-series-{datetime}-{id}", rec);
+        name = BuildSafeScreenshotSeriesName(name);
+        return Path.Combine(directory, name);
+    }
+
+    private static string BuildSafeScreenshotSeriesName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) ||
+            Path.IsPathRooted(name) ||
+            name is "." or ".." ||
+            name.Contains(Path.DirectorySeparatorChar) ||
+            name.Contains(Path.AltDirectorySeparatorChar) ||
+            Path.GetFileName(name) != name ||
+            name.Any(c => Path.GetInvalidFileNameChars().Contains(c)))
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "Screenshot-series filename_template must resolve to one safe directory name.",
+                new
+                {
+                    field = "output.filename_template",
+                    reason = "path_traversal_or_invalid_name"
+                });
+        }
+
+        return name;
+    }
     /// <summary>
     /// Builds the final output path from the request's output node and recording metadata.
     /// </summary>

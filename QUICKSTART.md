@@ -49,9 +49,16 @@ Example request:
 {
   "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
   "duration_seconds": 30,
+  "countdown_seconds": 3,
   "video": { "fps": 30, "quality": "medium" }
 }
 ```
+
+`countdown_seconds` is optional for both raw and quick recording requests. It
+defaults to `3` and accepts only integer values `0` through `10`. Use `0` to
+skip the visible countdown while keeping local confirmation, preparation,
+preflight, and credible-first-frame gating. The value is shown in the local
+confirmation summary and returned under recording `config`.
 
 ## Files
 
@@ -154,6 +161,32 @@ render-endpoint ID is supplied. Microphone and system audio cannot be enabled in
 the same recording. Because this is not yet a public capability, the default
 `/capabilities`, `/permissions`, and `/audio/devices` contract continues to
 report system audio as unavailable.
+
+## Bounded Screenshot Series
+
+Use the same quick endpoint for a bounded PNG sequence. The local user still
+confirms the request:
+
+```json
+{
+  "target": { "type": "selected_region" },
+  "mode": "screenshot_series",
+  "interval_ms": 5000,
+  "max_count": 12,
+  "countdown_seconds": 3
+}
+```
+
+The response exposes `mode: "screenshot_series"` and the planned/captured
+counts. The final output is a directory containing numbered PNG files and
+`series.json`; audio and chapter marks are intentionally unsupported. Use
+`max_duration_seconds` instead of `max_count` when a duration bound is more
+natural, but never send both.
+The schedule is anchored at the first valid PNG submission. Each scheduled
+point is claimed serially and launches one bounded FFmpeg single-frame process;
+there is no parallel catch-up. In `series.json`, `lateness_ms` measures delay at
+the claim point, while `capture_duration_ms` measures the monotonic time from
+claim to valid PNG submission. Neither is a fixed desktop-latency guarantee.
 
 ## Portable Package Contents
 

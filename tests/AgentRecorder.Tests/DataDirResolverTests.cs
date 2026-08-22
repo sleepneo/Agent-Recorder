@@ -12,12 +12,22 @@ public class DataDirResolverTests
     [Fact]
     public void Resolve_Default_NoEnv_NoOverride_ReturnsLocalAppData()
     {
-        DataDirResolver.ClearOverride();
-        var result = DataDirResolver.Resolve();
+        var originalEnv = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null);
+            DataDirResolver.ClearOverride();
+            var result = DataDirResolver.Resolve();
 
-        Assert.True(Path.IsPathFullyQualified(result));
-        Assert.Equal("AgentRecorder", Path.GetFileName(result));
-        Assert.EndsWith(Path.Combine("AppData", "Local", "AgentRecorder"), result);
+            Assert.True(Path.IsPathFullyQualified(result));
+            Assert.Equal("AgentRecorder", Path.GetFileName(result));
+            Assert.EndsWith(Path.Combine("AppData", "Local", "AgentRecorder"), result);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", originalEnv);
+            DataDirResolver.ClearOverride();
+        }
     }
 
     [Fact]

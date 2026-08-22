@@ -1,7 +1,14 @@
 namespace AgentRecorder.Capture;
 public sealed class CaptureConfig
 {
+    public const int DefaultCountdownSeconds = 3;
+    public const int MinCountdownSeconds = 0;
+    public const int MaxCountdownSeconds = 10;
+
     public string SourceKind = "display";
+    public string Mode = "video";
+    public ScreenshotSeriesConfig? ScreenshotSeries;
+    public bool IsScreenshotSeries => string.Equals(Mode, ScreenshotSeriesConfig.ModeName, StringComparison.Ordinal);
     public (int x, int y, int w, int h) Bounds;
     /// <summary>
     /// Public ordinal selected by the request, for example <c>display_1</c>.
@@ -125,7 +132,14 @@ public sealed class CaptureConfig
     public int Fps = 30;
     public string Quality = "medium";
     public string OutputPath = "";
+    public string OutputConflictPolicy = "rename";
     public int? DurationSeconds;
+    /// <summary>
+    /// Normalized per-recording pre-capture countdown. The API parser owns
+    /// validation; this strongly typed value is carried through backend
+    /// selection and the engine state machine.
+    /// </summary>
+    public int CountdownSeconds = DefaultCountdownSeconds;
     public string CommandArgs = "";
     /// <summary>
     /// If non-null, indicates that bounds were normalized to even dimensions

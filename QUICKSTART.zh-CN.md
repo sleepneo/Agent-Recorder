@@ -48,9 +48,14 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 {
   "target": { "type": "selected_region", "selection_timeout_seconds": 120 },
   "duration_seconds": 30,
+  "countdown_seconds": 3,
   "video": { "fps": 30, "quality": "medium" }
 }
 ```
+
+`countdown_seconds` 对 raw API 和 quick API 都可选，省略时为 `3`，只接受 `0..10`
+的整数。设为 `0` 可关闭可见倒计时，但仍保留本地确认、准备、预检和可信首帧门槛。
+该值会在本地确认摘要及录制响应/状态的 `config` 中展示。
 
 ## 文件位置
 
@@ -128,6 +133,32 @@ X-Agent-Recorder-Key: <api-key>
 未指定设备时使用当前 Windows 多媒体默认输出端点；也可显式提供 render
 endpoint ID。单次录制不能同时启用麦克风和系统声音。由于该能力尚未升级为公开
 契约，默认 `/capabilities`、`/permissions` 和 `/audio/devices` 仍会报告系统声音未开放。
+
+## 有界截图序列
+
+截图序列仍使用同一个 quick 接口，并且必须由本地用户确认：
+
+```json
+{
+  "target": { "type": "selected_region" },
+  "mode": "screenshot_series",
+  "interval_ms": 5000,
+  "max_count": 12,
+  "countdown_seconds": 3
+}
+```
+
+响应会返回 `mode: "screenshot_series"` 以及计划/已捕获数量。最终产物是包含编号 PNG
+和 `series.json` 的目录；音频和章节标记不适用。若使用时长边界，改用
+`max_duration_seconds`，不能与 `max_count` 同时发送。raw 请求不要发送
+`stop_condition`，quick 请求不要发送 `duration_seconds` 或 `stop_condition`；这些字段
+会在目标和音频解析前以 `400 INVALID_ARGUMENT` 拒绝。时长从第一张有效 PNG 提交时
+开始计时，第一张为 `t=0`；deadline 到达后正常结束，实际数量可以少于计划数量。
+截图区域和 manifest 的坐标空间固定为 `virtual_screen`。
+计划点按顺序认领，每个点启动一个有界 FFmpeg 单帧进程，不会并发追赶。manifest 的
+`lateness_ms` 只表示计划点认领时的非负迟到，不包含本帧捕获/编码耗时；新增的
+`capture_duration_ms` 表示从认领到有效 PNG 提交的单调时钟耗时。它们是诚实的诊断字段，
+不是固定桌面毫秒延迟承诺。
 
 ## 发布包里有什么
 

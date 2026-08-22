@@ -103,6 +103,12 @@ public interface ITrayContext
     void SetCountdown(object rec, int? remainingSeconds) { }
 
     /// <summary>
+    /// Updates the existing recording indicator for screenshot-series progress.
+    /// Hosts that do not have local UI may ignore this notification.
+    /// </summary>
+    void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc) { }
+
+    /// <summary>
     /// Shows a "finalizing" / "saving" indicator after screen capture has ended.
     /// </summary>
     void SetFinalizing(object rec) { }

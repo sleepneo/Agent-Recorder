@@ -616,6 +616,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
     private static CaptureConfig Config((int x, int y, int w, int h) bounds) => new()
     {
         SourceKind = "display",
+        CountdownSeconds = 0,
         Bounds = bounds,
         DurationSeconds = 5,
         Fps = 30,

@@ -600,3 +600,40 @@ AGENT-API-REFERENCE.zh-CN.md
 如果批准后的计划校验返回 `capture_semantics_changed`，应报告“捕获方式在确认后
 发生变化，录制未开始”，然后重新创建请求。不得通过 HTTP 自批准，也不得把该失败
 当作已开始录制或返回一个输出文件路径。
+
+### 配置每条录制的开始前倒计时
+
+raw `POST /api/v1/recordings` 和 quick `POST /api/v1/recordings/quick` 使用同一个顶层
+字段 `countdown_seconds`。省略为 3；有效范围是整数 `0..10`。传入负数、超过 10、
+浮点数、字符串、布尔值、`null`、对象或数组会在目标解析/选区 UI 之前返回
+`400 INVALID_ARGUMENT`。`0` 只关闭可见倒计时，不会跳过确认、准备、预检、捕获授权或
+可信首帧门槛。请从 `/capabilities.interaction.countdown` 读取能力范围和默认值，并在
+`/recordings/{id}` 的 `config.countdown_seconds` 中确认最终规范化值。
+
+自然语言映射示例：用户说“倒计时 5 秒后录屏”时发送
+`countdown_seconds: 5`；用户说“立即开始”时发送 `countdown_seconds: 0`，但仍等待
+本地确认、准备和可信首帧，不得把 API 返回的 `pending_confirmation`、`preparing` 或
+`countdown` 状态描述为已经开始录制。
+
+### 有界截图序列
+
+当用户明确要求“定时截图/截图序列”时，使用 quick API 的同一顶层契约：
+`mode: "screenshot_series"`、`interval_ms: 1000..3600000`，以及二选一的
+`max_count: 1..300` 或 `max_duration_seconds: 1..86400`。不要同时发送两个边界，
+也不要为截图序列发送任何音频字段。raw 请求不得发送 `stop_condition`，quick 请求
+不得发送 `duration_seconds` 或 `stop_condition`；服务会在目标解析和音频设备枚举前以
+`400 INVALID_ARGUMENT` 拒绝这些冲突字段。不要把视频 duration 映射到截图序列，时长
+边界只使用 `max_duration_seconds`。
+
+轮询 recording 状态时，把 `pending_confirmation`、`preparing`、`countdown`、
+`capturing`、`completed`、`cancelled`、`failed` 分开报告。完成后报告 `output.path`
+目录和 `series.json`，并说明这是 PNG 文件夹，不是 MP4；有帧主动停止会发布 partial
+目录，零帧停止不会发布空目录。`max_duration_seconds` 从第一张有效 PNG 原子提交
+时开始计时（第一张为 `t=0`）；到达 deadline 后是正常 `completed`，可以出现计划数
+大于实际数。截图序列不使用章节标记热键或 marks API；确认、runner 和 manifest 的
+坐标空间都应为 `virtual_screen`。
+每个计划点从第一个有效 PNG 提交锚定的 scheduled start 认领，随后只启动一个有限的
+FFmpeg 单帧进程；不要把截图序列理解成连续 worker，也不要并发追赶。完成的
+`series.json` 中，`captured_offset_ms` 是有效提交相对首帧锚点的偏移，`lateness_ms` 是
+不含本帧捕获/编码耗时的认领迟到，`capture_duration_ms` 是认领到有效 PNG 提交的单调
+时钟耗时。不要向用户承诺固定的桌面毫秒延迟。

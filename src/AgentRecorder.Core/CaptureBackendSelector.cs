@@ -42,6 +42,70 @@ public static class CaptureBackendSelector
         BuildPlan(cfg, DefaultDisplayProbe);
 
     /// <summary>
+    /// Builds the bounded, per-frame plan used by screenshot_series. This is
+    /// intentionally separate from the duration-oriented video selector: a
+    /// screenshot series never inherits a WGC/window-surface decision.
+    /// </summary>
+    public static CapturePlan BuildScreenshotSeriesPlan(CaptureConfig cfg)
+    {
+        if (cfg == null) throw new ArgumentNullException(nameof(cfg));
+        cfg.NormalizeAudioSource();
+        if (!IsKnownSourceKind(cfg.SourceKind))
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                $"Unsupported source type: '{cfg.SourceKind}'. Expected 'display', 'window', or 'region'.");
+        }
+
+        if (cfg.AudioRequested)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "Audio is not supported for screenshot_series; remove the audio request.");
+        }
+
+        if (cfg.Bounds.w <= 0 || cfg.Bounds.h <= 0)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "Screenshot-series bounds must have positive width and height.");
+        }
+
+        const string backend = "ffmpeg-single-frame";
+        string semantics = string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal)
+            ? "screen_rectangle"
+            : DetermineSemantics(cfg.SourceKind, backend);
+        var evidence = new CaptureBackendSelectionEvidence(
+            backend,
+            backend,
+            "screenshot_series_single_frame",
+            "not_run",
+            null,
+            false);
+
+        return new CapturePlan(
+            backend,
+            backend,
+            evidence,
+            semantics,
+            cfg.SourceKind,
+            cfg.SourceKind == "window" && cfg.WindowHandle != nint.Zero
+                ? $"window_{cfg.WindowHandle.ToInt64()}"
+                : null,
+            cfg.WindowHandle,
+            new CapturePlanBounds(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h),
+            cfg.SourceKind is "region" or "display" ? cfg.DisplayStableIdentity : null,
+            cfg.DisplayBounds.HasValue
+                ? new CapturePlanBounds(
+                    cfg.DisplayBounds.Value.x,
+                    cfg.DisplayBounds.Value.y,
+                    cfg.DisplayBounds.Value.w,
+                    cfg.DisplayBounds.Value.h)
+                : null,
+            cfg.SourceKind is "region" or "display" ? cfg.DisplayId : null,
+            cfg.DisplayIdentityStatus,
+            AudioCaptureSourceKind.None,
+            previewSemantics: semantics);
+    }
+
+    /// <summary>
     /// Builds a complete capture decision without constructing or starting a
     /// backend. The WGC availability probe is capability-only and does not read
     /// screen pixels.

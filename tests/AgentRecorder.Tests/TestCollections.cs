@@ -22,7 +22,7 @@ public sealed class NonParallelAgentRecorderDataDirCollection
 /// intended writer boundary. API/headless writers use their own global port
 /// collection, which is also a compatible DisableParallelization boundary.
 /// </summary>
-[CollectionDefinition("NonParallel-SystemQueryProviders")]
+[CollectionDefinition("NonParallel-SystemQueryProviders", DisableParallelization = true)]
 public sealed class NonParallelSystemQueryProvidersCollection
 {
 }

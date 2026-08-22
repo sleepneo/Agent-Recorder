@@ -563,6 +563,20 @@ public sealed class ApiServer
             throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body");
         }
 
+        // Normalize the shared mode/series contract before target resolution,
+        // audio enumeration, or the region-selection UI. Screenshot-series
+        // audio is rejected here, before any target side effect.
+        try
+        {
+            ConfigParser.RejectQuickScreenshotSeriesStopFields(body);
+            ConfigParser.NormalizeModeAndSeries(body);
+        }
+        catch (ApiException ex)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
+        }
+
         var targetNode = body["target"];
         if (targetNode == null)
         {
@@ -577,7 +591,21 @@ public sealed class ApiServer
             throw new ApiException(400, "INVALID_ARGUMENT", "target.type is required");
         }
 
+        // Validate the shared top-level countdown contract before any quick
+        // target resolution, audio enumeration, or region-selection UI.
+        int countdownSeconds;
+        try
+        {
+            countdownSeconds = ConfigParser.NormalizeCountdownSeconds(body);
+        }
+        catch (ApiException ex)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
+        }
+
         JsonObject cfg = BuildQuickRecordingConfig(body);
+        cfg["countdown_seconds"] = countdownSeconds;
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null;
 
         // Resolve audio intent before any target resolution so microphone failures
@@ -848,6 +876,18 @@ public sealed class ApiServer
         if (nestedNode != null)
             cfg["nested"] = nestedNode.DeepClone();
 
+        if (body["countdown_seconds"] != null)
+            cfg["countdown_seconds"] = body["countdown_seconds"]!.DeepClone();
+
+        if (body["mode"] != null)
+            cfg["mode"] = body["mode"]!.DeepClone();
+        if (body["interval_ms"] != null)
+            cfg["interval_ms"] = body["interval_ms"]!.DeepClone();
+        if (body["max_count"] != null)
+            cfg["max_count"] = body["max_count"]!.DeepClone();
+        if (body["max_duration_seconds"] != null)
+            cfg["max_duration_seconds"] = body["max_duration_seconds"]!.DeepClone();
+
         var stopConditionNode = body["stop_condition"];
         if (stopConditionNode != null)
         {
@@ -1003,6 +1043,7 @@ public sealed class ApiServer
             },
             recording = new
             {
+                modes = new[] { "video", ScreenshotSeriesConfig.ModeName },
                 sources = new[] { "display", "window", "region" },
                 audio = new[] { "microphone" },
                 audio_capabilities = new
@@ -1011,6 +1052,21 @@ public sealed class ApiServer
                     system_audio = new { supported = false, status = "not_implemented" }
                 },
                 containers = new[] { "mp4" },
+                screenshot_series = new
+                {
+                    supported = true,
+                    mode = ScreenshotSeriesConfig.ModeName,
+                    output_format = "png_sequence",
+                    audio_supported = false,
+                    interval_ms = new { min = ScreenshotSeriesConfig.MinIntervalMs, max = ScreenshotSeriesConfig.MaxIntervalMs },
+                    max_count = ScreenshotSeriesConfig.MaxFrameCount,
+                    max_duration_seconds = ScreenshotSeriesConfig.MaxDurationSecondsLimit,
+                    min_count = ScreenshotSeriesConfig.MinCount,
+                    min_duration_seconds = ScreenshotSeriesConfig.MinDurationSeconds,
+                    max_planned_frames = ScreenshotSeriesConfig.MaxFrameCount,
+                    targets = new[] { "primary_display", "active_window", "selected_region", "last_region" },
+                    capture_semantics = "one single-frame capture per anchored schedule point; no continuous video extraction"
+                },
                 codecs = new[] { "h264" },
                 fps = new[] { 15, 24, 30, 60 },
                 stop_conditions = new[] { "duration", "manual" },
@@ -1044,6 +1100,14 @@ public sealed class ApiServer
                 region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi,
                 quick_recording_endpoint = "/api/v1/recordings/quick",
                 quick_recording_supported = true,
+                countdown = new
+                {
+                    supported = true,
+                    min_seconds = ConfigParser.MinCountdownSeconds,
+                    max_seconds = ConfigParser.MaxCountdownSeconds,
+                    default_seconds = ConfigParser.DefaultCountdownSeconds,
+                    capture_during_countdown = false
+                },
                 stop_controls = new
                 {
                     floating_button = _tray.SupportsFloatingStopButton,
@@ -1056,7 +1120,7 @@ public sealed class ApiServer
                         behavior = "stop_all_active_recordings"
                     }
                 },
-                quick_recipes = new[]
+                quick_recipes = new object[]
                 {
                     new
                     {
@@ -1065,7 +1129,7 @@ public sealed class ApiServer
                         description = "Record the primary display with local confirmation.",
                         endpoint = "/api/v1/recordings/quick",
                         method = "POST",
-                        request_template = new { target = new { type = "primary_display" }, duration_seconds = 60 },
+                        request_template = new { target = new { type = "primary_display" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
                         available = hasPrimaryDisplay,
                         unavailable_reason = hasPrimaryDisplay ? null : "no_primary_display"
                     },
@@ -1076,7 +1140,7 @@ public sealed class ApiServer
                         description = "Record the current active window with local confirmation.",
                         endpoint = "/api/v1/recordings/quick",
                         method = "POST",
-                        request_template = new { target = new { type = "active_window" }, duration_seconds = 60 },
+                        request_template = new { target = new { type = "active_window" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
                         available = hasActiveWindow,
                         unavailable_reason = hasActiveWindow ? null : "no_active_window"
                     },
@@ -1087,7 +1151,7 @@ public sealed class ApiServer
                         description = "Ask the local user to select a region, then create a recording with local confirmation.",
                         endpoint = "/api/v1/recordings/quick",
                         method = "POST",
-                        request_template = new { target = new { type = "selected_region" }, duration_seconds = 60 },
+                        request_template = new { target = new { type = "selected_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
                         available = supportsRegionSelection,
                         unavailable_reason = supportsRegionSelection ? null : "headless_host"
                     },
@@ -1098,9 +1162,28 @@ public sealed class ApiServer
                         description = "Record the last selected region with local confirmation.",
                         endpoint = "/api/v1/recordings/quick",
                         method = "POST",
-                        request_template = new { target = new { type = "last_region" }, duration_seconds = 60 },
+                        request_template = new { target = new { type = "last_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
                         available = hasLastRegion,
                         unavailable_reason = hasLastRegion ? null : "no_last_selected_region"
+                    },
+                    new
+                    {
+                        name = "screenshot_selected_region",
+                        target_type = "selected_region",
+                        mode = ScreenshotSeriesConfig.ModeName,
+                        description = "Ask the local user to select a region, then capture a bounded PNG screenshot series with local confirmation.",
+                        endpoint = "/api/v1/recordings/quick",
+                        method = "POST",
+                        request_template = new
+                        {
+                            target = new { type = "selected_region" },
+                            mode = ScreenshotSeriesConfig.ModeName,
+                            interval_ms = 5000,
+                            max_count = 12,
+                            countdown_seconds = ConfigParser.DefaultCountdownSeconds
+                        },
+                        available = supportsRegionSelection,
+                        unavailable_reason = supportsRegionSelection ? null : "headless_host"
                     }
                 }
             },

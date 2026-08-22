@@ -1199,3 +1199,46 @@ semantic change returns a terminal `capture_semantics_changed` failure before
 countdown, authorization, helper/FFmpeg start, recording controls, or output
 creation. The caller must issue a new request. WGC remains experimental and
 default-off.
+
+## Configurable pre-capture countdown
+
+`POST /api/v1/recordings` and `POST /api/v1/recordings/quick` accept the same
+optional top-level `countdown_seconds` field. It defaults to `3` and accepts
+only integer values from `0` through `10`. Negative values, values above `10`,
+fractions, strings, booleans, `null`, objects, and arrays return
+`400 INVALID_ARGUMENT` before quick target/source resolution or region-selection
+UI. A value of `0` skips visible digits and countdown audit events, but does
+not skip confirmation, preparation, preflight, capture authorization, or
+credible-first-frame gating. The normalized value is returned in the
+confirmation summary and recording status `config.countdown_seconds` field.
+`/capabilities.interaction.countdown` reports the range, default, and
+`capture_during_countdown=false`; quick recipe templates include the default.
+
+## Bounded screenshot series
+
+The raw and quick recording endpoints also accept `mode: "screenshot_series"`.
+The canonical fields are `interval_ms` (`1000..3600000`) and exactly one of
+`max_count` (`1..300`) or `max_duration_seconds` (`1..86400`). Duration mode
+plans `ceil(max_duration_seconds * 1000 / interval_ms)` captures and rejects a
+plan above 300 frames. Audio is not part of this mode and is rejected before
+source or device resolution with `400 INVALID_ARGUMENT`. Raw `stop_condition`, or
+quick `duration_seconds`/`stop_condition`, is also rejected there with a stable
+field and suggested action; use `max_duration_seconds` for a series duration.
+
+The public response adds `mode`, `series`, and a PNG-sequence `output`. A series
+uses one single-frame FFmpeg process per anchored schedule point. The final
+directory contains numbered PNG files and `series.json`; normal completion and
+partial cancellation with frames publish the directory, while zero-frame
+cancellation or failure leaves no final directory. Duration starts at the first
+valid PNG atomic commit (`t=0`); reaching the deadline before the next start claim
+is normal `completed` and may leave planned and captured counts different. Chapter
+marks and the MP4 bundle are not applicable. Bounds are explicitly
+`virtual_screen` and the approved plan, runner request, confirmation summary, and
+manifest carry the same coordinate-space value.
+Each scheduled point claims its start serially and launches one bounded FFmpeg
+single-frame process; the worker never launches parallel catch-up frames. The
+first valid PNG atomic submission is the `t=0` anchor. In `series.json`,
+`captured_offset_ms` is the valid-submit offset, `lateness_ms` is non-negative
+claim lateness excluding the frame's own capture/encode time, and
+`capture_duration_ms` is the monotonic claim-to-valid-submit duration. These
+are truthful diagnostics, not a fixed desktop-latency or real-time guarantee.

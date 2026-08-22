@@ -151,3 +151,36 @@ fingerprint. After approval, the engine rereads active target metadata and verif
 target availability, stable identity, display bounds, and region containment before
 countdown or helper authorization. Hotplug, target replacement, display movement,
 or size changes therefore fail closed without creating capture output.
+
+### Configurable countdown safety
+
+The pre-capture countdown is per recording: `countdown_seconds` is an integer
+from `0` to `10` and defaults to `3`. During a positive countdown there is no
+screen capture, REC state, elapsed time, chapter-mark timeline, or global mark
+hotkey. The overlay is cleared before authorization/backend start, and the
+public start time is anchored to credible first-frame evidence. A zero value
+removes only the visible countdown phase; it does not bypass confirmation,
+preparation, preflight, authorization, or first-frame safety gates.
+
+Positive visible countdowns may emit `recording.countdown_started`,
+`recording.countdown_completed`, and at most one `recording.countdown_cancelled`.
+These events carry normalized seconds and stable trigger/backend fields, not
+output paths, titles, or raw request fields.
+
+## Screenshot-series safety boundary
+
+Screenshot series is a bounded, consent-gated PNG workflow, not a continuous
+video or a post-hoc video extraction mode. No frame runner is created or called
+before local approval; positive countdowns call it zero times, and a zero-second
+countdown still waits for the first valid PNG before entering `capturing`.
+Each recording owns one sequential worker and one cancellable frame process at a
+time. Stop/Dispose wins the per-job gate, cancels the process, and prevents a
+late frame from being committed.
+
+Frames are written to recording-specific data-dir staging, validated for PNG
+signature, non-zero size, and expected dimensions, then atomically renamed.
+Manifest bytes are UTF-8 without BOM and are atomically staged before the final
+directory rename. Audit frame events include only recording id, index, offsets,
+lateness, dimensions, and size; they never include pixels, paths, titles, or
+hashes. Audio requests, marks, and overwrite publication are fail-closed for
+this mode.

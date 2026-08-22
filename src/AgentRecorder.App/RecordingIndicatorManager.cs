@@ -302,12 +302,14 @@ internal sealed class RecordingIndicatorManager
         var dpiInfo = forcedDpi ?? _dpiResolver.Resolve(targetArea);
 
         using var labelFont = new Font("Segoe UI", 9, FontStyle.Bold);
-        var labelSize = RecordingIndicatorForm.MeasureLabelSize(
-            recording.NestedRole,
-            recording.DurationSeconds,
-            labelFont,
-            new Padding(4, 2, 4, 2),
-            dpiInfo);
+        var labelSize = recording.IsScreenshotSeries
+            ? RecordingIndicatorForm.MeasureSeriesLabelSize(labelFont, new Padding(4, 2, 4, 2), dpiInfo)
+            : RecordingIndicatorForm.MeasureLabelSize(
+                recording.NestedRole,
+                recording.DurationSeconds,
+                labelFont,
+                new Padding(4, 2, 4, 2),
+                dpiInfo);
 
         using var stopControlFont = new Font("Segoe UI", 8, FontStyle.Bold);
         var stopControlTextProvider = _textProviderFactory();
@@ -423,7 +425,19 @@ internal sealed class RecordingIndicatorManager
         if (!_countdownOverlays.TryGetValue(recording.Id, out var overlay))
         {
             var bounds = recording.Config.Bounds;
-            var overlayBounds = ComputeCountdownBounds(bounds.x, bounds.y, bounds.w, bounds.h);
+            var overlayBounds = ComputeCountdownBounds(
+                new Rectangle(bounds.x, bounds.y, bounds.w, bounds.h),
+                SystemInformation.VirtualScreen);
+            if (overlayBounds.Width <= 0 || overlayBounds.Height <= 0)
+            {
+                _audit.Log("recording_countdown_overlay.bounds_error", new
+                {
+                    recording_id = recording.Id,
+                    target_bounds = new { bounds.x, bounds.y, bounds.w, bounds.h },
+                    virtual_screen = SystemInformation.VirtualScreen
+                });
+                return;
+            }
             overlay = new CountdownOverlayForm(overlayBounds);
             _countdownOverlays[recording.Id] = overlay;
             overlay.SetNumber(remainingSeconds);
@@ -477,6 +491,13 @@ internal sealed class RecordingIndicatorManager
         {
             indicator.SetPhase(RecordingIndicatorPhase.Preparing);
         }
+    }
+
+    internal void ShowSeriesProgress(Recording recording, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    {
+        EnsureIndicator(recording, null, null);
+        if (_indicators.TryGetValue(recording.Id, out var indicator))
+            indicator.SetSeriesProgress(captured, planned);
     }
 
     /// <summary>
@@ -655,6 +676,9 @@ internal sealed class RecordingIndicatorManager
     {
         _indicators[recording.Id] = indicator;
 
+        if (recording.IsScreenshotSeries)
+            indicator.SetSeriesProgress(0, recording.ScreenshotSeries?.PlannedFrameCount ?? 0);
+
         _audit.Log("recording_indicator.shown", new
         {
             recording_id = recording.Id,
@@ -810,40 +834,25 @@ internal sealed class RecordingIndicatorManager
         ShowFor(recording, parentRecording, parentFallbackReason);
     }
 
-    private static Rectangle ComputeCountdownBounds(int x, int y, int w, int h)
+    /// <summary>
+    /// Testable geometry seam for the countdown overlay. The result is always
+    /// contained by both the approved target and the virtual screen; unlike
+    /// the indicator border, the countdown overlay is never enlarged beyond
+    /// the approved capture rectangle.
+    /// </summary>
+    internal static Rectangle ComputeCountdownBoundsForTests(Rectangle targetBounds, Rectangle virtualScreen)
+        => ComputeCountdownBounds(targetBounds, virtualScreen);
+
+    private static Rectangle ComputeCountdownBounds(Rectangle targetBounds, Rectangle virtualScreen)
     {
-        const int MinSize = 160;
-        int size = Math.Max(MinSize, Math.Min(w, h));
-        if (size < MinSize)
-            size = MinSize;
+        var visibleTarget = Rectangle.Intersect(targetBounds, virtualScreen);
+        if (visibleTarget.Width <= 0 || visibleTarget.Height <= 0)
+            return Rectangle.Empty;
 
-        int centerX = x + w / 2;
-        int centerY = y + h / 2;
-
-        // Clamp to virtual screen.
-        var vs = SystemInformation.VirtualScreen;
-        int left = centerX - size / 2;
-        int top = centerY - size / 2;
-        int right = left + size;
-        int bottom = top + size;
-
-        if (left < vs.X) left = vs.X;
-        if (top < vs.Y) top = vs.Y;
-        if (right > vs.X + vs.Width) right = vs.X + vs.Width;
-        if (bottom > vs.Y + vs.Height) bottom = vs.Y + vs.Height;
-
-        if (right - left < MinSize)
-        {
-            left = vs.X;
-            right = Math.Min(vs.X + vs.Width, left + MinSize);
-        }
-        if (bottom - top < MinSize)
-        {
-            top = vs.Y;
-            bottom = Math.Min(vs.Y + vs.Height, top + MinSize);
-        }
-
-        return new Rectangle(left, top, right - left, bottom - top);
+        int size = Math.Min(visibleTarget.Width, visibleTarget.Height);
+        int left = visibleTarget.X + (visibleTarget.Width - size) / 2;
+        int top = visibleTarget.Y + (visibleTarget.Height - size) / 2;
+        return new Rectangle(left, top, size, size);
     }
 
     /// <summary>

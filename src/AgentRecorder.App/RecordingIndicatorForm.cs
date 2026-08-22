@@ -449,6 +449,7 @@ internal enum RecordingIndicatorPhase
 {
     Preparing,
     Countdown,
+    Series,
     Recording,
     Finalizing
 }
@@ -595,9 +596,12 @@ internal sealed class RecordingIndicatorForm : Form
 
         var font = new Font("Segoe UI", 9, FontStyle.Bold);
         var padding = new Padding(4, 2, 4, 2);
-        var size = _presentation.Mode == CaptureVisibilityMode.ParentVisible
+        var plannedLabelSize = _presentation.LabelBounds.Width > 0 && _presentation.LabelBounds.Height > 0
             ? _presentation.LabelBounds.Size
             : MeasureLabelSize(_nestedRole, _durationSeconds, font, padding);
+        var size = _presentation.Mode == CaptureVisibilityMode.ParentVisible
+            ? _presentation.LabelBounds.Size
+            : plannedLabelSize;
 
         _label = new Label
         {
@@ -712,6 +716,21 @@ internal sealed class RecordingIndicatorForm : Form
             (int)Math.Ceiling(screenSize.Height * scale));
     }
 
+    internal static Size MeasureSeriesLabelSize(Font font, Padding padding, DisplayDpiInfo dpiInfo)
+    {
+        int effectiveDpi = Math.Max(dpiInfo.DpiX, dpiInfo.DpiY);
+        if (effectiveDpi <= 0) effectiveDpi = 96;
+        var zh = TextRenderer.MeasureText("截图 300/300", font, Size.Empty, TextFormatFlags.SingleLine);
+        var en = TextRenderer.MeasureText("SHOT 300/300", font, Size.Empty, TextFormatFlags.SingleLine);
+        var screenSize = new Size(
+            Math.Max(zh.Width, en.Width) + padding.Horizontal,
+            Math.Max(zh.Height, en.Height) + padding.Vertical);
+        int screenDpi = GetSystemDpi();
+        if (screenDpi <= 0) screenDpi = 96;
+        float scale = effectiveDpi / (float)screenDpi;
+        return new Size((int)Math.Ceiling(screenSize.Width * scale), (int)Math.Ceiling(screenSize.Height * scale));
+    }
+
     private static int GetSystemDpi()
     {
         using var temp = new Control();
@@ -735,6 +754,7 @@ internal sealed class RecordingIndicatorForm : Form
         {
             RecordingIndicatorPhase.Preparing => Color.FromArgb(255, 255, 165, 0), // amber
             RecordingIndicatorPhase.Countdown => Color.FromArgb(255, 255, 165, 0), // amber
+            RecordingIndicatorPhase.Series => Color.FromArgb(255, 255, 0, 0), // red
             RecordingIndicatorPhase.Finalizing => Color.FromArgb(255, 128, 128, 128), // gray
             _ => Color.Red
         };
@@ -1075,6 +1095,10 @@ internal sealed class RecordingIndicatorForm : Form
                     : textProvider.Get("Indicator_Preparing");
                 _timer.Stop();
                 break;
+            case RecordingIndicatorPhase.Series:
+                _label.BackColor = Color.FromArgb(180, 255, 0, 0);
+                _timer.Stop();
+                break;
             case RecordingIndicatorPhase.Recording:
             default:
                 _label.BackColor = Color.FromArgb(180, 255, 0, 0); // red
@@ -1083,6 +1107,17 @@ internal sealed class RecordingIndicatorForm : Form
                 break;
         }
 
+        Invalidate();
+    }
+
+    internal void SetSeriesProgress(int captured, int planned)
+    {
+        ClearTransientFeedback();
+        _phase = RecordingIndicatorPhase.Series;
+        _countdownValue = null;
+        _timer.Stop();
+        _label.BackColor = Color.FromArgb(180, 255, 0, 0);
+        _label.Text = _textProviderFactory().Format("Indicator_ScreenshotSeries", captured, planned);
         Invalidate();
     }
 

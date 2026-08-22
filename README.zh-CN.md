@@ -72,7 +72,7 @@ POST /api/v1/recordings/quick
 | 窗口录制 | 已实现 | 默认解析窗口可见边界并通过 `ffmpeg-window-region` 连续录制；符合条件的短时无麦克风请求可通过本地实验开关使用 WGC continuous；确认信息会区分窗口表面与屏幕矩形，并在批准后、捕获前重新校验语义 |
 | 选区录制 | 已实现 | 支持拖拽、精确坐标、尺寸预设、边缘/窗口吸附、点击窗口选区和双屏可靠置顶 |
 | 嵌套录制 | 已实现 | 外层录制过程中可以启动内层录制 |
-| 本地确认 | 已实现 | 每次录制均需人类用户确认；麦克风与延迟授权 WGC 路径在批准后显示不采集画面的 3-2-1 倒计时 |
+| 本地确认 | 已实现 | 每次录制均需人类用户确认；麦克风、普通无音频 FFmpeg 与延迟授权 WGC 路径在批准后显示不采集画面的可配置 0-10 秒倒计时 |
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示红色边框和计时标签，支持 outer/inner |
 | 本地停止控制 | 已实现 | 每条录制有独立悬浮停止按钮；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |
@@ -90,6 +90,38 @@ POST /api/v1/recordings/quick
 | 系统声音 | 受控预览 | 隔离 WASAPI loopback、音视频分离采集、AAC 合流、确认 UI、倒计时和连续性诊断已接通；选区产品路径通过 12 秒真实设备音画验收。默认仍关闭，仅在 `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true` 时可用，因此本版公开能力契约继续报告未开放 |
 | WGC 连续录制 | 实验性实现 | 已支持符合条件的 display/window/region 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败、稳定显示器身份、topology 复核、GPU 区域裁剪和 FFmpeg 自动回退；display 稳定性、遮挡窗口及 10 秒选区录制已通过真实桌面验收；默认关闭，未作为公共 API 能力开放 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
+
+### 每条录制的开始前倒计时
+
+raw API 与 quick API 都接受顶层 `countdown_seconds`。省略时默认为 `3`，只接受
+`0..10` 的 JSON 整数；负数、超过 10、浮点数、字符串、布尔值、`null`、对象和数组
+均返回 `400 INVALID_ARGUMENT`。设为 `0` 时仍保留确认、准备、预检和可信首帧边界，
+但不显示倒计时。规范化后的值会出现在确认摘要以及录制状态的 `config` 中。
+
+### 有界截图序列
+
+raw 与 quick 请求可使用 `mode: "screenshot_series"`，要求 `interval_ms` 为
+`1000..3600000` 的整数，并且只能提供一个有限边界：`max_count`（`1..300`）或
+`max_duration_seconds`（`1..86400`）。按时长请求计划
+`ceil(max_duration_seconds * 1000 / interval_ms)` 个时间点，超过 300 张会在目标、
+设备或选区解析前拒绝。截图序列不支持音频；raw 请求若带 `stop_condition`，quick
+请求若带 `duration_seconds` 或 `stop_condition`，均在目标/音频解析前返回
+`400 INVALID_ARGUMENT`，并建议删除冲突字段或改用 `max_duration_seconds`。
+
+每个时间点只执行一次单帧 PNG 捕获。通过本地确认和启动前检查/倒计时后，图片先写入
+data-dir 下 recording-specific 的 `temp` staging，完成签名、非零大小和尺寸校验后
+原子命名；最终目录包含 `frame-0001.png` 和 `series.json`。完成或有帧取消时，状态通过
+`mode`、`series` 和 `output` 返回；章节标记和 MP4 bundle 对截图序列不适用。指示器显示
+`截图 x/y`，不会显示误导性的 `REC`。时长边界从第一张有效 PNG 原子提交时开始计时，
+该帧为 `t=0`；到达或超过 deadline 时不会再启动下一 runner，正常完成但
+`planned_frame_count` 可能大于 `captured_frame_count`。所有截图序列 bounds 明确使用
+`virtual_screen`，确认摘要、runner 请求和 `series.json` 使用同一坐标空间。
+每个计划点先认领 scheduled start，再启动一个有限的 FFmpeg 单帧进程；gdigrab 使用
+有限的低延迟输入采样率，同时保留 `-frames:v 1`，不会变成连续 worker。认领始终串行，
+不会为了追赶计划点并发启动多个 frame。`series.json` 中第一张有效 PNG 提交是时间锚点
+（`t=0`）；`captured_offset_ms` 是有效提交偏移，`lateness_ms` 是不包含本帧捕获/编码耗时
+的非负认领迟到，`capture_duration_ms` 是从认领到有效 PNG 提交的单调时钟耗时。这些字段
+用于诚实描述时序，不承诺固定桌面毫秒延迟或实时保证。
 
 ## 项目结构
 

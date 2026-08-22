@@ -626,6 +626,19 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         });
     }
 
+    public void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    {
+        var recording = rec as Recording;
+        if (recording == null) return;
+        RunOnUi(() =>
+        {
+            _activeRecordings[recording.Id] = recording;
+            _indicatorManager.ShowSeriesProgress(recording, captured, planned, nextCaptureDueAtUtc);
+            UpdateRecordingUi();
+            UpdateChapterMarkHotkeyRegistration();
+        });
+    }
+
     public void SetFinalizing(object rec)
     {
         var recording = rec as Recording;
@@ -823,7 +836,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     {
         lock (recording)
         {
-            return recording.State == RecState.recording;
+            return recording.State == RecState.recording && !recording.IsScreenshotSeries;
         }
     }
 

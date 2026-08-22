@@ -68,6 +68,11 @@ public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifie
         _audit.Log("recording.headless_error", new { error = text });
     }
 
+    public void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    {
+        _audit.Log("recording.headless_series_progress", new { captured, planned });
+    }
+
     public void ShowRecordingFailure(string recordingId, string reasonCode)
     {
         _audit.Log("recording_failure_notification.requested", new

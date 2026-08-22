@@ -21,8 +21,23 @@ namespace AgentRecorder.Tests;
 /// Focused local Chapter Marks tests. All Win32 registration is substituted and all
 /// tray tests run on an STA without creating a real global registration.
 /// </summary>
-public sealed class ChapterMarksHotkeyTests
+[Collection("NonParallel-AgentRecorderDataDir")]
+public sealed class ChapterMarksHotkeyTests : IDisposable
 {
+    private readonly TempDirectory _uiDataDir = new();
+
+    public ChapterMarksHotkeyTests()
+    {
+        DataDirResolver.SetOverride(_uiDataDir.Path);
+        UiLanguageStore.Save(UiLanguage.ZhCn);
+    }
+
+    public void Dispose()
+    {
+        DataDirResolver.ClearOverride();
+        _uiDataDir.Dispose();
+    }
+
     private static void RunOnSta(Action action)
     {
         Exception? error = null;
@@ -102,6 +117,19 @@ public sealed class ChapterMarksHotkeyTests
                 OutputPath = Path.Combine(Path.GetTempPath(), $"chapter-hotkey-{Guid.NewGuid():N}.mp4")
             }
         };
+    }
+
+    private static Recording MakeScreenshotSeriesRecording(RecState state, long anchor)
+    {
+        var recording = MakeRecording(state, anchor);
+        recording.Config.Mode = ScreenshotSeriesConfig.ModeName;
+        recording.Config.ScreenshotSeries = new ScreenshotSeriesConfig
+        {
+            IntervalMs = 1000,
+            MaxCount = 1,
+            PlannedFrameCount = 1
+        };
+        return recording;
     }
 
     private static (TrayContext context, RecordingEngine engine, CaptureAuditLogger audit, FakeGlobalStopHotkey markHotkey, FeedbackSpy feedback) CreateContext(
@@ -219,6 +247,48 @@ public sealed class ChapterMarksHotkeyTests
             context.SetFinalizing(recording);
             Assert.Equal(1, setup.markHotkey.UnregisterCallCount);
             Assert.False(context.IsChapterMarksHotkeyRegistered);
+        });
+    }
+
+    [Fact]
+    public void ScreenshotSeriesOnly_DoesNotRegisterChapterMarkHotkeyOrCreateMarks()
+    {
+        RunOnSta(() =>
+        {
+            var setup = CreateContext();
+            using var context = setup.context;
+            var series = MakeScreenshotSeriesRecording(RecState.recording, 0);
+            Add(setup.engine, series);
+
+            context.SetRecording(series);
+            Assert.Equal(0, setup.markHotkey.RegisterCallCount);
+            Assert.False(context.IsChapterMarksHotkeyRegistered);
+
+            setup.markHotkey.SimulatePressed();
+            Assert.Empty(series.SnapshotMarks());
+            Assert.Empty(setup.feedback.Calls);
+        });
+    }
+
+    [Fact]
+    public void VideoAndScreenshotSeries_HotkeyMarksOnlyVideoRecording()
+    {
+        RunOnSta(() =>
+        {
+            var setup = CreateContext();
+            using var context = setup.context;
+            var video = MakeRecording(RecState.recording, 0);
+            var series = MakeScreenshotSeriesRecording(RecState.recording, 0);
+            Add(setup.engine, video, series);
+
+            context.SetRecording(video);
+            context.SetRecording(series);
+            setup.markHotkey.SimulatePressed();
+
+            Assert.Single(video.SnapshotMarks());
+            Assert.Empty(series.SnapshotMarks());
+            Assert.Single(setup.feedback.Calls);
+            Assert.Equal(1, setup.markHotkey.RegisterCallCount);
         });
     }
 

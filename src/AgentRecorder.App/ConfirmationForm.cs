@@ -781,14 +781,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 11,
+            RowCount = 12,
             AutoSize = false
         };
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        for (int i = 0; i < 11; i++)
-            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 11f));
+        for (int i = 0; i < 12; i++)
+            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 12f));
 
         int row = 0;
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Source"), GetString(s, "source"));
@@ -797,6 +797,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             GetCaptureSemanticsDisplay(s));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), GetString(s, "source_title"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), GetString(s, "duration"));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Countdown"), GetCountdownDisplay(s));
         var rawAudio = GetString(s, "audio");
         var audioSourceKind = GetString(s, "audio_source_kind");
         string audioLabel;
@@ -828,6 +829,19 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), GetString(s, "confirmation_id"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Timeout"), GetString(s, "timeout_seconds"));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ExpiresAt"), GetString(s, "expires_at"));
+
+        if (string.Equals(GetString(s, "mode"), "screenshot_series", StringComparison.Ordinal))
+        {
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Mode"), _text.Get("Confirmation_Value_ScreenshotSeries"));
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Interval"), GetString(s, "series_interval_ms") + " ms");
+            var bound = GetString(s, "series_max_count");
+            if (bound == "N/A" || string.IsNullOrWhiteSpace(bound) || bound == "0")
+                bound = GetString(s, "series_max_duration_seconds") + " s";
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Bound"), bound);
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_PlannedFrames"), GetString(s, "series_planned_frame_count"));
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_OutputKind"), _text.Get("Confirmation_Value_PngSequence"));
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_OutputDirectory"), GetString(s, "output"));
+        }
 
         _infoPanel.Controls.Add(_infoTable);
         contentTable.Controls.Add(_infoPanel, 0, 0);
@@ -1065,7 +1079,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             var infoRowSample = TextRenderer.MeasureText("Xy", new Font("Segoe UI", 9));
             int rowMinHeight = infoRowSample.Height + 4;
-            int infoPreferredHeight = (rowMinHeight * 11) + _infoPanel.Padding.Vertical;
+            int infoPreferredHeight = (rowMinHeight * 12) + _infoPanel.Padding.Vertical;
 
             int previewLabelHeight = _previewBoundsLabel.PreferredSize.Height + _previewBoundsLabel.Margin.Vertical;
             int previewPreferredHeight = Math.Max(_previewPanel.MinimumSize.Height, 260) + previewLabelHeight;
@@ -1228,6 +1242,18 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     {
         value = GetString(node, key);
         return value != "N/A" && !string.IsNullOrEmpty(value);
+    }
+
+    private string GetCountdownDisplay(JsonNode summary)
+    {
+        var raw = GetString(summary, "countdown_seconds");
+        if (!int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+            return _text.Get("Confirmation_Value_NA");
+
+        return seconds <= 0
+            ? _text.Get("Confirmation_Info_Countdown_Off")
+            : _text.Format("Confirmation_Info_Countdown_Seconds", seconds);
     }
 
     private string GetInitialOutputDirectory(string? defaultOutputDirectory)

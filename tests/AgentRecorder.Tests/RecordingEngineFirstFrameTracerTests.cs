@@ -110,7 +110,6 @@ public class RecordingEngineFirstFrameTracerTests
             Engine.SetTray(new NoOpTray());
 
             TraceId = traceId;
-            Tracer.IntentAccepted(traceId, "/recordings");
 
             Recording = new Recording
             {

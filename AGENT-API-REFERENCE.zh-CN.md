@@ -1659,6 +1659,59 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 使用 `screen_rectangle`。30 秒等不符合 WGC 实验条件的请求会在确认前显示
 `screen_rectangle`，不会先承诺窗口表面语义。
 
+### 每条录制的开始前倒计时
+
+两个创建接口都接受同一个顶层字段：
+
+```json
+{ "target": { "type": "primary_display" }, "countdown_seconds": 10 }
+```
+
+省略时为 `3`；只接受 `0..10` 的整数。非法类型或越界值统一返回
+`400 INVALID_ARGUMENT`，quick API 会在主屏、活动窗口、选区和上次选区解析之前完成
+校验。`0` 不显示数字、不写可见倒计时事件，但仍执行确认、准备、预检、捕获授权和
+可信首帧转换。确认摘要会显示 `3 秒` 或 `关闭`，英文 UI 显示 `3 seconds` 或 `Off`；
+录制状态通过 `config.countdown_seconds` 返回规范化值。
+
+能力发现：`interaction.countdown` 包含 `supported=true`、`min_seconds=0`、
+`max_seconds=10`、`default_seconds=3` 和 `capture_during_countdown=false`；四个
+quick recipe 的 `request_template` 也包含默认 `countdown_seconds`。
+
 用户批准后会重新执行不采集像素的计划校验。若窗口目标身份或窗口语义发生变化，
 请求以 `capture_semantics_changed` 失败，并在倒计时、授权、helper/FFmpeg 启动、
 REC/停止 UI 和输出文件创建之前终止。请重新创建请求；HTTP 不能批准或替换该确认。
+
+## 有界截图序列 API
+
+截图序列沿用 `POST /api/v1/recordings` 和 `POST /api/v1/recordings/quick`，请求体增加：
+
+```json
+{
+  "mode": "screenshot_series",
+  "interval_ms": 5000,
+  "max_count": 12,
+  "target": { "type": "selected_region" }
+}
+```
+
+`interval_ms` 必须是 `1000..3600000` 的整数；`max_count` 和
+`max_duration_seconds` 必须恰好提供一个。按时长计划数为
+`ceil(max_duration_seconds * 1000 / interval_ms)`，超过 300 张返回
+`400 INVALID_ARGUMENT`。截图序列不支持音频，任何音频请求会在设备、显示器、窗口
+或选区解析前返回 `400 INVALID_ARGUMENT`。raw 请求带 `stop_condition`，或 quick 请求
+带 `duration_seconds`/`stop_condition`，同样返回 `400 INVALID_ARGUMENT`，详情包含冲突
+字段和建议动作；时长边界请使用 `max_duration_seconds`。
+
+确认摘要会显示模式、间隔、有限边界、计划数量和 PNG 输出目录。批准后状态依次可为
+`preparing`、`countdown`、`capturing`、`finalizing`、`completed`、`cancelled` 或
+`failed`；响应中的 `output` 是目录和 `series.json`，`series` 包含计划/已捕获数量、
+下一张时间和错误码。最终 `series.json` 为 UTF-8 无 BOM、snake_case、schema version 1，
+帧文件名为 `frame-0001.png` 形式。截图序列不支持 marks，不能把它描述成 MP4。
+时长从第一张有效 PNG 原子提交时开始计时（该帧为 `t=0`）；deadline 到达或超过时，
+不会再启动下一 runner，正常完成但计划数可能大于实际数。截图 bounds、确认摘要、
+runner 请求和 manifest 统一使用 `virtual_screen` 坐标空间。
+每个计划点在 scheduled start 处串行认领后启动一个有限的 FFmpeg 单帧进程；不会并发
+追赶。`series.json` 的第一张有效 PNG 提交是 `t=0` 锚点：`captured_offset_ms` 是有效
+提交偏移，`lateness_ms` 是不含本帧捕获/编码耗时的非负认领迟到，
+`capture_duration_ms` 是认领到有效 PNG 提交的单调时钟耗时。此诊断字段不构成固定桌面
+毫秒延迟或实时保证。

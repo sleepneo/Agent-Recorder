@@ -67,7 +67,8 @@ Agents should use the paths returned by `ensure-running` or
   multi-monitor desktops.
 - Mandatory local user confirmation before recording starts, with target preview,
   an optional local save-directory choice, and a no-capture 3-2-1 countdown on
-  microphone and deferred-start WGC paths.
+  microphone, ordinary no-audio FFmpeg, and deferred-start WGC paths. The
+  countdown is configurable per recording from 0 to 10 seconds.
 - Before-confirmation and before-start preflight checks for output paths, free
   space, capture bounds, encoders, and source availability.
 - A click-through red recording border and timer around the captured region.
@@ -124,6 +125,41 @@ Agents should use the paths returned by `ensure-running` or
 - Agent API reference: `AGENT-API-REFERENCE.zh-CN.md`
 - Developer API reference: `docs/api.md`
 - Security model: `docs/safety.md`
+
+### Per-recording pre-capture countdown
+
+Both raw and quick recording requests accept the optional top-level
+`countdown_seconds` field. It defaults to `3`, accepts integer values from `0`
+through `10`, and rejects other JSON types or out-of-range values with
+`400 INVALID_ARGUMENT`. `0` keeps preparation, confirmation, preflight, and
+first-frame safety boundaries but skips the visible countdown. The normalized
+value appears in the confirmation summary and recording status/configuration.
+
+### Bounded screenshot series
+
+Raw and quick recording requests can set `mode: "screenshot_series"` with an
+integer `interval_ms` from `1000` to `3600000` and exactly one finite bound:
+`max_count` (`1..300`) or `max_duration_seconds` (`1..86400`). Duration plans
+use `ceil(duration_seconds * 1000 / interval_ms)` points and are rejected when
+the plan exceeds 300 frames. Audio is not supported and is rejected before
+target or device resolution.
+
+Each point runs one single-frame PNG capture. After local confirmation and the
+normal preflight/countdown, frames are staged under the data directory's
+recording-specific `temp` area, validated, atomically named, and published as a
+directory containing `frame-0001.png` and `series.json`. A completed or partial
+cancelled series is reported through `mode`, `series`, and `output`; marks and
+the MP4 bundle are not applicable. The indicator uses `SHOT x/y` (or Chinese
+`截图 x/y`) rather than `REC`. Each point claims its scheduled start before
+launching one finite FFmpeg process; the input cadence is a bounded low-latency
+gdigrab setting and `-frames:v 1` still limits the process to one PNG. Claims
+are serialized, so the scheduler does not launch parallel catch-up frames. The
+first valid PNG submission is the timeline anchor (`t=0`). In `series.json`,
+`captured_offset_ms` is the valid-submit offset, `lateness_ms` is non-negative
+claim lateness excluding the frame's own capture/encode time, and
+`capture_duration_ms` is the monotonic claim-to-valid-submit duration. These
+fields describe timing truthfully; they are not a fixed desktop latency or
+real-time guarantee.
 
 ## Project Layout
 

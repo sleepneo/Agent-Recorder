@@ -68,6 +68,12 @@ public sealed class Recording
     public string? AudioContinuityStatus { get; set; }
 
     public int? DurationSeconds { get; set; }
+    /// <summary>
+    /// Normalized countdown requested for this recording. Kept on the
+    /// recording as well as <see cref="Config"/> so status and lifecycle
+    /// events cannot accidentally fall back to a process-wide default.
+    /// </summary>
+    public int CountdownSeconds { get; set; } = CaptureConfig.DefaultCountdownSeconds;
     public ICaptureBackend? Backend { get; set; }
     public string? Error { get; set; }
     public CaptureConfig Config { get; set; } = new();
@@ -76,6 +82,9 @@ public sealed class Recording
     public string? StderrExcerpt;
     public int ExitCode = -1;
     public string BackendType { get; set; } = "ffmpeg";
+    public string Mode => Config.IsScreenshotSeries ? ScreenshotSeriesConfig.ModeName : "video";
+    public ScreenshotSeriesRuntime? ScreenshotSeries { get; internal set; }
+    public bool IsScreenshotSeries => Config.IsScreenshotSeries;
 
     private readonly object _marksLock = new();
     private readonly List<RecordingMark> _marks = new();
