@@ -390,6 +390,58 @@ public sealed class LoopbackTimelineTests
     }
 
     [Fact]
+    public void EpochRebase_PreservesMediaCursorAndWritesNewEpochAfterMeasuredSilence()
+    {
+        var format = new WaveFormat(48_000, 16, 1);
+        var timeline = new LoopbackTimeline(format, 10_000_000, TimeSpan.FromMilliseconds(100));
+        var output = new List<byte>();
+        const long originalAnchor = 10_000_000;
+        timeline.Start(originalAnchor);
+
+        var first = Enumerable.Repeat((byte)0x11, 960).ToArray();
+        timeline.AppendPacket(first, first.Length, 480, 0, originalAnchor, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        output.AddRange(new byte[960]);
+        timeline.AdvanceMediaCursor(960);
+        var cursorBeforeRebase = timeline.MediaBytes;
+
+        timeline.RebaseAfterEpochReset(0, 100_000_000);
+        var next = Enumerable.Repeat((byte)0x44, 960).ToArray();
+        timeline.AppendPacket(next, next.Length, 480, 0, 100_000_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        Assert.Equal(originalAnchor, timeline.AnchorTimestamp);
+        Assert.Equal(cursorBeforeRebase + next.Length, timeline.MediaBytes);
+        Assert.Equal(first.Concat(new byte[960]).Concat(next).ToArray(), output.ToArray());
+    }
+
+    [Fact]
+    public void LargeFirstQpcEpochJump_IsRejectedBeforeAnySuspectBytesAreWritten()
+    {
+        var format = new WaveFormat(48_000, 16, 1);
+        var timeline = new LoopbackTimeline(format, 10_000_000, TimeSpan.FromMilliseconds(100));
+        var output = new List<byte>();
+        timeline.Start(10_000_000);
+        timeline.AppendPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 960, 480, 0, 10_000_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+
+        var suspect = Enumerable.Repeat((byte)0x22, 960).ToArray();
+        var ex = Assert.Throws<LoopbackTimelineException>(() => timeline.AppendPacket(
+            suspect, suspect.Length, 480, 480, 25_000_000, true,
+            (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+            (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray())));
+
+        Assert.True(ex.IsEpochResetCandidate);
+        Assert.Equal(960, timeline.MediaBytes);
+        Assert.DoesNotContain((byte)0x22, output);
+        Assert.Equal(Enumerable.Repeat((byte)0x11, 960).ToArray(), output.ToArray());
+    }
+
+    [Fact]
     public void FortyEightKhz_PositionRegressionAndTimestampErrorEquivalentFailClosed()
     {
         var format = new WaveFormat(48_000, 16, 1);

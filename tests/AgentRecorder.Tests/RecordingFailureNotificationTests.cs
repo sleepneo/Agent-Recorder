@@ -33,6 +33,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
+    [InlineData("audio_capture_discontinuous")]
     public void Manager_RequestsOneLocalizedAppOwnedNotification(string reasonCode)
     {
         var audit = new CaptureAuditLogger();
@@ -49,6 +50,11 @@ public sealed class RecordingFailureNotificationTests : IDisposable
         Assert.Equal(UiLanguage.ZhCn, attempt.Text.Language);
         Assert.Contains("录制", attempt.Text.Get("Tray_RecordingFailure_Title"));
         Assert.DoesNotContain(reasonCode, attempt.Text.Get(BodyKey(reasonCode)), StringComparison.Ordinal);
+        if (reasonCode == "audio_capture_discontinuous")
+        {
+            Assert.Contains("系统音频", attempt.Text.Get(BodyKey(reasonCode)));
+            Assert.Contains("未保存最终视频", attempt.Text.Get(BodyKey(reasonCode)));
+        }
         Assert.Contains(audit.Events, e => e == "recording_failure_notification.requested");
         Assert.Contains(audit.Events, e => e == "recording_failure_notification.shown");
         var shown = Assert.Single(audit.Payloads, p => p.Event == "recording_failure_notification.shown");
@@ -85,6 +91,22 @@ public sealed class RecordingFailureNotificationTests : IDisposable
             Assert.Equal("rec-close", attempt.Request.RecordingId);
             Assert.Equal("window_closed", attempt.Request.ReasonCode);
         });
+    }
+
+    [Fact]
+    public void Manager_SystemAudioNotification_LocalizesEnglishFailureMessage()
+    {
+        var audit = new CaptureAuditLogger();
+        var presenter = new FakePresenter();
+        using var manager = new RecordingFailureNotificationManager(
+            audit, () => new UiTextProvider(UiLanguage.EnUs), () => 0, presenter);
+
+        manager.Request("rec-audio-en", "audio_capture_discontinuous");
+
+        var attempt = Assert.Single(presenter.Attempts);
+        var body = attempt.Text.Get("Tray_RecordingFailure_SystemAudioBody");
+        Assert.Contains("System audio", body, StringComparison.Ordinal);
+        Assert.Contains("no final video was saved", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -199,7 +221,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     public void Layout_FitsLocalizedLongestTextAt100_150_And200Dpi(UiLanguage language)
     {
         var text = new UiTextProvider(language);
-        foreach (var reason in new[] { "window_closed", "window_minimized", "size_changed" })
+        foreach (var reason in new[] { "window_closed", "window_minimized", "size_changed", "audio_capture_discontinuous" })
         {
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 96));
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 144));
@@ -281,6 +303,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     {
         "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
         "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
+        "audio_capture_discontinuous" => "Tray_RecordingFailure_SystemAudioBody",
         _ => "Tray_RecordingFailure_SizeChangedBody"
     };
 

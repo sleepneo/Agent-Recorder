@@ -14,6 +14,46 @@ internal readonly record struct LoopbackPacketAppendResult(
 internal sealed class LoopbackTimelineException : InvalidOperationException
 {
     public LoopbackTimelineException(string message) : base(message) { }
+
+    private LoopbackTimelineException(
+        string message,
+        bool isQpcDevicePositionConflict,
+        long qpcDriftTicks,
+        long currentDeviceGapFrames,
+        bool deviceGapOutOfBounds,
+        bool dataDiscontinuity,
+        int consecutiveQpcOutliers,
+        bool isEpochResetCandidate)
+        : base(message)
+    {
+        IsQpcDevicePositionConflict = isQpcDevicePositionConflict;
+        QpcDriftTicks = qpcDriftTicks;
+        CurrentDeviceGapFrames = currentDeviceGapFrames;
+        DeviceGapOutOfBounds = deviceGapOutOfBounds;
+        DataDiscontinuity = dataDiscontinuity;
+        ConsecutiveQpcOutliers = consecutiveQpcOutliers;
+        IsEpochResetCandidate = isEpochResetCandidate;
+    }
+
+    internal bool IsQpcDevicePositionConflict { get; }
+    internal long QpcDriftTicks { get; }
+    internal long CurrentDeviceGapFrames { get; }
+    internal bool DeviceGapOutOfBounds { get; }
+    internal bool DataDiscontinuity { get; }
+    internal int ConsecutiveQpcOutliers { get; }
+    internal bool IsEpochResetCandidate { get; }
+
+    internal static LoopbackTimelineException QpcDevicePositionConflict(
+        string message,
+        long qpcDriftTicks,
+        long currentDeviceGapFrames,
+        bool deviceGapOutOfBounds,
+        bool dataDiscontinuity,
+        int consecutiveQpcOutliers,
+        bool isEpochResetCandidate)
+        => new(message, true, qpcDriftTicks, currentDeviceGapFrames,
+            deviceGapOutOfBounds, dataDiscontinuity, consecutiveQpcOutliers,
+            isEpochResetCandidate);
 }
 
 /// <summary>
@@ -33,6 +73,7 @@ internal sealed class LoopbackTimeline
     private readonly long _frameTimestampTicks;
     private readonly long _qpcJitterToleranceTicks;
     private readonly long _maxDeviceGapFrames;
+    private readonly long _epochResetQpcDriftThresholdTicks;
     private long _anchorTimestamp;
     private long _anchorDevicePosition = -1;
     private long _anchorDeviceMediaBytes;
@@ -58,6 +99,7 @@ internal sealed class LoopbackTimeline
             throw new ArgumentOutOfRangeException(nameof(paddingTolerance));
 
         _timestampFrequency = timestampFrequency;
+        _epochResetQpcDriftThresholdTicks = timestampFrequency;
         _frameTimestampTicks = AudioPacketPositionMath.FramesToTimestampTicks(
             1, _format.SampleRate, timestampFrequency);
         var qpcQuantizationTicks = Math.Max(1L,
@@ -88,6 +130,50 @@ internal sealed class LoopbackTimeline
             throw new ArgumentOutOfRangeException(nameof(anchorTimestamp));
         if (Interlocked.CompareExchange(ref _anchorTimestamp, anchorTimestamp, 0) != 0)
             throw new InvalidOperationException("Loopback timeline has already started");
+    }
+
+    /// <summary>
+    /// Re-anchors only the device/QPC epoch after the session has reopened the
+    /// already-approved endpoint. The original wall-clock anchor and the
+    /// current media cursor are intentionally preserved, so the next epoch
+    /// starts exactly at the existing write cursor instead of rewriting old
+    /// samples or treating a device-position reset as a media rollback.
+    /// </summary>
+    public void RebaseAfterEpochReset(long devicePosition, long packetStartTimestampTicks)
+    {
+        if (!IsStarted)
+            throw new LoopbackTimelineException("Cannot rebase a loopback timeline before the successful Start boundary");
+        if (devicePosition < 0 || packetStartTimestampTicks <= 0)
+            throw new LoopbackTimelineException(
+                $"Cannot rebase loopback timeline with invalid epoch evidence: device_position={devicePosition}; packet_start_ticks={packetStartTimestampTicks}");
+
+        long mediaBytes = MediaBytes;
+        Interlocked.Exchange(ref _anchorDevicePosition, devicePosition);
+        Interlocked.Exchange(ref _anchorDeviceMediaBytes, mediaBytes);
+        Interlocked.Exchange(ref _lastDeviceStart, devicePosition);
+        Interlocked.Exchange(ref _lastDeviceEnd, devicePosition);
+        Interlocked.Exchange(ref _lastPacketStartTimestamp, packetStartTimestampTicks);
+        Interlocked.Exchange(ref _lastPacketEndTimestamp, packetStartTimestampTicks);
+        Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
+        Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+        Volatile.Write(ref _consecutiveQpcOutliers, 0);
+        Volatile.Write(ref _continuityDegraded, 1);
+    }
+
+    /// <summary>
+    /// Advances the media cursor for zero samples already written by the
+    /// session's objectively-measured recovery padding. The writer and this
+    /// cursor must move together or the first packet of the new epoch could
+    /// overlap the silence that was just inserted.
+    /// </summary>
+    public void AdvanceMediaCursor(long bytes)
+    {
+        if (bytes < 0 || bytes % _format.BlockAlign != 0)
+            throw new ArgumentOutOfRangeException(nameof(bytes));
+        if (bytes == 0)
+            return;
+
+        Interlocked.Add(ref _mediaBytes, bytes);
     }
 
     /// <summary>
@@ -161,6 +247,39 @@ internal sealed class LoopbackTimeline
             if (qpcDriftTicks > _qpcJitterToleranceTicks ||
                 qpcDriftTicks < -_qpcJitterToleranceTicks)
             {
+                // A first, very large QPC jump with otherwise usable device
+                // evidence is an endpoint epoch-reset candidate. Do not write
+                // this packet: CaptureSession will recover off the capture
+                // thread, pad the measured hole, then rebase and accept the
+                // next generation's packet in the correct order.
+                bool epochResetCandidate =
+                    _consecutiveQpcOutliers == 0 &&
+                    !dataDiscontinuity &&
+                    !deviceGapOutOfBounds &&
+                    (qpcDriftTicks >= _epochResetQpcDriftThresholdTicks ||
+                     qpcDriftTicks <= -_epochResetQpcDriftThresholdTicks);
+                if (epochResetCandidate)
+                {
+                    Interlocked.Increment(ref _qpcOutlierCount);
+                    Volatile.Write(ref _consecutiveQpcOutliers, 1);
+                    Volatile.Write(ref _continuityDegraded, 1);
+                    throw CreateQpcConflictException(
+                        qpcDeltaTicks,
+                        expectedQpcDeltaTicks,
+                        qpcDriftTicks,
+                        deviceDeltaFrames,
+                        currentDeviceGap,
+                        deviceGapOutOfBounds,
+                        packetStartTimestampTicks,
+                        previousPacketEnd,
+                        framesRecorded,
+                        positionValid,
+                        dataDiscontinuity,
+                        trustedQpc,
+                        trustedDeviceStart,
+                        epochResetCandidate: true);
+                }
+
                 if (_consecutiveQpcOutliers == 0 &&
                     !dataDiscontinuity &&
                     !deviceGapOutOfBounds)
@@ -289,10 +408,17 @@ internal sealed class LoopbackTimeline
         bool positionValid,
         bool dataDiscontinuity,
         long trustedQpc,
-        long trustedDeviceStart)
+        long trustedDeviceStart,
+        bool epochResetCandidate = false)
     {
-        return new LoopbackTimelineException(
-            $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; current_device_gap_frames={currentDeviceGap}; max_device_gap_frames={_maxDeviceGapFrames}; device_gap_out_of_bounds={deviceGapOutOfBounds}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}; consecutive_qpc_outliers={_consecutiveQpcOutliers}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; last_written_device_start={Interlocked.Read(ref _lastDeviceStart)}; last_written_device_end={Interlocked.Read(ref _lastDeviceEnd)}");
+        return LoopbackTimelineException.QpcDevicePositionConflict(
+            $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; current_device_gap_frames={currentDeviceGap}; max_device_gap_frames={_maxDeviceGapFrames}; device_gap_out_of_bounds={deviceGapOutOfBounds}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}; consecutive_qpc_outliers={_consecutiveQpcOutliers}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; last_written_device_start={Interlocked.Read(ref _lastDeviceStart)}; last_written_device_end={Interlocked.Read(ref _lastDeviceEnd)}",
+            qpcDriftTicks,
+            currentDeviceGap,
+            deviceGapOutOfBounds,
+            dataDiscontinuity,
+            _consecutiveQpcOutliers,
+            epochResetCandidate);
     }
 
     /// <summary>

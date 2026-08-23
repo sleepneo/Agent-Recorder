@@ -3421,6 +3421,28 @@ public sealed class RecordingEngine : IDisposable
             else
                 tray.ShowError("Recording failed: " + meta.StopReason);
         }
+
+        // System-loopback terminal failures are reported by the app-owned
+        // notification surface after REC/floating controls are closed. Keep
+        // this separate from user stops, pre-confirmation failures, and normal
+        // completion; no tray balloon is used for this product path.
+        if (!finalizationSuccess &&
+            natural &&
+            rec.StartedAtUtc != default &&
+            rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback &&
+            !(IsWgcContinuousBackend(rec.BackendType) && IsWgcLifecycleFailure(rec.StopReason)) &&
+            IsTerminalSystemAudioFailure(meta.AudioHelperErrorCode))
+        {
+            if (tray is IRecordingFailureNotifier notifier)
+                notifier.ShowRecordingFailure(rec.Id, "audio_capture_discontinuous");
+            else
+                _audit.Log("recording_failure_notification.unavailable", new
+                {
+                    recording_id = rec.Id,
+                    reason_code = "audio_capture_discontinuous",
+                    host_mode = tray.HostMode
+                });
+        }
     }
 
     private void TraceEncoderSelection(Recording rec, OutputMeta meta)
@@ -3454,6 +3476,14 @@ public sealed class RecordingEngine : IDisposable
 
     private static bool IsWgcContinuousBackend(string? backendType) =>
         string.Equals(backendType, "wgc-continuous", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTerminalSystemAudioFailure(string? errorCode) => errorCode is
+        "audio_capture_discontinuous" or
+        "audio_capture_stalled" or
+        "audio_capture_error" or
+        "audio_write_failure" or
+        "audio_helper_runtime_failure" or
+        "audio_helper_failure";
 
     /// <summary>
     /// Cancels and disposes the countdown timer for a recording, if one is running.

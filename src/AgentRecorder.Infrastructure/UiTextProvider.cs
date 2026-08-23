@@ -172,6 +172,7 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Tray_RecordingFailure_WindowMinimizedBody"] = "目标窗口已最小化；录制已停止，未保存最终视频。",
             ["Tray_RecordingFailure_SizeChangedBody"] = "目标窗口尺寸已改变；录制已停止，未保存最终视频。",
             ["Tray_RecordingFailure_CaptureSemanticsChangedBody"] = "捕获方式在确认后发生变化；录制未开始。请重新发起请求并再次确认。",
+            ["Tray_RecordingFailure_SystemAudioBody"] = "系统音频已中断；录制未完成，未保存最终视频。",
             ["Tray_RecordingFailure_GenericBody"] = "录制已停止，未保存最终视频。",
             ["Tray_RecordingFailure_Close"] = "关闭",
 
@@ -325,6 +326,7 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Tray_RecordingFailure_WindowMinimizedBody"] = "The target window was minimized; recording stopped and no final video was saved.",
             ["Tray_RecordingFailure_SizeChangedBody"] = "The target window changed size; recording stopped and no final video was saved.",
             ["Tray_RecordingFailure_CaptureSemanticsChangedBody"] = "The capture method changed after confirmation; recording did not start. Please retry and confirm again.",
+            ["Tray_RecordingFailure_SystemAudioBody"] = "System audio was interrupted; recording was not completed and no final video was saved.",
             ["Tray_RecordingFailure_GenericBody"] = "Recording stopped and no final video was saved.",
             ["Tray_RecordingFailure_Close"] = "Close",
 

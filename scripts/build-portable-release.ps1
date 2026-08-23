@@ -11,7 +11,7 @@
     .local-data/release-candidates/.
 
 .PARAMETER Version
-    Version string for the zip name. Default: v0.1.8
+    Version string for the zip name. Default: v0.1.9
 
 .PARAMETER PublishMode
     "self-contained" (default) or "framework-dependent".
@@ -27,7 +27,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.8",
+    [string]$Version = "v0.1.9",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
@@ -723,6 +723,49 @@ function Invoke-BoundedProcess {
         if ($null -ne $launched) {
             $launched.Dispose()
         }
+    }
+}
+
+function Invoke-DotNetPublishWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName,
+
+        [int]$MaxAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $output = dotnet @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return [pscustomobject]@{
+                ExitCode = 0
+                Output = $output
+                Attempts = $attempt
+            }
+        }
+
+        $outputText = ($output | Out-String)
+        $isTransientFileLock =
+            $outputText -match "being used by another process" -or
+            $outputText -match "正由另一进程使用" -or
+            $outputText -match "进程无法访问文件"
+
+        if (-not $isTransientFileLock -or $attempt -eq $MaxAttempts) {
+            return [pscustomobject]@{
+                ExitCode = $exitCode
+                Output = $output
+                Attempts = $attempt
+            }
+        }
+
+        $delaySeconds = 2 * $attempt
+        Write-Host "[WARN] $DisplayName hit a transient output-file lock; retrying in $delaySeconds seconds ($attempt/$MaxAttempts)..." -ForegroundColor Yellow
+        dotnet build-server shutdown 2>&1 | Out-Null
+        Start-Sleep -Seconds $delaySeconds
     }
 }
 
@@ -1432,10 +1475,10 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
-$publishResult = dotnet @publishArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
+$publishAttempt = Invoke-DotNetPublishWithRetry -Arguments $publishArgs -DisplayName "AgentRecorder.App publish"
+if ($publishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish failed:" -ForegroundColor Red
-    Write-Host $publishResult
+    Write-Host $publishAttempt.Output
     exit 1
 }
 Write-Host "[OK] Published to $appPublishDir" -ForegroundColor Green
@@ -1466,10 +1509,10 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
-$headlessPublishResult = dotnet @headlessPublishArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
+$headlessPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $headlessPublishArgs -DisplayName "AgentRecorder.Headless publish"
+if ($headlessPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (Headless) failed:" -ForegroundColor Red
-    Write-Host $headlessPublishResult
+    Write-Host $headlessPublishAttempt.Output
     exit 1
 }
 Write-Host "[OK] Published to $headlessPublishDir" -ForegroundColor Green
@@ -1500,10 +1543,10 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
-$cliPublishResult = dotnet @cliPublishArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
+$cliPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $cliPublishArgs -DisplayName "AgentRecorder.Cli publish"
+if ($cliPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (Cli) failed:" -ForegroundColor Red
-    Write-Host $cliPublishResult
+    Write-Host $cliPublishAttempt.Output
     exit 1
 }
 Write-Host "[OK] Published to $cliPublishDir" -ForegroundColor Green
@@ -1534,10 +1577,10 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
-$audioHelperPublishResult = dotnet @audioHelperPublishArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
+$audioHelperPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $audioHelperPublishArgs -DisplayName "AgentRecorder.AudioHelper publish"
+if ($audioHelperPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (AudioHelper) failed:" -ForegroundColor Red
-    Write-Host $audioHelperPublishResult
+    Write-Host $audioHelperPublishAttempt.Output
     exit 1
 }
 Write-Host "[OK] Published to $audioHelperPublishDir" -ForegroundColor Green

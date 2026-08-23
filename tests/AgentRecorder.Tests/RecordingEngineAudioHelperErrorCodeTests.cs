@@ -29,16 +29,30 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
         try { Directory.Delete(_tmpDir, true); } catch { }
     }
 
-    private sealed class NoOpTray : ITrayContext
+    private class NoOpTray : ITrayContext
     {
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
         public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
         public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public virtual void SetIdle(object rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
+    }
+
+    private sealed class CapturingFailureTray : NoOpTray, IRecordingFailureNotifier
+    {
+        public List<(string RecordingId, string ReasonCode)> Notifications { get; } = new();
+        public List<string> CallOrder { get; } = new();
+
+        public override void SetIdle(object rec) => CallOrder.Add("SetIdle");
+
+        public void ShowRecordingFailure(string recordingId, string reasonCode)
+        {
+            CallOrder.Add("ShowRecordingFailure");
+            Notifications.Add((recordingId, reasonCode));
+        }
     }
 
     private sealed class CapturingTracer : IPerformanceTracer, IDisposable
@@ -114,6 +128,26 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
                 OutputPath = outputPath,
                 Microphone = true,
                 MicDevice = "fake-mic"
+            }
+        };
+    }
+
+    private static Recording CreateSystemLoopbackRecording(string outputPath)
+    {
+        return new Recording
+        {
+            SourceType = "display",
+            SourceTitle = "Display 1",
+            OutputPath = outputPath,
+            DurationSeconds = 30,
+            Config = new CaptureConfig
+            {
+                SourceKind = "display",
+                Bounds = (0, 0, 1920, 1080),
+                Fps = 30,
+                OutputPath = outputPath,
+                AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+                SystemLoopbackEndpoint = "{0.0.0.00000000}.{system-loopback-endpoint}"
             }
         };
     }
@@ -371,6 +405,52 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
         Assert.True(video.StopCalled, "Video worker must be stopped when audio helper fails.");
         Assert.True(tracer.TerminalRecorded.Wait(TimeSpan.FromSeconds(5)), "Tracer should record the terminal event.");
         Assert.Equal("audio_capture_stalled", tracer.LastTerminalErrorCode);
+    }
+
+    [Fact]
+    public void NaturalSystemAudioFailure_NotifiesAppOwnedSurfaceAfterControlsClose()
+    {
+        var tray = new CapturingFailureTray();
+        var engine = CreateEngine(tray, out var tracer);
+        using var _ = tracer;
+        var outputPath = Path.Combine(_tmpDir, $"rec-{Guid.NewGuid():N}.mp4");
+        var audio = CreateStalledAudioWorker(estimatedGapMs: 12455, naturalExitDelayMs: 50);
+        var video = new FakeVideoCaptureWorker(firstFrameDelayMs: 0, naturalExitDelayMs: 30000);
+        var backend = CreateAvSplitBackend(audio, video, _tmpDir);
+        engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+        var rec = CreateSystemLoopbackRecording(outputPath);
+
+        engine.StartCaptureForTests(rec, tray);
+
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(10)));
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("audio_capture_stalled", rec.Error);
+        var notification = Assert.Single(tray.Notifications);
+        Assert.Equal(rec.Id, notification.RecordingId);
+        Assert.Equal("audio_capture_discontinuous", notification.ReasonCode);
+        Assert.Equal(new[] { "SetIdle", "ShowRecordingFailure" }, tray.CallOrder.TakeLast(2));
+        Assert.False(File.Exists(outputPath));
+    }
+
+    [Fact]
+    public void SynchronousSystemAudioStartFailure_BeforeCredibleStart_DoesNotNotifyInterruption()
+    {
+        var tray = new CapturingFailureTray();
+        var engine = CreateEngine(tray, out var tracer);
+        using var _ = tracer;
+        var outputPath = Path.Combine(_tmpDir, $"rec-{Guid.NewGuid():N}.mp4");
+        var audio = CreateFailingAudioWorker("audio_capture_discontinuous");
+        var video = new FakeVideoCaptureWorker();
+        var backend = CreateAvSplitBackend(audio, video, _tmpDir);
+        engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+        var rec = CreateSystemLoopbackRecording(outputPath);
+
+        engine.StartCaptureForTests(rec, tray);
+
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(5)));
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal(default, rec.StartedAtUtc);
+        Assert.Empty(tray.Notifications);
     }
 
     [Fact]

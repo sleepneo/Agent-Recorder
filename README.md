@@ -101,7 +101,10 @@ Agents should use the paths returned by `ensure-running` or
 - A controlled system-audio preview records a selected Windows render endpoint
   through isolated WASAPI loopback capture, synchronizes it with FFmpeg video,
   muxes AAC into the final MP4, and exposes continuity diagnostics without
-  misreporting system audio as a microphone. The complete region-selection,
+  misreporting system audio as a microphone. The locally approved endpoint stays
+  fixed for the recording; changing the Windows default output does not silently
+  change what is captured, and returning to the approved endpoint uses bounded
+  same-endpoint recovery. The complete region-selection,
   save-path confirmation, countdown, REC indicator, recording, and finalization
   flow has passed a supervised 12-second real-device A/V acceptance test. This
   path is disabled by default behind

@@ -131,7 +131,8 @@ X-Agent-Recorder-Key: <api-key>
 ```
 
 未指定设备时使用当前 Windows 多媒体默认输出端点；也可显式提供 render
-endpoint ID。单次录制不能同时启用麦克风和系统声音。由于该能力尚未升级为公开
+endpoint ID。本地确认窗中批准的输出端点在本次录制期间保持固定，切换 Windows
+默认输出不会改录其他设备。单次录制不能同时启用麦克风和系统声音。由于该能力尚未升级为公开
 契约，默认 `/capabilities`、`/permissions` 和 `/audio/devices` 仍会报告系统声音未开放。
 
 ## 有界截图序列

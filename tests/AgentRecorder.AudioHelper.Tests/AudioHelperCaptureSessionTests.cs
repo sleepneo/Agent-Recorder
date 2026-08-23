@@ -21,7 +21,11 @@ public class AudioHelperCaptureSessionTests
         public bool Started { get; private set; }
         public bool Stopped { get; private set; }
         public bool Disposed { get; private set; }
+        public int PacketCallbackThreadId { get; private set; }
+        public int DisposeThreadId { get; private set; }
         public Exception? StartRecordingException { get; set; }
+        public bool RaiseStartExceptionAfterCallback { get; set; }
+        public Action<FakeAudioInput>? OnStartRecording { get; set; }
         public long DiscontinuityCount { get; set; }
         public Action<FakeAudioInput>? OnStopRecording { get; set; }
         public Action<FakeAudioInput>? OnDispose { get; set; }
@@ -35,9 +39,12 @@ public class AudioHelperCaptureSessionTests
 
         public StartRecordingResult StartRecording()
         {
-            if (StartRecordingException != null)
+            if (StartRecordingException != null && !RaiseStartExceptionAfterCallback)
                 throw StartRecordingException;
             Started = true;
+            OnStartRecording?.Invoke(this);
+            if (StartRecordingException != null)
+                throw StartRecordingException;
             if (ErrorToRaiseInsideStartRecording != null)
                 RecordingStopped?.Invoke(this, new StoppedEventArgs(ErrorToRaiseInsideStartRecording));
             return StartRecordingResult.Started;
@@ -63,6 +70,7 @@ public class AudioHelperCaptureSessionTests
             bool positionValid = true,
             bool dataDiscontinuity = false)
         {
+            PacketCallbackThreadId = Environment.CurrentManagedThreadId;
             int blockAlign = Math.Max(1, Format?.BlockAlign ?? 1);
             PacketPositionAvailable?.Invoke(this, new AudioPacketEventArgs(
                 buffer,
@@ -82,6 +90,7 @@ public class AudioHelperCaptureSessionTests
 
         public void Dispose()
         {
+            DisposeThreadId = Environment.CurrentManagedThreadId;
             OnDispose?.Invoke(this);
             Disposed = true;
         }
@@ -365,7 +374,7 @@ public class AudioHelperCaptureSessionTests
 
             Assert.NotEqual(0, exitCode);
             Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
-            Assert.Equal("audio_loopback_packet_position_invalid", terminal.ErrorCode);
+            Assert.Equal("audio_capture_discontinuous", terminal.ErrorCode);
             Assert.Contains("qpc_outlier_count=1", terminal.Reason);
             Assert.Contains("last_trusted_qpc_ticks=", terminal.Reason);
             Assert.Contains("last_trusted_device_start=0", terminal.Reason);
@@ -378,6 +387,391 @@ public class AudioHelperCaptureSessionTests
             if (Directory.Exists(dir))
                 Directory.Delete(dir, true);
         }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_LargeQpcEpochReset_ReopensSameApprovedInputAndRebasesContinuously()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_epoch_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var firstInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var recoveredInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var inputs = new Queue<FakeAudioInput>(new[] { firstInput, recoveredInput });
+        int openCount = 0;
+        var opts = Options("rec_loopback_epoch", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts,
+            _ =>
+            {
+                Interlocked.Increment(ref openCount);
+                return (inputs.Dequeue(), null, null);
+            });
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => firstInput.Started, TimeSpan.FromSeconds(2)));
+            var anchor = (long)(typeof(CaptureSession)
+                .GetField("_firstSampleAnchorTicks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session) ?? 0L);
+            var packetTicks = AudioPacketPositionMath.FramesToTimestampTicks(480, 48_000, Stopwatch.Frequency);
+            const long epochJumpTicks = 15_000_000;
+
+            firstInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 0, anchor);
+            var epochPacketThread = new Thread(() => firstInput.InjectPositionedPacket(
+                Enumerable.Repeat((byte)0x22, 960).ToArray(), 480, anchor + packetTicks + epochJumpTicks));
+            epochPacketThread.Start();
+            Assert.True(epochPacketThread.Join(TimeSpan.FromSeconds(1)),
+                "The packet callback must return quickly without synchronously disposing its own capture input");
+
+            Assert.True(SpinWait.SpinUntil(() => recoveredInput.Started, TimeSpan.FromSeconds(5)),
+                "The large same-endpoint QPC epoch reset must enter the existing bounded recovery path");
+            Assert.NotEqual(firstInput.PacketCallbackThreadId, firstInput.DisposeThreadId);
+            recoveredInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x44, 960).ToArray(), 0, 100_000_000);
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+            Assert.Equal(0, exitCode);
+            Assert.Equal(AudioHelperSessionState.Stopped, summary.State);
+            Assert.Equal(1, summary.RecoveryCount);
+            Assert.Equal(1, summary.RecoveryAttempts);
+            Assert.Equal(1, summary.QpcOutlierCount);
+            Assert.Equal("degraded", summary.ContinuityStatus);
+            Assert.Equal(2, openCount);
+            Assert.True(File.Exists(output));
+            Assert.False(File.Exists(partial));
+
+            using var reader = new WaveFileReader(output);
+            var pcm = new byte[reader.Length];
+            Assert.Equal(pcm.Length, reader.Read(pcm, 0, pcm.Length));
+            Assert.Equal(Enumerable.Repeat((byte)0x11, 960).ToArray(), pcm.Take(960).ToArray());
+            int newEpochOffset = FindRun(pcm, 0x44, 960, 960);
+            Assert.True(newEpochOffset >= 960);
+            Assert.All(pcm.Skip(960).Take(newEpochOffset - 960), value => Assert.Equal(0, value));
+            Assert.DoesNotContain((byte)0x22, pcm.Take(newEpochOffset).ToArray());
+            Assert.DoesNotContain(AudioHelperEventStreamParser.ParseEvents(stdout.ToString()),
+                evt => evt.ErrorCode == "audio_helper_failure");
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_CallbackStarvation_RebasesNewGenerationBeforeItsFirstPacket()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_starvation_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var firstInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var recoveredInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var inputs = new Queue<FakeAudioInput>(new[] { firstInput, recoveredInput });
+        int openCount = 0;
+        var opts = Options("rec_loopback_starvation", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts,
+            _ =>
+            {
+                Interlocked.Increment(ref openCount);
+                return (inputs.Dequeue(), null, null);
+            },
+            stallDetectionThreshold: TimeSpan.FromSeconds(30));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => firstInput.Started, TimeSpan.FromSeconds(2)));
+            var anchor = GetPrivateLong(session, "_firstSampleAnchorTicks");
+            firstInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 0, anchor);
+
+            // Drive CheckStall through its existing private clock state rather
+            // than sleeping. This is the callback_starvation trigger, not a
+            // synthetic QPC conflict.
+            ForceCallbackStarvation(session, 960);
+
+            Assert.True(SpinWait.SpinUntil(() => recoveredInput.Started, TimeSpan.FromSeconds(5)));
+            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
+                TimeSpan.FromSeconds(5)));
+            recoveredInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x44, 960).ToArray(), 0, 100_000_000);
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+            Assert.Equal(0, exitCode);
+            Assert.Equal(1, summary.RecoveryCount);
+            Assert.Equal(1, summary.RecoveryAttempts);
+            Assert.Equal("degraded", summary.ContinuityStatus);
+            Assert.Equal(2, openCount);
+            Assert.DoesNotContain(AudioHelperEventStreamParser.ParseEvents(stdout.ToString()),
+                evt => evt.ErrorCode == "audio_capture_discontinuous");
+
+            var pcm = ReadPcm(output);
+            Assert.Equal(Enumerable.Repeat((byte)0x11, 960).ToArray(), pcm.Take(960).ToArray());
+            int newEpochOffset = FindRun(pcm, 0x44, 960, 960);
+            Assert.True(newEpochOffset >= 960);
+            Assert.All(pcm.Skip(960).Take(newEpochOffset - 960), value => Assert.Equal(0, value));
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_MediaWallGapDivergence_RebasesNewGeneration()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_gap_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var firstInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var recoveredInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var inputs = new Queue<FakeAudioInput>(new[] { firstInput, recoveredInput });
+        int openCount = 0;
+        var opts = Options("rec_loopback_gap", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts,
+            _ =>
+            {
+                Interlocked.Increment(ref openCount);
+                return (inputs.Dequeue(), null, null);
+            },
+            stallDetectionThreshold: TimeSpan.FromSeconds(30),
+            runtimeGapThreshold: TimeSpan.FromMilliseconds(1));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => firstInput.Started, TimeSpan.FromSeconds(2)));
+            var anchor = GetPrivateLong(session, "_firstSampleAnchorTicks");
+            firstInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 0, anchor);
+
+            // Two deterministic CheckStall passes satisfy the existing
+            // hysteresis for media_wall_gap_divergence without a long sleep.
+            ForceMediaWallGapDivergence(session, 960);
+
+            Assert.True(SpinWait.SpinUntil(() => recoveredInput.Started, TimeSpan.FromSeconds(5)));
+            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
+                TimeSpan.FromSeconds(5)));
+            recoveredInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x55, 960).ToArray(), 0, 120_000_000);
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+            Assert.Equal(0, exitCode);
+            Assert.Equal(1, summary.RecoveryCount);
+            Assert.Equal(1, summary.RecoveryAttempts);
+            Assert.Equal("degraded", summary.ContinuityStatus);
+            Assert.True(summary.GapFilledBytes > 0);
+            Assert.Equal(2, openCount);
+
+            var pcm = ReadPcm(output);
+            Assert.Equal(Enumerable.Repeat((byte)0x11, 960).ToArray(), pcm.Take(960).ToArray());
+            int newEpochOffset = FindRun(pcm, 0x55, 960, 960);
+            Assert.True(newEpochOffset >= 960);
+            Assert.All(pcm.Skip(960).Take(newEpochOffset - 960), value => Assert.Equal(0, value));
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public async Task Run_SystemLoopback_FirstRecoveryCandidateFailsAfterBufferedPacket_SecondCandidateRebasesIndependently()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_attempts_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var firstInput = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var failedCandidate = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1),
+            StartRecordingException = new InvalidOperationException("candidate start failed"),
+            RaiseStartExceptionAfterCallback = true
+        };
+        failedCandidate.OnStartRecording = input => input.InjectPositionedPacket(
+            Enumerable.Repeat((byte)0x33, 960).ToArray(), 0, 200_000_000);
+        var successfulCandidate = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var inputs = new Queue<FakeAudioInput>(new[] { firstInput, failedCandidate, successfulCandidate });
+        int openCount = 0;
+        var opts = Options("rec_loopback_attempts", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts,
+            _ =>
+            {
+                Interlocked.Increment(ref openCount);
+                return (inputs.Dequeue(), null, null);
+            },
+            stallDetectionThreshold: TimeSpan.FromSeconds(30));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => firstInput.Started, TimeSpan.FromSeconds(2)));
+            var anchor = GetPrivateLong(session, "_firstSampleAnchorTicks");
+            firstInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 0, anchor);
+            ForceCallbackStarvation(session, 960);
+
+            Assert.True(SpinWait.SpinUntil(() => successfulCandidate.Started, TimeSpan.FromSeconds(5)));
+            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
+                TimeSpan.FromSeconds(5)));
+            successfulCandidate.InjectPositionedPacket(Enumerable.Repeat((byte)0x44, 960).ToArray(), 0, 220_000_000);
+            session.RequestStop();
+
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
+            var summary = AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());
+            Assert.Equal(0, exitCode);
+            Assert.Equal(1, summary.RecoveryCount);
+            Assert.Equal(2, summary.RecoveryAttempts);
+            Assert.Equal("degraded", summary.ContinuityStatus);
+            Assert.Equal(3, openCount);
+            Assert.True(failedCandidate.Disposed);
+
+            var pcm = ReadPcm(output);
+            Assert.Equal(Enumerable.Repeat((byte)0x11, 960).ToArray(), pcm.Take(960).ToArray());
+            int newEpochOffset = FindRun(pcm, 0x44, 960, 960);
+            Assert.True(newEpochOffset >= 960);
+            Assert.All(pcm.Skip(960).Take(newEpochOffset - 960), value => Assert.Equal(0, value));
+            Assert.DoesNotContain((byte)0x33, pcm);
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    private static int FindRun(byte[] bytes, byte value, int length, int start)
+    {
+        for (int offset = start; offset + length <= bytes.Length; offset++)
+        {
+            if (bytes.AsSpan(offset, length).IndexOfAnyExcept(value) < 0)
+                return offset;
+        }
+
+        return -1;
+    }
+
+    private static byte[] ReadPcm(string path)
+    {
+        using var reader = new WaveFileReader(path);
+        var pcm = new byte[reader.Length];
+        Assert.Equal(pcm.Length, reader.Read(pcm, 0, pcm.Length));
+        return pcm;
+    }
+
+    private static void SetPrivateLong(CaptureSession session, string fieldName, long value)
+    {
+        var field = typeof(CaptureSession).GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        object converted = field!.FieldType == typeof(int)
+            ? (object)checked((int)value)
+            : value;
+        field.SetValue(session, converted);
+    }
+
+    private static long GetPrivateLong(CaptureSession session, string fieldName)
+    {
+        var field = typeof(CaptureSession).GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        return Convert.ToInt64(field!.GetValue(session));
+    }
+
+    private static void InvokeCheckStall(CaptureSession session)
+    {
+        var method = typeof(CaptureSession).GetMethod("CheckStall", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(method);
+        method!.Invoke(session, null);
+    }
+
+    private static void ForceCallbackStarvation(CaptureSession session, long bytesWritten)
+    {
+        var old = Stopwatch.GetTimestamp() - (60 * Stopwatch.Frequency);
+        SetPrivateLong(session, "_lastCallbackTimestamp", old);
+        SetPrivateLong(session, "_lastStreamResumeTimestamp", old);
+        SetPrivateLong(session, "_stallCheckLastBytes", bytesWritten);
+        InvokeCheckStall(session);
+    }
+
+    private static void ForceMediaWallGapDivergence(CaptureSession session, long bytesWritten)
+    {
+        var old = Stopwatch.GetTimestamp() - Stopwatch.Frequency;
+        var now = Stopwatch.GetTimestamp();
+        SetPrivateLong(session, "_firstCallbackTimestamp", old);
+        SetPrivateLong(session, "_lastCallbackTimestamp", now);
+        SetPrivateLong(session, "_lastStreamResumeTimestamp", now);
+        SetPrivateLong(session, "_stallCheckLastBytes", -1);
+        SetPrivateLong(session, "_gapOverThresholdChecks", 0);
+        SetPrivateLong(session, "_bytesWritten", bytesWritten);
+        InvokeCheckStall(session);
+        InvokeCheckStall(session);
     }
 
     [Fact]

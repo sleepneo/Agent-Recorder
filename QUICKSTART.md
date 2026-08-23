@@ -158,7 +158,9 @@ evaluation. Start Agent Recorder with
 
 The current Windows multimedia output endpoint is used unless an explicit
 render-endpoint ID is supplied. Microphone and system audio cannot be enabled in
-the same recording. Because this is not yet a public capability, the default
+the same recording. The endpoint shown in the local confirmation is fixed for
+that recording: changing the Windows default output does not switch capture to
+another device. Because this is not yet a public capability, the default
 `/capabilities`, `/permissions`, and `/audio/devices` contract continues to
 report system audio as unavailable.
 
