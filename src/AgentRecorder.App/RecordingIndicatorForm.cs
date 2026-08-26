@@ -467,7 +467,11 @@ internal sealed class RecordingIndicatorForm : Form
     private readonly string? _nestedRole;
     private readonly IWindowDisplayAffinity _displayAffinity;
     private readonly Func<IUiTextProvider> _textProviderFactory;
+    private readonly IRecordingMotionPreference _motionPreference;
+    private readonly Func<DateTime> _motionClock;
+    private readonly Func<bool> _highContrastPreference;
     private System.Windows.Forms.Timer _timer = null!;
+    private System.Windows.Forms.Timer _motionTimer = null!;
     private Label _label = null!;
     private Label _feedbackLabel = null!;
     private System.Windows.Forms.Timer _feedbackTimer = null!;
@@ -478,12 +482,19 @@ internal sealed class RecordingIndicatorForm : Form
     private int _actualWindowDpi;
     private RecordingIndicatorPhase _phase = RecordingIndicatorPhase.Recording;
     private int? _countdownValue;
+    private RecordingIndicatorVisualPalette _visualPalette;
+    private Color _recordingBorderColor;
+    private Color _recordingLabelBackgroundColor;
+    private DateTime _motionStartedAtUtc;
+    private bool _motionEnabled;
+    private Rectangle[] _lastMotionDirtyRegions = Array.Empty<Rectangle>();
 
     internal RecordingIndicatorBounds BoundsForTests => _bounds;
     internal string RecordingIdForTests => _recordingId;
     internal int ActualWindowDpiForTests => _actualWindowDpi;
     internal bool TimerEnabledForTests => _timer?.Enabled ?? false;
     internal string LabelTextForTests => _label?.Text ?? "";
+    internal Color LabelBackColorForTests => _label?.BackColor ?? Color.Empty;
     internal Rectangle LabelBoundsForTests => _label?.Bounds ?? Rectangle.Empty;
     internal Size LabelMeasuredSizeForTests => MeasureLabelSize(_nestedRole, _durationSeconds, _label?.Font ?? new Font("Segoe UI", 9, FontStyle.Bold), _label?.Padding ?? new Padding(4, 2, 4, 2));
     internal bool DisplayAffinityAppliedForTests => _displayAffinityApplied;
@@ -505,6 +516,14 @@ internal sealed class RecordingIndicatorForm : Form
     internal bool FeedbackBoundsInsideClientForTests => _feedbackLabel != null && ClientRectangle.Contains(_feedbackLabel.Bounds);
     internal bool FeedbackIsFrontmostChildForTests => _feedbackLabel != null && Controls.GetChildIndex(_feedbackLabel) == 0;
     internal bool FeedbackBackgroundOpaqueForTests => _feedbackLabel?.BackColor.A == 255;
+    internal bool MotionTimerEnabledForTests => _motionTimer?.Enabled ?? false;
+    internal int MotionTimerIntervalForTests => _motionTimer?.Interval ?? 0;
+    internal bool MotionEnabledForTests => _motionEnabled;
+    internal int MotionTickCountForTests { get; private set; }
+    internal Color RecordingBorderColorForTests => _recordingBorderColor;
+    internal Color RecordingLabelBackgroundForTests => _recordingLabelBackgroundColor;
+    internal RecordingIndicatorVisualPalette VisualPaletteForTests => _visualPalette;
+    internal Rectangle[] LastMotionDirtyRegionsForTests => _lastMotionDirtyRegions.ToArray();
 
     public RecordingIndicatorForm(
         string recordingId,
@@ -513,7 +532,7 @@ internal sealed class RecordingIndicatorForm : Form
         int? durationSeconds = null,
         string? nestedRole = null,
         IWindowDisplayAffinity? displayAffinity = null)
-        : this(recordingId, bounds, startedAtUtc, durationSeconds, nestedRole, null, displayAffinity, null)
+        : this(recordingId, bounds, startedAtUtc, durationSeconds, nestedRole, null, displayAffinity, null, null, null)
     {
     }
 
@@ -524,7 +543,10 @@ internal sealed class RecordingIndicatorForm : Form
         int? durationSeconds = null,
         string? nestedRole = null,
         IWindowDisplayAffinity? displayAffinity = null,
-        Func<IUiTextProvider>? textProviderFactory = null)
+        Func<IUiTextProvider>? textProviderFactory = null,
+        IRecordingMotionPreference? motionPreference = null,
+        Func<DateTime>? motionClock = null,
+        Func<bool>? highContrastPreference = null)
     {
         _recordingId = recordingId;
         _presentation = presentation;
@@ -534,6 +556,13 @@ internal sealed class RecordingIndicatorForm : Form
         _nestedRole = nestedRole;
         _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
         _textProviderFactory = textProviderFactory ?? (() => new UiTextProvider(UiLanguageStore.LoadOrDefault()));
+        _motionPreference = motionPreference ?? new WindowsRecordingMotionPreference();
+        _motionClock = motionClock ?? (() => DateTime.UtcNow);
+        _highContrastPreference = highContrastPreference ?? (() => SystemInformation.HighContrast);
+        _motionEnabled = ReadMotionPreference(_motionPreference);
+        _visualPalette = RecordingStatusVisualModel.IndicatorPalette(_phase, IsHighContrast());
+        _recordingBorderColor = _visualPalette.Border;
+        _recordingLabelBackgroundColor = _visualPalette.LabelBackgroundLow;
 
         InitializeComponent();
         StartPosition = FormStartPosition.Manual;
@@ -548,7 +577,10 @@ internal sealed class RecordingIndicatorForm : Form
         string? nestedRole,
         RecordingIndicatorPresentation? presentation,
         IWindowDisplayAffinity? displayAffinity,
-        Func<IUiTextProvider>? textProviderFactory = null)
+        Func<IUiTextProvider>? textProviderFactory = null,
+        IRecordingMotionPreference? motionPreference = null,
+        Func<DateTime>? motionClock = null,
+        Func<bool>? highContrastPreference = null)
     {
         _recordingId = recordingId;
         _bounds = RecordingIndicatorGeometry.ClampToVirtualScreen(bounds);
@@ -557,6 +589,13 @@ internal sealed class RecordingIndicatorForm : Form
         _nestedRole = nestedRole;
         _displayAffinity = displayAffinity ?? WindowDisplayAffinity.Instance;
         _textProviderFactory = textProviderFactory ?? (() => new UiTextProvider(UiLanguageStore.LoadOrDefault()));
+        _motionPreference = motionPreference ?? new WindowsRecordingMotionPreference();
+        _motionClock = motionClock ?? (() => DateTime.UtcNow);
+        _highContrastPreference = highContrastPreference ?? (() => SystemInformation.HighContrast);
+        _motionEnabled = ReadMotionPreference(_motionPreference);
+        _visualPalette = RecordingStatusVisualModel.IndicatorPalette(_phase, IsHighContrast());
+        _recordingBorderColor = _visualPalette.Border;
+        _recordingLabelBackgroundColor = _visualPalette.LabelBackgroundLow;
 
         _presentation = presentation ?? new RecordingIndicatorPresentation(
             CaptureVisibilityMode.ExcludeFromCapture,
@@ -605,8 +644,8 @@ internal sealed class RecordingIndicatorForm : Form
         _label = new Label
         {
             AutoSize = false,
-            BackColor = Color.FromArgb(180, 255, 0, 0),
-            ForeColor = Color.White,
+            BackColor = _recordingLabelBackgroundColor,
+            ForeColor = _visualPalette.LabelForeground,
             Font = font,
             Padding = padding,
             Text = FormatLabel(TimeSpan.Zero),
@@ -641,6 +680,12 @@ internal sealed class RecordingIndicatorForm : Form
             Interval = 500
         };
         _timer.Tick += (_, _) => UpdateLabel();
+
+        _motionTimer = new System.Windows.Forms.Timer
+        {
+            Interval = RecordingIndicatorMotion.TimerIntervalMilliseconds
+        };
+        _motionTimer.Tick += (_, _) => UpdateRecordingMotion();
     }
 
     /// <summary>
@@ -668,9 +713,17 @@ internal sealed class RecordingIndicatorForm : Form
     /// </summary>
     internal static Size MeasureLabelSize(string? nestedRole, int? durationSeconds, Font font, Padding padding)
     {
-        var prefix = string.IsNullOrEmpty(nestedRole)
-            ? "REC"
-            : $"REC {nestedRole.ToUpperInvariant()}";
+        return MeasureLabelSize(nestedRole, durationSeconds, font, padding, new UiTextProvider(UiLanguage.EnUs));
+    }
+
+    internal static Size MeasureLabelSize(
+        string? nestedRole,
+        int? durationSeconds,
+        Font font,
+        Padding padding,
+        IUiTextProvider textProvider)
+    {
+        var prefix = RecordingStatusVisualModel.RecordingPrefix(textProvider, nestedRole);
 
         string maxText;
         if (durationSeconds.HasValue && durationSeconds.Value > 0)
@@ -696,6 +749,15 @@ internal sealed class RecordingIndicatorForm : Form
     /// testable with forced <see cref="DisplayDpiInfo"/> values.
     /// </summary>
     internal static Size MeasureLabelSize(string? nestedRole, int? durationSeconds, Font font, Padding padding, DisplayDpiInfo dpiInfo)
+        => MeasureLabelSize(nestedRole, durationSeconds, font, padding, dpiInfo, new UiTextProvider(UiLanguage.EnUs));
+
+    internal static Size MeasureLabelSize(
+        string? nestedRole,
+        int? durationSeconds,
+        Font font,
+        Padding padding,
+        DisplayDpiInfo dpiInfo,
+        IUiTextProvider textProvider)
     {
         int effectiveDpi = Math.Max(dpiInfo.DpiX, dpiInfo.DpiY);
         if (effectiveDpi <= 0)
@@ -704,7 +766,7 @@ internal sealed class RecordingIndicatorForm : Form
         // Measure at the current process/screen DPI, then scale to the target monitor DPI.
         // This keeps measurement consistent with the runtime Label rendering (which uses
         // the same font at the monitor DPI) while remaining testable with forced DPI values.
-        var screenSize = MeasureLabelSize(nestedRole, durationSeconds, font, padding);
+        var screenSize = MeasureLabelSize(nestedRole, durationSeconds, font, padding, textProvider);
         int screenDpi = GetSystemDpi();
         if (screenDpi <= 0)
             screenDpi = 96;
@@ -742,21 +804,20 @@ internal sealed class RecordingIndicatorForm : Form
         PositionLabel();
         PositionFeedback();
         UpdateLabel();
-        _timer.Start();
+        if (_phase == RecordingIndicatorPhase.Recording)
+        {
+            _timer.Start();
+            StartMotionTimerIfNeeded();
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
 
-        var borderColor = _phase switch
-        {
-            RecordingIndicatorPhase.Preparing => Color.FromArgb(255, 255, 165, 0), // amber
-            RecordingIndicatorPhase.Countdown => Color.FromArgb(255, 255, 165, 0), // amber
-            RecordingIndicatorPhase.Series => Color.FromArgb(255, 255, 0, 0), // red
-            RecordingIndicatorPhase.Finalizing => Color.FromArgb(255, 128, 128, 128), // gray
-            _ => Color.Red
-        };
+        var borderColor = _phase == RecordingIndicatorPhase.Recording
+            ? _recordingBorderColor
+            : _visualPalette.Border;
 
         if (_presentation.Mode == CaptureVisibilityMode.ParentVisible)
         {
@@ -788,6 +849,17 @@ internal sealed class RecordingIndicatorForm : Form
         base.OnResize(e);
         PositionLabel();
         PositionFeedback();
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs e)
+    {
+        base.OnSystemColorsChanged(e);
+        _motionEnabled = ReadMotionPreference(_motionPreference);
+        UpdateVisualPalette();
+        StopMotionTimer();
+        if (_phase == RecordingIndicatorPhase.Recording)
+            StartMotionTimerIfNeeded();
+        Invalidate();
     }
 
     protected override void OnLoad(EventArgs e)
@@ -868,6 +940,8 @@ internal sealed class RecordingIndicatorForm : Form
         {
             _timer?.Stop();
             _timer?.Dispose();
+            _motionTimer?.Stop();
+            _motionTimer?.Dispose();
             _feedbackTimer?.Stop();
             _feedbackTimer?.Dispose();
             _label?.Font?.Dispose();
@@ -1071,38 +1145,36 @@ internal sealed class RecordingIndicatorForm : Form
     internal void SetPhase(RecordingIndicatorPhase phase, int? countdownValue = null)
     {
         ClearTransientFeedback();
+        StopMotionTimer();
         _phase = phase;
         _countdownValue = countdownValue;
 
         var textProvider = _textProviderFactory();
+        UpdateVisualPalette();
         switch (phase)
         {
             case RecordingIndicatorPhase.Preparing:
-                _label.BackColor = Color.FromArgb(180, 255, 165, 0); // amber
                 _label.Text = textProvider.Get("Indicator_Preparing");
                 _timer.Stop();
                 break;
             case RecordingIndicatorPhase.Finalizing:
-                _label.BackColor = Color.FromArgb(180, 128, 128, 128); // gray
                 _label.Text = textProvider.Get("Indicator_Finalizing");
                 _timer.Stop();
                 break;
             case RecordingIndicatorPhase.Countdown:
-                _label.BackColor = Color.FromArgb(180, 255, 165, 0); // amber
                 _label.Text = countdownValue.HasValue
                     ? textProvider.Format("Indicator_Countdown", countdownValue.Value)
                     : textProvider.Get("Indicator_Preparing");
                 _timer.Stop();
                 break;
             case RecordingIndicatorPhase.Series:
-                _label.BackColor = Color.FromArgb(180, 255, 0, 0);
                 _timer.Stop();
                 break;
             case RecordingIndicatorPhase.Recording:
             default:
-                _label.BackColor = Color.FromArgb(180, 255, 0, 0); // red
                 _timer.Start();
                 UpdateLabel();
+                StartMotionTimerIfNeeded();
                 break;
         }
 
@@ -1114,10 +1186,118 @@ internal sealed class RecordingIndicatorForm : Form
         ClearTransientFeedback();
         _phase = RecordingIndicatorPhase.Series;
         _countdownValue = null;
+        StopMotionTimer();
         _timer.Stop();
-        _label.BackColor = Color.FromArgb(180, 255, 0, 0);
+        UpdateVisualPalette();
         _label.Text = _textProviderFactory().Format("Indicator_ScreenshotSeries", captured, planned);
         Invalidate();
+    }
+
+    internal void UpdateRecordingMotionForTests(TimeSpan elapsed)
+        => UpdateRecordingMotion(elapsed);
+
+    internal void RefreshSystemColorsForTests()
+        => OnSystemColorsChanged(EventArgs.Empty);
+
+    private bool ReadMotionPreference(IRecordingMotionPreference preference)
+    {
+        try { return preference.IsAnimationEnabled && !IsHighContrast(); }
+        catch { return false; }
+    }
+
+    private bool IsHighContrast()
+    {
+        try { return _highContrastPreference(); }
+        catch { return true; }
+    }
+
+    private void StartMotionTimerIfNeeded()
+    {
+        if (_motionTimer == null || !_motionEnabled || IsHighContrast() ||
+            _phase != RecordingIndicatorPhase.Recording || IsDisposed)
+            return;
+
+        if (!_motionTimer.Enabled)
+        {
+            try { _motionStartedAtUtc = _motionClock(); }
+            catch { _motionStartedAtUtc = DateTime.UtcNow; }
+            _motionTimer.Start();
+        }
+    }
+
+    private void StopMotionTimer()
+    {
+        _motionTimer?.Stop();
+        _lastMotionDirtyRegions = Array.Empty<Rectangle>();
+        _recordingBorderColor = _visualPalette.Border;
+        _recordingLabelBackgroundColor = _visualPalette.LabelBackgroundLow;
+        if (_label != null)
+        {
+            _label.BackColor = _recordingLabelBackgroundColor;
+            _label.ForeColor = _visualPalette.LabelForeground;
+        }
+    }
+
+    private void UpdateRecordingMotion()
+    {
+        if (!_motionEnabled)
+        {
+            StopMotionTimer();
+            return;
+        }
+
+        TimeSpan elapsed;
+        try { elapsed = _motionClock() - _motionStartedAtUtc; }
+        catch { elapsed = TimeSpan.Zero; }
+        UpdateRecordingMotion(elapsed);
+    }
+
+    private void UpdateRecordingMotion(TimeSpan elapsed)
+    {
+        if (_phase != RecordingIndicatorPhase.Recording || !_motionEnabled || IsHighContrast())
+            return;
+
+        var amount = RecordingIndicatorMotion.PulseAmount(elapsed);
+        var nextBorderColor = RecordingStatusVisualModel.IndicatorRecordingColor(_visualPalette, amount);
+        var nextLabelColor = RecordingStatusVisualModel.IndicatorLabelColor(_visualPalette, amount);
+        bool borderChanged = nextBorderColor != _recordingBorderColor;
+        bool labelChanged = nextLabelColor != _recordingLabelBackgroundColor;
+        _recordingBorderColor = nextBorderColor;
+        _recordingLabelBackgroundColor = nextLabelColor;
+        if (_label != null && labelChanged)
+            _label.BackColor = nextLabelColor;
+
+        if (!borderChanged && !labelChanged)
+        {
+            _lastMotionDirtyRegions = Array.Empty<Rectangle>();
+            return;
+        }
+
+        _lastMotionDirtyRegions = RecordingIndicatorMotion.ComputeDirtyRegions(
+            _presentation,
+            ClientRectangle,
+            _label?.Bounds ?? Rectangle.Empty,
+            includeBorder: borderChanged,
+            includeLabel: labelChanged);
+        foreach (var region in _lastMotionDirtyRegions)
+        {
+            Invalidate(region);
+            if (labelChanged && _label != null && _label.Bounds.IntersectsWith(region))
+                _label.Invalidate(region);
+        }
+        MotionTickCountForTests++;
+    }
+
+    private void UpdateVisualPalette()
+    {
+        _visualPalette = RecordingStatusVisualModel.IndicatorPalette(_phase, IsHighContrast());
+        _recordingBorderColor = _visualPalette.Border;
+        _recordingLabelBackgroundColor = _visualPalette.LabelBackgroundLow;
+        if (_label != null)
+        {
+            _label.BackColor = _recordingLabelBackgroundColor;
+            _label.ForeColor = _visualPalette.LabelForeground;
+        }
     }
 
     private void UpdateLabel()
@@ -1143,9 +1323,7 @@ internal sealed class RecordingIndicatorForm : Form
 
     private string FormatLabel(TimeSpan elapsed)
     {
-        var prefix = string.IsNullOrEmpty(_nestedRole)
-            ? "REC"
-            : $"REC {_nestedRole.ToUpperInvariant()}";
+        var prefix = RecordingStatusVisualModel.RecordingPrefix(_textProviderFactory(), _nestedRole);
 
         if (_durationSeconds.HasValue && _durationSeconds.Value > 0)
         {

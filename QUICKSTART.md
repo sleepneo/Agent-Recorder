@@ -102,6 +102,8 @@ For ordinary recordings, the REC border and floating stop button remain visible
 to the user while being excluded from the captured video on a best-effort basis.
 During nested recording, a geometrically safe inner control can remain visible
 in the outer video so the outer recording captures the complete inner workflow.
+The stop control may move inside the recording boundary when the preferred
+outside position would leave its display; capture exclusion behavior is unchanged.
 
 The agent can also stop a specific recording through the API:
 

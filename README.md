@@ -71,9 +71,10 @@ Agents should use the paths returned by `ensure-running` or
   countdown is configurable per recording from 0 to 10 seconds.
 - Before-confirmation and before-start preflight checks for output paths, free
   space, capture bounds, encoders, and source availability.
-- A click-through red recording border and timer around the captured region.
-- A floating stop button next to each active recording; clicking it stops only
-  that recording.
+- A click-through red recording border and timer around the captured region,
+  with restrained REC motion that follows the Windows animation preference.
+- A stable rounded-capsule stop control next to each active recording; clicking
+  it stops only that recording.
 - A global stop hotkey (`Ctrl+Shift+F10`) that stops all active recordings.
 - Chapter marks through the authenticated API or `Ctrl+Shift+F11` while
   recording. The local hotkey marks every active nested recording, shows brief
@@ -81,6 +82,8 @@ Agents should use the paths returned by `ensure-running` or
 - Tray menu stop entry that adapts to one or multiple active recordings.
 - Chinese and English local UI with DPI-aware confirmation, selection, recording
   indicators, and stop controls.
+- A DPI-aware region selector with corner accents and a live
+  `W x H @ display` label.
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.

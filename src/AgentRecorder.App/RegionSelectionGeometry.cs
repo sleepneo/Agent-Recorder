@@ -36,6 +36,57 @@ internal static class RegionSelectionGeometry
     public static Point GetVirtualScreenCenter(Rectangle formBounds)
         => AgentRecorder.UI.Geometry.RegionSelectionGeometry.GetVirtualScreenCenter(formBounds);
 
+    public static RegionSelectionVisualMetrics ComputeVisualMetrics(int dpi)
+        => RegionSelectionVisualGeometry.ComputeMetrics(dpi);
+
+    public static Rectangle ComputeVisualBoundaryBounds(Rectangle selection)
+        => RegionSelectionVisualGeometry.ComputeBoundaryBounds(selection);
+
+    public static Rectangle ComputeVisualBoundaryBounds(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeBoundaryBounds(selection, metrics);
+
+    public static IReadOnlyList<RegionSelectionStrokeSegment> ComputeVisualBoundaryStrokeSegments(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeBoundaryStrokeSegments(selection, metrics);
+
+    public static Rectangle ComputeVisualBoundaryPaintEnvelope(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeBoundaryPaintEnvelope(selection, metrics);
+
+    public static IReadOnlyList<RegionSelectionLineSegment> ComputeCornerLines(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeCornerLines(selection, metrics);
+
+    public static IReadOnlyList<RegionSelectionStrokeSegment> ComputeCornerStrokeSegments(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeCornerStrokeSegments(selection, metrics);
+
+    public static IReadOnlyList<Rectangle> ComputeEdgeHandleBounds(
+        Rectangle selection,
+        RegionSelectionVisualMetrics metrics)
+        => RegionSelectionVisualGeometry.ComputeEdgeHandleBounds(selection, metrics);
+
+    public static RegionSelectionLabelLayout ComputeLabelLayout(
+        Rectangle selection,
+        Size textSize,
+        Rectangle clientBounds,
+        RegionSelectionVisualMetrics metrics,
+        IEnumerable<Rectangle>? avoidRects = null)
+        => RegionSelectionVisualGeometry.ComputeLabelLayout(selection, textSize, clientBounds, metrics, avoidRects);
+
+    public static string FormatSelectionLabelText(
+        int width,
+        int height,
+        string? displayId,
+        int maxDisplayIdCharacters = 24)
+        => RegionSelectionVisualGeometry.FormatSelectionLabelText(width, height, displayId, maxDisplayIdCharacters);
+
     public static Rectangle ClampSelectionAfterDrag(
         Rectangle current, Rectangle clientBounds, SnapEdgeMask movableEdges,
         bool preserveSize = false, int minSize = 32)

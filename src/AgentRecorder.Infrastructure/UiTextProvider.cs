@@ -180,8 +180,13 @@ public sealed class UiTextProvider : IUiTextProvider
             ["StopControl_Button_Stop"] = "■ 停止",
             ["StopControl_Button_Stopping"] = "停止中...",
             ["StopControl_Tooltip"] = "停止本次录制",
+            ["StopControl_Role_Outer"] = "OUTER",
+            ["StopControl_Role_Inner"] = "INNER",
 
             // Recording indicator phases
+            ["Indicator_Recording"] = "REC",
+            ["Indicator_Recording_Outer"] = "REC OUTER",
+            ["Indicator_Recording_Inner"] = "REC INNER",
             ["Indicator_Preparing"] = "正在准备麦克风…",
             ["Indicator_Finalizing"] = "正在保存…",
             ["Indicator_Countdown"] = "{0}",
@@ -334,8 +339,13 @@ public sealed class UiTextProvider : IUiTextProvider
             ["StopControl_Button_Stop"] = "■ Stop",
             ["StopControl_Button_Stopping"] = "Stopping...",
             ["StopControl_Tooltip"] = "Stop this recording",
+            ["StopControl_Role_Outer"] = "OUTER",
+            ["StopControl_Role_Inner"] = "INNER",
 
             // Recording indicator phases
+            ["Indicator_Recording"] = "REC",
+            ["Indicator_Recording_Outer"] = "REC OUTER",
+            ["Indicator_Recording_Inner"] = "REC INNER",
             ["Indicator_Preparing"] = "Preparing microphone...",
             ["Indicator_Finalizing"] = "Saving...",
             ["Indicator_Countdown"] = "{0}",

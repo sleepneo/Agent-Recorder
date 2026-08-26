@@ -103,6 +103,8 @@ public class UiTextProviderTests
 
             // Recording stop control
             "StopControl_Button_Stop", "StopControl_Tooltip", "StopControl_Button_Stopping",
+            "StopControl_Role_Outer", "StopControl_Role_Inner",
+            "Indicator_Recording", "Indicator_Recording_Outer", "Indicator_Recording_Inner",
 
             // Confirmation form
             "Confirmation_FolderBrowser_Description", "Confirmation_Title",

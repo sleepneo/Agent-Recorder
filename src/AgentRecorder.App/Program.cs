@@ -24,6 +24,10 @@ internal static class Program
 #if DEBUG
             if (ConfirmationThemePreviewHost.TryRun(args))
                 return;
+            if (RegionSelectionStylePreviewHost.TryRun(args))
+                return;
+            if (RecordingStatusStylePreviewHost.TryRun(args))
+                return;
 #endif
             Run();
         }

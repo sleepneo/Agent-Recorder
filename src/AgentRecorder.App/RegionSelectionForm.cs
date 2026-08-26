@@ -47,6 +47,10 @@ public sealed class RegionSelectionForm : Form
     private readonly Button _preset900;
     private readonly Button _preset1080;
     private readonly Button _presetFit16x9;
+    private RegionSelectionVisualPalette _visualPalette;
+    private RegionSelectionVisualMetrics _visualMetrics;
+    private string _selectionTagText = "";
+    private RegionSelectionLabelLayout _selectionTagLayout = RegionSelectionLabelLayout.Hidden;
     private bool _updatingInputs;
     private List<DisplayInfo>? _displays;
 
@@ -114,6 +118,8 @@ public sealed class RegionSelectionForm : Form
         _initialVirtualBounds = initialVirtualBounds;
         _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
         _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
+        _visualPalette = RegionSelectionVisualPalette.Create();
+        _visualMetrics = RegionSelectionGeometry.ComputeVisualMetrics(DeviceDpi);
         if (onAuditEvent != null)
             AuditEvent += (_, e) => onAuditEvent(e);
 
@@ -293,6 +299,7 @@ public sealed class RegionSelectionForm : Form
         // Apply initial selection immediately while still on the creating thread.
         // OnShown is message-pump dependent and may not run before tests inspect state.
         ApplyInitialSelection();
+        UpdateSelectionTagLayout();
 
         RaiseAuditEvent("region_selection.ui_created", CreateLifecyclePayload("handle_created"));
     }
@@ -386,6 +393,23 @@ public sealed class RegionSelectionForm : Form
     {
         base.OnResize(e);
         UpdateButtonPositions();
+        UpdateSelectionTagLayout();
+        Invalidate();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        _visualPalette = RegionSelectionVisualPalette.Create();
+        _visualMetrics = RegionSelectionGeometry.ComputeVisualMetrics(DeviceDpi);
+        UpdateSelectionTagLayout();
+        Invalidate();
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs e)
+    {
+        base.OnSystemColorsChanged(e);
+        _visualPalette = RegionSelectionVisualPalette.Create();
         Invalidate();
     }
 
@@ -720,19 +744,15 @@ public sealed class RegionSelectionForm : Form
     /// Finds the display that contains the center of the given bounds.
     /// Returns the display_id from SystemQuery.EnumDisplays().
     /// </summary>
-    private static string FindDisplayForBounds(Rectangle bounds)
+    private string FindDisplayForBounds(Rectangle bounds)
     {
-        try
-        {
-            var displays = SystemQuery.EnumDisplays();
-            return RegionSelectionGeometry.FindDisplayId(bounds, displays)
-                ?? RegionSelectionGeometry.FindDisplayIdByOverlap(bounds, displays)
-                ?? "display_1";
-        }
-        catch
-        {
+        var displays = _displays;
+        if (displays is not { Count: > 0 })
             return "display_1";
-        }
+
+        return RegionSelectionGeometry.FindDisplayId(bounds, displays)
+            ?? RegionSelectionGeometry.FindDisplayIdByOverlap(bounds, displays)
+            ?? "display_1";
     }
 
     private void CancelSelection()
@@ -749,9 +769,14 @@ public sealed class RegionSelectionForm : Form
         List<DisplayInfo> displays = new();
         try
         {
-            displays = _displays ?? SystemQuery.EnumDisplays().ToList();
+            if (_displays == null)
+                _displays = SystemQuery.EnumDisplays().ToList();
+            displays = _displays;
         }
-        catch { }
+        catch
+        {
+            _displays = new List<DisplayInfo>();
+        }
 
         IEnumerable<WindowInfo> windows = Enumerable.Empty<WindowInfo>();
         try
@@ -1175,6 +1200,7 @@ public sealed class RegionSelectionForm : Form
             _inputW.Value = _selection.Width;
             _inputH.Value = _selection.Height;
             _updatingInputs = false;
+            UpdateSelectionTagLayout();
         }
         else
         {
@@ -1188,6 +1214,7 @@ public sealed class RegionSelectionForm : Form
             _inputW.Value = MinSize;
             _inputH.Value = MinSize;
             _updatingInputs = false;
+            UpdateSelectionTagLayout();
         }
     }
 
@@ -1195,12 +1222,18 @@ public sealed class RegionSelectionForm : Form
     {
         try
         {
+            var displays = _displays;
+            if (displays is not { Count: > 0 })
+            {
+                _displayLabel.Text = _text.Format("RegionSelection_Display_UnknownWithVirtual", Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height);
+                return;
+            }
+
             var virtualBounds = new Rectangle(
                 Bounds.X + _selection.X,
                 Bounds.Y + _selection.Y,
                 _selection.Width,
                 _selection.Height);
-            var displays = SystemQuery.EnumDisplays();
             var displayId = RegionSelectionGeometry.FindDisplayId(virtualBounds, displays)
                          ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, displays)
                          ?? "unknown";
@@ -1212,10 +1245,118 @@ public sealed class RegionSelectionForm : Form
         }
     }
 
+    private DisplayInfo? GetSelectionDisplay()
+    {
+        if (_selection.Width <= 0 || _selection.Height <= 0 || _displays is not { Count: > 0 })
+            return null;
+
+        var virtualBounds = new Rectangle(
+            Bounds.X + _selection.X,
+            Bounds.Y + _selection.Y,
+            _selection.Width,
+            _selection.Height);
+        string? displayId = RegionSelectionGeometry.FindDisplayId(virtualBounds, _displays)
+            ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, _displays);
+        return displayId == null ? null : _displays.FirstOrDefault(display => display.id == displayId);
+    }
+
+    private int GetSelectionDpi()
+    {
+        var display = GetSelectionDisplay();
+        if (display is not null && display.scale_factor > 0)
+            return Math.Max(96, (int)Math.Round(display.scale_factor * 96d));
+
+        return DeviceDpi > 0 ? DeviceDpi : 96;
+    }
+
+    private Font CreateSelectionTagFont()
+        => new("Segoe UI", _visualMetrics.SelectionLabelFontPixelSize,
+            FontStyle.Bold, GraphicsUnit.Pixel);
+
+    private static Font CreateDisplayBoundaryLabelFont(RegionSelectionVisualMetrics metrics)
+        => new("Consolas", metrics.DisplayBoundaryLabelFontPixelSize,
+            FontStyle.Bold, GraphicsUnit.Pixel);
+
+    private void UpdateSelectionTagLayout()
+    {
+        _visualMetrics = RegionSelectionGeometry.ComputeVisualMetrics(GetSelectionDpi());
+        if (_selection.Width <= 0 || _selection.Height <= 0 || ClientSize.Width <= 0 || ClientSize.Height <= 0)
+        {
+            _selectionTagText = "";
+            _selectionTagLayout = RegionSelectionLabelLayout.Hidden;
+            return;
+        }
+
+        var display = GetSelectionDisplay();
+        string displayId = display?.id ?? "";
+        using var font = CreateSelectionTagFont();
+        int maxTextWidth = Math.Max(64, ClientSize.Width - _visualMetrics.LabelPadding * 4);
+        string text = RegionSelectionGeometry.FormatSelectionLabelText(
+            _selection.Width, _selection.Height, displayId, maxDisplayIdCharacters: 24);
+        Size textSize = MeasureSelectionTagText(text, font);
+
+        if (textSize.Width > maxTextWidth)
+        {
+            text = RegionSelectionGeometry.FormatSelectionLabelText(
+                _selection.Width, _selection.Height, displayId, maxDisplayIdCharacters: 10);
+            textSize = MeasureSelectionTagText(text, font);
+        }
+
+        if (textSize.Width > maxTextWidth)
+        {
+            text = RegionSelectionGeometry.FormatSelectionLabelText(
+                _selection.Width, _selection.Height, null);
+            textSize = MeasureSelectionTagText(text, font);
+        }
+
+        _selectionTagText = text;
+        var avoidRects = GetSelectionTagAvoidRects();
+        _selectionTagLayout = RegionSelectionGeometry.ComputeLabelLayout(
+            _selection,
+            textSize,
+            ClientRectangle,
+            _visualMetrics,
+            avoidRects);
+    }
+
+    private static Size MeasureSelectionTagText(string text, Font font)
+        => TextRenderer.MeasureText(
+            text,
+            font,
+            new Size(int.MaxValue, int.MaxValue),
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+
+    private IReadOnlyList<Rectangle> GetSelectionTagAvoidRects()
+    {
+        var avoids = new List<Rectangle>
+        {
+            _infoLabel.Bounds,
+            _coordsLabel.Bounds,
+            _displayLabel.Bounds,
+            _controlPanel.Bounds,
+            _confirmButton.Bounds,
+            _cancelButton.Bounds
+        };
+
+        avoids.AddRange(RegionSelectionGeometry.ComputeEdgeHandleBounds(_selection, _visualMetrics));
+
+        // Keep the near-selection label away from all current resize hit zones,
+        // including corners whose visual expression is the L shape itself.
+        int hitSize = HandleSize * 2;
+        int half = HandleSize;
+        avoids.Add(new Rectangle(_selection.Left - half, _selection.Top - half, hitSize, hitSize));
+        avoids.Add(new Rectangle(_selection.Right - half, _selection.Top - half, hitSize, hitSize));
+        avoids.Add(new Rectangle(_selection.Left - half, _selection.Bottom - half, hitSize, hitSize));
+        avoids.Add(new Rectangle(_selection.Right - half, _selection.Bottom - half, hitSize, hitSize));
+        return avoids;
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
         var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
         // Draw multi-monitor boundaries and labels
         DrawDisplayBoundaries(g);
@@ -1223,7 +1364,7 @@ public sealed class RegionSelectionForm : Form
         // Draw window hover highlight (behind the selection so it never obscures it).
         if (_hoverWindowClientBounds.HasValue)
         {
-            using var hoverPen = new Pen(Color.FromArgb(180, 0, 255, 255), 2)
+            using var hoverPen = new Pen(_visualPalette.HoverWindowBorder, 2)
             {
                 DashStyle = DashStyle.Dash
             };
@@ -1235,42 +1376,75 @@ public sealed class RegionSelectionForm : Form
             // Draw dark overlay outside selection
             using var region = new Region(ClientRectangle);
             region.Exclude(_selection);
-            using var brush = new SolidBrush(Color.FromArgb(100, 0, 0, 0));
+            using var brush = new SolidBrush(_visualPalette.SelectionMask);
             g.FillRegion(brush, region);
 
-            // Draw selection border
-            using var pen = new Pen(Color.Yellow, 2);
-            g.DrawRectangle(pen, _selection);
-
-            // Draw resize handles
-            using var handleBrush = new SolidBrush(Color.Yellow);
-            int hs = HandleSize;
-            g.FillRectangle(handleBrush, _selection.Left - hs / 2, _selection.Top - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Right - hs / 2, _selection.Top - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Left - hs / 2, _selection.Bottom - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Right - hs / 2, _selection.Bottom - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Left + _selection.Width / 2 - hs / 2, _selection.Top - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Left + _selection.Width / 2 - hs / 2, _selection.Bottom - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Left - hs / 2, _selection.Top + _selection.Height / 2 - hs / 2, hs, hs);
-            g.FillRectangle(handleBrush, _selection.Right - hs / 2, _selection.Top + _selection.Height / 2 - hs / 2, hs, hs);
+            DrawSelectionVisuals(g);
+            DrawSelectionTag(g);
         }
+    }
+
+    private void DrawSelectionVisuals(Graphics g)
+    {
+        var boundary = RegionSelectionGeometry.ComputeVisualBoundaryBounds(_selection, _visualMetrics);
+        using (var boundaryPen = new Pen(_visualPalette.SelectionBoundary, _visualMetrics.BoundaryStrokeWidth)
+        {
+            LineJoin = LineJoin.Round
+        })
+        {
+            if (!boundary.IsEmpty)
+                g.DrawRectangle(boundaryPen, boundary);
+        }
+
+        using (var accentPen = new Pen(_visualPalette.SelectionAccent, _visualMetrics.AccentStrokeWidth)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+            LineJoin = LineJoin.Round
+        })
+        {
+            foreach (var segment in RegionSelectionGeometry.ComputeCornerStrokeSegments(_selection, _visualMetrics))
+                g.DrawLine(accentPen, segment.Centerline.Start, segment.Centerline.End);
+        }
+
+        using var handleBrush = new SolidBrush(_visualPalette.EdgeHandleFill);
+        using var handlePen = new Pen(_visualPalette.EdgeHandleOutline, Math.Max(1, _visualMetrics.BoundaryStrokeWidth));
+        foreach (var handle in RegionSelectionGeometry.ComputeEdgeHandleBounds(_selection, _visualMetrics))
+        {
+            g.FillRectangle(handleBrush, handle);
+            g.DrawRectangle(handlePen, handle);
+        }
+    }
+
+    private void DrawSelectionTag(Graphics g)
+    {
+        if (!_selectionTagLayout.IsVisible || string.IsNullOrWhiteSpace(_selectionTagText))
+            return;
+
+        using var surface = new SolidBrush(_visualPalette.SelectionLabelSurface);
+        g.FillRectangle(surface, _selectionTagLayout.Bounds);
+
+        using var font = CreateSelectionTagFont();
+        TextRenderer.DrawText(
+            g,
+            _selectionTagText,
+            font,
+            _selectionTagLayout.TextBounds,
+            _visualPalette.SelectionLabelText,
+            TextFormatFlags.SingleLine |
+            TextFormatFlags.NoPadding |
+            TextFormatFlags.NoPrefix |
+            TextFormatFlags.VerticalCenter |
+            TextFormatFlags.EndEllipsis);
     }
 
     private void DrawDisplayBoundaries(Graphics g)
     {
-        List<DisplayInfo>? displays = null;
-        try
-        {
-            displays = _displays ?? SystemQuery.EnumDisplays().ToList();
-        }
-        catch
-        {
-            // Fall back to virtual screen bounds if enumeration fails.
-        }
+        var displays = _displays;
 
         if (displays == null || displays.Count == 0)
         {
-            using var pen = new Pen(Color.FromArgb(80, 255, 255, 255), 1)
+            using var pen = new Pen(_visualPalette.DisplayBoundary, _visualMetrics.BoundaryStrokeWidth)
             {
                 DashStyle = DashStyle.Dash
             };
@@ -1279,12 +1453,12 @@ public sealed class RegionSelectionForm : Form
             return;
         }
 
-        using var boundaryPen = new Pen(Color.FromArgb(100, 255, 255, 255), 1)
+        using var boundaryPen = new Pen(_visualPalette.DisplayBoundary, _visualMetrics.BoundaryStrokeWidth)
         {
             DashStyle = DashStyle.Dash
         };
-        using var labelBrush = new SolidBrush(Color.FromArgb(180, 255, 255, 255));
-        using var labelFont = new Font("Consolas", 10, FontStyle.Bold);
+        const TextFormatFlags labelFlags =
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
 
         foreach (var display in displays)
         {
@@ -1300,10 +1474,25 @@ public sealed class RegionSelectionForm : Form
 
             // Draw label near the top-left corner, inside the display if possible.
             var label = display.id;
-            var labelSize = g.MeasureString(label, labelFont);
+            int displayDpi = display.scale_factor > 0
+                ? Math.Max(96, (int)Math.Round(display.scale_factor * 96d, MidpointRounding.AwayFromZero))
+                : _visualMetrics.Dpi;
+            var displayMetrics = RegionSelectionGeometry.ComputeVisualMetrics(displayDpi);
+            using var labelFont = CreateDisplayBoundaryLabelFont(displayMetrics);
+            var labelSize = TextRenderer.MeasureText(
+                label,
+                labelFont,
+                new Size(int.MaxValue, int.MaxValue),
+                labelFlags);
             int labelX = clientBounds.Left + 4;
             int labelY = clientBounds.Top + 4;
-            g.DrawString(label, labelFont, labelBrush, labelX, labelY);
+            TextRenderer.DrawText(
+                g,
+                label,
+                labelFont,
+                new Rectangle(new Point(labelX, labelY), labelSize),
+                _visualPalette.DisplayLabelText,
+                labelFlags);
         }
     }
 
@@ -1341,6 +1530,23 @@ public sealed class RegionSelectionForm : Form
     internal IReadOnlyList<WindowPickCandidate> WindowCandidates => _windowCandidates;
     internal IReadOnlyList<Rectangle> WindowCandidateBoundsForTests => _windowCandidates.Select(c => c.ClientBounds).ToList();
     internal string CurrentDragModeForTests => _dragMode.ToString();
+    internal string SelectionLabelTextForTests => _selectionTagText;
+    internal RegionSelectionLabelLayout SelectionLabelLayoutForTests => _selectionTagLayout;
+    internal RegionSelectionVisualMetrics SelectionVisualMetricsForTests => _visualMetrics;
+    internal RegionSelectionVisualPalette SelectionVisualPaletteForTests => _visualPalette;
+    internal (GraphicsUnit Unit, float Size) SelectionLabelFontSpecForTests
+    {
+        get
+        {
+            using var font = CreateSelectionTagFont();
+            return (font.Unit, font.Size);
+        }
+    }
+    internal (GraphicsUnit Unit, float Size) DisplayBoundaryLabelFontSpecForTests
+        => (GraphicsUnit.Pixel, _visualMetrics.DisplayBoundaryLabelFontPixelSize);
+    internal Rectangle ControlPanelBoundsForTests => _controlPanel.Bounds;
+    internal Rectangle ConfirmButtonBoundsForTests => _confirmButton.Bounds;
+    internal Rectangle CancelButtonBoundsForTests => _cancelButton.Bounds;
 
     internal void RefreshCandidatesAndTargetsForTest() => RefreshCandidatesAndTargets();
 

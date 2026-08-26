@@ -22,8 +22,8 @@ internal sealed class RecordingIndicatorManager
     private readonly Action<string> _onStopRequested;
     private readonly IDisplayDpiResolver _dpiResolver;
     private readonly Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> _formFactory;
-    private readonly Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> _stopControlFactory;
-    private readonly Func<IUiTextProvider, Font, DisplayDpiInfo, Size> _stopControlSizeProvider;
+    private readonly Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, string?, RecordingStopControlForm> _stopControlFactory;
+    private readonly Func<IUiTextProvider, Font, DisplayDpiInfo, string?, Size> _stopControlSizeProvider;
     private Func<IUiTextProvider> _textProviderFactory = null!;
 
     public RecordingIndicatorManager(AuditLogger audit)
@@ -33,7 +33,9 @@ internal sealed class RecordingIndicatorManager
     }
 
     public RecordingIndicatorManager(AuditLogger audit, Action<string> onStopRequested, IUiTextProvider? textProvider = null)
-        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory), CreateStopControlFactory(textProvider), new DisplayDpiResolver())
+        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory),
+            (id, bounds, size, dpi, mode, role) => new RecordingStopControlForm(id, bounds, size, dpi, mode, role, textProvider),
+            new DisplayDpiResolver())
     {
         _textProviderFactory = () => textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
     }
@@ -43,7 +45,9 @@ internal sealed class RecordingIndicatorManager
     /// This avoids capturing a stale <see cref="IUiTextProvider"/> when the UI language changes.
     /// </summary>
     public RecordingIndicatorManager(AuditLogger audit, Action<string> onStopRequested, Func<IUiTextProvider> textProviderFactory)
-        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory), (id, bounds, size, dpi, mode) => new RecordingStopControlForm(id, bounds, size, dpi, mode, textProviderFactory()), new DisplayDpiResolver())
+        : this(audit, onStopRequested, (id, p, s, d, r, factory) => DefaultFormFactory(id, p, s, d, r, factory),
+            (id, bounds, size, dpi, mode, role) => new RecordingStopControlForm(id, bounds, size, dpi, mode, role, textProviderFactory()),
+            new DisplayDpiResolver())
     {
         _textProviderFactory = textProviderFactory;
     }
@@ -66,7 +70,9 @@ internal sealed class RecordingIndicatorManager
         Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> stopControlFactory,
         IDisplayDpiResolver? dpiResolver = null,
         Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
-        : this(audit, onStopRequested, (id, p, s, d, r, _) => formFactory(id, p, s, d, r), stopControlFactory, dpiResolver, stopControlSizeProvider)
+        : this(audit, onStopRequested, (id, p, s, d, r, _) => formFactory(id, p, s, d, r),
+            (id, bounds, size, dpi, mode, _) => stopControlFactory(id, bounds, size, dpi, mode),
+            dpiResolver, stopControlSizeProvider)
     {
     }
 
@@ -92,7 +98,9 @@ internal sealed class RecordingIndicatorManager
         Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, RecordingStopControlForm> stopControlFactory,
         IDisplayDpiResolver? dpiResolver = null,
         Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
-        : this(audit, onStopRequested, WrapLegacyFormFactory(formFactory), (id, bounds, size, dpi, _) => stopControlFactory(id, bounds, size, dpi), dpiResolver, stopControlSizeProvider)
+        : this(audit, onStopRequested, WrapLegacyFormFactory(formFactory),
+            (id, bounds, size, dpi, _, _) => stopControlFactory(id, bounds, size, dpi),
+            dpiResolver, stopControlSizeProvider)
     {
     }
 
@@ -100,7 +108,7 @@ internal sealed class RecordingIndicatorManager
         AuditLogger audit,
         Action<string> onStopRequested,
         Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> formFactory,
-        Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> stopControlFactory,
+        Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, string?, RecordingStopControlForm> stopControlFactory,
         IDisplayDpiResolver? dpiResolver = null,
         Func<IUiTextProvider, Font, DisplayDpiInfo, Size>? stopControlSizeProvider = null)
     {
@@ -109,7 +117,9 @@ internal sealed class RecordingIndicatorManager
         _formFactory = formFactory;
         _stopControlFactory = stopControlFactory;
         _dpiResolver = dpiResolver ?? new DisplayDpiResolver();
-        _stopControlSizeProvider = stopControlSizeProvider ?? DefaultStopControlSizeProvider;
+        _stopControlSizeProvider = stopControlSizeProvider == null
+            ? DefaultStopControlSizeProvider
+            : (text, font, dpi, _) => stopControlSizeProvider(text, font, dpi);
         _textProviderFactory = () => new UiTextProvider(UiLanguageStore.LoadOrDefault());
     }
 
@@ -129,9 +139,10 @@ internal sealed class RecordingIndicatorManager
         RecordingStopControlBounds bounds,
         Size controlSize,
         DisplayDpiInfo dpiInfo,
-        CaptureVisibilityMode mode)
+        CaptureVisibilityMode mode,
+        string? nestedRole)
     {
-        return new RecordingStopControlForm(recordingId, bounds, controlSize, dpiInfo, mode);
+        return new RecordingStopControlForm(recordingId, bounds, controlSize, dpiInfo, mode, nestedRole);
     }
 
     private static Func<string, RecordingIndicatorPresentation, DateTime, int?, string?, Func<IUiTextProvider>, RecordingIndicatorForm> WrapLegacyFormFactory(
@@ -141,12 +152,12 @@ internal sealed class RecordingIndicatorManager
             legacy(id, presentation.WindowBounds, started, duration, role);
     }
 
-    private static Size DefaultStopControlSizeProvider(IUiTextProvider text, Font font, DisplayDpiInfo dpi)
+    private static Size DefaultStopControlSizeProvider(IUiTextProvider text, Font font, DisplayDpiInfo dpi, string? nestedRole)
     {
         // Measure at the current process DPI, then scale to the target monitor DPI so that
         // forced DisplayDpiInfo values are respected in tests and the combined plan uses the
         // same physical pixel semantics for both label and stop control.
-        var screenSize = RecordingStopControlLayout.MeasurePreferredSize(text, font);
+        var screenSize = RecordingStopControlLayout.MeasurePreferredSize(text, font, nestedRole);
         int screenDpi = GetSystemDpi();
         if (screenDpi <= 0)
             screenDpi = 96;
@@ -167,9 +178,9 @@ internal sealed class RecordingIndicatorManager
         return temp.DeviceDpi;
     }
 
-    private static Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, RecordingStopControlForm> CreateStopControlFactory(IUiTextProvider? textProvider)
+    private static Func<string, RecordingStopControlBounds, Size, DisplayDpiInfo, CaptureVisibilityMode, string?, RecordingStopControlForm> CreateStopControlFactory(IUiTextProvider? textProvider)
     {
-        return (recordingId, bounds, size, dpi, mode) => new RecordingStopControlForm(recordingId, bounds, size, dpi, mode, textProvider);
+        return (recordingId, bounds, size, dpi, mode, role) => new RecordingStopControlForm(recordingId, bounds, size, dpi, mode, role, textProvider);
     }
 
     /// <summary>
@@ -301,6 +312,7 @@ internal sealed class RecordingIndicatorManager
         var dpiInfo = forcedDpi ?? _dpiResolver.Resolve(targetArea);
 
         using var labelFont = new Font("Segoe UI", 9, FontStyle.Bold);
+        var textProvider = _textProviderFactory();
         var labelSize = recording.IsScreenshotSeries
             ? RecordingIndicatorForm.MeasureSeriesLabelSize(labelFont, new Padding(4, 2, 4, 2), dpiInfo)
             : RecordingIndicatorForm.MeasureLabelSize(
@@ -308,11 +320,11 @@ internal sealed class RecordingIndicatorManager
                 recording.DurationSeconds,
                 labelFont,
                 new Padding(4, 2, 4, 2),
-                dpiInfo);
+                dpiInfo,
+                textProvider);
 
         using var stopControlFont = new Font("Segoe UI", 8, FontStyle.Bold);
-        var stopControlTextProvider = _textProviderFactory();
-        var controlSize = _stopControlSizeProvider(stopControlTextProvider, stopControlFont, dpiInfo);
+        var controlSize = _stopControlSizeProvider(textProvider, stopControlFont, dpiInfo, recording.NestedRole);
 
         var indicatorPlan = RecordingIndicatorGeometry.ComputePresentationPlan(
             recording,
@@ -593,7 +605,8 @@ internal sealed class RecordingIndicatorManager
                 plan.StopBounds,
                 plan.StopControlSize,
                 plan.DpiInfo,
-                plan.IndicatorPresentation.Mode);
+                plan.IndicatorPresentation.Mode,
+                recording.NestedRole);
 
             // Create hidden HWNDs so we can read the actual DPI before any window becomes visible.
             _ = indicator.Handle;
@@ -648,7 +661,8 @@ internal sealed class RecordingIndicatorManager
                     retryPlan.StopBounds,
                     retryPlan.StopControlSize,
                     retryPlan.DpiInfo,
-                    retryPlan.IndicatorPresentation.Mode);
+                    retryPlan.IndicatorPresentation.Mode,
+                    recording.NestedRole);
 
                 return new VerificationResult(indicator, stopControl, retryPlan, true);
             }

@@ -16,19 +16,33 @@ internal static class RecordingStopControlLayout
     public const int VerticalSafetyInsetLogical = 4;
 
     public static Size MeasurePreferredSize(IUiTextProvider text, Font font, Rectangle targetMonitorBounds)
+        => MeasurePreferredSize(text, font, targetMonitorBounds, null);
+
+    public static Size MeasurePreferredSize(
+        IUiTextProvider text,
+        Font font,
+        Rectangle targetMonitorBounds,
+        string? nestedRole)
     {
         using var host = new DpiHost(targetMonitorBounds);
         host.EnsureHandle();
-        return MeasureOnHost(text, font, host);
+        return MeasureOnHost(text, font, host, nestedRole);
     }
 
     internal static Size MeasurePreferredSize(IUiTextProvider text, Font font, Rectangle targetMonitorBounds, int testDpi)
+        => MeasurePreferredSize(text, font, targetMonitorBounds, testDpi, null);
+
+    internal static Size MeasurePreferredSize(
+        IUiTextProvider text,
+        Font font,
+        Rectangle targetMonitorBounds,
+        int testDpi,
+        string? nestedRole)
     {
         float scale = testDpi / 96f;
-        var stopSize = TextRenderer.MeasureText(text.Get("StopControl_Button_Stop"), font, Size.Empty, TextFormatFlags.SingleLine);
-        var stoppingSize = TextRenderer.MeasureText(text.Get("StopControl_Button_Stopping"), font, Size.Empty, TextFormatFlags.SingleLine);
-        int width = (int)Math.Ceiling(Math.Max(stopSize.Width, stoppingSize.Width) * scale);
-        int height = (int)Math.Ceiling(Math.Max(stopSize.Height, stoppingSize.Height) * scale);
+        var measured = MeasureLongestText(text, font, nestedRole);
+        int width = (int)Math.Ceiling(measured.Width * scale);
+        int height = (int)Math.Ceiling(measured.Height * scale);
         int horizontalInset = (int)Math.Ceiling(HorizontalSafetyInsetLogical * scale);
         int verticalInset = (int)Math.Ceiling(VerticalSafetyInsetLogical * scale);
         width += (int)Math.Ceiling(ButtonPadding.Horizontal * scale) + horizontalInset * 2;
@@ -39,17 +53,34 @@ internal static class RecordingStopControlLayout
     }
 
     public static Size MeasurePreferredSize(IUiTextProvider text, Font font, Control? dpiSource = null)
-        => MeasurePreferredSize(text, font, GetDpiScale(dpiSource));
+        => MeasurePreferredSize(text, font, GetDpiScale(dpiSource), null);
+
+    public static Size MeasurePreferredSize(
+        IUiTextProvider text,
+        Font font,
+        string? nestedRole,
+        Control? dpiSource = null)
+        => MeasurePreferredSize(text, font, GetDpiScale(dpiSource), nestedRole);
 
     internal static Size MeasurePreferredSize(IUiTextProvider text, Font font, float dpiScale)
+        => MeasurePreferredSize(text, font, dpiScale, null);
+
+    internal static Size MeasurePreferredSize(
+        IUiTextProvider text,
+        Font font,
+        float dpiScale,
+        string? nestedRole)
     {
         using var tempButton = CreateMeasureButton(font);
-        tempButton.Text = text.Get("StopControl_Button_Stop");
-        var stopSize = tempButton.GetPreferredSize(Size.Empty);
-        tempButton.Text = text.Get("StopControl_Button_Stopping");
-        var stoppingSize = tempButton.GetPreferredSize(Size.Empty);
-        int width = Math.Max(stopSize.Width, stoppingSize.Width);
-        int height = Math.Max(stopSize.Height, stoppingSize.Height);
+        var width = 0;
+        var height = 0;
+        foreach (var value in SupportedButtonTexts(text, nestedRole))
+        {
+            tempButton.Text = value;
+            var preferred = tempButton.GetPreferredSize(Size.Empty);
+            width = Math.Max(width, preferred.Width);
+            height = Math.Max(height, preferred.Height);
+        }
         int horizontalInset = (int)Math.Ceiling(HorizontalSafetyInsetLogical * dpiScale);
         int verticalInset = (int)Math.Ceiling(VerticalSafetyInsetLogical * dpiScale);
         width += horizontalInset * 2;
@@ -75,16 +106,19 @@ internal static class RecordingStopControlLayout
         return new Rectangle(left, top, right - left, bottom - top);
     }
 
-    private static Size MeasureOnHost(IUiTextProvider text, Font font, DpiHost host)
+    private static Size MeasureOnHost(IUiTextProvider text, Font font, DpiHost host, string? nestedRole)
     {
         using var tempButton = CreateMeasureButton(font);
         host.Controls.Add(tempButton);
-        tempButton.Text = text.Get("StopControl_Button_Stop");
-        var stopSize = tempButton.GetPreferredSize(Size.Empty);
-        tempButton.Text = text.Get("StopControl_Button_Stopping");
-        var stoppingSize = tempButton.GetPreferredSize(Size.Empty);
-        int width = Math.Max(stopSize.Width, stoppingSize.Width);
-        int height = Math.Max(stopSize.Height, stoppingSize.Height);
+        int width = 0;
+        int height = 0;
+        foreach (var value in SupportedButtonTexts(text, nestedRole))
+        {
+            tempButton.Text = value;
+            var preferred = tempButton.GetPreferredSize(Size.Empty);
+            width = Math.Max(width, preferred.Width);
+            height = Math.Max(height, preferred.Height);
+        }
         float dpiScale = host.DeviceDpi / 96f;
         width += (int)Math.Ceiling(HorizontalSafetyInsetLogical * dpiScale) * 2;
         height += (int)Math.Ceiling(VerticalSafetyInsetLogical * dpiScale) * 2;
@@ -105,6 +139,36 @@ internal static class RecordingStopControlLayout
         };
         button.FlatAppearance.BorderSize = 0;
         return button;
+    }
+
+    private static Size MeasureLongestText(IUiTextProvider text, Font font, string? nestedRole)
+    {
+        int width = 0;
+        int height = 0;
+        foreach (var value in SupportedButtonTexts(text, nestedRole))
+        {
+            var measured = TextRenderer.MeasureText(value, font, Size.Empty, TextFormatFlags.SingleLine);
+            width = Math.Max(width, measured.Width);
+            height = Math.Max(height, measured.Height);
+        }
+        return new Size(width, height);
+    }
+
+    private static IEnumerable<string> SupportedButtonTexts(IUiTextProvider text, string? nestedRole)
+    {
+        // Measure both supported locales and all explicit role variants so a
+        // future language switch or role presentation cannot reflow the capsule.
+        var providers = new[]
+        {
+            text,
+            new UiTextProvider(UiLanguage.ZhCn),
+            new UiTextProvider(UiLanguage.EnUs)
+        };
+        foreach (var provider in providers.DistinctBy(provider => provider.Language))
+        {
+            yield return RecordingStatusVisualModel.StopButtonText(provider, nestedRole, stopping: false);
+            yield return RecordingStatusVisualModel.StopButtonText(provider, nestedRole, stopping: true);
+        }
     }
 
     private static float GetDpiScale(Control? control)
