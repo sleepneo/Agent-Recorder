@@ -31,11 +31,10 @@ public static class ConfigParser
     private static readonly IMicrophoneStatusProvider NullStatusProvider = NullMicrophoneStatusProvider.Instance;
     private static readonly ISystemAudioEndpointProvider EmptySystemAudioProvider = new EmptySystemAudioEndpointProvider();
 
-    public static Recording Build(JsonNode cfg, string agent, out object summary,
+    public static Recording Build(JsonNode cfg, string agent, out RecordingRequestSummary summary,
         IMicrophoneDeviceProvider? microphoneProvider = null,
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
-        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
         // Normalize this before audio/device/source resolution so malformed
@@ -57,7 +56,6 @@ public static class ConfigParser
             microphoneProvider,
             microphoneStatusProvider,
             systemAudioEndpointProvider,
-            systemAudioExperimentFlag,
             preResolvedSystemAudioEndpoint);
         var resolvedMic = resolvedAudio.Microphone;
 
@@ -352,42 +350,42 @@ public static class ConfigParser
             }
         }
 
-        summary = new
+        summary = new RecordingRequestSummary
         {
-            mode = rec.Mode,
-            source = $"{rec.SourceType}: {rec.SourceTitle}",
-            audio = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
+            Mode = rec.Mode,
+            Source = $"{rec.SourceType}: {rec.SourceTitle}",
+            Audio = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
                 ? rec.SystemAudioEndpointIsDefault == true
                     ? $"System audio: On (Default output: {rec.SystemAudioEndpointName})"
                     : $"System audio: On (Selected output: {rec.SystemAudioEndpointName})"
                 : rec.Microphone ? $"Microphone: {rec.MicrophoneDeviceName}" : "No audio",
-            audio_source_kind = rec.AudioSourceKind switch
+            AudioSourceKind = rec.AudioSourceKind switch
             {
                 AudioCaptureSourceKind.Microphone => "microphone",
                 AudioCaptureSourceKind.SystemLoopback => "system-loopback",
                 _ => "none"
             },
-            audio_system_enabled = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback,
-            audio_system_default_output = rec.SystemAudioEndpointIsDefault == true
+            AudioSystemEnabled = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback,
+            AudioSystemDefaultOutput = rec.SystemAudioEndpointIsDefault == true
                 ? rec.SystemAudioEndpointName
                 : null,
-            audio_system_output_name = rec.SystemAudioEndpointName,
-            audio_system_output_is_default = rec.SystemAudioEndpointIsDefault,
-            audio_system_output_selection = rec.SystemAudioEndpointIsDefault == true ? "default" : "selected",
-            audio_device = rec.Microphone ? rec.MicrophoneDeviceName : null,
-            audio_volume_percent = rec.Microphone ? resolvedMic?.VolumePercent : null,
-            duration = rec.DurationSeconds is int s ? $"{s}s" : "Manual stop",
-            countdown_seconds = rec.CountdownSeconds,
-            output = rec.OutputPath,
-            series = seriesConfig == null ? null : new
+            AudioSystemOutputName = rec.SystemAudioEndpointName,
+            AudioSystemOutputIsDefault = rec.SystemAudioEndpointIsDefault,
+            AudioSystemOutputSelection = rec.SystemAudioEndpointIsDefault == true ? "default" : "selected",
+            AudioDevice = rec.Microphone ? rec.MicrophoneDeviceName : null,
+            AudioVolumePercent = rec.Microphone ? resolvedMic?.VolumePercent : null,
+            Duration = rec.DurationSeconds is int s ? $"{s}s" : "Manual stop",
+            CountdownSeconds = rec.CountdownSeconds,
+            Output = rec.OutputPath,
+            Series = seriesConfig == null ? null : new RecordingSeriesPresentation
             {
-                interval_ms = seriesConfig.IntervalMs,
-                max_count = seriesConfig.MaxCount,
-                max_duration_seconds = seriesConfig.MaxDurationSeconds,
-                planned_frame_count = seriesConfig.PlannedFrameCount,
-                output_kind = "png_sequence_directory"
+                IntervalMs = seriesConfig.IntervalMs,
+                MaxCount = seriesConfig.MaxCount,
+                MaxDurationSeconds = seriesConfig.MaxDurationSeconds,
+                PlannedFrameCount = seriesConfig.PlannedFrameCount,
+                OutputKind = "png_sequence_directory"
             },
-            nested_role = rec.NestedRole ?? "none"
+            NestedRole = rec.NestedRole ?? "none"
         };
         return rec;
     }
@@ -697,14 +695,12 @@ public static class ConfigParser
         IMicrophoneDeviceProvider? provider = null,
         IMicrophoneStatusProvider? statusProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
-        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
         => ResolveAudioIntentDetails(
             cfg,
             provider,
             statusProvider,
             systemAudioEndpointProvider,
-            systemAudioExperimentFlag,
             preResolvedSystemAudioEndpoint).Microphone;
 
     /// <summary>
@@ -716,12 +712,8 @@ public static class ConfigParser
         IMicrophoneDeviceProvider? provider = null,
         IMicrophoneStatusProvider? statusProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
-        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
-        var flag = systemAudioExperimentFlag ?? DisabledSystemAudioExperimentFlag.Instance;
-        RejectUnsupportedAudioFeatures(cfg, flag);
-
         var micNode = cfg["audio"]?["microphone"];
         var systemNode = cfg["audio"]?["system_audio"];
         bool microphoneEnabled = micNode?["enabled"]?.GetValue<bool>() ?? false;
@@ -838,24 +830,6 @@ public static class ConfigParser
         }
     }
 
-
-    /// <summary>
-    /// Rejects explicit requests for audio capabilities that are not yet
-    /// implemented. Must run before any display/window enumeration or output
-    /// path construction so that the failure is fast and cheap.
-    /// Microphone is implemented; system audio remains blocked.
-    /// </summary>
-    public static void RejectUnsupportedAudioFeatures(
-        JsonNode cfg,
-        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null)
-    {
-        var sys = cfg["audio"]?["system_audio"];
-        if (sys?["enabled"]?.GetValue<bool>() == true &&
-            !(systemAudioExperimentFlag ?? DisabledSystemAudioExperimentFlag.Instance).IsEnabled)
-            throw new ApiException(400, "CAPABILITY_NOT_IMPLEMENTED",
-                "System audio recording is disabled for the controlled experiment.",
-                new { capability = "system_audio", suggested_action = "retry_without_audio" });
-    }
 
     private static SystemAudioEndpointInfo ResolveSystemAudioEndpoint(
         JsonNode? systemNode,
@@ -984,6 +958,9 @@ public static class ConfigParser
 
     private sealed class EmptySystemAudioEndpointProvider : ISystemAudioEndpointProvider
     {
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(Array.Empty<SystemAudioEndpointInfo>());
+
         public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken cancellationToken = default)
             => Task.FromResult<SystemAudioEndpointInfo?>(null);
 

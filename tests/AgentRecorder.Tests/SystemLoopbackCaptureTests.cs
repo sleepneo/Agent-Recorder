@@ -391,49 +391,4 @@ AudioSourceKind: microphone
         Assert.DoesNotContain("microphone", meta.AudioCaptureBackend, StringComparison.OrdinalIgnoreCase);
     }
 
-    // ============================================================
-    // Public capability closure - system audio remains blocked
-    // ============================================================
-
-    [Fact]
-    public void ConfigParser_SystemAudioEnabled_ReturnsCapabilityNotImplemented()
-    {
-        // Verify that the ConfigParser still rejects system_audio.enabled=true
-        // This is a behavior test for the existing capability check.
-        var json = JsonNode.Parse(@"{
-            ""audio"": {
-                ""system_audio"": {
-                    ""enabled"": true
-                }
-            }
-        }");
-
-        var ex = Assert.Throws<ApiException>(() => { ConfigParser.RejectUnsupportedAudioFeatures(json!); });
-        Assert.Equal(400, ex.Status);
-        Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", ex.Code);
-    }
-
-    [Fact]
-    public void ConfigParser_SystemAudioDisabled_DoesNotThrow()
-    {
-        var json = JsonNode.Parse(@"{
-            ""audio"": {
-                ""system_audio"": {
-                    ""enabled"": false
-                }
-            }
-        }");
-
-        // Should not throw
-        ConfigParser.RejectUnsupportedAudioFeatures(json!);
-    }
-
-    [Fact]
-    public void ConfigParser_NoSystemAudio_DoesNotThrow()
-    {
-        var json = JsonNode.Parse(@"{}");
-
-        // Should not throw
-        ConfigParser.RejectUnsupportedAudioFeatures(json!);
-    }
 }

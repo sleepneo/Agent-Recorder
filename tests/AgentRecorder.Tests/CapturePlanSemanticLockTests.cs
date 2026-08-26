@@ -118,7 +118,10 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         });
 
         Assert.NotNull(tray.Summary);
-        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(tray.Summary));
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(tray.Summary, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        }));
         var root = summary.RootElement;
         Assert.Equal("screen_rectangle", root.GetProperty("capture_semantics").GetString());
         Assert.Equal("ffmpeg-window-region", root.GetProperty("planned_backend").GetString());
@@ -654,7 +657,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
 
     private static ConfirmationForm NewForm(object summary, CountingScreenPreviewProvider screen, FakeDwmThumbnailProvider dwm) =>
         new(
-            new PendingConfirmationItem("conf_1", "rec_1", summary, _ => { }, 60),
+            ConfirmationPresentationTestData.CreateItem("conf_1", "rec_1", summary, _ => { }, 60),
             1,
             1,
             previewProvider: screen,
@@ -811,7 +814,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     private sealed class CountingScreenPreviewProvider : IScreenPreviewProvider
     {
         public int Calls { get; private set; }
-        public Bitmap Capture(CaptureBounds bounds, Size maxSize)
+        public Bitmap Capture(ConfirmationCaptureBounds bounds, Size maxSize)
         {
             Calls++;
             return new Bitmap(Math.Max(1, maxSize.Width), Math.Max(1, maxSize.Height));
@@ -888,7 +891,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
         public bool DeferConfirmation { get; set; }
-        public object? Summary { get; private set; }
+        public RecordingConfirmationPresentation? Summary { get; private set; }
         public int PreparingCalls { get; private set; }
         public int CountdownCalls { get; private set; }
         public int RecordingCalls { get; private set; }
@@ -896,9 +899,9 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         public string? LastError { get; private set; }
         public string? LastFailureReason { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
-            Summary = summary;
+            Summary = presentation;
             if (DeferConfirmation)
                 _callback = callback;
             else
@@ -906,13 +909,13 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         }
         public void Approve() => _callback?.Invoke(ConfirmationDecision.Approve());
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) => RecordingCalls++;
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) => RecordingCalls++;
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) => LastError = text;
-        public void SetPreparing(object rec) => PreparingCalls++;
-        public void SetCountdown(object rec, int? remainingSeconds) => CountdownCalls++;
-        public void SetFinalizing(object rec) => FinalizingCalls++;
+        public void SetPreparing(RecordingUiPresentation rec) => PreparingCalls++;
+        public void SetCountdown(RecordingUiPresentation rec) => CountdownCalls++;
+        public void SetFinalizing(RecordingUiPresentation rec) => FinalizingCalls++;
         public void ShowRecordingFailure(string recordingId, string reasonCode) => LastFailureReason = reasonCode;
     }
 

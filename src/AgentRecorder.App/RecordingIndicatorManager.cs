@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
-using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 
@@ -286,14 +285,14 @@ internal sealed class RecordingIndicatorManager
     /// indicator, label and stop control are decided jointly.
     /// </summary>
     internal RecordingControlPlan? ComputeControlPlan(
-        Recording recording,
-        Recording? parentRecording,
+        RecordingUiPresentation recording,
+        RecordingUiPresentation? parentRecording,
         Rectangle virtualScreen,
         DisplayDpiInfo? forcedDpi = null,
         string? parentFallbackReason = null)
     {
-        var bounds = recording.Config.Bounds;
-        var indicatorBounds = new RecordingIndicatorBounds(bounds.x, bounds.y, bounds.w, bounds.h);
+        var bounds = recording.CaptureBounds;
+        var indicatorBounds = new RecordingIndicatorBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height);
         var clamped = RecordingIndicatorGeometry.TryClampToVirtualScreen(indicatorBounds);
         if (clamped == null)
             return null;
@@ -401,10 +400,10 @@ internal sealed class RecordingIndicatorManager
     /// Switches an existing indicator to the preparing phase (amber border + label).
     /// If no indicator exists yet, shows one first.
     /// </summary>
-    public void ShowPreparing(Recording recording, Recording? parentRecording = null, string? parentFallbackReason = null)
+    public void ShowPreparing(RecordingUiPresentation recording, RecordingUiPresentation? parentRecording = null, string? parentFallbackReason = null)
     {
         EnsureIndicator(recording, parentRecording, parentFallbackReason);
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
         {
             indicator.SetPhase(RecordingIndicatorPhase.Preparing);
         }
@@ -413,40 +412,41 @@ internal sealed class RecordingIndicatorManager
     /// <summary>
     /// Shows the large countdown overlay in the center of the capture region.
     /// </summary>
-    public void ShowCountdown(Recording recording, int remainingSeconds)
+    public void ShowCountdown(RecordingUiPresentation recording)
     {
         // Keep the indicator in countdown phase (amber border) while the large overlay shows the digit.
+        int remainingSeconds = recording.CountdownRemainingSeconds ?? 0;
         EnsureIndicator(recording, null, null);
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
         {
             indicator.SetPhase(RecordingIndicatorPhase.Countdown, remainingSeconds);
         }
 
-        if (!_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        if (!_countdownOverlays.TryGetValue(recording.RecordingId, out var overlay))
         {
-            var bounds = recording.Config.Bounds;
+            var bounds = recording.CaptureBounds;
             var overlayBounds = ComputeCountdownBounds(
-                new Rectangle(bounds.x, bounds.y, bounds.w, bounds.h),
+                new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height),
                 SystemInformation.VirtualScreen);
             if (overlayBounds.Width <= 0 || overlayBounds.Height <= 0)
             {
                 _audit.Log("recording_countdown_overlay.bounds_error", new
                 {
-                    recording_id = recording.Id,
-                    target_bounds = new { bounds.x, bounds.y, bounds.w, bounds.h },
+                    recording_id = recording.RecordingId,
+                    target_bounds = new { bounds.X, bounds.Y, bounds.Width, bounds.Height },
                     virtual_screen = SystemInformation.VirtualScreen
                 });
                 return;
             }
             overlay = new CountdownOverlayForm(overlayBounds);
-            _countdownOverlays[recording.Id] = overlay;
+            _countdownOverlays[recording.RecordingId] = overlay;
             overlay.SetNumber(remainingSeconds);
             try { overlay.Show(); }
             catch (Exception ex)
             {
                 _audit.Log("recording_countdown_overlay.show_error", new
                 {
-                    recording_id = recording.Id,
+                    recording_id = recording.RecordingId,
                     error = ex.Message
                 });
             }
@@ -460,15 +460,15 @@ internal sealed class RecordingIndicatorManager
     /// <summary>
     /// Hides the countdown overlay and switches the indicator to the recording phase.
     /// </summary>
-    public void HideCountdownAndShowRecording(Recording recording)
+    public void HideCountdownAndShowRecording(RecordingUiPresentation recording)
     {
-        if (_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        if (_countdownOverlays.TryGetValue(recording.RecordingId, out var overlay))
         {
-            _countdownOverlays.Remove(recording.Id);
+            _countdownOverlays.Remove(recording.RecordingId);
             try { overlay.CloseWithoutResult(); } catch { }
         }
 
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
         {
             indicator.SetPhase(RecordingIndicatorPhase.Recording);
         }
@@ -479,34 +479,36 @@ internal sealed class RecordingIndicatorManager
     /// phase. Used when the countdown reaches zero: the red REC phase is shown
     /// only when real first-frame evidence arrives, never at countdown zero.
     /// </summary>
-    public void HideCountdownOverlay(Recording recording)
+    public void HideCountdownOverlay(RecordingUiPresentation recording)
     {
-        if (_countdownOverlays.TryGetValue(recording.Id, out var overlay))
+        if (_countdownOverlays.TryGetValue(recording.RecordingId, out var overlay))
         {
-            _countdownOverlays.Remove(recording.Id);
+            _countdownOverlays.Remove(recording.RecordingId);
             try { overlay.CloseWithoutResult(); } catch { }
         }
 
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
         {
             indicator.SetPhase(RecordingIndicatorPhase.Preparing);
         }
     }
 
-    internal void ShowSeriesProgress(Recording recording, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    internal void ShowSeriesProgress(RecordingUiPresentation recording)
     {
         EnsureIndicator(recording, null, null);
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
-            indicator.SetSeriesProgress(captured, planned);
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
+            indicator.SetSeriesProgress(
+                recording.SeriesCapturedFrameCount ?? 0,
+                recording.SeriesPlannedFrameCount ?? 0);
     }
 
     /// <summary>
     /// Switches an existing indicator to the finalizing phase (gray border + saving label).
     /// Does not close the indicator; the engine closes it after terminal state.
     /// </summary>
-    public void ShowFinalizing(Recording recording)
+    public void ShowFinalizing(RecordingUiPresentation recording)
     {
-        if (_indicators.TryGetValue(recording.Id, out var indicator))
+        if (_indicators.TryGetValue(recording.RecordingId, out var indicator))
         {
             indicator.SetPhase(RecordingIndicatorPhase.Finalizing);
         }
@@ -517,25 +519,25 @@ internal sealed class RecordingIndicatorManager
     /// A single combined plan is computed before any UI is created so that failures in any part
     /// cause a joint fallback to exclude-from-capture mode.
     /// </summary>
-    public void ShowFor(Recording recording, Recording? parentRecording = null, string? parentFallbackReason = null)
+    public void ShowFor(RecordingUiPresentation recording, RecordingUiPresentation? parentRecording = null, string? parentFallbackReason = null)
     {
         if (recording == null) throw new ArgumentNullException(nameof(recording));
 
-        CloseFor(recording.Id, "recording_indicator.replaced");
+        CloseFor(recording.RecordingId, "recording_indicator.replaced");
 
-        var bounds = recording.Config.Bounds;
-        var indicatorBounds = new RecordingIndicatorBounds(bounds.x, bounds.y, bounds.w, bounds.h);
+        var bounds = recording.CaptureBounds;
+        var indicatorBounds = new RecordingIndicatorBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height);
         var clamped = RecordingIndicatorGeometry.TryClampToVirtualScreen(indicatorBounds);
 
         if (clamped == null)
         {
-            var reason = bounds.w <= 0 || bounds.h <= 0 ? "invalid_bounds" : "outside_virtual_screen";
+            var reason = bounds.Width <= 0 || bounds.Height <= 0 ? "invalid_bounds" : "outside_virtual_screen";
             _audit.Log("recording_indicator.skipped", new
             {
-                recording_id = recording.Id,
+                recording_id = recording.RecordingId,
                 reason,
                 source_type = recording.SourceType,
-                bounds = new { x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h }
+                bounds = new { x = bounds.X, y = bounds.Y, w = bounds.Width, h = bounds.Height }
             });
             return;
         }
@@ -546,10 +548,10 @@ internal sealed class RecordingIndicatorManager
             // Should not happen because clamped != null was checked above, but guard anyway.
             _audit.Log("recording_indicator.skipped", new
             {
-                recording_id = recording.Id,
+                recording_id = recording.RecordingId,
                 reason = "plan_unavailable",
                 source_type = recording.SourceType,
-                bounds = new { x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h }
+                bounds = new { x = bounds.X, y = bounds.Y, w = bounds.Width, h = bounds.Height }
             });
             return;
         }
@@ -573,21 +575,21 @@ internal sealed class RecordingIndicatorManager
         RecordingControlPlan FinalPlan,
         bool Retried);
 
-    internal VerificationResult? VerifyAndBuildForms(Recording recording, RecordingControlPlan plan, Recording? parentRecording)
+    internal VerificationResult? VerifyAndBuildForms(RecordingUiPresentation recording, RecordingControlPlan plan, RecordingUiPresentation? parentRecording)
     {
         RecordingIndicatorForm? indicator = null;
         RecordingStopControlForm? stopControl = null;
         try
         {
             indicator = _formFactory(
-                recording.Id,
+                recording.RecordingId,
                 plan.IndicatorPresentation,
                 recording.StartedAtUtc,
                 recording.DurationSeconds,
                 recording.NestedRole,
                 _textProviderFactory);
             stopControl = _stopControlFactory(
-                recording.Id,
+                recording.RecordingId,
                 plan.StopBounds,
                 plan.StopControlSize,
                 plan.DpiInfo,
@@ -626,23 +628,23 @@ internal sealed class RecordingIndicatorManager
                 {
                     _audit.Log("recording_indicator.skipped", new
                     {
-                        recording_id = recording.Id,
+                        recording_id = recording.RecordingId,
                         reason = "retry_plan_unavailable",
                         source_type = recording.SourceType,
-                        bounds = new { x = recording.Config.Bounds.x, y = recording.Config.Bounds.y, w = recording.Config.Bounds.w, h = recording.Config.Bounds.h }
+                        bounds = new { x = recording.CaptureBounds.X, y = recording.CaptureBounds.Y, w = recording.CaptureBounds.Width, h = recording.CaptureBounds.Height }
                     });
                     return null;
                 }
 
                 indicator = _formFactory(
-                    recording.Id,
+                    recording.RecordingId,
                     retryPlan.IndicatorPresentation,
                     recording.StartedAtUtc,
                     recording.DurationSeconds,
                     recording.NestedRole,
                     _textProviderFactory);
                 stopControl = _stopControlFactory(
-                    recording.Id,
+                    recording.RecordingId,
                     retryPlan.StopBounds,
                     retryPlan.StopControlSize,
                     retryPlan.DpiInfo,
@@ -659,7 +661,7 @@ internal sealed class RecordingIndicatorManager
             DisposeCandidate(stopControl);
             _audit.Log("recording_indicator.show_error", new
             {
-                recording_id = recording.Id,
+                recording_id = recording.RecordingId,
                 error = ex.Message,
                 stage = "verify_and_build"
             });
@@ -668,20 +670,20 @@ internal sealed class RecordingIndicatorManager
     }
 
     private void ShowFinalForms(
-        Recording recording,
+        RecordingUiPresentation recording,
         RecordingIndicatorForm indicator,
         RecordingStopControlForm stopControl,
         RecordingControlPlan plan,
         bool retried)
     {
-        _indicators[recording.Id] = indicator;
+        _indicators[recording.RecordingId] = indicator;
 
         if (recording.IsScreenshotSeries)
-            indicator.SetSeriesProgress(0, recording.ScreenshotSeries?.PlannedFrameCount ?? 0);
+            indicator.SetSeriesProgress(0, recording.SeriesPlannedFrameCount ?? 0);
 
         _audit.Log("recording_indicator.shown", new
         {
-            recording_id = recording.Id,
+            recording_id = recording.RecordingId,
             source_type = recording.SourceType,
             bounds = new { x = plan.IndicatorPresentation.WindowBounds.X, y = plan.IndicatorPresentation.WindowBounds.Y, w = plan.IndicatorPresentation.WindowBounds.Width, h = plan.IndicatorPresentation.WindowBounds.Height },
             duration_seconds = recording.DurationSeconds,
@@ -698,11 +700,11 @@ internal sealed class RecordingIndicatorManager
         }
         catch (Exception ex)
         {
-            _indicators.Remove(recording.Id);
+            _indicators.Remove(recording.RecordingId);
             try { indicator.Dispose(); } catch { }
             _audit.Log("recording_indicator.show_error", new
             {
-                recording_id = recording.Id,
+                recording_id = recording.RecordingId,
                 error = ex.Message
             });
             try { stopControl.Dispose(); } catch { }
@@ -710,7 +712,7 @@ internal sealed class RecordingIndicatorManager
         }
 
         stopControl.StopClicked += OnStopControlClicked;
-        _stopControls[recording.Id] = stopControl;
+        _stopControls[recording.RecordingId] = stopControl;
 
         try
         {
@@ -719,11 +721,11 @@ internal sealed class RecordingIndicatorManager
         catch (Exception ex)
         {
             stopControl.StopClicked -= OnStopControlClicked;
-            _stopControls.Remove(recording.Id);
+            _stopControls.Remove(recording.RecordingId);
             try { stopControl.Dispose(); } catch { }
             _audit.Log("recording_stop_control.show_error", new
             {
-                recording_id = recording.Id,
+                recording_id = recording.RecordingId,
                 error = ex.Message
             });
             return;
@@ -732,7 +734,7 @@ internal sealed class RecordingIndicatorManager
         var stopBounds = plan.StopBounds;
         _audit.Log("recording_stop_control.shown", new
         {
-            recording_id = recording.Id,
+            recording_id = recording.RecordingId,
             source_type = recording.SourceType,
             target_monitor = plan.DpiInfo.MonitorId,
             target_dpi_x = plan.DpiInfo.DpiX,
@@ -826,9 +828,9 @@ internal sealed class RecordingIndicatorManager
         }
     }
 
-    private void EnsureIndicator(Recording recording, Recording? parentRecording, string? parentFallbackReason)
+    private void EnsureIndicator(RecordingUiPresentation recording, RecordingUiPresentation? parentRecording, string? parentFallbackReason)
     {
-        if (_indicators.ContainsKey(recording.Id))
+        if (_indicators.ContainsKey(recording.RecordingId))
             return;
 
         ShowFor(recording, parentRecording, parentFallbackReason);

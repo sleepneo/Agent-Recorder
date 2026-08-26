@@ -2,8 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using Xunit;
-using AgentRecorder.App;
-using static AgentRecorder.Windows.SystemQuery;
+using AgentRecorder.UI.Geometry;
 
 namespace AgentRecorder.Tests;
 
@@ -15,6 +14,14 @@ namespace AgentRecorder.Tests;
 /// </summary>
 public class RegionSelectionGeometryTests
 {
+    private static Rectangle Rect(int x, int y, int width, int height) => new(x, y, width, height);
+
+    private static GeometryDisplay Display(string id, string displayName, bool isPrimary, Rectangle bounds, double scale)
+        => new(id, bounds);
+
+    private static GeometryWindow Window(
+        string id, string title, string processName, int processId, bool isVisible, bool isMinimized, Rectangle bounds)
+        => new(id, bounds, isMinimized, !string.IsNullOrWhiteSpace(title));
     // -------------------------------------------------------------------------
     // ToVirtualBounds tests
     // -------------------------------------------------------------------------
@@ -113,12 +120,12 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayId_CenterOnPrimaryDisplay_ReturnsPrimary()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
-            new DisplayInfo("display_2", "Display 2", false,
-                new Bounds(3840, 0, 2560, 1600), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 3840, 2160), 1.0),
+            Display("display_2", "Display 2", false,
+                Rect(3840, 0, 2560, 1600), 1.0),
         };
 
         // Center of a region at x=1000, y=500 with size 800x600
@@ -133,12 +140,12 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayId_CenterOnSecondaryDisplay_ReturnsSecondary()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
-            new DisplayInfo("display_2", "Display 2", false,
-                new Bounds(3840, 0, 2560, 1600), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 3840, 2160), 1.0),
+            Display("display_2", "Display 2", false,
+                Rect(3840, 0, 2560, 1600), 1.0),
         };
 
         // Center at (5000, 800) -> display_2
@@ -153,12 +160,12 @@ public class RegionSelectionGeometryTests
     public void FindDisplayId_CenterOnNegativeCoordinateDisplay_ReturnsNegativeDisplay()
     {
         // Left monitor at -2560 to 0
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_neg", "Left Display", false,
-                new Bounds(-2560, 0, 2560, 1600), 1.0),
-            new DisplayInfo("display_main", "Main Display", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
+            Display("display_neg", "Left Display", false,
+                Rect(-2560, 0, 2560, 1600), 1.0),
+            Display("display_main", "Main Display", true,
+                Rect(0, 0, 3840, 2160), 1.0),
         };
 
         // Selection at x=-2000, y=200 with size 800x600
@@ -173,10 +180,10 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayId_CenterOutsideAllDisplays_ReturnsNull()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 3840, 2160), 1.0),
         };
 
         // Center at x=5000 (outside display_1)
@@ -190,12 +197,12 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayIdByOverlap_MostOverlapWins()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
-            new DisplayInfo("display_2", "Display 2", false,
-                new Bounds(3840, 0, 2560, 1600), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 3840, 2160), 1.0),
+            Display("display_2", "Display 2", false,
+                Rect(3840, 0, 2560, 1600), 1.0),
         };
 
         // Selection spanning across both displays
@@ -482,12 +489,12 @@ public class RegionSelectionGeometryTests
         Assert.Equal(602, normH);  // 603 -> 602 (even)
 
         // Step 3: Find display
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_neg", "Left", false,
-                new Bounds(-2560, 0, 2560, 1600), 1.0),
-            new DisplayInfo("display_main", "Main", true,
-                new Bounds(0, 0, 3840, 2160), 1.0),
+            Display("display_neg", "Left", false,
+                Rect(-2560, 0, 2560, 1600), 1.0),
+            Display("display_main", "Main", true,
+                Rect(0, 0, 3840, 2160), 1.0),
         };
 
         // Center of (-2460, 200) + (800/2, 602/2) = (-2060, 501) -> display_neg
@@ -606,10 +613,10 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayIdByOverlap_NoOverlap_ReturnsNull()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 100, 100), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 100, 100), 1.0),
         };
 
         var bounds = new Rectangle(150, 150, 20, 20);
@@ -622,12 +629,12 @@ public class RegionSelectionGeometryTests
     [Fact]
     public void FindDisplayIdByOverlap_TieKeepsFirstPositiveOverlap()
     {
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 100, 200), 1.0),
-            new DisplayInfo("display_2", "Display 2", false,
-                new Bounds(100, 0, 100, 200), 1.0),
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 100, 200), 1.0),
+            Display("display_2", "Display 2", false,
+                Rect(100, 0, 100, 200), 1.0),
         };
 
         // 100x200 region from (50,0) overlaps each display by 50x200 = 10000
@@ -646,13 +653,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_DisplayBounds_ReturnsClientTargets()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_1", "Display 1", true,
-                new Bounds(0, 0, 1920, 1080), 1.0)
+            Display("display_1", "Display 1", true,
+                Rect(0, 0, 1920, 1080), 1.0)
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<WindowInfo>());
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<GeometryWindow>());
 
         Assert.Single(targets);
         Assert.Equal(new Rectangle(0, 0, 1920, 1080), targets[0]);
@@ -662,15 +669,15 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_NegativeDisplay_ReturnsClientTargets()
     {
         var formBounds = new Rectangle(-2560, 0, 6400, 2160);
-        var displays = new List<DisplayInfo>
+        var displays = new List<GeometryDisplay>
         {
-            new DisplayInfo("display_neg", "Left", false,
-                new Bounds(-2560, 0, 2560, 1600), 1.0),
-            new DisplayInfo("display_main", "Main", true,
-                new Bounds(0, 0, 3840, 2160), 1.0)
+            Display("display_neg", "Left", false,
+                Rect(-2560, 0, 2560, 1600), 1.0),
+            Display("display_main", "Main", true,
+                Rect(0, 0, 3840, 2160), 1.0)
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<WindowInfo>());
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, displays, Array.Empty<GeometryWindow>());
 
         Assert.Equal(2, targets.Count);
         Assert.Contains(new Rectangle(0, 0, 2560, 1600), targets);
@@ -681,13 +688,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_WindowBounds_ReturnsClientTargets()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, false,
-                new Bounds(120, 80, 640, 480))
+            Window("window_1", "Notepad", "notepad.exe", 123, false, false,
+                Rect(120, 80, 640, 480))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Single(targets);
         Assert.Equal(new Rectangle(120, 80, 640, 480), targets[0]);
@@ -697,13 +704,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_MinimizedWindow_IsIgnored()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, true,
-                new Bounds(120, 80, 640, 480))
+            Window("window_1", "Notepad", "notepad.exe", 123, false, true,
+                Rect(120, 80, 640, 480))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Empty(targets);
     }
@@ -712,13 +719,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_EmptyTitleWindow_IsIgnored()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "", "", 123, false, false,
-                new Bounds(120, 80, 640, 480))
+            Window("window_1", "", "", 123, false, false,
+                Rect(120, 80, 640, 480))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Empty(targets);
     }
@@ -727,13 +734,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_FullScreenOverlayWindow_IsIgnored()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "Overlay", "app.exe", 123, false, false,
-                new Bounds(0, 0, 1920, 1080))
+            Window("window_1", "Overlay", "app.exe", 123, false, false,
+                Rect(0, 0, 1920, 1080))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Empty(targets);
     }
@@ -742,13 +749,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_TooSmallWindow_IsIgnored()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "Tiny", "tiny.exe", 123, false, false,
-                new Bounds(10, 10, 10, 10))
+            Window("window_1", "Tiny", "tiny.exe", 123, false, false,
+                Rect(10, 10, 10, 10))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Empty(targets);
     }
@@ -982,8 +989,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowClientBounds_ValidWindow_ReturnsClientBounds()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, false,
-            new Bounds(120, 80, 640, 480));
+        var window = Window("window_1", "Notepad", "notepad.exe", 123, false, false,
+            Rect(120, 80, 640, 480));
 
         var result = RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window);
 
@@ -995,8 +1002,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowClientBounds_Minimized_ReturnsNull()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "Notepad", "notepad.exe", 123, false, true,
-            new Bounds(120, 80, 640, 480));
+        var window = Window("window_1", "Notepad", "notepad.exe", 123, false, true,
+            Rect(120, 80, 640, 480));
 
         Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
     }
@@ -1005,8 +1012,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowClientBounds_EmptyTitle_ReturnsNull()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "", "", 123, false, false,
-            new Bounds(120, 80, 640, 480));
+        var window = Window("window_1", "", "", 123, false, false,
+            Rect(120, 80, 640, 480));
 
         Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
     }
@@ -1015,8 +1022,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowClientBounds_FullScreenOverlay_ReturnsNull()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "Overlay", "overlay.exe", 123, false, false,
-            new Bounds(0, 0, 1920, 1080));
+        var window = Window("window_1", "Overlay", "overlay.exe", 123, false, false,
+            Rect(0, 0, 1920, 1080));
 
         Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
     }
@@ -1025,8 +1032,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowClientBounds_TinyWindow_ReturnsNull()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "Tiny", "tiny.exe", 123, false, false,
-            new Bounds(10, 10, 10, 10));
+        var window = Window("window_1", "Tiny", "tiny.exe", 123, false, false,
+            Rect(10, 10, 10, 10));
 
         Assert.Null(RegionSelectionGeometry.ComputeWindowClientBounds(formBounds, window));
     }
@@ -1035,8 +1042,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowPickBounds_PartiallyOffscreen_IsClampedToClientArea()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var window = new WindowInfo("window_1", "Offscreen", "offscreen.exe", 123, false, false,
-            new Bounds(1800, 900, 300, 300));
+        var window = Window("window_1", "Offscreen", "offscreen.exe", 123, false, false,
+            Rect(1800, 900, 300, 300));
 
         var result = RegionSelectionGeometry.ComputeWindowPickBounds(formBounds, window);
 
@@ -1053,8 +1060,8 @@ public class RegionSelectionGeometryTests
     public void ComputeWindowPickBounds_NegativeCoordinateDisplay_IsClamped()
     {
         var formBounds = new Rectangle(-2560, 0, 6400, 2160);
-        var window = new WindowInfo("window_1", "Left", "left.exe", 123, false, false,
-            new Bounds(-2600, 100, 400, 400));
+        var window = Window("window_1", "Left", "left.exe", 123, false, false,
+            Rect(-2600, 100, 400, 400));
 
         var result = RegionSelectionGeometry.ComputeWindowPickBounds(formBounds, window);
 
@@ -1071,13 +1078,13 @@ public class RegionSelectionGeometryTests
     public void GenerateSnapTargets_UsesClampedWindowBounds()
     {
         var formBounds = new Rectangle(0, 0, 1920, 1080);
-        var windows = new List<WindowInfo>
+        var windows = new List<GeometryWindow>
         {
-            new WindowInfo("window_1", "Offscreen", "offscreen.exe", 123, false, false,
-                new Bounds(1800, 900, 300, 300))
+            Window("window_1", "Offscreen", "offscreen.exe", 123, false, false,
+                Rect(1800, 900, 300, 300))
         };
 
-        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<DisplayInfo>(), windows);
+        var targets = RegionSelectionGeometry.GenerateSnapTargets(formBounds, Array.Empty<GeometryDisplay>(), windows);
 
         Assert.Single(targets);
         Assert.Equal(1920, targets[0].Right);

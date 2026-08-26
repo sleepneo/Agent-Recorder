@@ -33,12 +33,12 @@ public class TcpHttpAdapterTests
         public bool IsGlobalStopHotkeyRegistered => false;
         public string? GlobalStopHotkeyGesture => null;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Approve());
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Approve());
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
             => callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

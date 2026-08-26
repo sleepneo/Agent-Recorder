@@ -153,16 +153,19 @@ public class ConfigParserMicrophoneTests : IDisposable
         Assert.False(rec.Config.Microphone);
     }
 
-    [Theory]
-    [InlineData("\"audio\":{\"system_audio\":{\"enabled\":true}}")]
-    [InlineData("\"audio\":{\"microphone\":{\"enabled\":true},\"system_audio\":{\"enabled\":true}}")]
-    public void Build_SystemAudioEnabled_FailsFast_WithCapabilityNotImplemented(string audioJson)
+    [Fact]
+    public void Build_SystemAudioEnabled_IsNotBlockedByAnExperimentGate()
     {
-        var ex = Assert.Throws<ApiException>(() => ConfigParser.Build(Cfg(audioJson), "test", out _));
+        var endpoint = new SystemAudioEndpointInfo("render_1", "Speakers", "render", "active", true);
+        var provider = new FakeSystemAudioProvider(endpoint);
+        var rec = ConfigParser.Build(
+            Cfg("\"audio\":{\"system_audio\":{\"enabled\":true}}"),
+            "test",
+            out _,
+            systemAudioEndpointProvider: provider);
 
-        Assert.Equal(400, ex.Status);
-        Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", ex.Code);
-        Assert.Equal("system_audio", GetCapability(ex.Details));
+        Assert.Equal(AudioCaptureSourceKind.SystemLoopback, rec.AudioSourceKind);
+        Assert.Equal("render_1", rec.SystemAudioEndpointId);
     }
 
     [Fact]
@@ -176,8 +179,8 @@ public class ConfigParserMicrophoneTests : IDisposable
 
         ConfigParser.Build(Cfg("\"audio\":{\"microphone\":{\"enabled\":true}}"), "test", out var summary, provider);
 
-        var json = JsonSerializer.Serialize(summary);
-        Assert.Contains("Secret Mic Name", json);
+        Assert.Equal("Secret Mic Name", summary.AudioDevice);
+        Assert.Equal("microphone", summary.AudioSourceKind);
     }
 
     [Fact]
@@ -281,12 +284,7 @@ public class ConfigParserMicrophoneTests : IDisposable
         return doc.RootElement.TryGetProperty("device_id", out var p) ? p.GetString() : null;
     }
 
-    private static string? GetSummaryAudio(object summary)
-    {
-        var json = JsonSerializer.Serialize(summary);
-        using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("audio").GetString();
-    }
+    private static string GetSummaryAudio(RecordingRequestSummary summary) => summary.Audio;
 
     private static string? GetSuggestedAction(object? details)
     {
@@ -311,6 +309,21 @@ public class ConfigParserMicrophoneTests : IDisposable
         public FakeProvider(params MicrophoneDeviceInfo[] devices) => _devices = devices;
         public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<MicrophoneDeviceInfo>>(_devices.ToList());
+    }
+
+    private sealed class FakeSystemAudioProvider : ISystemAudioEndpointProvider
+    {
+        private readonly SystemAudioEndpointInfo _endpoint;
+        public FakeSystemAudioProvider(SystemAudioEndpointInfo endpoint) => _endpoint = endpoint;
+
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(new[] { _endpoint });
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(_endpoint);
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(endpointId == _endpoint.Id ? _endpoint : null);
     }
 
     private sealed class FailingProvider : IMicrophoneDeviceProvider

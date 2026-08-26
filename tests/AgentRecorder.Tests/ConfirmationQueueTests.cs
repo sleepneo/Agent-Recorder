@@ -17,12 +17,12 @@ public class ConfirmationQueueTests
         var callback1Called = false;
         var callback2Called = false;
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             _ => { callback1Called = true; },
             60);
 
-        var item2 = new PendingConfirmationItem(
+        var item2 = ConfirmationPresentationTestData.CreateItem(
             "conf_2", "rec_2", new { source = "test2" },
             _ => { callback2Called = true; },
             60);
@@ -43,12 +43,12 @@ public class ConfirmationQueueTests
         ConfirmationDecision? callback1Result = null;
         var callback2Called = false;
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             result => { callback1Called = true; callback1Result = result; },
             60);
 
-        var item2 = new PendingConfirmationItem(
+        var item2 = ConfirmationPresentationTestData.CreateItem(
             "conf_2", "rec_2", new { source = "test2" },
             _ => { callback2Called = true; },
             60);
@@ -74,7 +74,7 @@ public class ConfirmationQueueTests
         var queue = new ConfirmationQueue();
         ConfirmationDecision? received = null;
 
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test" },
             result => { received = result; },
             60);
@@ -98,7 +98,7 @@ public class ConfirmationQueueTests
         var callbackCalled = false;
         ConfirmationDecision? callbackResult = null;
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             result => { callbackCalled = true; callbackResult = result; },
             60);
@@ -121,7 +121,7 @@ public class ConfirmationQueueTests
         var queue = new ConfirmationQueue();
         var callbackCount = 0;
 
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test" },
             _ => callbackCount++,
             60);
@@ -149,12 +149,12 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             _ => { },
             60);
 
-        var item2 = new PendingConfirmationItem(
+        var item2 = ConfirmationPresentationTestData.CreateItem(
             "conf_2", "rec_2", new { source = "test2" },
             _ => { },
             60);
@@ -177,12 +177,12 @@ public class ConfirmationQueueTests
         var callbackCount = 0;
         var rejectedCount = 0;
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             d => { callbackCount++; if (!d.Approved) rejectedCount++; },
             60);
 
-        var item2 = new PendingConfirmationItem(
+        var item2 = ConfirmationPresentationTestData.CreateItem(
             "conf_2", "rec_2", new { source = "test2" },
             d => { callbackCount++; if (!d.Approved) rejectedCount++; },
             60);
@@ -203,12 +203,12 @@ public class ConfirmationQueueTests
     {
         var queue = new ConfirmationQueue();
 
-        var item1 = new PendingConfirmationItem(
+        var item1 = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test1" },
             _ => { },
             60);
 
-        var item2 = new PendingConfirmationItem(
+        var item2 = ConfirmationPresentationTestData.CreateItem(
             "conf_2", "rec_2", new { source = "test2" },
             _ => { },
             60);
@@ -234,7 +234,7 @@ public class ConfirmationQueueTests
     public void PendingConfirmationItem_InvokeCallback_OnlyOnce()
     {
         var callbackCount = 0;
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test" },
             _ => callbackCount++,
             60);
@@ -260,7 +260,7 @@ public class ConfirmationQueueTests
         var callbackCompleted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         bool readSucceeded = false;
 
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test" },
             _ =>
             {
@@ -299,7 +299,7 @@ public class ConfirmationQueueTests
         var callbackCompleted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         bool readSucceeded = false;
 
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_1", "rec_1", new { source = "test" },
             _ =>
             {

@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="AgentRecorder.UI.Geometry" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
@@ -18,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\AgentRecorder.UI.Geometry\AgentRecorder.UI.Geometry.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Infrastructure\AgentRecorder.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Logging\AgentRecorder.Logging.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Security\AgentRecorder.Security.csproj" />

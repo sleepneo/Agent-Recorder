@@ -28,7 +28,7 @@ public class ConfirmationFormTests : IDisposable
 
     private class FakePreviewProvider : IScreenPreviewProvider
     {
-        public Bitmap Capture(CaptureBounds bounds, Size maxSize) => new Bitmap(maxSize.Width, maxSize.Height);
+        public Bitmap Capture(ConfirmationCaptureBounds bounds, Size maxSize) => new Bitmap(maxSize.Width, maxSize.Height);
     }
 
     private class FakeDirectoryPicker : IOutputDirectoryPicker
@@ -91,7 +91,7 @@ public class ConfirmationFormTests : IDisposable
 
     private static PendingConfirmationItem CreateItem(string confirmationId = "conf_1", string recordingId = "rec_1")
     {
-        return new PendingConfirmationItem(
+        return ConfirmationPresentationTestData.CreateItem(
             confirmationId,
             recordingId,
             new
@@ -120,7 +120,7 @@ public class ConfirmationFormTests : IDisposable
             int callbackCount = 0;
             ConfirmationDecision? lastResult = null;
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -143,7 +143,7 @@ public class ConfirmationFormTests : IDisposable
             int callbackCount = 0;
             ConfirmationDecision? lastResult = null;
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -171,7 +171,7 @@ public class ConfirmationFormTests : IDisposable
             int callbackCount = 0;
             ConfirmationDecision? lastResult = null;
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -205,7 +205,7 @@ public class ConfirmationFormTests : IDisposable
             int callbackCount = 0;
             ConfirmationDecision? lastResult = null;
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -248,12 +248,12 @@ public class ConfirmationFormTests : IDisposable
             var item2Called = false;
             ConfirmationDecision? item2Result = null;
 
-            var item1 = new PendingConfirmationItem(
+            var item1 = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 approved => { item1Approved = approved.Approved; },
                 60);
 
-            var item2 = new PendingConfirmationItem(
+            var item2 = ConfirmationPresentationTestData.CreateItem(
                 "conf_2", "rec_2", new { source = "test2", recording_id = "rec_2", confirmation_id = "conf_2", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 approved => { item2Called = true; item2Result = approved; },
                 60);
@@ -304,7 +304,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", summary, _ => { }, 60);
 
             using var form = new ConfirmationForm(item, 1, 1, null, new FakePreviewProvider());
@@ -342,7 +342,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", summary, _ => { }, 60);
 
             using var form = new ConfirmationForm(item, 1, 1, null, new FakePreviewProvider());
@@ -378,7 +378,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", summary, _ => { }, 60);
 
             using var form = new ConfirmationForm(item, 1, 1);
@@ -397,7 +397,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -416,7 +416,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -437,7 +437,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -455,7 +455,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -464,7 +464,7 @@ public class ConfirmationFormTests : IDisposable
             form.Show();
 
             Assert.Contains("剩余", form.TimeoutTextForTests);
-            Assert.True(form.TimeoutProgressValueForTests > 0);
+            Assert.True(form.CountdownRingRatioForTests > 0);
             Assert.True(form.CountdownTimerEnabledForTests);
 
             form.CloseWithoutResult();
@@ -476,7 +476,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -487,7 +487,7 @@ public class ConfirmationFormTests : IDisposable
             form.Show();
 
             Assert.Equal("确认已过期", form.TimeoutTextForTests);
-            Assert.Equal(0, form.TimeoutProgressValueForTests);
+            Assert.Equal(0, form.CountdownRingRatioForTests);
             Assert.False(form.ApproveButtonEnabledForTests);
             Assert.False(form.ChangeOutputButtonEnabledForTests);
             Assert.False(form.CountdownTimerEnabledForTests);
@@ -501,7 +501,7 @@ public class ConfirmationFormTests : IDisposable
     {
         RunOnSta(() =>
         {
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", new { source = "test", recording_id = "rec_1", confirmation_id = "conf_1", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
                 _ => { },
                 60);
@@ -541,7 +541,7 @@ public class ConfirmationFormTests : IDisposable
                     expires_at = "2026-01-01T00:00:00Z"
                 };
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1);
@@ -590,7 +590,7 @@ public class ConfirmationFormTests : IDisposable
                 var picker = new FakeDirectoryPicker(otherDir);
                 ConfirmationDecision? decision = null;
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, d => { decision = d; }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1,
@@ -652,7 +652,7 @@ public class ConfirmationFormTests : IDisposable
 
                 var picker = new FakeDirectoryPicker(null);
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1,
@@ -702,7 +702,7 @@ public class ConfirmationFormTests : IDisposable
                 };
 
                 ConfirmationDecision? decision = null;
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, d => { decision = d; }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1, onResult: d => { decision = d; });
@@ -753,29 +753,25 @@ public class ConfirmationFormTests : IDisposable
                     expires_at = "2026-01-01T00:00:00Z"
                 };
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1);
                 form.Show();
 
                 var outputPanel = form.OutputPanelBoundsForTests;
-                var progress = form.TimeoutProgressBoundsForTests;
+                var ring = form.CountdownRingBoundsForTests;
                 var timeoutLabel = form.TimeoutLabelBoundsForTests;
                 var warning = form.WarningLabelBoundsForTests;
                 var approve = form.ApproveButtonBoundsForTests;
                 var reject = form.RejectButtonBoundsForTests;
 
                 Assert.True(outputPanel.Height > 0);
-                Assert.True(progress.Height > 0);
+                Assert.True(ring.Height > 0);
 
-                // Output panel must end before the countdown progress bar begins.
-                Assert.True(outputPanel.Bottom <= progress.Top,
-                    $"Output panel bottom ({outputPanel.Bottom}) should be at or above progress top ({progress.Top})");
-
-                // Countdown progress bar must end before its label begins.
-                Assert.True(progress.Bottom <= timeoutLabel.Top,
-                    $"Progress bottom ({progress.Bottom}) should be at or above label top ({timeoutLabel.Top})");
+                // Output panel must end before the remaining-time label begins.
+                Assert.True(outputPanel.Bottom <= timeoutLabel.Top,
+                    $"Output panel bottom ({outputPanel.Bottom}) should be at or above timeout label top ({timeoutLabel.Top})");
 
                 // Timeout label must end before warning label begins.
                 Assert.True(timeoutLabel.Bottom <= warning.Top,
@@ -821,7 +817,7 @@ public class ConfirmationFormTests : IDisposable
                     expires_at = "2026-01-01T00:00:00Z"
                 };
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1);
@@ -830,7 +826,7 @@ public class ConfirmationFormTests : IDisposable
                 var client = new Rectangle(0, 0, form.ClientSize.Width, form.ClientSize.Height);
 
                 Assert.True(client.Contains(form.OutputPanelBoundsForTests));
-                Assert.True(client.Contains(form.TimeoutProgressBoundsForTests));
+                Assert.True(client.Contains(form.CountdownRingBoundsForTests));
                 Assert.True(client.Contains(form.TimeoutLabelBoundsForTests));
                 Assert.True(client.Contains(form.WarningLabelBoundsForTests));
                 Assert.True(client.Contains(form.ApproveButtonBoundsForTests));
@@ -959,7 +955,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", summary, _ => { }, 60);
 
             using var form = new ConfirmationForm(item, 1, 1, textProvider: text);
@@ -1000,7 +996,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 longId, longId, summary, _ => { }, 60);
 
             using var form = new ConfirmationForm(item, 1, 1);
@@ -1040,7 +1036,7 @@ public class ConfirmationFormTests : IDisposable
                     expires_at = "2026-01-01T00:00:00Z"
                 };
 
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1);
@@ -1077,7 +1073,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem(
+            var item = ConfirmationPresentationTestData.CreateItem(
                 "conf_1", "rec_1", summary, _ => { }, 60);
 
             var tinyWorkingArea = new Rectangle(0, 0, 600, 500);
@@ -1124,7 +1120,7 @@ public class ConfirmationFormTests : IDisposable
                 };
 
                 var picker = new FakeDirectoryPicker(otherDir);
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1,
@@ -1156,7 +1152,7 @@ public class ConfirmationFormTests : IDisposable
 
     private static PendingConfirmationItem CreateRealDesktopItem(string confirmationId = "confirm_f33edb4dd086", string recordingId = "rec_7d6437459aa3")
     {
-        return new PendingConfirmationItem(
+        return ConfirmationPresentationTestData.CreateItem(
             confirmationId,
             recordingId,
             new
@@ -1348,7 +1344,7 @@ public class ConfirmationFormTests : IDisposable
                 };
 
                 var picker = new FakeDirectoryPicker(otherDir);
-                var item = new PendingConfirmationItem(
+                var item = ConfirmationPresentationTestData.CreateItem(
                     "conf_1", "rec_1", summary, _ => { }, 60);
 
                 using var form = new ConfirmationForm(item, 1, 1, directoryPicker: picker);
@@ -1552,7 +1548,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem("conf_1", "rec_1", summary, _ => { }, 60);
+            var item = ConfirmationPresentationTestData.CreateItem("conf_1", "rec_1", summary, _ => { }, 60);
             using var form = new ConfirmationForm(item, 1, 1);
             form.Show();
 
@@ -1585,7 +1581,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem("conf_1", "rec_1", summary, _ => { }, 60);
+            var item = ConfirmationPresentationTestData.CreateItem("conf_1", "rec_1", summary, _ => { }, 60);
             using var form = new ConfirmationForm(item, 1, 1);
             form.Show();
 
@@ -1631,7 +1627,7 @@ public class ConfirmationFormTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            var item = new PendingConfirmationItem("conf_system", "rec_system", summary, _ => { }, 60);
+            var item = ConfirmationPresentationTestData.CreateItem("conf_system", "rec_system", summary, _ => { }, 60);
             using var form = new ConfirmationForm(item, 1, 1, textProvider: new UiTextProvider(language));
             form.Show();
 

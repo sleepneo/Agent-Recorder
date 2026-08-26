@@ -69,7 +69,6 @@ public sealed class RecordingEngine : IDisposable
     private readonly IMicrophoneDeviceProvider _microphoneProvider;
     private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
     private readonly ISystemAudioEndpointProvider _systemAudioEndpointProvider;
-    private readonly ISystemAudioExperimentFlag _systemAudioExperimentFlag;
     private readonly IDisplayTopologyProvider _displayTopologyProvider;
     private bool _usesDefaultBackendFactory = true;
     private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
@@ -221,8 +220,7 @@ public sealed class RecordingEngine : IDisposable
         IMicrophoneDeviceProvider? microphoneProvider = null,
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
         IDisplayTopologyProvider? displayTopologyProvider = null,
-        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
-        ISystemAudioExperimentFlag? systemAudioExperimentFlag = null)
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -230,8 +228,6 @@ public sealed class RecordingEngine : IDisposable
         _microphoneProvider = microphoneProvider ?? new EmptyMicrophoneProvider();
         _microphoneStatusProvider = microphoneStatusProvider ?? NullMicrophoneStatusProvider.Instance;
         _systemAudioEndpointProvider = systemAudioEndpointProvider ?? new CoreAudioSystemAudioEndpointProvider();
-        _systemAudioExperimentFlag = systemAudioExperimentFlag
-            ?? global::AgentRecorder.Core.SystemAudioExperimentFlag.FromEnvironment();
         _displayTopologyProvider = displayTopologyProvider ?? SystemQueryDisplayTopologyProvider.Instance;
     }
 
@@ -251,8 +247,6 @@ public sealed class RecordingEngine : IDisposable
     public IMicrophoneStatusProvider MicrophoneStatusProvider => _microphoneStatusProvider;
 
     public ISystemAudioEndpointProvider SystemAudioEndpointProvider => _systemAudioEndpointProvider;
-
-    public ISystemAudioExperimentFlag SystemAudioExperimentFlag => _systemAudioExperimentFlag;
 
     public void SetTray(ITrayContext tray) => _tray = tray;
 
@@ -638,7 +632,7 @@ public sealed class RecordingEngine : IDisposable
         // so it runs outside lock.)
         // =====================================================================
         Recording rec;
-        object summary;
+        RecordingRequestSummary summary;
         try
         {
             rec = ConfigParser.Build(
@@ -648,7 +642,6 @@ public sealed class RecordingEngine : IDisposable
                 _microphoneProvider,
                 _microphoneStatusProvider,
                 _systemAudioEndpointProvider,
-                _systemAudioExperimentFlag,
                 preResolvedSystemAudioEndpoint);
         }
         catch (ApiException ex)
@@ -806,60 +799,10 @@ public sealed class RecordingEngine : IDisposable
             _audit.Log("confirmation.created", new { recording_id = rec.Id, confirmation_id = conf.Id, nested_role = rec.NestedRole ?? "none" });
             _tracer.ConfirmationCreated(traceId, rec.Id, conf.Id);
 
-            // Add metadata to summary for tray UI
-            var summaryWithMeta = new
-            {
-                mode = rec.Mode,
-                source = GetSummaryField(summary, "source"),
-                audio = GetSummaryField(summary, "audio"),
-                audio_source_kind = GetSummaryField(summary, "audio_source_kind"),
-                audio_system_enabled = GetSummaryField(summary, "audio_system_enabled"),
-                audio_system_default_output = GetSummaryField(summary, "audio_system_default_output"),
-                audio_system_output_name = GetSummaryField(summary, "audio_system_output_name"),
-                audio_system_output_is_default = GetSummaryField(summary, "audio_system_output_is_default"),
-                audio_system_output_selection = GetSummaryField(summary, "audio_system_output_selection"),
-                duration = GetSummaryField(summary, "duration"),
-                countdown_seconds = rec.CountdownSeconds,
-                output = GetSummaryField(summary, "output"),
-                series = GetSummaryField(summary, "series"),
-                series_interval_ms = rec.ScreenshotSeries?.IntervalMs,
-                series_max_count = rec.ScreenshotSeries?.MaxCount,
-                series_max_duration_seconds = rec.ScreenshotSeries?.MaxDurationSeconds,
-                series_planned_frame_count = rec.ScreenshotSeries?.PlannedFrameCount,
-                output_kind = rec.IsScreenshotSeries ? "png_sequence_directory" : "mp4_file",
-                nested_role = GetSummaryField(summary, "nested_role"),
-                recording_id = rec.Id,
-                confirmation_id = conf.Id,
-                timeout_seconds = conf.TimeoutSeconds,
-                expires_at = DateTime.UtcNow.AddSeconds(conf.TimeoutSeconds).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                source_type = rec.SourceType,
-                source_title = rec.SourceTitle,
-                source_application = rec.SourceApplication,
-                window_id = capturePlan.TargetIdentity,
-                trace_id = traceId,
-                coordinate_space = capturePlan.CoordinateSpace,
-                capture_semantics = capturePlan.CaptureSemantics,
-                planned_backend = capturePlan.PlannedBackend,
-                preview_semantics = capturePlan.PreviewSemantics,
-                selection_reason_code = capturePlan.Evidence.SelectionReasonCode,
-                selection_availability_source = capturePlan.Evidence.AvailabilitySource,
-                selection_fallback = capturePlan.FallbackOccurred,
-                target_display_id = capturePlan.TargetDisplayId ?? "",
-                target_display_bounds = capturePlan.DisplayBounds == null
-                    ? null
-                    : new
-                    {
-                        x = capturePlan.DisplayBounds.X,
-                        y = capturePlan.DisplayBounds.Y,
-                        width = capturePlan.DisplayBounds.Width,
-                        height = capturePlan.DisplayBounds.Height
-                    },
-                capture_bounds = (rec.Config.Bounds.w > 0 && rec.Config.Bounds.h > 0)
-                    ? new { x = rec.Config.Bounds.x, y = rec.Config.Bounds.y, width = rec.Config.Bounds.w, height = rec.Config.Bounds.h }
-                    : null
-            };
+            var presentation = BuildConfirmationPresentation(summary, rec, conf, capturePlan, traceId);
+            var summaryWithMeta = RecordingConfirmationApiProjection.ToObject(presentation);
 
-            tray.RequestConfirmation(summaryWithMeta, decision =>
+            tray.RequestConfirmation(presentation, decision =>
             {
                 if (decision.Approved)
                 {
@@ -1160,19 +1103,19 @@ public sealed class RecordingEngine : IDisposable
             return true;
 
         const string errorCode = "capture_semantics_changed";
-        MarkBundleNotApplicable(rec);
         lock (rec)
         {
             if (rec.IsFinalized)
                 return false;
 
-            rec.IsFinalized = true;
             rec.CompletedAtUtc = DateTime.UtcNow;
             rec.StopReason = errorCode;
             rec.Error = errorCode;
             rec.Warnings.Add(errorCode);
+            MarkBundleNotApplicable(rec);
             rec.State = RecState.failed;
             BumpStateVersion();
+            rec.PublishFinalized();
         }
 
         try
@@ -1635,7 +1578,7 @@ public sealed class RecordingEngine : IDisposable
         if (conf != null)
             TrySetIdleOnAllDone(tray);
         else
-            tray.SetIdle(rec);
+            tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
 
         return false;
     }
@@ -1804,7 +1747,7 @@ public sealed class RecordingEngine : IDisposable
         // machinery as audio/deferred recordings.
         if (useOrdinaryFfmpegCountdown)
         {
-            tray.SetPreparing(rec);
+            tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             BeginOrdinaryFfmpegCountdown(rec, traceId, tray);
             return;
         }
@@ -1858,7 +1801,7 @@ public sealed class RecordingEngine : IDisposable
                     backend = rec.BackendType,
                     awaiting_authorization = true
                 });
-                tray.SetPreparing(rec);
+                tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
                 BeginDeferredCountdown(rec, traceId, tray);
             }
             // Split A/V backends with a microphone: show preparing UI and wait
@@ -1878,13 +1821,13 @@ public sealed class RecordingEngine : IDisposable
                     endpoint_id = rec.SystemAudioEndpointId ?? "",
                     endpoint_name = rec.SystemAudioEndpointName ?? ""
                 });
-                tray.SetPreparing(rec);
+                tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             }
             // For other first-frame-observable backends (e.g. no-microphone FFmpeg),
             // show preparing until credible first-frame evidence arrives.
             else if (rec.Backend is IFirstFrameObservableCaptureBackend && !rec.IsFinalized)
             {
-                tray.SetPreparing(rec);
+                tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             }
             // Non-observable backends cannot wait for evidence.
             else if (!rec.IsFinalized)
@@ -1960,7 +1903,7 @@ public sealed class RecordingEngine : IDisposable
         if (!_seriesOps.TryAdd(rec.Id, op))
             throw new InvalidOperationException("A screenshot-series worker is already active for this recording.");
 
-        tray.SetPreparing(rec);
+        tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
         // Never pass the operation CTS as Task.Run's scheduling token. Stop can
         // cancel before the delegate is scheduled; the worker must still start,
         // observe ownership, and retire the operation deterministically.
@@ -2169,7 +2112,12 @@ public sealed class RecordingEngine : IDisposable
                     height,
                     size_bytes = size
                 });
-                tray.SetSeriesProgress(rec, frameCount, runtime.PlannedFrameCount, nextDueAtUtc);
+                tray.SetSeriesProgress(CreateRecordingUiPresentation(
+                    rec,
+                    RecordingUiState.Recording,
+                    seriesCapturedFrameCount: frameCount,
+                    seriesPlannedFrameCount: runtime.PlannedFrameCount,
+                    seriesNextCaptureDueAtUtc: nextDueAtUtc));
             }
 
             FinishScreenshotSeries(rec, op, tray, "completed", null, null);
@@ -2199,7 +2147,7 @@ public sealed class RecordingEngine : IDisposable
         int seconds = rec.CountdownSeconds;
         if (seconds <= 0)
         {
-            tray.SetCountdown(rec, null);
+            tray.SetCountdown(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             return;
         }
 
@@ -2215,7 +2163,10 @@ public sealed class RecordingEngine : IDisposable
         for (int remaining = steps; remaining > 0; remaining--)
         {
             op.Cts.Token.ThrowIfCancellationRequested();
-            tray.SetCountdown(rec, remaining);
+            tray.SetCountdown(CreateRecordingUiPresentation(
+                rec,
+                RecordingUiState.Countdown,
+                countdownRemainingSeconds: remaining));
             BeforeScreenshotCountdownStepForTests?.Invoke(rec, remaining);
             await Task.Delay(CountdownInterval, op.Cts.Token).ConfigureAwait(false);
         }
@@ -2223,7 +2174,7 @@ public sealed class RecordingEngine : IDisposable
         {
             if (op.StopRequested || rec.IsFinalized)
                 throw new OperationCanceledException(op.Cts.Token);
-            tray.SetCountdown(rec, null);
+            tray.SetCountdown(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             rec.State = RecState.preparing;
             BumpStateVersion();
         }
@@ -2341,7 +2292,6 @@ public sealed class RecordingEngine : IDisposable
             terminalStatus = "failed";
             runtime.Status = terminalStatus;
             runtime.ErrorCode = "series_publish_failed";
-            rec.Error = runtime.ErrorCode;
             ScreenshotSeriesArtifacts.DeleteStaging(runtime);
         }
 
@@ -2349,15 +2299,16 @@ public sealed class RecordingEngine : IDisposable
         {
             if (terminalStatus == "completed")
                 runtime.Status = "completed";
+            rec.Error = runtime.ErrorCode;
             rec.State = terminalStatus switch
             {
                 "completed" => RecState.completed,
                 "cancelled" => RecState.cancelled,
                 _ => RecState.failed
             };
-            rec.IsFinalized = true;
             MarkBundleNotApplicable(rec);
             BumpStateVersion();
+            rec.PublishFinalized();
         }
 
         _audit.Log(terminalStatus == "completed" ? "recording.completed" : terminalStatus == "cancelled" ? "recording.cancelled" : "recording.failed", new
@@ -2378,7 +2329,7 @@ public sealed class RecordingEngine : IDisposable
         });
         _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id,
             status: rec.State.ToString(), errorCode: runtime.ErrorCode, stopReason: rec.StopReason);
-        tray.SetIdle(rec);
+        tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
     }
 
     private sealed class ScreenshotSeriesFailureException : Exception
@@ -2454,7 +2405,7 @@ public sealed class RecordingEngine : IDisposable
         });
 
         StartDeadlineWatchdog(rec, traceId, tray);
-        tray.SetRecording(rec);
+        tray.SetRecording(CreateRecordingUiPresentation(rec, RecordingUiState.Recording));
     }
 
     private void StartDeadlineWatchdog(Recording rec, string? traceId, ITrayContext tray)
@@ -2537,7 +2488,7 @@ public sealed class RecordingEngine : IDisposable
                 exit_code = exitCode,
                 reason
             });
-            tray.SetFinalizing(rec);
+            tray.SetFinalizing(CreateRecordingUiPresentation(rec, RecordingUiState.Finalizing));
         }
 
         return transitioned;
@@ -2848,8 +2799,8 @@ public sealed class RecordingEngine : IDisposable
             rec.Error = error;
             rec.Warnings.Add(warning);
             rec.State = RecState.failed;
-            rec.IsFinalized = true;
             BumpStateVersion();
+            rec.PublishFinalized();
             return StartFailureOwnership.Failed;
         }
     }
@@ -2876,7 +2827,7 @@ public sealed class RecordingEngine : IDisposable
             error,
             stage = stage ?? ""
         });
-        tray.SetIdle(rec);
+        tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
         tray.ShowError(error);
     }
 
@@ -2909,7 +2860,10 @@ public sealed class RecordingEngine : IDisposable
                 {
                     for (int remaining = CountdownStepsFor(rec); remaining >= 1; remaining--)
                     {
-                        tray.SetCountdown(rec, remaining);
+                        tray.SetCountdown(CreateRecordingUiPresentation(
+                            rec,
+                            RecordingUiState.Countdown,
+                            countdownRemainingSeconds: remaining));
                         await Task.Delay(CountdownInterval, ct).ConfigureAwait(false);
                     }
                 }
@@ -2944,7 +2898,7 @@ public sealed class RecordingEngine : IDisposable
                     countdown_seconds = rec.CountdownSeconds
                 });
 
-                tray.SetCountdown(rec, null);
+                tray.SetCountdown(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
             }
 
             // Late-terminal guard: a stop/finalize that won the race after the
@@ -3135,7 +3089,7 @@ public sealed class RecordingEngine : IDisposable
                     stage = "first_frame_wait"
                 });
                 try { rec.Backend?.Cancel(); } catch { }
-                tray.SetIdle(rec);
+                tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
                 tray.ShowError(rec.Error);
                 return;
             }
@@ -3199,8 +3153,6 @@ public sealed class RecordingEngine : IDisposable
                 natural = false;
                 stopReason = rec.StopReason;
             }
-
-            rec.IsFinalized = true;
 
             rec.CompletedAtUtc = DateTime.UtcNow;
             rec.ExitCode = exitCode;
@@ -3397,6 +3349,8 @@ public sealed class RecordingEngine : IDisposable
                     audio_qpc_outlier_count = meta.AudioQpcOutlierCount
                 });
             }
+
+            rec.PublishFinalized();
         }
 
         _tracer.FinalizationCompleted(GetTraceIdForRecording(rec.Id), rec.Id, finalizationSuccess);
@@ -3406,7 +3360,7 @@ public sealed class RecordingEngine : IDisposable
             _ = Task.Run(() => RunBundleGenerationAsync(rec, bundleRequest));
         }
 
-        tray.SetIdle(rec);
+        tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
 
         // The idle transition closes the REC/floating controls first. The
         // notifier then applies the tray host's language and bubble policy,
@@ -3691,9 +3645,9 @@ public sealed class RecordingEngine : IDisposable
                 rec.State = RecState.cancelled;
                 rec.StopReason = NormalizeStopReason(reason);
                 rec.CompletedAtUtc = DateTime.UtcNow;
-                rec.IsFinalized = true;
                 MarkBundleNotApplicable(rec);
                 BumpStateVersion();
+                rec.PublishFinalized();
             }
             else
             {
@@ -3705,7 +3659,7 @@ public sealed class RecordingEngine : IDisposable
         }
 
         if (enteredStopping)
-            _tray?.SetStopping(rec);
+            _tray?.SetStopping(CreateRecordingUiPresentation(rec, RecordingUiState.Stopping));
 
         CancelCountdown(rec.Id);
 
@@ -3717,7 +3671,7 @@ public sealed class RecordingEngine : IDisposable
             // is recorded.
             try { rec.Backend?.Cancel(); } catch { }
             _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
-            _tray!.SetIdle(rec);
+            _tray!.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
             return BuildStopResponse(rec);
         }
 
@@ -3733,6 +3687,7 @@ public sealed class RecordingEngine : IDisposable
     private object StopScreenshotSeries(Recording rec, string reason)
     {
         ScreenshotSeriesOperation? op;
+        bool cancelledWithoutOperation = false;
         lock (rec)
         {
             if (IsTerminalState(rec.State))
@@ -3744,29 +3699,35 @@ public sealed class RecordingEngine : IDisposable
                 rec.State = RecState.cancelled;
                 rec.StopReason = NormalizeStopReason(reason);
                 rec.CompletedAtUtc = DateTime.UtcNow;
-                rec.IsFinalized = true;
                 rec.ScreenshotSeries!.Status = "cancelled";
                 rec.ScreenshotSeries.StopReason = rec.StopReason;
                 rec.ScreenshotSeries.CompletedAtUtc = rec.CompletedAtUtc;
                 MarkBundleNotApplicable(rec);
                 BumpStateVersion();
-                _audit.Log("recording.cancelled", new { recording_id = rec.Id, mode = ScreenshotSeriesConfig.ModeName, reason = rec.StopReason });
-                _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
-                _tray?.SetIdle(rec);
-                return BuildStopResponse(rec);
+                rec.PublishFinalized();
+                cancelledWithoutOperation = true;
             }
-
-            if (rec.State == RecState.stopping)
+            else if (rec.State == RecState.stopping)
                 return BuildStoppingResponse(rec);
+            else
+            {
+                rec.State = RecState.stopping;
+                rec.StopReason = NormalizeStopReason(reason);
+                op.StopRequested = true;
+                BumpStateVersion();
+            }
+        }
 
-            rec.State = RecState.stopping;
-            rec.StopReason = NormalizeStopReason(reason);
-            op.StopRequested = true;
-            BumpStateVersion();
+        if (cancelledWithoutOperation)
+        {
+            _audit.Log("recording.cancelled", new { recording_id = rec.Id, mode = ScreenshotSeriesConfig.ModeName, reason = rec.StopReason });
+            _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
+            _tray?.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+            return BuildStopResponse(rec);
         }
 
         try { op!.Cts.Cancel(); } catch { }
-        try { op.Task?.Wait(TimeSpan.FromSeconds(10)); } catch { }
+        try { op!.Task?.Wait(TimeSpan.FromSeconds(10)); } catch { }
         return IsTerminalState(rec.State) ? BuildStopResponse(rec) : BuildStoppingResponse(rec);
     }
 
@@ -4408,14 +4369,110 @@ public sealed class RecordingEngine : IDisposable
     private static long SafeSize(string p) { try { return new FileInfo(p).Length; } catch { return 0; } }
     private static string Iso(DateTime t) => t.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-    private static string GetSummaryField(object summary, string field)
+    private static RecordingConfirmationPresentation BuildConfirmationPresentation(
+        RecordingRequestSummary summary,
+        Recording rec,
+        Confirmation confirmation,
+        CapturePlan capturePlan,
+        string traceId)
     {
-        var type = summary.GetType();
-        var prop = type.GetProperty(field);
-        if (prop == null) return "";
-        var value = prop.GetValue(summary);
-        return value?.ToString() ?? "";
+        var createdAtUtc = DateTime.SpecifyKind(confirmation.CreatedAtUtc, DateTimeKind.Utc);
+        var captureBounds = rec.Config.Bounds.w > 0 && rec.Config.Bounds.h > 0
+            ? new ConfirmationCaptureBounds(
+                rec.Config.Bounds.x,
+                rec.Config.Bounds.y,
+                rec.Config.Bounds.w,
+                rec.Config.Bounds.h)
+            : null;
+        var targetDisplayBounds = capturePlan.DisplayBounds == null
+            ? null
+            : new ConfirmationCaptureBounds(
+                capturePlan.DisplayBounds.X,
+                capturePlan.DisplayBounds.Y,
+                capturePlan.DisplayBounds.Width,
+                capturePlan.DisplayBounds.Height);
+
+        return new RecordingConfirmationPresentation
+        {
+            Summary = summary,
+            RecordingId = rec.Id,
+            ConfirmationId = confirmation.Id,
+            TimeoutSeconds = confirmation.TimeoutSeconds,
+            CreatedAtUtc = createdAtUtc,
+            ExpiresAtUtc = createdAtUtc.AddSeconds(confirmation.TimeoutSeconds),
+            SourceType = rec.SourceType,
+            SourceTitle = rec.SourceTitle,
+            SourceApplication = rec.SourceApplication,
+            WindowId = capturePlan.TargetIdentity,
+            TraceId = traceId,
+            CoordinateSpace = capturePlan.CoordinateSpace,
+            CaptureSemantics = capturePlan.CaptureSemantics,
+            PlannedBackend = capturePlan.PlannedBackend,
+            PreviewSemantics = capturePlan.PreviewSemantics,
+            SelectionReasonCode = capturePlan.Evidence.SelectionReasonCode,
+            SelectionAvailabilitySource = capturePlan.Evidence.AvailabilitySource,
+            SelectionFallback = capturePlan.FallbackOccurred,
+            TargetDisplayId = capturePlan.TargetDisplayId ?? "",
+            TargetDisplayBounds = targetDisplayBounds,
+            CaptureBounds = captureBounds,
+            OutputKind = rec.IsScreenshotSeries ? "png_sequence_directory" : "mp4_file"
+        };
     }
+
+    /// <summary>
+    /// Creates the immutable UI boundary value immediately before a tray
+    /// notification. The recording monitor is the existing lifecycle lock used
+    /// by state transitions, so all mutable fields are copied as one snapshot.
+    /// Optional countdown/series values are supplied by the worker that owns the
+    /// corresponding progress event; they are copied into the DTO rather than
+    /// leaving the UI to read a mutable runtime object later.
+    /// </summary>
+    private static RecordingUiPresentation CreateRecordingUiPresentation(
+        Recording rec,
+        RecordingUiState state,
+        int? countdownRemainingSeconds = null,
+        int? seriesCapturedFrameCount = null,
+        int? seriesPlannedFrameCount = null,
+        DateTime? seriesNextCaptureDueAtUtc = null)
+    {
+        lock (rec)
+        {
+            var bounds = rec.Config.Bounds;
+            var series = rec.ScreenshotSeries;
+            return new RecordingUiPresentation
+            {
+                RecordingId = rec.Id,
+                State = state,
+                SourceType = rec.SourceType,
+                CaptureBounds = new RecordingUiBounds(bounds.x, bounds.y, bounds.w, bounds.h),
+                DurationSeconds = rec.DurationSeconds,
+                StartedAtUtc = rec.StartedAtUtc,
+                IsScreenshotSeries = rec.IsScreenshotSeries,
+                SeriesCapturedFrameCount = seriesCapturedFrameCount,
+                SeriesPlannedFrameCount = seriesPlannedFrameCount ?? series?.PlannedFrameCount,
+                SeriesNextCaptureDueAtUtc = seriesNextCaptureDueAtUtc,
+                CountdownRemainingSeconds = countdownRemainingSeconds,
+                NestedRole = rec.NestedRole,
+                ParentRecordingId = rec.ParentRecordingId,
+                NestedSessionId = rec.NestedSessionId
+            };
+        }
+    }
+
+    internal static RecordingUiPresentation CreateRecordingUiPresentationForTests(
+        Recording rec,
+        RecordingUiState state,
+        int? countdownRemainingSeconds = null,
+        int? seriesCapturedFrameCount = null,
+        int? seriesPlannedFrameCount = null,
+        DateTime? seriesNextCaptureDueAtUtc = null)
+        => CreateRecordingUiPresentation(
+            rec,
+            state,
+            countdownRemainingSeconds,
+            seriesCapturedFrameCount,
+            seriesPlannedFrameCount,
+            seriesNextCaptureDueAtUtc);
 
     /// <summary>
     /// Null-object tray context used only by internal test seams that may run
@@ -4426,10 +4483,10 @@ public sealed class RecordingEngine : IDisposable
         public static ITrayContext Instance { get; } = new NullTrayContext();
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation presentation) { }
+        public void SetIdle(RecordingUiPresentation presentation) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

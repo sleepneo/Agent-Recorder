@@ -17,10 +17,14 @@ namespace AgentRecorder.App;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         try
         {
+#if DEBUG
+            if (ConfirmationThemePreviewHost.TryRun(args))
+                return;
+#endif
             Run();
         }
         catch (Exception ex)
@@ -131,7 +135,6 @@ internal static class Program
         var micProvider = new CachingMicrophoneDeviceProvider(new FfmpegDshowMicrophoneProvider());
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
-        var systemAudioExperimentFlag = SystemAudioExperimentFlag.FromEnvironment();
 
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
         var engine = new RecordingEngine(
@@ -140,8 +143,7 @@ internal static class Program
             bundleGenerator,
             micProvider,
             micStatusProvider,
-            systemAudioEndpointProvider: systemAudioEndpointProvider,
-            systemAudioExperimentFlag: systemAudioExperimentFlag);
+            systemAudioEndpointProvider: systemAudioEndpointProvider);
         var tray = new TrayContext(engine, audit, perfTracer);
         engine.SetTray(tray);
 

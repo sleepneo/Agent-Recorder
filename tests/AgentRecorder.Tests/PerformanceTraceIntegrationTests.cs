@@ -81,7 +81,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
         public string? ApproveOutputDirectory { get; set; }
         public int RequestConfirmationCallCount { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
             RequestConfirmationCallCount++;
             if (Mode == DecisionMode.Timeout)
@@ -99,8 +99,8 @@ public class PerformanceTraceIntegrationTests : IDisposable
             callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -114,7 +114,8 @@ public class PerformanceTraceIntegrationTests : IDisposable
 
     private ApiServer CreateServer(ControllableTray tray, string? subDir = null,
         IEnsureContextStore? ensureContextStore = null, IPerformanceTracer? tracer = null,
-        string? existingDataDir = null)
+        string? existingDataDir = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null)
     {
         _dataDir = existingDataDir ?? Path.Combine(Path.GetTempPath(), $"perf-int-test-{Guid.NewGuid():N}");
         if (!string.IsNullOrEmpty(subDir))
@@ -126,7 +127,8 @@ public class PerformanceTraceIntegrationTests : IDisposable
 
         _audit = new CaptureAuditLogger();
         _tracer = tracer ?? new RecordingPerformanceTracer(_dataDir);
-        _engine = new RecordingEngine(_audit, _tracer);
+        _engine = new RecordingEngine(_audit, _tracer,
+            systemAudioEndpointProvider: systemAudioEndpointProvider ?? new EmptySystemAudioProvider());
         _engine.SetTray(tray);
         _backend.ThrowOnStart = false;
         _backend.CompleteOnStart = false;
@@ -831,7 +833,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
             expires_at = "2026-01-01T00:00:00Z"
         };
 
-        var item = new PendingConfirmationItem(confirmationId, recordingId, summary, _ => { }, 60);
+        var item = ConfirmationPresentationTestData.CreateItem(confirmationId, recordingId, summary, _ => { }, 60);
 
         Exception? ex = null;
         var thread = new Thread(() =>
@@ -863,7 +865,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
     {
         var events = new List<(string TraceId, string EventName)>();
         var fakeTracer = new FakeTracer(events);
-        var item = new PendingConfirmationItem(
+        var item = ConfirmationPresentationTestData.CreateItem(
             "conf_c", "rec_c",
             new { source = "test", recording_id = "rec_c", confirmation_id = "conf_c", trace_id = "trace_c", timeout_seconds = 60, expires_at = "2026-01-01T00:00:00Z" },
             _ => { }, 60);
@@ -1006,10 +1008,10 @@ public class PerformanceTraceIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_SystemAudioRejected_RecordsIntentFailedAndNoTerminal()
+    public async Task QuickRecording_SystemAudioNoDevices_RecordsIntentFailedAndNoTerminal()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Approve };
-        var server = CreateServer(tray);
+            var server = CreateServer(tray, systemAudioEndpointProvider: new EmptySystemAudioProvider());
         try
         {
             SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
@@ -1024,7 +1026,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(503, (int)response.StatusCode);
 
             await Task.Delay(100);
             _tracer!.Flush();
@@ -1038,7 +1040,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
             var accepted = events.First(e => e["event"]!.GetValue<string>() == "intent.accepted");
             Assert.Equal("recordings.quick", accepted["endpoint"]?.GetValue<string>());
             var failed = events.First(e => e["event"]!.GetValue<string>() == "intent.failed");
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", failed["data"]!["error_code"]!.GetValue<string>());
+            Assert.Equal("SYSTEM_AUDIO_DEFAULT_ENDPOINT_NOT_FOUND", failed["data"]!["error_code"]!.GetValue<string>());
         }
         finally
         {
@@ -1699,6 +1701,23 @@ public class PerformanceTraceIntegrationTests : IDisposable
             server.Stop();
             (realTracer as IDisposable)?.Dispose();
         }
+    }
+
+    private sealed class EmptySystemAudioProvider : ISystemAudioEndpointProvider
+    {
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(
+                Array.Empty<SystemAudioEndpointInfo>());
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(null);
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(null);
     }
 
     private sealed class FakeTracer : IPerformanceTracer

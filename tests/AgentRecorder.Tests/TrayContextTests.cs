@@ -59,37 +59,34 @@ public class TrayContextTests : IDisposable
         return ctx;
     }
 
-    private static Recording MakeRecording(
+    private static RecordingUiPresentation MakeRecording(
         (int x, int y, int w, int h) bounds,
         string? nestedRole = null,
         string? parentRecordingId = null,
         string? nestedSessionId = null)
     {
-        return new Recording
+        return new RecordingUiPresentation
         {
+            RecordingId = "rec_" + Guid.NewGuid().ToString("N")[..12],
+            State = RecordingUiState.Recording,
             SourceType = "region",
+            CaptureBounds = new RecordingUiBounds(bounds.x, bounds.y, bounds.w, bounds.h),
             StartedAtUtc = DateTime.UtcNow,
             NestedRole = nestedRole,
             ParentRecordingId = parentRecordingId,
-            NestedSessionId = nestedSessionId,
-            Config = new CaptureConfig
-            {
-                SourceKind = "region",
-                Bounds = bounds,
-                OutputPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"test-tray-{Guid.NewGuid():N}.mp4")
-            }
+            NestedSessionId = nestedSessionId
         };
     }
 
     private sealed class FakeIndicatorPresenter : IIndicatorPresenter
     {
-        public Recording? LastRecording { get; private set; }
-        public Recording? LastParent { get; private set; }
+        public RecordingUiPresentation? LastRecording { get; private set; }
+        public RecordingUiPresentation? LastParent { get; private set; }
         public string? LastFallbackReason { get; private set; }
 
-        public void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null)
+        public void ShowFor(RecordingUiPresentation presentation, RecordingUiPresentation? parent, string? parentFallbackReason = null)
         {
-            LastRecording = recording;
+            LastRecording = presentation;
             LastParent = parent;
             LastFallbackReason = parentFallbackReason;
         }
@@ -205,7 +202,9 @@ public class TrayContextTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            ctx.RequestConfirmation(summary, decision => { approved = decision.Approved; });
+            ctx.RequestConfirmation(
+                ConfirmationPresentationTestData.CreateItem("conf_lang", "rec_lang", summary, _ => { }, 60).Presentation,
+                decision => { approved = decision.Approved; });
             Application.DoEvents();
             Thread.Sleep(50);
             Application.DoEvents();
@@ -230,21 +229,11 @@ public class TrayContextTests : IDisposable
         {
             using var ctx = CreateContext(UiLanguage.ZhCn);
 
-            var rec = new Recording
-            {
-                SourceType = "region",
-                StartedAtUtc = DateTime.UtcNow,
-                Config = new CaptureConfig
-                {
-                    SourceKind = "region",
-                    Bounds = (100, 100, 800, 600),
-                    OutputPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"test-lang-{Guid.NewGuid():N}.mp4")
-                }
-            };
+            var rec = MakeRecording((100, 100, 800, 600));
 
             ctx.SetRecording(rec);
 
-            var activeBefore = GetPrivateField<System.Collections.Generic.Dictionary<string, Recording>>(ctx, "_activeRecordings").Count;
+            var activeBefore = GetPrivateField<System.Collections.Generic.Dictionary<string, RecordingUiPresentation>>(ctx, "_activeRecordings").Count;
             Assert.Equal(1, activeBefore);
 
             var stopItem = GetPrivateField<ToolStripMenuItem>(ctx, "_stopItem");
@@ -252,7 +241,7 @@ public class TrayContextTests : IDisposable
 
             SetLanguage(ctx, UiLanguage.EnUs);
 
-            var activeAfter = GetPrivateField<System.Collections.Generic.Dictionary<string, Recording>>(ctx, "_activeRecordings").Count;
+            var activeAfter = GetPrivateField<System.Collections.Generic.Dictionary<string, RecordingUiPresentation>>(ctx, "_activeRecordings").Count;
             Assert.Equal(1, activeAfter);
             Assert.Equal("Stop recording", stopItem.Text);
         });
@@ -290,7 +279,7 @@ public class TrayContextTests : IDisposable
             using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
 
             var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.RecordingId, "session-a");
 
             ctx.SetRecording(outer);
             ctx.SetRecording(inner);
@@ -344,7 +333,7 @@ public class TrayContextTests : IDisposable
             using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
 
             var notOuter = MakeRecording((0, 0, 1000, 800), "inner", nestedSessionId: "session-a");
-            var inner = MakeRecording((200, 200, 400, 300), "inner", notOuter.Id, "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", notOuter.RecordingId, "session-a");
 
             ctx.SetRecording(notOuter);
             ctx.SetRecording(inner);
@@ -367,7 +356,7 @@ public class TrayContextTests : IDisposable
             using var ctx = CreateContext(UiLanguage.EnUs, indicatorPresenter: presenter);
 
             var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: outerSession);
-            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, innerSession);
+            var inner = MakeRecording((200, 200, 400, 300), "inner", outer.RecordingId, innerSession);
 
             ctx.SetRecording(outer);
             ctx.SetRecording(inner);

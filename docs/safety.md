@@ -116,13 +116,12 @@ Context files are written using a random temp file in the same directory and ato
   duplex HFP link. AirPods Pro and Focal Bathys have passed supervised product
   recording, but compatibility remains device/driver dependent. Initialization,
   pairing, continuity, and runtime-recovery failures remain visible and are never
-  converted into a successful silent video. The system-audio product path is a
-  default-off controlled preview. Without
-  `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`, requests that set
-  `audio.system_audio.enabled=true` fail fast with `CAPABILITY_NOT_IMPLEMENTED`
-  and never reach target resolution, confirmation, or capture. When enabled,
-  the normal local confirmation, countdown, preflight, recording, continuity,
-  finalization, and atomic publication boundaries still apply.
+  converted into a successful silent video. System audio is a public capability,
+  but its approved render endpoint is resolved before UI, fixed after local
+  confirmation, and never silently follows a later Windows default switch. The
+  normal local confirmation, countdown, preflight, recording, continuity,
+  bounded same-endpoint recovery, finalization, and atomic publication
+  boundaries apply; measured recovery gaps are reported as silence/metadata.
 - Microphone discovery supports both the bundled FFmpeg classic dshow listing and the FFmpeg 8.x tagged format. The parser accepts only trusted logger prefixes and complete records; malformed, incomplete, or conflicting listings fail closed as `unavailable`, and partial device lists are never returned. See [API reference](api.md#get-audiodevices) for the exact grammar and response contract.
 
 ## Truthful window confirmation

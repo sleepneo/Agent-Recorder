@@ -309,7 +309,6 @@ internal static class Program
         var micProvider = new CachingMicrophoneDeviceProvider(new FfmpegDshowMicrophoneProvider());
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
-        var systemAudioExperimentFlag = SystemAudioExperimentFlag.FromEnvironment();
 
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
         var engine = new RecordingEngine(
@@ -318,8 +317,7 @@ internal static class Program
             bundleGenerator,
             micProvider,
             micStatusProvider,
-            systemAudioEndpointProvider: systemAudioEndpointProvider,
-            systemAudioExperimentFlag: systemAudioExperimentFlag);
+            systemAudioEndpointProvider: systemAudioEndpointProvider);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 

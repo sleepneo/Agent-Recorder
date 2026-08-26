@@ -33,7 +33,7 @@ public class FirstFrameConsentInvariantTests : IDisposable
 
         public DecisionMode Mode { get; set; } = DecisionMode.Timeout;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
             if (Mode == DecisionMode.Timeout)
                 return;
@@ -50,8 +50,8 @@ public class FirstFrameConsentInvariantTests : IDisposable
             callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

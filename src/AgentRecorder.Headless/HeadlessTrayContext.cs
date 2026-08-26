@@ -25,7 +25,7 @@ public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifie
 
     public HeadlessTrayContext(AuditLogger audit) => _audit = audit;
 
-    public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+    public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
     {
         _audit.Log("confirmation.headless_unavailable", new
         {
@@ -48,12 +48,12 @@ public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifie
         callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
     }
 
-    public void SetRecording(object rec)
+    public void SetRecording(RecordingUiPresentation presentation)
     {
         _audit.Log("recording.headless_set_recording", new { note = "Headless host has no UI to update." });
     }
 
-    public void SetIdle(object rec)
+    public void SetIdle(RecordingUiPresentation presentation)
     {
         _audit.Log("recording.headless_set_idle", new { note = "Headless host has no UI to update." });
     }
@@ -68,9 +68,13 @@ public sealed class HeadlessTrayContext : ITrayContext, IRecordingFailureNotifie
         _audit.Log("recording.headless_error", new { error = text });
     }
 
-    public void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    public void SetSeriesProgress(RecordingUiPresentation presentation)
     {
-        _audit.Log("recording.headless_series_progress", new { captured, planned });
+        _audit.Log("recording.headless_series_progress", new
+        {
+            captured = presentation.SeriesCapturedFrameCount,
+            planned = presentation.SeriesPlannedFrameCount
+        });
     }
 
     public void ShowRecordingFailure(string recordingId, string reasonCode)

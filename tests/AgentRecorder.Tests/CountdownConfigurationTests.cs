@@ -59,8 +59,7 @@ public sealed class CountdownConfigurationTests
 
             Assert.Equal(10, recording.CountdownSeconds);
             Assert.Equal(10, recording.Config.CountdownSeconds);
-            var summaryJson = JsonNode.Parse(JsonSerializer.Serialize(summary))!;
-            Assert.Equal(10, summaryJson["countdown_seconds"]!.GetValue<int>());
+            Assert.Equal(10, summary.CountdownSeconds);
         }
         finally
         {
@@ -197,22 +196,22 @@ public sealed class CountdownConfigurationTests
         public bool PauseAfterFirst { get; init; }
         public ManualResetEventSlim FirstCountdownShown { get; } = new();
         public ManualResetEventSlim ReleaseCountdown { get; } = new();
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
-        public void SetPreparing(object rec) { }
-        public void SetCountdown(object rec, int? remainingSeconds)
+        public void SetPreparing(RecordingUiPresentation rec) { }
+        public void SetCountdown(RecordingUiPresentation rec)
         {
-            if (remainingSeconds.HasValue)
+            if (rec.CountdownRemainingSeconds is int remainingSeconds)
             {
                 bool first;
                 lock (CountdownValues)
                 {
                     first = CountdownValues.Count == 0;
-                    CountdownValues.Add(remainingSeconds.Value);
+                    CountdownValues.Add(remainingSeconds);
                 }
                 if (first)
                 {
@@ -222,7 +221,7 @@ public sealed class CountdownConfigurationTests
                 }
             }
         }
-        public void SetFinalizing(object rec) { }
+        public void SetFinalizing(RecordingUiPresentation rec) { }
     }
 
     private sealed class ObservableBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend

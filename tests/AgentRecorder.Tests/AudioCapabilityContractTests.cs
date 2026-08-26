@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -18,8 +19,7 @@ namespace AgentRecorder.Tests;
 /// <summary>
 /// Contract tests for the three public audio capability endpoints:
 /// <c>/capabilities</c>, <c>/permissions</c>, and <c>/audio/devices</c>.
-/// Verifies that microphone is reported as supported and system audio remains
-/// not implemented.
+/// Verifies the public microphone and system-audio capability/device contracts.
 /// </summary>
 [Collection("HeadlessHostIntegration")]
 public class AudioCapabilityContractTests : IDisposable
@@ -29,11 +29,11 @@ public class AudioCapabilityContractTests : IDisposable
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -46,15 +46,15 @@ public class AudioCapabilityContractTests : IDisposable
         public int RequestConfirmationCallCount { get; private set; }
         public int RequestRegionSelectionCallCount { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
             => RequestConfirmationCallCount++;
 
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
             => RequestRegionSelectionCallCount++;
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -67,7 +67,7 @@ public class AudioCapabilityContractTests : IDisposable
         public int RequestConfirmationCallCount { get; private set; }
         public int RequestRegionSelectionCallCount { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
             RequestConfirmationCallCount++;
             callback(ConfirmationDecision.Approve());
@@ -80,8 +80,8 @@ public class AudioCapabilityContractTests : IDisposable
             callback("selected", 0, 0, 800, 600, "display_1", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -89,7 +89,11 @@ public class AudioCapabilityContractTests : IDisposable
     private ApiServer? _server;
     private string? _dataDir;
 
-    private ApiServer CreateServer(IMicrophoneDeviceProvider? microphoneProvider = null, ITrayContext? tray = null, IMicrophoneStatusProvider? microphoneStatusProvider = null)
+    private ApiServer CreateServer(
+        IMicrophoneDeviceProvider? microphoneProvider = null,
+        ITrayContext? tray = null,
+        IMicrophoneStatusProvider? microphoneStatusProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null)
     {
         _dataDir = Path.Combine(Path.GetTempPath(), $"audio-contract-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dataDir);
@@ -98,7 +102,11 @@ public class AudioCapabilityContractTests : IDisposable
 
         var actualTray = tray ?? new NoOpTray();
         var audit = new AuditLogger();
-        var engine = new RecordingEngine(audit, microphoneProvider: microphoneProvider, microphoneStatusProvider: microphoneStatusProvider);
+        var engine = new RecordingEngine(
+            audit,
+            microphoneProvider: microphoneProvider,
+            microphoneStatusProvider: microphoneStatusProvider,
+            systemAudioEndpointProvider: systemAudioEndpointProvider ?? new FakeSystemAudioProvider());
         engine.SetTray(actualTray);
         _server = new ApiServer(engine, audit, actualTray);
         return _server;
@@ -113,6 +121,19 @@ public class AudioCapabilityContractTests : IDisposable
     private static StringContent JsonContent(string json) =>
         new(json, Encoding.UTF8, "application/json");
 
+    private static void SetSingleDisplayTopology()
+    {
+        var fingerprint = DisplayIdentityDeriver.Resolve("audio-contract-test-source", new[]
+        {
+            new DisplayTargetMapping("audio-contract-test-source", "audio-contract-test-display")
+        }).Fingerprint!;
+        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        {
+            new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+                fingerprint, DisplayIdentityResolutionStatus.Resolved)
+        });
+    }
+
     public void Dispose()
     {
         try { _server?.Stop(); } catch { }
@@ -120,6 +141,8 @@ public class AudioCapabilityContractTests : IDisposable
         {
             try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); } catch { }
         }
+        SystemQuery.SetDisplayProvider(null);
+        SystemQuery.SetDisplayTopologyProvider(null);
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
         ApiKeyAuth.ResetForTesting(null);
     }
@@ -150,9 +173,10 @@ public class AudioCapabilityContractTests : IDisposable
             // With no injected devices the availability status must honestly report no_devices.
             Assert.Equal("no_devices", mic.GetProperty("status").GetString());
 
+            Assert.Contains("system_audio", audio.EnumerateArray().Select(a => a.GetString()));
             var sys = caps.GetProperty("system_audio");
-            Assert.False(sys.GetProperty("supported").GetBoolean());
-            Assert.Equal("not_implemented", sys.GetProperty("status").GetString());
+            Assert.True(sys.GetProperty("supported").GetBoolean());
+            Assert.Equal("no_devices", sys.GetProperty("status").GetString());
         }
         finally
         {
@@ -161,7 +185,7 @@ public class AudioCapabilityContractTests : IDisposable
     }
 
     [Fact]
-    public async Task Permissions_Microphone_Supported_SystemAudio_NotImplemented()
+    public async Task Permissions_Microphone_AndSystemAudioExposeAvailability()
     {
         var server = CreateServer();
         try
@@ -182,8 +206,8 @@ public class AudioCapabilityContractTests : IDisposable
             Assert.Contains(mic.GetProperty("status").GetString(), new[] { "available", "no_devices", "unavailable" });
 
             var sys = data.GetProperty("system_audio");
-            Assert.False(sys.GetProperty("supported").GetBoolean());
-            Assert.Equal("not_implemented", sys.GetProperty("status").GetString());
+            Assert.True(sys.GetProperty("supported").GetBoolean());
+            Assert.Equal("no_devices", sys.GetProperty("status").GetString());
 
             Assert.Equal("granted", data.GetProperty("output_directory").GetProperty("status").GetString());
         }
@@ -209,10 +233,12 @@ public class AudioCapabilityContractTests : IDisposable
             var data = doc.RootElement.GetProperty("data");
 
             // Microphone is implemented; with no devices the status is "no_devices"
-            // rather than the old "not_implemented".
+            // rather than reporting the capability as unsupported.
             Assert.Equal("no_devices", data.GetProperty("status").GetString());
             Assert.True(data.GetProperty("microphone_supported").GetBoolean());
-            Assert.False(data.GetProperty("system_audio_supported").GetBoolean());
+            Assert.True(data.GetProperty("system_audio_supported").GetBoolean());
+            Assert.Equal("no_devices", data.GetProperty("microphone_status").GetString());
+            Assert.Equal("no_devices", data.GetProperty("system_audio_status").GetString());
 
             var inputs = data.GetProperty("input_devices");
             Assert.Equal(JsonValueKind.Array, inputs.ValueKind);
@@ -245,7 +271,9 @@ public class AudioCapabilityContractTests : IDisposable
 
             Assert.Equal("ready", data.GetProperty("status").GetString());
             Assert.True(data.GetProperty("microphone_supported").GetBoolean());
-            Assert.False(data.GetProperty("system_audio_supported").GetBoolean());
+            Assert.True(data.GetProperty("system_audio_supported").GetBoolean());
+            Assert.Equal("ready", data.GetProperty("microphone_status").GetString());
+            Assert.Equal("no_devices", data.GetProperty("system_audio_status").GetString());
 
             var inputs = data.GetProperty("input_devices").EnumerateArray().ToList();
             Assert.Equal(2, inputs.Count);
@@ -256,9 +284,78 @@ public class AudioCapabilityContractTests : IDisposable
             Assert.True(first.GetProperty("is_default").GetBoolean());
             Assert.Equal("active", first.GetProperty("state").GetString());
 
+            Assert.Empty(data.GetProperty("output_devices").EnumerateArray());
+
             // Privacy: no raw stderr, paths, or exception text should be present.
             Assert.False(body.Contains("ffmpeg", StringComparison.OrdinalIgnoreCase));
             Assert.False(body.Contains("stderr", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            server.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task AudioDevices_SystemAudioReady_ExposesExactRenderIdAndLegacyMicrophoneStatus()
+    {
+        var endpoint = new SystemAudioEndpointInfo(
+            "{0.0.0.00000000}.{SPEAKERS}", "Studio Speakers", "render", "active", true);
+        var server = CreateServer(
+            microphoneProvider: new FakeMicrophoneProvider(
+                new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active")),
+            systemAudioEndpointProvider: new FakeSystemAudioProvider(endpoint));
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/audio/devices");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data");
+            Assert.Equal("ready", data.GetProperty("status").GetString());
+            Assert.Equal("ready", data.GetProperty("microphone_status").GetString());
+            Assert.Equal("ready", data.GetProperty("system_audio_status").GetString());
+
+            var output = Assert.Single(data.GetProperty("output_devices").EnumerateArray());
+            Assert.Equal(endpoint.Id, output.GetProperty("id").GetString());
+            Assert.Equal(endpoint.Name, output.GetProperty("name").GetString());
+            Assert.True(output.GetProperty("is_default").GetBoolean());
+            Assert.Equal("active", output.GetProperty("state").GetString());
+            Assert.Equal("render", output.GetProperty("direction").GetString());
+        }
+        finally
+        {
+            server.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task AudioDevices_SystemAudioFailure_IsolatedFromMicrophoneAndDoesNotLeakDetails()
+    {
+        var server = CreateServer(
+            microphoneProvider: new FakeMicrophoneProvider(
+                new MicrophoneDeviceInfo("mic_1", "Test Microphone", true, "active")),
+            systemAudioEndpointProvider: new ThrowingSystemAudioProvider(
+                new InvalidOperationException("secret endpoint path C:\\private\\endpoint")));
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/audio/devices");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+            Assert.Equal("ready", data.GetProperty("status").GetString());
+            Assert.Equal("ready", data.GetProperty("microphone_status").GetString());
+            Assert.Equal("unavailable", data.GetProperty("system_audio_status").GetString());
+            Assert.Single(data.GetProperty("input_devices").EnumerateArray());
+            Assert.Empty(data.GetProperty("output_devices").EnumerateArray());
+            Assert.DoesNotContain("secret", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("endpoint path", body, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -443,6 +540,7 @@ public class AudioCapabilityContractTests : IDisposable
         var server = CreateServer(provider, tray, statusProvider);
         try
         {
+            SetSingleDisplayTopology();
             server.Start();
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
@@ -552,6 +650,7 @@ public class AudioCapabilityContractTests : IDisposable
         var server = CreateServer(provider, tray, statusProvider);
         try
         {
+            SetSingleDisplayTopology();
             server.Start();
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
@@ -587,6 +686,7 @@ public class AudioCapabilityContractTests : IDisposable
         var server = CreateServer(provider, tray, statusProvider);
         try
         {
+            SetSingleDisplayTopology();
             server.Start();
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
@@ -784,6 +884,46 @@ public class AudioCapabilityContractTests : IDisposable
         public ThrowingMicrophoneProvider(Exception exception) => _exception = exception;
         public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
             => Task.FromException<IReadOnlyList<MicrophoneDeviceInfo>>(_exception);
+    }
+
+    private sealed class FakeSystemAudioProvider : ISystemAudioEndpointProvider
+    {
+        private readonly IReadOnlyList<SystemAudioEndpointInfo> _endpoints;
+
+        public FakeSystemAudioProvider(params SystemAudioEndpointInfo[] endpoints)
+            => _endpoints = endpoints.ToList();
+
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(_endpoints);
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(_endpoints.FirstOrDefault(e => e.IsDefaultMultimedia));
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(_endpoints.FirstOrDefault(e => e.Id == endpointId));
+    }
+
+    private sealed class ThrowingSystemAudioProvider : ISystemAudioEndpointProvider
+    {
+        private readonly Exception _exception;
+        public ThrowingSystemAudioProvider(Exception exception) => _exception = exception;
+
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromException<IReadOnlyList<SystemAudioEndpointInfo>>(_exception);
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromException<SystemAudioEndpointInfo?>(_exception);
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+            => Task.FromException<SystemAudioEndpointInfo?>(_exception);
     }
 
     private sealed class FakeStatusProvider : IMicrophoneStatusProvider

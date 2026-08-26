@@ -150,10 +150,10 @@ public sealed class CountdownApiContractTests
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
         public int ConfirmationCount { get; private set; }
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => ConfirmationCount++;
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => ConfirmationCount++;
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

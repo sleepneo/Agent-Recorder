@@ -80,7 +80,10 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
         Assert.Equal("(0,0,1920,1080)", BoundsText(payload.GetProperty("revalidated_display_bounds")));
         Assert.Equal("synthetic-test-display:display-left", payload.GetProperty("approved_display_identity_fingerprint").GetString());
         Assert.DoesNotContain("device", payload.ToString(), StringComparison.OrdinalIgnoreCase);
-        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(tray.Summary));
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(tray.Summary, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        }));
         Assert.Equal("display-left", summary.RootElement.GetProperty("target_display_id").GetString());
         Assert.DoesNotContain("synthetic-test-display:display-left", summary.RootElement.ToString(), StringComparison.Ordinal);
     }
@@ -385,25 +388,25 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
         private Action<ConfirmationDecision>? _callback;
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public object? Summary { get; private set; }
+        public RecordingConfirmationPresentation? Summary { get; private set; }
         public int PreparingCalls { get; private set; }
         public int CountdownCalls { get; private set; }
         public int RecordingCalls { get; private set; }
         public string? LastFailureReason { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
-            Summary = summary;
+            Summary = presentation;
             _callback = callback;
         }
         public void Approve() => _callback?.Invoke(ConfirmationDecision.Approve());
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) => RecordingCalls++;
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) => RecordingCalls++;
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
-        public void SetPreparing(object rec) => PreparingCalls++;
-        public void SetCountdown(object rec, int? remainingSeconds) => CountdownCalls++;
+        public void SetPreparing(RecordingUiPresentation rec) => PreparingCalls++;
+        public void SetCountdown(RecordingUiPresentation rec) => CountdownCalls++;
         public void ShowRecordingFailure(string recordingId, string reasonCode) => LastFailureReason = reasonCode;
     }
 

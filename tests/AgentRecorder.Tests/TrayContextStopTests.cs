@@ -151,7 +151,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
 
             var icon = GetPrivateField<NotifyIcon>(ctx, "_icon");
             var stopItem = GetPrivateField<ToolStripMenuItem>(ctx, "_stopItem");
@@ -175,8 +175,8 @@ public class TrayContextStopTests : IDisposable
             var r1 = MakeRecording((100, 100, 800, 600));
             var r2 = MakeRecording((500, 500, 640, 480));
 
-            ctx.SetRecording(r1);
-            ctx.SetRecording(r2);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(r1));
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(r2));
 
             var icon = GetPrivateField<NotifyIcon>(ctx, "_icon");
             var stopItem = GetPrivateField<ToolStripMenuItem>(ctx, "_stopItem");
@@ -197,8 +197,8 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
-            ctx.SetIdle(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
+            ctx.SetIdle(RecordingUiPresentationTestData.FromRecording(rec, RecordingUiState.Idle));
 
             var icon = GetPrivateField<NotifyIcon>(ctx, "_icon");
             var stopItem = GetPrivateField<ToolStripMenuItem>(ctx, "_stopItem");
@@ -220,7 +220,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
 
             // Invoke private StopAll via reflection.
             var stopAllMethod = ctx.GetType().GetMethod("StopAll", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -274,7 +274,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
             engine._recs[rec.Id] = rec;
 
             var onGlobalHotkey = ctx.GetType().GetMethod("OnGlobalHotkeyPressed", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -370,8 +370,8 @@ public class TrayContextStopTests : IDisposable
             var r1 = MakeRecording((100, 100, 800, 600));
             var r2 = MakeRecording((500, 500, 640, 480), "inner");
 
-            ctx.SetRecording(r1);
-            ctx.SetRecording(r2);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(r1));
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(r2));
 
             var stopAllMethod = ctx.GetType().GetMethod("StopAll", BindingFlags.NonPublic | BindingFlags.Instance);
             stopAllMethod!.Invoke(ctx, new object[] { "test" });
@@ -392,7 +392,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
             engine._recs[rec.Id] = rec;
 
             var stopAllMethod = ctx.GetType().GetMethod("StopAll", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -426,7 +426,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
             engine._recs[rec.Id] = rec;
 
             var onGlobalHotkey = ctx.GetType().GetMethod("OnGlobalHotkeyPressed", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -460,7 +460,7 @@ public class TrayContextStopTests : IDisposable
             using var ctx = CreateTrayContext(engine, audit);
             var rec = MakeRecording((100, 100, 800, 600));
 
-            ctx.SetRecording(rec);
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(rec));
             engine._recs[rec.Id] = rec;
 
             var onFloating = ctx.GetType().GetMethod("OnFloatingStopRequested", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -513,7 +513,9 @@ public class TrayContextStopTests : IDisposable
                 expires_at = "2026-01-01T00:00:00Z"
             };
 
-            ctx.RequestConfirmation(summary, decision =>
+            ctx.RequestConfirmation(
+                ConfirmationPresentationTestData.CreateItem("conf_tray", "rec_tray", summary, _ => { }, 60).Presentation,
+                decision =>
             {
                 approved = decision.Approved;
                 approvedMre.Set();

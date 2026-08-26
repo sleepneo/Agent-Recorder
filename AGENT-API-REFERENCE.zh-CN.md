@@ -257,7 +257,7 @@ GET /capabilities
 
 **WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的短时无麦克风 display/window/region 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态；region 模式按稳定显示器身份复核 topology，并在编码前执行 GPU 裁剪。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
 
-**音频能力**：麦克风默认由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone"]`。`recording.audio_capabilities.microphone` 在设备枚举成功且存在至少一个 active 输入时返回 `{ "supported": true, "status": "ready" }`，无设备时返回 `{ "supported": true, "status": "no_devices" }`，枚举失败时返回 `{ "supported": true, "status": "unavailable" }`。系统声音已完成受控产品路径，但默认关闭；公开契约中的 `system_audio` 因此仍为 `{ "supported": false, "status": "not_implemented" }`。仅当进程启动前显式设置 `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true` 时，`audio.system_audio.enabled=true` 才进入本地确认流程，否则返回 `CAPABILITY_NOT_IMPLEMENTED`。本地确认时批准的系统声音端点在本次录制中保持固定；默认输出切到其他设备时不会自动跟随，切回批准端点后执行有界同端点恢复并通过终态连续性指标披露缺口。
+**音频能力**：麦克风和系统声音均由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone", "system_audio"]`。`recording.audio_capabilities.microphone` 与 `.system_audio` 都返回 `supported: true`，状态为新鲜的 `ready`、`no_devices` 或 `unavailable`。系统声音请求仍须本地确认；批准的 render endpoint 在本次录制中保持固定，默认输出切换不会自动跟随，切回批准端点后执行有界同端点恢复并通过连续性指标披露缺口。麦克风和系统声音不能在同一请求中同时启用。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -579,13 +579,13 @@ Context 指标校验与冲突检测：`ensure_elapsed_ms` 和 `service_startup_e
 GET /permissions
 ```
 
-不需要 API key。`screen_capture` 与 `output_directory` 为本地授予。麦克风已支持，其 `status` 诚实反映设备可用性：`available`（存在可用设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。本版本不探测真实 Windows 麦克风 ACL，因此不报告 `granted`。默认关闭的系统声音受控预览不改变该公开响应，`system_audio` 仍报告未开放。
+不需要 API key。`screen_capture` 与 `output_directory` 为本地授予。麦克风和系统声音均已支持，其状态诚实反映可用性：`available`、`no_devices` 或 `unavailable`。本版本不探测真实 Windows 麦克风或 render endpoint ACL，因此不伪造 `granted`。
 
 ```json
 {
   "screen_capture": { "status": "granted" },
   "microphone": { "supported": true, "status": "available" },
-  "system_audio": { "supported": false, "status": "not_implemented" },
+  "system_audio": { "supported": true, "status": "available" },
   "output_directory": {
     "status": "granted",
     "default_path": "C:\\...\\.local-data\\Videos",
@@ -600,7 +600,7 @@ GET /permissions
 GET /audio/devices
 ```
 
-不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并为每个设备附加新鲜的 CoreAudio 只读状态。`status` 为 `ready`（存在设备）、`no_devices`（无设备）或 `unavailable`（枚举失败）。`microphone_supported` 为 `true`；`system_audio_supported` 为 `false`。
+不需要 API key。通过 FFmpeg dshow 枚举真实麦克风输入设备，并通过 CoreAudio 枚举 active render endpoint。兼容字段 `status` 保持为麦克风状态，同时提供 `microphone_status` 和 `system_audio_status`；两侧状态均为 `ready`、`no_devices` 或 `unavailable`。`microphone_supported` 与 `system_audio_supported` 均为 `true`。两侧枚举相互隔离，某侧失败时仍返回 HTTP 200 且该侧数组为空。
 
 请求麦克风录制时，Agent Recorder 会启动独立的 Windows WASAPI helper（`AgentRecorder.AudioHelper.exe`），按 CoreAudio endpoint 精确采集。本接口返回的 `id` 仍为 FFmpeg dshow alternative name，以保持 API 兼容；Agent Recorder 内部会将其映射为对应的 CoreAudio endpoint ID。蓝牙 Hands-Free endpoint 会被动分类，并可自动配对同一 ContainerId 的 render endpoint 进行 duplex prime。设备可枚举且状态为 active 仍不代表所有驱动都能初始化；配对、初始化失败或运行期样本中断会作为录制失败显式返回。如需显式回退到 FFmpeg dshow 诊断后端，可在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`。
 
@@ -622,9 +622,24 @@ GET /audio/devices
       "volume_percent": 75
     }
   ],
-  "system_audio_supported": false
+  "microphone_status": "ready",
+  "system_audio_status": "ready",
+  "system_audio_supported": true,
+  "output_devices": [
+    {
+      "id": "{0.0.0.00000000}.{RENDER-ENDPOINT}",
+      "name": "Speakers",
+      "is_default": true,
+      "state": "active",
+      "direction": "render"
+    }
+  ]
 }
 ```
+
+`output_devices` 只包含 active render endpoint。其 `id` 是不透明的 CoreAudio endpoint ID，
+后续请求必须原样作为 `audio.system_audio.device_id` 传回；省略该字段时使用当前 Windows
+多媒体默认输出。列表把精确默认端点放在首位，之后按名称和 ID 确定性排序。
 
 字段说明：
 
@@ -763,7 +778,7 @@ X-Agent-Name: <agent-name>
 | `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
 | `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
 | `video` | 否 | 透传到原始录制配置，默认值同原始 API |
-| `audio` | 否 | 透传到原始录制配置；`audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择：仅有一个 active 设备、或仅有一个 CoreAudio 多媒体默认设备时选中该设备；否则必须提供 `audio.microphone.device_id`（来自 `GET /audio/devices`）。系统声音默认关闭；受控预览开关启用后可单独设置 `audio.system_audio.enabled=true`。麦克风与系统声音不能同时启用。若选中麦克风被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`）；若设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`。应用不会自动取消系统静音；状态未知时不阻断 |
+| `audio` | 否 | 透传到原始录制配置；`audio.microphone.enabled` 或 `audio.system_audio.enabled` 可单独为 `true`。省略麦克风 `device_id` 时自动选择唯一 active/默认输入；显式 ID 来自 `input_devices`。省略系统声音 `device_id` 时使用当前 Windows 多媒体默认输出；显式 ID 来自 `output_devices`。批准的端点固定在本次录制中，麦克风与系统声音不能同时启用。若选中麦克风被静音，请求会在选区/确认 UI 前失败（`409 AUDIO_DEVICE_MUTED`）；若设备已知为 inactive，返回 `503 AUDIO_DEVICE_NOT_AVAILABLE`。应用不会自动取消系统静音；状态未知时不阻断 |
 | `output` | 否 | 透传到原始录制配置 |
 | `nested` | 否 | 透传到原始录制配置，使用现有 nested 规则 |
 
@@ -959,7 +974,7 @@ X-Agent-Name: <agent-name>
 }
 ```
 
-`audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择单一 active 设备或单一 CoreAudio 多媒体默认设备；存在多个 active 设备且无法唯一确定默认设备时必须提供 `audio.microphone.device_id`（来自 `GET /audio/devices`）。系统声音默认关闭；未启用进程级受控预览开关时，`audio.system_audio.enabled=true` 会返回 `CAPABILITY_NOT_IMPLEMENTED`。开关启用后可单独设置该值，并可省略 `device_id` 以使用当前 Windows 多媒体默认输出端点。确认后的端点固定到本次录制；切换系统默认输出不会自动切换捕获端点。麦克风与系统声音不能同时启用。
+`audio.microphone.enabled` 为 `true` 时开启麦克风录制。省略 `audio.microphone.device_id` 时自动选择单一 active 设备或单一 CoreAudio 多媒体默认设备；存在多个 active 设备且无法唯一确定默认设备时必须提供 `input_devices` 中的 ID。`audio.system_audio.enabled=true` 可直接使用当前 Windows 多媒体默认输出，也可用 `output_devices` 中的完整 ID；确认后的端点固定到本次录制，切换系统默认输出不会自动切换捕获端点，切回批准端点时执行有界恢复。麦克风与系统声音不能同时启用。
 
 默认音频采集后端为独立 WASAPI helper。如需使用 FFmpeg dshow 诊断回退，请在启动 Agent Recorder 前设置环境变量 `AGENT_RECORDER_AUDIO_BACKEND=dshow`；其它非法值会被拒绝。
 
@@ -1633,7 +1648,6 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 |--------|-----------|------|
 | `INVALID_ARGUMENT` | 400 | 请求体或参数非法。 |
 | `SOURCE_NOT_FOUND` | 404 | 目标显示器/窗口/来源不存在。 |
-| `CAPABILITY_NOT_IMPLEMENTED` | 400 | 请求的能力未开放；例如默认进程中设置 `audio.system_audio.enabled=true`。 |
 | `AUDIO_DEVICE_MUTED` | 409 | 选中的麦克风已被静音。应用不会自动取消静音；用户需在 Windows 声音设置中取消静音后重试。 |
 | `AUDIO_DEVICE_NOT_AVAILABLE` | 503 | 选中的麦克风当前 inactive，或没有可用麦克风。建议检查设备后重试。 |
 | `AUDIO_DEVICE_NOT_FOUND` | 404 | 请求中 `audio.microphone.device_id` 不存在；请重新调用 `GET /audio/devices` 获取设备列表。 |

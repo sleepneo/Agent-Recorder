@@ -604,30 +604,29 @@ public sealed class CountdownStartRaceTests
         public int RecordingCount => Volatile.Read(ref _recordingCount);
         public int IdleCount => Volatile.Read(ref _idleCount);
         public int ShowErrorCount => Volatile.Read(ref _showErrorCount);
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec)
+        public void SetRecording(RecordingUiPresentation rec)
         {
             Interlocked.Increment(ref _recordingCount);
         }
-        public void SetIdle(object rec) { Interlocked.Increment(ref _idleCount); }
+        public void SetIdle(RecordingUiPresentation rec) { Interlocked.Increment(ref _idleCount); }
         public void SetAllIdle() { }
         public void ShowError(string text) { Interlocked.Increment(ref _showErrorCount); }
-        public void SetPreparing(object rec) { }
-        public void SetCountdown(object rec, int? remainingSeconds)
+        public void SetPreparing(RecordingUiPresentation rec) { }
+        public void SetCountdown(RecordingUiPresentation rec)
         {
-            if (remainingSeconds is not int value)
+            if (rec.CountdownRemainingSeconds is not int value)
                 return;
 
-            var recording = (Recording)rec;
             lock (_gate)
             {
-                if (!_countdowns.TryGetValue(recording.Id, out var values))
-                    _countdowns[recording.Id] = values = new List<int>();
+                if (!_countdowns.TryGetValue(rec.RecordingId, out var values))
+                    _countdowns[rec.RecordingId] = values = new List<int>();
                 values.Add(value);
             }
         }
-        public void SetFinalizing(object rec) { }
+        public void SetFinalizing(RecordingUiPresentation rec) { }
         public IReadOnlyList<int> CountdownValuesFor(string id)
         {
             lock (_gate)

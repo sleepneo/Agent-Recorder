@@ -53,20 +53,20 @@ public class RecordingEnginePreparingStateTests : IDisposable
         public int? LastCountdownValue;
         public string? LastError;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
         {
             callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { Interlocked.Increment(ref SetRecordingCallCount); }
-        public void SetIdle(object rec) { Interlocked.Increment(ref SetIdleCallCount); }
+        public void SetRecording(RecordingUiPresentation rec) { Interlocked.Increment(ref SetRecordingCallCount); }
+        public void SetIdle(RecordingUiPresentation rec) { Interlocked.Increment(ref SetIdleCallCount); }
         public void SetAllIdle() { Interlocked.Increment(ref SetIdleCallCount); }
         public void ShowError(string text) { LastError = text; }
-        public void SetPreparing(object rec) { Interlocked.Increment(ref SetPreparingCallCount); }
-        public void SetCountdown(object rec, int? remainingSeconds) { LastCountdownValue = remainingSeconds; }
-        public void SetFinalizing(object rec) { Interlocked.Increment(ref SetFinalizingCallCount); }
+        public void SetPreparing(RecordingUiPresentation rec) { Interlocked.Increment(ref SetPreparingCallCount); }
+        public void SetCountdown(RecordingUiPresentation rec) { LastCountdownValue = rec.CountdownRemainingSeconds; }
+        public void SetFinalizing(RecordingUiPresentation rec) { Interlocked.Increment(ref SetFinalizingCallCount); }
     }
 
     private RecordingEngine CreateEngine(out FakeTray tray, Func<CaptureConfig, (ICaptureBackend, string)>? backendFactory = null)

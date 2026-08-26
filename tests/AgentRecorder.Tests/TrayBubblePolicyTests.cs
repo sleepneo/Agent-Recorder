@@ -63,10 +63,10 @@ public class TrayBubblePolicyTests
     {
         var field = typeof(TrayContext).GetField("_activeRecordings", BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.NotNull(field);
-        var dict = (Dictionary<string, Recording>)field!.GetValue(ctx)!;
+        var dict = (Dictionary<string, RecordingUiPresentation>)field!.GetValue(ctx)!;
         dict.Clear();
         foreach (var rec in recordings)
-            dict[rec.Id] = rec;
+            dict[rec.Id] = RecordingUiPresentationTestData.FromRecording(rec);
     }
 
     private static void ShowBalloonTipIfAllowed(TrayContext ctx, BubbleType type, int timeout, string title, string body, ToolTipIcon icon)
@@ -201,7 +201,7 @@ public class TrayBubblePolicyTests
             // exercises production code without showing REC borders or stop buttons.
             SetPrivateField(ctx, "_indicatorManager", CreateNoOpIndicatorManager());
 
-            ctx.SetRecording(MakeRecording());
+            ctx.SetRecording(RecordingUiPresentationTestData.FromRecording(MakeRecording()));
             Application.DoEvents();
             Thread.Sleep(50);
             Application.DoEvents();

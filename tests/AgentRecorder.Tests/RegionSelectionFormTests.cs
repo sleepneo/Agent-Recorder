@@ -10,6 +10,7 @@ using AgentRecorder.App;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 using Xunit;
+using RegionSelectionGeometry = AgentRecorder.App.RegionSelectionGeometry;
 
 namespace AgentRecorder.Tests;
 

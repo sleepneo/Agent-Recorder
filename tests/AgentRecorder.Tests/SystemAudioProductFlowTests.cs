@@ -47,61 +47,15 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         RecordingPreflightChecker.ShouldUseWasapiBackend = _oldWasapi;
     }
 
-    [Theory]
-    [InlineData(null, false)]
-    [InlineData("", false)]
-    [InlineData("1", false)]
-    [InlineData("yes", false)]
-    [InlineData("TRUE", true)]
-    [InlineData(" true ", true)]
-    public void ExperimentFlag_OnlyNormalizedTrueEnables(string? raw, bool expected)
-    {
-        var flag = SystemAudioExperimentFlag.FromEnvironment(() => raw);
-        Assert.Equal(expected, flag.IsEnabled);
-    }
-
     [Fact]
-    public void ExperimentFlag_ExplicitNullReader_DoesNotFallbackToProcessEnvironment()
-    {
-        var old = Environment.GetEnvironmentVariable(SystemAudioExperimentFlag.EnvironmentVariableName);
-        try
-        {
-            Environment.SetEnvironmentVariable(SystemAudioExperimentFlag.EnvironmentVariableName, "true");
-
-            Assert.False(SystemAudioExperimentFlag.FromEnvironment(() => null).IsEnabled);
-            Assert.True(SystemAudioExperimentFlag.FromEnvironment().IsEnabled);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SystemAudioExperimentFlag.EnvironmentVariableName, old);
-        }
-    }
-
-    [Fact]
-    public void FlagOff_RejectsBeforeTargetLookupOrEndpointEnumeration()
-    {
-        var endpointProvider = new CountingEndpointProvider(DefaultEndpoint);
-        var ex = Assert.Throws<ApiException>(() => ConfigParser.Build(
-            Request(sourceType: "display", displayId: "missing-display"),
-            "agent",
-            out _,
-            systemAudioEndpointProvider: endpointProvider,
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(false)));
-
-        Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", ex.Code);
-        Assert.Equal(0, endpointProvider.CallCount);
-    }
-
-    [Fact]
-    public void EnabledIntent_ResolvesRenderEndpointAndBuildsSourceAccuratePlan()
+    public void PublicSystemAudio_ResolvesRenderEndpointAndBuildsSourceAccuratePlan()
     {
         var endpointProvider = new CountingEndpointProvider(DefaultEndpoint);
         var rec = ConfigParser.Build(
             Request(),
             "agent",
             out var summary,
-            systemAudioEndpointProvider: endpointProvider,
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(true));
+            systemAudioEndpointProvider: endpointProvider);
 
         Assert.Equal(AudioCaptureSourceKind.SystemLoopback, rec.AudioSourceKind);
         Assert.False(rec.Microphone);
@@ -109,8 +63,8 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         Assert.Equal(DefaultEndpoint.Name, rec.SystemAudioEndpointName);
         Assert.Equal(AudioCaptureSourceKind.SystemLoopback, rec.Config.AudioSourceKind);
         Assert.Equal(DefaultEndpoint.Id, rec.Config.SystemLoopbackEndpoint);
-        Assert.Equal("system-loopback", SummaryString(summary, "audio_source_kind"));
-        Assert.Contains("System audio: On (Default output: Speakers Long Name)", SummaryString(summary, "audio"));
+        Assert.Equal("system-loopback", summary.AudioSourceKind);
+        Assert.Contains("System audio: On (Default output: Speakers Long Name)", summary.Audio);
 
         var plan = CaptureBackendSelector.BuildPlan(rec.Config, new FakeAvailabilityProbe());
         Assert.Equal("ffmpeg-av-split", plan.PlannedBackend);
@@ -132,14 +86,13 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             Request(systemDeviceId: selected.Id),
             "agent",
             out var summary,
-            systemAudioEndpointProvider: new CountingEndpointProvider(selected),
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(true));
+            systemAudioEndpointProvider: new CountingEndpointProvider(selected));
 
         Assert.False(rec.SystemAudioEndpointIsDefault);
-        Assert.Equal("selected", SummaryString(summary, "audio_system_output_selection"));
-        Assert.Equal("Headphones", SummaryString(summary, "audio_system_output_name"));
-        Assert.Equal("System audio: On (Selected output: Headphones)", SummaryString(summary, "audio"));
-        Assert.Equal("", SummaryString(summary, "audio_system_default_output"));
+        Assert.Equal("selected", summary.AudioSystemOutputSelection);
+        Assert.Equal("Headphones", summary.AudioSystemOutputName);
+        Assert.Equal("System audio: On (Selected output: Headphones)", summary.Audio);
+        Assert.Null(summary.AudioSystemDefaultOutput);
     }
 
     [Fact]
@@ -151,12 +104,11 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             "agent",
             out var summary,
             systemAudioEndpointProvider: new CountingEndpointProvider(laterEndpoint),
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(true),
             preResolvedSystemAudioEndpoint: DefaultEndpoint);
 
         Assert.True(rec.SystemAudioEndpointIsDefault);
-        Assert.Equal("default", SummaryString(summary, "audio_system_output_selection"));
-        Assert.Contains("Default output: Speakers Long Name", SummaryString(summary, "audio"));
+        Assert.Equal("default", summary.AudioSystemOutputSelection);
+        Assert.Contains("Default output: Speakers Long Name", summary.Audio);
     }
 
     [Fact]
@@ -165,8 +117,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         var endpointProvider = new CountingEndpointProvider(DefaultEndpoint);
         var ex = Assert.Throws<ApiException>(() => ConfigParser.ResolveAudioIntentDetails(
             Request(microphoneEnabled: true),
-            systemAudioEndpointProvider: endpointProvider,
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(true)));
+            systemAudioEndpointProvider: endpointProvider));
 
         Assert.Equal("UNSUPPORTED_FEATURE", ex.Code);
         Assert.Equal(0, endpointProvider.CallCount);
@@ -186,8 +137,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             Request(sourceType: "display", displayId: "missing-display"),
             "agent",
             out _,
-            systemAudioEndpointProvider: endpointProvider,
-            systemAudioExperimentFlag: new SystemAudioExperimentFlag(true)));
+            systemAudioEndpointProvider: endpointProvider));
 
         Assert.Equal(expectedCode, ex.Code);
         Assert.True(endpointProvider.CallCount > 0);
@@ -237,8 +187,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             int backendStarts = 0;
             var engine = new RecordingEngine(
                 new AuditLogger(),
-                systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint),
-                systemAudioExperimentFlag: new SystemAudioExperimentFlag(true));
+                systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint));
             engine.BackendFactory = _ =>
             {
                 backendStarts++;
@@ -280,8 +229,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             var tray = new PendingTray();
             var engine = new RecordingEngine(
                 new AuditLogger(),
-                systemAudioEndpointProvider: endpointProvider,
-                systemAudioExperimentFlag: new SystemAudioExperimentFlag(true))
+                systemAudioEndpointProvider: endpointProvider)
             {
                 CountdownInterval = TimeSpan.FromMilliseconds(5),
                 CountdownSteps = 1,
@@ -338,8 +286,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             var tray = new PendingTray();
             var engine = new RecordingEngine(
                 new AuditLogger(),
-                systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint),
-                systemAudioExperimentFlag: new SystemAudioExperimentFlag(true));
+                systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint));
             engine.BackendFactory = _ => (backend, "ffmpeg-region-av-split");
             engine.CreateRecording(Request(outputDirectory: tmp), "agent", tray);
             var rec = Assert.Single(engine._recs.Values);
@@ -399,14 +346,16 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         return root;
     }
 
-    private static string SummaryString(object summary, string property)
-        => (summary.GetType().GetProperty(property)?.GetValue(summary)?.ToString()) ?? "";
-
     private sealed class CountingEndpointProvider : ISystemAudioEndpointProvider
     {
         private readonly SystemAudioEndpointInfo? _endpoint;
         public CountingEndpointProvider(SystemAudioEndpointInfo? endpoint) => _endpoint = endpoint;
         public int CallCount { get; private set; }
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(_endpoint == null
+                ? Array.Empty<SystemAudioEndpointInfo>()
+                : new[] { _endpoint });
+
         public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken cancellationToken = default)
         {
             CallCount++;
@@ -432,10 +381,10 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => true;
         public Action<ConfirmationDecision>? PendingCallback { get; private set; }
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => PendingCallback = callback;
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => PendingCallback = callback;
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

@@ -29,11 +29,11 @@ public class ApiResponseSerializationTests : IDisposable
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -125,6 +125,94 @@ public class ApiResponseSerializationTests : IDisposable
     {
         var handler = new HttpClientHandler { UseProxy = false };
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+    }
+
+    private static StringContent JsonContent(string json) =>
+        new(json, Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task RecordingConfirmationSummary_OrdinaryAndQuick_PreserveLegacyValueKinds()
+    {
+        SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+        {
+            new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+        });
+
+        var ordinaryServer = CreateServer();
+        ordinaryServer.Start();
+        JsonDocument ordinaryDocument;
+        var ordinaryDataDir = _dataDir!;
+        using (var client = CreateClient())
+        {
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var ordinaryResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
+
+            Assert.Equal(200, (int)ordinaryResponse.StatusCode);
+            ordinaryDocument = JsonDocument.Parse(await ordinaryResponse.Content.ReadAsStringAsync());
+        }
+
+        ordinaryServer.Stop();
+        try { if (Directory.Exists(ordinaryDataDir)) Directory.Delete(ordinaryDataDir, recursive: true); } catch { }
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
+        ApiKeyAuth.ResetForTesting(null);
+
+        var quickServer = CreateServer();
+        quickServer.Start();
+        JsonDocument quickDocument;
+        using (var client = CreateClient())
+        {
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var quickResponse = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
+
+            Assert.Equal(200, (int)quickResponse.StatusCode);
+            quickDocument = JsonDocument.Parse(await quickResponse.Content.ReadAsStringAsync());
+        }
+
+        using (ordinaryDocument)
+        using (quickDocument)
+        {
+            var ordinarySummary = ordinaryDocument.RootElement.GetProperty("data").GetProperty("summary");
+            var quickSummary = quickDocument.RootElement.GetProperty("data").GetProperty("summary");
+
+            AssertLegacySummaryValueKinds(ordinarySummary);
+            AssertLegacySummaryValueKinds(quickSummary);
+
+            foreach (var field in new[]
+            {
+                "audio_system_enabled", "audio_system_default_output", "audio_system_output_name",
+                "audio_system_output_is_default", "series", "series_interval_ms",
+                "series_max_count", "series_max_duration_seconds", "series_planned_frame_count",
+                "selection_fallback", "target_display_bounds", "capture_bounds"
+            })
+            {
+                Assert.Equal(ordinarySummary.GetProperty(field).ValueKind, quickSummary.GetProperty(field).ValueKind);
+            }
+        }
+    }
+
+    private static void AssertLegacySummaryValueKinds(JsonElement summary)
+    {
+        Assert.Equal(JsonValueKind.String, summary.GetProperty("audio_system_enabled").ValueKind);
+        Assert.Equal("False", summary.GetProperty("audio_system_enabled").GetString());
+        Assert.Equal(JsonValueKind.String, summary.GetProperty("audio_system_default_output").ValueKind);
+        Assert.Equal("", summary.GetProperty("audio_system_default_output").GetString());
+        Assert.Equal(JsonValueKind.String, summary.GetProperty("audio_system_output_name").ValueKind);
+        Assert.Equal("", summary.GetProperty("audio_system_output_name").GetString());
+        Assert.Equal(JsonValueKind.String, summary.GetProperty("audio_system_output_is_default").ValueKind);
+        Assert.Equal("", summary.GetProperty("audio_system_output_is_default").GetString());
+        Assert.Equal(JsonValueKind.String, summary.GetProperty("series").ValueKind);
+        Assert.Equal("", summary.GetProperty("series").GetString());
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("series_interval_ms").ValueKind);
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("series_max_count").ValueKind);
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("series_max_duration_seconds").ValueKind);
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("series_planned_frame_count").ValueKind);
+        Assert.Equal(JsonValueKind.False, summary.GetProperty("selection_fallback").ValueKind);
+        Assert.Equal(JsonValueKind.Object, summary.GetProperty("target_display_bounds").ValueKind);
+        Assert.Equal(JsonValueKind.Object, summary.GetProperty("capture_bounds").ValueKind);
     }
 
     public void Dispose()

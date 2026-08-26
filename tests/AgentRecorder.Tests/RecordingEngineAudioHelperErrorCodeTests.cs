@@ -33,10 +33,10 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
     {
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public virtual void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public virtual void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -46,7 +46,7 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
         public List<(string RecordingId, string ReasonCode)> Notifications { get; } = new();
         public List<string> CallOrder { get; } = new();
 
-        public override void SetIdle(object rec) => CallOrder.Add("SetIdle");
+        public override void SetIdle(RecordingUiPresentation rec) => CallOrder.Add("SetIdle");
 
         public void ShowRecordingFailure(string recordingId, string reasonCode)
         {
@@ -449,6 +449,10 @@ public class RecordingEngineAudioHelperErrorCodeTests : IDisposable
 
         Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(5)));
         Assert.Equal(RecState.failed, rec.State);
+        Assert.Equal("audio_capture_discontinuous", rec.Error);
+        Assert.NotNull(rec.LastMeta);
+        Assert.Equal("audio_capture_discontinuous", rec.LastMeta!.AudioHelperErrorCode);
+        Assert.NotEqual(default, rec.CompletedAtUtc);
         Assert.Equal(default, rec.StartedAtUtc);
         Assert.Empty(tray.Notifications);
     }

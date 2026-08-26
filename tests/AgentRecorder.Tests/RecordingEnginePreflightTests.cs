@@ -46,7 +46,7 @@ public class RecordingEnginePreflightTests : IDisposable
 
         private Action<ConfirmationDecision>? _pendingCallback;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
             if (DeferCallback)
             {
@@ -67,8 +67,8 @@ public class RecordingEnginePreflightTests : IDisposable
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { }
 
-        public void SetRecording(object rec) => RecordingObjects.Add(rec);
-        public void SetIdle(object rec) => IdleObjects.Add(rec);
+        public void SetRecording(RecordingUiPresentation rec) => RecordingObjects.Add(rec);
+        public void SetIdle(RecordingUiPresentation rec) => IdleObjects.Add(rec);
         public void SetAllIdle() => AllIdleCalls.Add(new object());
         public void ShowError(string text) => LastError = text;
     }

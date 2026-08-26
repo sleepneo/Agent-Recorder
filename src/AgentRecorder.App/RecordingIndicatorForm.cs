@@ -2,7 +2,6 @@ using System;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
-using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 
@@ -145,9 +144,9 @@ internal static class RecordingIndicatorGeometry
     /// while keeping the inner capture clean.
     /// </summary>
     public static RecordingIndicatorPresentation ComputePresentationPlan(
-        Recording recording,
+        RecordingUiPresentation recording,
         RecordingIndicatorBounds captureBounds,
-        Recording? parentRecording,
+        RecordingUiPresentation? parentRecording,
         Size labelSize,
         Rectangle virtualScreen,
         string? parentFallbackReason = null)
@@ -169,12 +168,12 @@ internal static class RecordingIndicatorGeometry
         RecordingIndicatorBounds? parentBounds = ParentCaptureBounds(parentRecording);
 
         // Strict parent-visible precondition checks.
-        if (parentRecording == null || string.IsNullOrEmpty(parentRecording.Id) || string.IsNullOrEmpty(recording.ParentRecordingId))
+        if (parentRecording == null || string.IsNullOrEmpty(parentRecording.RecordingId) || string.IsNullOrEmpty(recording.ParentRecordingId))
         {
             return Exclude(captureBounds, parentBounds, labelSize, virtualScreen, parentFallbackReason ?? "parent_missing");
         }
 
-        if (!string.Equals(recording.ParentRecordingId, parentRecording.Id, StringComparison.Ordinal))
+        if (!string.Equals(recording.ParentRecordingId, parentRecording.RecordingId, StringComparison.Ordinal))
         {
             return Exclude(captureBounds, parentBounds, labelSize, virtualScreen, "parent_id_mismatch");
         }
@@ -215,7 +214,7 @@ internal static class RecordingIndicatorGeometry
     /// </summary>
     public static RecordingIndicatorPresentation ComputeExcludedPlan(
         RecordingIndicatorBounds captureBounds,
-        Recording? parentRecording,
+        RecordingUiPresentation? parentRecording,
         Size labelSize,
         Rectangle virtualScreen,
         string reason)
@@ -223,12 +222,12 @@ internal static class RecordingIndicatorGeometry
         return Exclude(captureBounds, ParentCaptureBounds(parentRecording), labelSize, virtualScreen, reason);
     }
 
-    private static RecordingIndicatorBounds? ParentCaptureBounds(Recording? parentRecording)
+    private static RecordingIndicatorBounds? ParentCaptureBounds(RecordingUiPresentation? parentRecording)
     {
         if (parentRecording == null)
             return null;
-        var pb = parentRecording.Config.Bounds;
-        return new RecordingIndicatorBounds(pb.x, pb.y, pb.w, pb.h);
+        var pb = parentRecording.CaptureBounds;
+        return new RecordingIndicatorBounds(pb.X, pb.Y, pb.Width, pb.Height);
     }
 
     private static RecordingIndicatorPresentation Exclude(

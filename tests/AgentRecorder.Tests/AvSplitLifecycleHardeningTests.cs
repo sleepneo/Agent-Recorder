@@ -833,15 +833,15 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
         public int RecordingCount => _recordingCount;
         public int IdleCount => _idleCount;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) => Interlocked.Increment(ref _recordingCount);
-        public void SetIdle(object rec) => Interlocked.Increment(ref _idleCount);
+        public void SetRecording(RecordingUiPresentation rec) => Interlocked.Increment(ref _recordingCount);
+        public void SetIdle(RecordingUiPresentation rec) => Interlocked.Increment(ref _idleCount);
         public void SetAllIdle() { }
         public void ShowError(string text) { }
-        public void SetPreparing(object rec) { }
-        public void SetFinalizing(object rec) => Interlocked.Increment(ref _finalizingCount);
+        public void SetPreparing(RecordingUiPresentation rec) { }
+        public void SetFinalizing(RecordingUiPresentation rec) => Interlocked.Increment(ref _finalizingCount);
 
         private int _finalizingCount;
         private int _recordingCount;

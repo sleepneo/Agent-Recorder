@@ -117,10 +117,10 @@ X-Agent-Recorder-Key: <api-key>
 
 托盘菜单提供中文/English 语言选择，设置保存在本机，并应用于后续打开的选区、确认和录制控制窗口。
 
-## 受控系统声音预览
+## 公开系统声音
 
-本版包含默认关闭的系统声音预览能力，供本机受监督体验。启动 Agent Recorder
-时设置 `AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`，然后在请求中加入：
+系统声音已经作为公开能力提供，并与所有录制一样需要本地确认。quick 请求可以直接使用
+当前 Windows 多媒体默认输出：
 
 ```json
 {
@@ -130,10 +130,21 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
-未指定设备时使用当前 Windows 多媒体默认输出端点；也可显式提供 render
-endpoint ID。本地确认窗中批准的输出端点在本次录制期间保持固定，切换 Windows
-默认输出不会改录其他设备。单次录制不能同时启用麦克风和系统声音。由于该能力尚未升级为公开
-契约，默认 `/capabilities`、`/permissions` 和 `/audio/devices` 仍会报告系统声音未开放。
+raw 请求使用相同的 `audio` 对象，例如：
+
+```json
+{
+  "source": { "type": "display", "display_id": "display_1" },
+  "stop_condition": { "type": "duration", "seconds": 30 },
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+省略 `audio.system_audio.device_id` 时使用当前 Windows 多媒体默认输出；如需显式指定，
+请使用 `GET /api/v1/audio/devices` 返回的 `output_devices` 中的完整 `id`，列表只包含
+active render endpoint。单次录制不能同时启用麦克风和系统声音。本地确认窗批准的端点在
+本次录制期间保持固定，切换 Windows 默认输出不会改录其他设备；切回批准端点时执行有界
+恢复，静音缺口会在连续性元数据中如实报告。
 
 ## 有界截图序列
 

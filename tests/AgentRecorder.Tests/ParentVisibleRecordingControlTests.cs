@@ -12,6 +12,7 @@ using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Windows;
+using SharedStopControlGeometry = AgentRecorder.UI.Geometry.StopControlGeometry;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -39,25 +40,22 @@ public class ParentVisibleRecordingControlTests
             throw new TargetInvocationException(ex);
     }
 
-    private static Recording MakeRecording(
+    private static RecordingUiPresentation MakeRecording(
         (int x, int y, int w, int h) bounds,
         string? nestedRole = null,
         string? parentRecordingId = null,
         string? nestedSessionId = null)
     {
-        return new Recording
+        return new RecordingUiPresentation
         {
+            RecordingId = "rec_" + Guid.NewGuid().ToString("N")[..12],
+            State = RecordingUiState.Recording,
             SourceType = "region",
+            CaptureBounds = new RecordingUiBounds(bounds.x, bounds.y, bounds.w, bounds.h),
             StartedAtUtc = DateTime.UtcNow,
             NestedRole = nestedRole,
             ParentRecordingId = parentRecordingId,
-            NestedSessionId = nestedSessionId,
-            Config = new CaptureConfig
-            {
-                SourceKind = "region",
-                Bounds = bounds,
-                OutputPath = Path.Combine(Path.GetTempPath(), $"test-pv-{Guid.NewGuid():N}.mp4")
-            }
+            NestedSessionId = nestedSessionId
         };
     }
 
@@ -102,8 +100,8 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_InnerWithActiveOuter_ReturnsParent()
     {
         var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
-        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, "session-a");
-        var active = new Dictionary<string, Recording> { [outer.Id] = outer };
+        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.RecordingId, "session-a");
+        var active = new Dictionary<string, RecordingUiPresentation> { [outer.RecordingId] = outer };
 
         var resolved = TrayContext.ResolveActiveParentForUi(inner, active);
 
@@ -114,7 +112,7 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_RegularRecording_ReturnsNull()
     {
         var rec = MakeRecording((100, 100, 800, 600));
-        var active = new Dictionary<string, Recording> { [rec.Id] = rec };
+        var active = new Dictionary<string, RecordingUiPresentation> { [rec.RecordingId] = rec };
 
         Assert.Null(TrayContext.ResolveActiveParentForUi(rec, active));
     }
@@ -124,7 +122,7 @@ public class ParentVisibleRecordingControlTests
     {
         var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
         var inner = MakeRecording((200, 200, 400, 300), "inner", "wrong-parent-id", "session-a");
-        var active = new Dictionary<string, Recording> { [outer.Id] = outer };
+        var active = new Dictionary<string, RecordingUiPresentation> { [outer.RecordingId] = outer };
 
         Assert.Null(TrayContext.ResolveActiveParentForUi(inner, active));
     }
@@ -133,8 +131,8 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_ParentNotOuter_ReturnsNull()
     {
         var notOuter = MakeRecording((0, 0, 1000, 800), "inner", nestedSessionId: "session-a");
-        var inner = MakeRecording((200, 200, 400, 300), "inner", notOuter.Id, "session-a");
-        var active = new Dictionary<string, Recording> { [notOuter.Id] = notOuter };
+        var inner = MakeRecording((200, 200, 400, 300), "inner", notOuter.RecordingId, "session-a");
+        var active = new Dictionary<string, RecordingUiPresentation> { [notOuter.RecordingId] = notOuter };
 
         Assert.Null(TrayContext.ResolveActiveParentForUi(inner, active));
     }
@@ -146,8 +144,8 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_SessionMismatch_ReturnsNull(string? innerSession, string? outerSession)
     {
         var outer = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: outerSession);
-        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id, innerSession);
-        var active = new Dictionary<string, Recording> { [outer.Id] = outer };
+        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.RecordingId, innerSession);
+        var active = new Dictionary<string, RecordingUiPresentation> { [outer.RecordingId] = outer };
 
         Assert.Null(TrayContext.ResolveActiveParentForUi(inner, active));
     }
@@ -156,8 +154,8 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_BothSessionsNull_Matches()
     {
         var outer = MakeRecording((0, 0, 1000, 800), "outer");
-        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.Id);
-        var active = new Dictionary<string, Recording> { [outer.Id] = outer };
+        var inner = MakeRecording((200, 200, 400, 300), "inner", outer.RecordingId);
+        var active = new Dictionary<string, RecordingUiPresentation> { [outer.RecordingId] = outer };
 
         var resolved = TrayContext.ResolveActiveParentForUi(inner, active);
         Assert.Same(outer, resolved);
@@ -167,7 +165,7 @@ public class ParentVisibleRecordingControlTests
     public void ResolveActiveParentForUi_MissingParent_ReturnsNull()
     {
         var inner = MakeRecording((200, 200, 400, 300), "inner", "missing-id", "session-a");
-        var active = new Dictionary<string, Recording>();
+        var active = new Dictionary<string, RecordingUiPresentation>();
 
         Assert.Null(TrayContext.ResolveActiveParentForUi(inner, active));
     }
@@ -260,7 +258,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1920, 1080), "inner", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -276,7 +274,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1920, 1080), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.Id, "session-b");
+        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.RecordingId, "session-b");
         var capture = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -292,7 +290,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1920, 1080), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 2000, vs.Y + 100, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 2000, vs.Y + 100, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 2000, vs.Y + 100, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -309,7 +307,7 @@ public class ParentVisibleRecordingControlTests
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X + 98, vs.Y + 98, 404, 304), "outer", nestedSessionId: "session-a");
         // Parent only 2 px larger than inner on each side, not enough for 4 px border + label.
-        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 100, vs.Y + 100, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -325,7 +323,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -345,7 +343,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -377,7 +375,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
         var labelSize = new Size(120, 24);
 
@@ -396,7 +394,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
         var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
 
         var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
@@ -422,7 +420,7 @@ public class ParentVisibleRecordingControlTests
     {
         var vs = SystemInformation.VirtualScreen;
         var parentRec = MakeRecording((px, py, pw, ph), "outer", nestedSessionId: "session-a");
-        var rec = MakeRecording((ix, iy, iw, ih), "inner", parentRec.Id, "session-a");
+        var rec = MakeRecording((ix, iy, iw, ih), "inner", parentRec.RecordingId, "session-a");
         var parent = new RecordingIndicatorBounds(px, py, pw, ph);
         var capture = new RecordingIndicatorBounds(ix, iy, iw, ih);
 
@@ -451,13 +449,13 @@ public class ParentVisibleRecordingControlTests
     [Fact]
     public void ComputeBounds_ParentVisible_PlacesButtonOutsideInnerInsideParent()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var inner = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
-        var parent = new RecordingIndicatorBounds(vs.X, vs.Y, 1000, 800);
-        var controlSize = new Size(RecordingStopControlGeometry.DefaultButtonWidth, RecordingStopControlGeometry.DefaultButtonHeight);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var inner = new Rectangle(vs.X + 200, vs.Y + 200, 400, 300);
+        var parent = new Rectangle(vs.X, vs.Y, 1000, 800);
+        var controlSize = new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight);
 
-        var bounds = RecordingStopControlGeometry.ComputeBounds(
-            inner, controlSize, "inner", vs, parent, CaptureVisibilityMode.ParentVisible);
+        var bounds = SharedStopControlGeometry.ComputeBounds(
+            inner, controlSize, "inner", vs, parent, StopControlVisibilityMode.ParentVisible);
 
         var rect = new Rectangle(bounds.X, bounds.Y, bounds.Width, bounds.Height);
         var innerRect = new Rectangle(inner.X, inner.Y, inner.Width, inner.Height);
@@ -474,13 +472,13 @@ public class ParentVisibleRecordingControlTests
     [Fact]
     public void ResolveCollision_ParentVisible_MovesOutOfForbiddenZone()
     {
-        var vs = SystemInformation.VirtualScreen;
+        var vs = new Rectangle(0, 0, 3200, 1610);
         var inner = new Rectangle(vs.X + 200, vs.Y + 200, 400, 300);
         var parent = new Rectangle(vs.X, vs.Y, 1000, 800);
         var preferred = new RecordingStopControlBounds(inner.X + 10, inner.Y + 10, 76, 28);
         var controlSize = new Size(76, 28);
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred, controlSize, vs, Array.Empty<RecordingStopControlBounds>(), inner, parent);
 
         Assert.NotNull(result);
@@ -496,7 +494,7 @@ public class ParentVisibleRecordingControlTests
     [Fact]
     public void ResolveCollision_ParentVisible_AvoidsOccupiedAndKeepsConstraints()
     {
-        var vs = SystemInformation.VirtualScreen;
+        var vs = new Rectangle(0, 0, 3200, 1610);
         var inner = new Rectangle(vs.X + 200, vs.Y + 200, 400, 300);
         var parent = new Rectangle(vs.X, vs.Y, 1000, 800);
         var occupied = new[]
@@ -506,7 +504,7 @@ public class ParentVisibleRecordingControlTests
         var preferred = occupied[0];
         var controlSize = new Size(76, 28);
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred, controlSize, vs, occupied, inner, parent);
 
         Assert.NotNull(result);
@@ -515,21 +513,21 @@ public class ParentVisibleRecordingControlTests
             "Resolved stop button intersects the forbidden inner zone");
         Assert.True(parent.Contains(rect),
             "Resolved stop button is not contained by the allowed parent zone");
-        Assert.All(occupied, o => Assert.False(RecordingStopControlGeometry.Intersects(result, o),
+        Assert.All(occupied, o => Assert.False(SharedStopControlGeometry.Intersects(result, o),
             "Resolved stop button intersects an occupied stop control"));
     }
 
     [Fact]
     public void ResolveCollision_ParentVisible_NoSafePosition_ReturnsNull()
     {
-        var vs = SystemInformation.VirtualScreen;
+        var vs = new Rectangle(0, 0, 3200, 1610);
         // Parent is only large enough for the inner rectangle, leaving no room for the button.
-        var inner = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 200, 150);
-        var parent = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 200, 150);
+        var inner = new Rectangle(vs.X + 100, vs.Y + 100, 200, 150);
+        var parent = new Rectangle(vs.X + 100, vs.Y + 100, 200, 150);
         var controlSize = new Size(76, 28);
         var preferred = new RecordingStopControlBounds(inner.X, inner.Y, controlSize.Width, controlSize.Height);
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred, controlSize, vs, Array.Empty<RecordingStopControlBounds>(),
             new Rectangle(inner.X, inner.Y, inner.Width, inner.Height),
             new Rectangle(parent.X, parent.Y, parent.Width, parent.Height));
@@ -540,13 +538,13 @@ public class ParentVisibleRecordingControlTests
     [Fact]
     public void TryResolveCollision_ParentVisible_NoSafePosition_ReturnsFalse()
     {
-        var vs = SystemInformation.VirtualScreen;
+        var vs = new Rectangle(0, 0, 3200, 1610);
         var inner = new Rectangle(vs.X + 100, vs.Y + 100, 200, 150);
         var parent = new Rectangle(vs.X + 100, vs.Y + 100, 200, 150);
         var controlSize = new Size(76, 28);
         var preferred = new RecordingStopControlBounds(inner.X, inner.Y, controlSize.Width, controlSize.Height);
 
-        bool ok = RecordingStopControlGeometry.TryResolveCollision(
+        bool ok = SharedStopControlGeometry.TryResolveCollision(
             preferred, controlSize, vs, Array.Empty<RecordingStopControlBounds>(),
             inner,
             parent,
@@ -567,7 +565,7 @@ public class ParentVisibleRecordingControlTests
         {
             var vs = SystemInformation.VirtualScreen;
             var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-            var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+            var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
             var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
             var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
                 rec, capture, parentRec, DefaultLabelSize, vs);
@@ -765,7 +763,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.RecordingId, "session-a");
 
             // The parent must be active in the manager so the inner plan sees no occupied stop control.
             var outerPlan = mgr.ComputeControlPlan(parent, null, SystemInformation.VirtualScreen);
@@ -791,7 +789,7 @@ public class ParentVisibleRecordingControlTests
             // but the stop button (76x28) does not fit in any margin. This triggers the joint
             // fallback after indicator geometry succeeds.
             var parent = MakeRecording((0, 0, 250, 261), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((30, 30, 200, 200), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((30, 30, 200, 200), "inner", parent.RecordingId, "session-a");
 
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen);
 
@@ -811,7 +809,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.RecordingId, "session-a");
 
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen);
 
@@ -840,7 +838,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1000, 800), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((200, 200, 400, 300), "inner", parent.RecordingId, "session-a");
 
             // Pre-place an outer stop control in the preferred right-side slot.
             var preferred = RecordingStopControlGeometry.ComputeBounds(
@@ -899,7 +897,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1200, 900), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.RecordingId, "session-a");
 
             var dpiInfo = new DisplayDpiInfo("test_display", new Rectangle(0, 0, 1920, 1080), dpi, dpi, dpi / 96f, false, null);
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen, dpiInfo);
@@ -928,7 +926,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1200, 900), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.RecordingId, "session-a");
 
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen);
 
@@ -971,7 +969,7 @@ public class ParentVisibleRecordingControlTests
             // the doubled button height does not fit; left/right margins are kept below 160 px
             // wide so the doubled button width does not fit either.
             var parent = MakeRecording((0, 0, 650, 148), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((100, 54, 500, 40), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((100, 54, 500, 40), "inner", parent.RecordingId, "session-a");
 
             var lowDpi = new DisplayDpiInfo("test", new Rectangle(0, 0, 1920, 1080), 96, 96, 1.0f, false, null);
             var highDpi = new DisplayDpiInfo("test", new Rectangle(0, 0, 1920, 1080), 192, 192, 2.0f, false, null);
@@ -1000,7 +998,7 @@ public class ParentVisibleRecordingControlTests
             var audit = new CaptureAuditLogger();
             var mgr = new RecordingIndicatorManager(audit);
             var parent = MakeRecording((0, 0, 1200, 900), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.RecordingId, "session-a");
 
             var dpiInfo = new DisplayDpiInfo("test_display", new Rectangle(0, 0, 1920, 1080), dpi, dpi, dpi / 96f, false, null);
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen, dpiInfo);
@@ -1047,7 +1045,7 @@ public class ParentVisibleRecordingControlTests
             // At 96 DPI the label fits in the top margin (36 px); at 192 DPI it is too tall
             // and too wide for every margin, so the whole plan falls back.
             var parent = MakeRecording((0, 0, 460, 274), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((30, 40, 400, 200), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((30, 40, 400, 200), "inner", parent.RecordingId, "session-a");
 
             var lowDpi = new DisplayDpiInfo("test", new Rectangle(0, 0, 1920, 1080), 96, 96, 1.0f, false, null);
             var highDpi = new DisplayDpiInfo("test", new Rectangle(0, 0, 1920, 1080), 192, 192, 2.0f, false, null);
@@ -1070,7 +1068,7 @@ public class ParentVisibleRecordingControlTests
         {
             var vs = SystemInformation.VirtualScreen;
             var parentRec = MakeRecording((vs.X, vs.Y, 1000, 800), "outer", nestedSessionId: "session-a");
-            var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.Id, "session-a");
+            var rec = MakeRecording((vs.X + 200, vs.Y + 200, 400, 300), "inner", parentRec.RecordingId, "session-a");
             var capture = new RecordingIndicatorBounds(vs.X + 200, vs.Y + 200, 400, 300);
             var plan = RecordingIndicatorGeometry.ComputePresentationPlan(
                 rec, capture, parentRec, DefaultLabelSize, vs);
@@ -1120,7 +1118,7 @@ public class ParentVisibleRecordingControlTests
             var mgr = new RecordingIndicatorManager(audit, _ => { }, CreateIndicator, CreateStopControl, new ForcedDpiResolver(resolverDpi));
 
             var parent = MakeRecording((0, 0, 1200, 900), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.RecordingId, "session-a");
 
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen);
             Assert.NotNull(plan);
@@ -1169,7 +1167,7 @@ public class ParentVisibleRecordingControlTests
             var mgr = new RecordingIndicatorManager(audit, _ => { }, CreateIndicator, CreateStopControl, new ForcedDpiResolver(resolverDpi));
 
             var parent = MakeRecording((0, 0, 1200, 900), "outer", nestedSessionId: "session-a");
-            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.Id, "session-a");
+            var inner = MakeRecording((300, 300, 500, 400), "inner", parent.RecordingId, "session-a");
 
             var plan = mgr.ComputeControlPlan(inner, parent, SystemInformation.VirtualScreen);
             Assert.NotNull(plan);

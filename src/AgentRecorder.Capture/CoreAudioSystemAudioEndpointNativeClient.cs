@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace AgentRecorder.Capture;
 
@@ -10,8 +11,116 @@ internal sealed class CoreAudioSystemAudioEndpointNativeClient : ISystemAudioEnd
     private const uint PKeyDeviceFriendlyNameId = 14;
     internal const int ErrorNotFound = unchecked((int)0x80070490);
 
-    public SystemAudioEndpointInfo? GetDefaultMultimediaRenderEndpoint()
+    public IReadOnlyList<SystemAudioEndpointInfo> GetRenderEndpoints(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        IMMDeviceEnumeratorSystemAudio? enumerator = null;
+        IMMDeviceCollectionSystemAudio? collection = null;
+        IMMDeviceSystemAudio? defaultEndpoint = null;
+        try
+        {
+            enumerator = CreateEnumerator();
+            if (enumerator == null)
+                throw new SystemAudioEndpointEnumerationException(
+                    "system_audio_endpoint_enumeration_unavailable",
+                    "MMDeviceEnumerator is unavailable.");
+
+            var enumHr = enumerator.EnumAudioEndpoints(
+                EDataFlow.eRender,
+                DeviceState.Active,
+                out collection);
+            if (enumHr != 0)
+                throw new SystemAudioEndpointEnumerationException(
+                    "system_audio_endpoint_enumeration_unavailable",
+                    $"EnumAudioEndpoints failed with HRESULT 0x{enumHr:X8}.");
+            if (collection == null)
+                throw new SystemAudioEndpointEnumerationException(
+                    "system_audio_endpoint_enumeration_unavailable",
+                    "EnumAudioEndpoints returned S_OK without a collection.");
+
+            var defaultHr = enumerator.GetDefaultAudioEndpoint(
+                EDataFlow.eRender,
+                ERole.eMultimedia,
+                out defaultEndpoint);
+            string? defaultId = null;
+            if (defaultHr == 0)
+            {
+                if (defaultEndpoint == null)
+                    throw new SystemAudioEndpointEnumerationException(
+                        "system_audio_default_endpoint_unavailable",
+                        "GetDefaultAudioEndpoint returned S_OK without an endpoint.");
+
+                var defaultIdHr = defaultEndpoint.GetId(out defaultId);
+                if (defaultIdHr != 0 || string.IsNullOrWhiteSpace(defaultId))
+                    throw new SystemAudioEndpointEnumerationException(
+                        "system_audio_default_endpoint_unavailable",
+                        "The default render endpoint did not return an id.");
+            }
+            else if (defaultHr != ErrorNotFound)
+            {
+                throw new SystemAudioEndpointEnumerationException(
+                    "system_audio_default_endpoint_unavailable",
+                    $"GetDefaultAudioEndpoint failed with HRESULT 0x{defaultHr:X8}.");
+            }
+
+            var countHr = collection.GetCount(out var count);
+            if (countHr != 0)
+                throw new SystemAudioEndpointEnumerationException(
+                    "system_audio_endpoint_enumeration_unavailable",
+                    $"IMMDeviceCollection.GetCount failed with HRESULT 0x{countHr:X8}.");
+
+            var endpoints = new List<SystemAudioEndpointInfo>(
+                count > int.MaxValue ? int.MaxValue : (int)count);
+            for (uint index = 0; index < count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                IMMDeviceSystemAudio? endpoint = null;
+                try
+                {
+                    var itemHr = collection.Item(index, out endpoint);
+                    if (itemHr != 0)
+                        throw new SystemAudioEndpointEnumerationException(
+                            "system_audio_endpoint_enumeration_unavailable",
+                            $"IMMDeviceCollection.Item failed with HRESULT 0x{itemHr:X8}.");
+                    if (endpoint == null)
+                        throw new SystemAudioEndpointEnumerationException(
+                            "system_audio_endpoint_enumeration_unavailable",
+                            "IMMDeviceCollection.Item returned S_OK without an endpoint.");
+
+                    var info = ReadEndpoint(endpoint, expectedDirection: "render",
+                        isDefault: false);
+                    if (!string.Equals(info.State, "active", StringComparison.OrdinalIgnoreCase))
+                        throw new SystemAudioEndpointEnumerationException(
+                            "system_audio_endpoint_enumeration_unavailable",
+                            "An active render collection contained a non-active endpoint.");
+                    endpoints.Add(info with
+                    {
+                        IsDefaultMultimedia = string.Equals(info.Id, defaultId, StringComparison.Ordinal)
+                    });
+                }
+                finally
+                {
+                    Release(endpoint);
+                }
+            }
+
+            return endpoints
+                .OrderByDescending(endpoint => endpoint.IsDefaultMultimedia)
+                .ThenBy(endpoint => endpoint.Name, StringComparer.Ordinal)
+                .ThenBy(endpoint => endpoint.Id, StringComparer.Ordinal)
+                .ToArray();
+        }
+        finally
+        {
+            Release(defaultEndpoint);
+            Release(collection);
+            Release(enumerator);
+        }
+    }
+
+    public SystemAudioEndpointInfo? GetDefaultMultimediaRenderEndpoint(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         IMMDeviceEnumeratorSystemAudio? enumerator = null;
         IMMDeviceSystemAudio? endpoint = null;
         try
@@ -43,8 +152,9 @@ internal sealed class CoreAudioSystemAudioEndpointNativeClient : ISystemAudioEnd
         }
     }
 
-    public SystemAudioEndpointInfo? GetEndpoint(string endpointId)
+    public SystemAudioEndpointInfo? GetEndpoint(string endpointId, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(endpointId))
             return null;
 
@@ -138,19 +248,31 @@ internal sealed class CoreAudioSystemAudioEndpointNativeClient : ISystemAudioEnd
                 "system_audio_endpoint_enumeration_unavailable",
                 "The render endpoint did not return an id.");
 
-        var state = endpoint.GetState(out var rawState) == 0 &&
-                    rawState == DeviceState.Active
-            ? "active"
-            : "inactive";
+        var stateHr = endpoint.GetState(out var rawState);
+        if (stateHr != 0)
+            throw new SystemAudioEndpointEnumerationException(
+                "system_audio_endpoint_enumeration_unavailable",
+                $"The endpoint state could not be read (HRESULT 0x{stateHr:X8}).");
+        var state = rawState == DeviceState.Active ? "active" : "inactive";
 
         string direction = "unknown";
         if (endpoint is IMMEndpointSystemAudio endpointFlow && endpointFlow.GetDataFlow(out var flow) == 0)
             direction = flow == EDataFlow.eRender ? "render" : flow == EDataFlow.eCapture ? "capture" : "unknown";
 
-        if (expectedDirection != null && direction == "unknown")
-            direction = expectedDirection;
+        if (direction == "unknown")
+            throw new SystemAudioEndpointEnumerationException(
+                "system_audio_endpoint_metadata_unavailable",
+                "The endpoint did not return a known data flow.");
+        if (expectedDirection != null && !string.Equals(direction, expectedDirection, StringComparison.OrdinalIgnoreCase))
+            throw new SystemAudioEndpointEnumerationException(
+                "system_audio_endpoint_wrong_direction",
+                "The endpoint is not a render endpoint.");
 
         var name = ReadFriendlyName(endpoint) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(name))
+            throw new SystemAudioEndpointEnumerationException(
+                "system_audio_endpoint_metadata_unavailable",
+                "The endpoint did not return a friendly name.");
         return new SystemAudioEndpointInfo(id, name, direction, state, isDefault);
     }
 
@@ -211,11 +333,21 @@ internal sealed class CoreAudioSystemAudioEndpointNativeClient : ISystemAudioEnd
 [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IMMDeviceEnumeratorSystemAudio
 {
-    [PreserveSig] int EnumAudioEndpoints(EDataFlow dataFlow, DeviceState stateMask, out IntPtr devices);
+    [PreserveSig] int EnumAudioEndpoints(
+        EDataFlow dataFlow,
+        DeviceState stateMask,
+        [MarshalAs(UnmanagedType.Interface)] out IMMDeviceCollectionSystemAudio devices);
     [PreserveSig] int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDeviceSystemAudio endpoint);
     [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDeviceSystemAudio endpoint);
     [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr client);
     [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr client);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMMDeviceCollectionSystemAudio
+{
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int Item(uint index, out IMMDeviceSystemAudio endpoint);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

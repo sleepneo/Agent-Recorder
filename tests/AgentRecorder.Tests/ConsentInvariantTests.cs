@@ -93,6 +93,30 @@ public class ConsentInvariantTests : IDisposable
         }
     }
 
+    private static readonly SystemAudioEndpointInfo DefaultEndpoint =
+        new("{0.0.0.00000000}.{SYSTEM}", "Speakers", "render", "active", true);
+
+    private sealed class FakeSystemAudioProvider : ISystemAudioEndpointProvider
+    {
+        private readonly SystemAudioEndpointInfo[] _endpoints;
+
+        public FakeSystemAudioProvider(params SystemAudioEndpointInfo[] endpoints)
+            => _endpoints = endpoints;
+
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(_endpoints);
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(_endpoints.FirstOrDefault(e => e.IsDefaultMultimedia));
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(
+            string endpointId,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult<SystemAudioEndpointInfo?>(_endpoints.FirstOrDefault(e => e.Id == endpointId));
+    }
+
     private sealed class ControllableTray : ITrayContext
     {
         public string HostMode => "headless";
@@ -101,10 +125,12 @@ public class ConsentInvariantTests : IDisposable
         public enum DecisionMode { Approve, Reject, Timeout }
 
         public DecisionMode Mode { get; set; } = DecisionMode.Reject;
+        public int RequestConfirmationCallCount { get; private set; }
         public int RequestRegionSelectionCallCount { get; private set; }
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
+            RequestConfirmationCallCount++;
             if (Mode == DecisionMode.Timeout)
                 return; // let the confirmation time out
 
@@ -121,8 +147,8 @@ public class ConsentInvariantTests : IDisposable
             callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -133,7 +159,10 @@ public class ConsentInvariantTests : IDisposable
     private RecordingEngine? _engine;
     private readonly FakeCaptureBackend _backend = new();
 
-    private ApiServer CreateServer(ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null)
+    private ApiServer CreateServer(
+        ControllableTray tray,
+        IMicrophoneDeviceProvider? microphoneProvider = null,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider = null)
     {
         _dataDir = Path.Combine(Path.GetTempPath(), $"consent-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_dataDir);
@@ -141,7 +170,10 @@ public class ConsentInvariantTests : IDisposable
         ApiKeyAuth.InitializeForTesting(_dataDir);
 
         _audit = new CaptureAuditLogger();
-        _engine = new RecordingEngine(_audit, microphoneProvider: microphoneProvider);
+        _engine = new RecordingEngine(
+            _audit,
+            microphoneProvider: microphoneProvider,
+            systemAudioEndpointProvider: systemAudioEndpointProvider ?? new FakeSystemAudioProvider());
         _engine.SetTray(tray);
         _engine.BackendFactory = _ => (_backend, "fake");
         _server = new ApiServer(_engine, _audit, tray);
@@ -595,7 +627,7 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateRecording_SystemAudioEnabled_FailsFast_WithCorrectCapability()
+    public async Task CreateRecording_SystemAudioNoDevices_FailsBeforeConsentOrBackend()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
         var server = CreateServer(tray);
@@ -612,14 +644,14 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(503, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
-            Assert.Equal("system_audio", doc.RootElement.GetProperty("error").GetProperty("details").GetProperty("capability").GetString());
+            Assert.Equal("SYSTEM_AUDIO_DEFAULT_ENDPOINT_NOT_FOUND", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
             Assert.False(_backend.StartCalled);
             Assert.DoesNotContain(_audit!.Events, e => e.Event == "confirmation.created");
+            Assert.Equal(0, tray.RequestConfirmationCallCount);
         }
         finally
         {
@@ -628,26 +660,64 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_SystemAudioEnabled_FailsFast_WithCorrectCapability()
+    public async Task CreateRecording_SystemAudioEnabled_RequiresConsentBeforeBackend()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
-        var server = CreateServer(tray);
+        var server = CreateServer(tray, systemAudioEndpointProvider: new FakeSystemAudioProvider(DefaultEndpoint));
         try
         {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
+            Assert.Equal(200, (int)response.StatusCode);
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
+            Assert.False(_backend.StartCalled);
+            Assert.Contains(_audit!.Events, e => e.Event == "confirmation.created");
+        }
+        finally
+        {
+            server.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_SystemAudioEnabled_RequiresConsentBeforeBackend()
+    {
+        var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
+        var server = CreateServer(tray, systemAudioEndpointProvider: new FakeSystemAudioProvider(DefaultEndpoint));
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+            });
+
             server.Start();
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(400, (int)response.StatusCode);
+            Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("CAPABILITY_NOT_IMPLEMENTED", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
-            Assert.Equal("system_audio", doc.RootElement.GetProperty("error").GetProperty("details").GetProperty("capability").GetString());
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
             Assert.False(_backend.StartCalled);
-            Assert.DoesNotContain(_audit!.Events, e => e.Event == "confirmation.created");
+            Assert.Contains(_audit!.Events, e => e.Event == "confirmation.created");
+            Assert.Equal(0, tray.RequestRegionSelectionCallCount);
         }
         finally
         {

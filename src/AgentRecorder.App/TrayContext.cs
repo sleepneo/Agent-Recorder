@@ -5,8 +5,6 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -35,7 +33,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly NotifyIcon _icon;
     private readonly RecordingEngine _engine;
     private readonly AuditLogger _audit;
-    private readonly Dictionary<string, Recording> _activeRecordings = new();
+    private readonly Dictionary<string, RecordingUiPresentation> _activeRecordings = new();
     private readonly HashSet<string> _stoppingIds = new();
     private readonly RecordingIndicatorManager _indicatorManager;
     private readonly TrayIconFactory _iconFactory;
@@ -239,26 +237,18 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     /// <summary>
     /// Pop up recording confirmation (only local user via tray menu or confirmation form; no HTTP API remote confirmation).
     /// </summary>
-    public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+    public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
     {
-        var s = JsonNode.Parse(JsonSerializer.Serialize(summary))!;
-        var confirmationId = GetString(s, "confirmation_id");
-        var recordingId = GetString(s, "recording_id");
-        var timeoutSeconds = GetInt(s, "timeout_seconds") ?? 60;
-
         var item = new PendingConfirmationItem(
-            confirmationId,
-            recordingId,
-            summary,
-            callback,
-            timeoutSeconds);
+            presentation,
+            callback);
 
         _confirmationQueue.Enqueue(item);
 
         _audit.Log("confirmation.ui_queued", new
         {
-            confirmation_id = confirmationId,
-            recording_id = recordingId,
+            confirmation_id = presentation.ConfirmationId,
+            recording_id = presentation.RecordingId,
             queue_count = _confirmationQueue.PendingCount
         });
 
@@ -292,8 +282,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             HideConfirmationForm();
         }
 
-        var s = JsonNode.Parse(JsonSerializer.Serialize(current.Summary))!;
-        var captureBounds = ConfirmationPreviewBuilder.ParseBounds(s);
+        var captureBounds = current.Presentation.CaptureBounds;
         var workingAreas = Screen.AllScreens.Select(screen => screen.WorkingArea).ToList();
         var fallbackWorkingArea = GetFallbackWorkingArea(captureBounds, workingAreas);
 
@@ -344,7 +333,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         }
     }
 
-    private static Rectangle GetFallbackWorkingArea(CaptureBounds? captureBounds, IReadOnlyList<Rectangle> workingAreas)
+    private static Rectangle GetFallbackWorkingArea(ConfirmationCaptureBounds? captureBounds, IReadOnlyList<Rectangle> workingAreas)
     {
         if (captureBounds == null)
         {
@@ -570,16 +559,14 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _currentForm?.CloseWithDecision(ConfirmationDecision.Reject(), _uiText.Get("Confirmation_Close_Rejected"));
     }
 
-    public void SetRecording(object rec)
+    public void SetRecording(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            var resolution = TryResolveActiveParentForUi(recording, _activeRecordings);
-            _indicatorManager.HideCountdownAndShowRecording(recording);
-            _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
+            _activeRecordings[presentation.RecordingId] = presentation;
+            var resolution = TryResolveActiveParentForUi(presentation, _activeRecordings);
+            _indicatorManager.HideCountdownAndShowRecording(presentation);
+            _indicatorPresenter.ShowFor(presentation, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
             // "Recording started" tray balloons are intentionally never shown;
@@ -588,78 +575,68 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         });
     }
 
-    public void SetPreparing(object rec)
+    public void SetPreparing(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            var resolution = TryResolveActiveParentForUi(recording, _activeRecordings);
-            _indicatorPresenter.ShowFor(recording, resolution.Parent, resolution.FallbackReason);
-            _indicatorManager.ShowPreparing(recording, resolution.Parent, resolution.FallbackReason);
+            _activeRecordings[presentation.RecordingId] = presentation;
+            var resolution = TryResolveActiveParentForUi(presentation, _activeRecordings);
+            _indicatorPresenter.ShowFor(presentation, resolution.Parent, resolution.FallbackReason);
+            _indicatorManager.ShowPreparing(presentation, resolution.Parent, resolution.FallbackReason);
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
         });
     }
 
-    public void SetCountdown(object rec, int? remainingSeconds)
+    public void SetCountdown(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            if (remainingSeconds.HasValue)
+            _activeRecordings[presentation.RecordingId] = presentation;
+            if (presentation.CountdownRemainingSeconds.HasValue)
             {
-                _indicatorManager.ShowCountdown(recording, remainingSeconds.Value);
+                _indicatorManager.ShowCountdown(presentation);
             }
             else
             {
                 // Countdown reached zero: hide the digit overlay but keep the
                 // amber preparing phase. The red REC phase is switched on only
                 // by real first-frame evidence via SetRecording.
-                _indicatorManager.HideCountdownOverlay(recording);
+                _indicatorManager.HideCountdownOverlay(presentation);
             }
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
         });
     }
 
-    public void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc)
+    public void SetSeriesProgress(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            _indicatorManager.ShowSeriesProgress(recording, captured, planned, nextCaptureDueAtUtc);
+            _activeRecordings[presentation.RecordingId] = presentation;
+            _indicatorManager.ShowSeriesProgress(presentation);
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
         });
     }
 
-    public void SetFinalizing(object rec)
+    public void SetFinalizing(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            _indicatorManager.ShowFinalizing(recording);
+            _activeRecordings[presentation.RecordingId] = presentation;
+            _indicatorManager.ShowFinalizing(presentation);
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
         });
     }
 
-    public void SetStopping(object rec)
+    public void SetStopping(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
-        if (recording == null) return;
         RunOnUi(() =>
         {
-            _activeRecordings[recording.Id] = recording;
-            _stoppingIds.Add(recording.Id);
+            _activeRecordings[presentation.RecordingId] = presentation;
+            _stoppingIds.Add(presentation.RecordingId);
             UpdateRecordingUi();
             UpdateChapterMarkHotkeyRegistration();
         });
@@ -671,11 +648,11 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     /// matches an active recording, that recording is an outer, and both share the
     /// same NestedSessionId (including the case where both are null).
     /// </summary>
-    internal static Recording? ResolveActiveParentForUi(
-        Recording recording,
-        IDictionary<string, Recording> activeRecordings)
+    internal static RecordingUiPresentation? ResolveActiveParentForUi(
+        RecordingUiPresentation presentation,
+        IDictionary<string, RecordingUiPresentation> activeRecordings)
     {
-        return TryResolveActiveParentForUi(recording, activeRecordings).Parent;
+        return TryResolveActiveParentForUi(presentation, activeRecordings).Parent;
     }
 
     /// <summary>
@@ -685,38 +662,34 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     /// distinct failures into a generic <c>parent_missing</c> value.
     /// </summary>
     internal static ParentResolutionResult TryResolveActiveParentForUi(
-        Recording recording,
-        IDictionary<string, Recording> activeRecordings)
+        RecordingUiPresentation presentation,
+        IDictionary<string, RecordingUiPresentation> activeRecordings)
     {
-        if (!string.Equals(recording.NestedRole, "inner", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(presentation.NestedRole, "inner", StringComparison.OrdinalIgnoreCase))
             return new ParentResolutionResult(null, null);
 
-        if (string.IsNullOrEmpty(recording.ParentRecordingId))
+        if (string.IsNullOrEmpty(presentation.ParentRecordingId))
             return new ParentResolutionResult(null, "parent_missing");
 
-        if (!activeRecordings.TryGetValue(recording.ParentRecordingId, out var candidate))
+        if (!activeRecordings.TryGetValue(presentation.ParentRecordingId, out var candidate))
             return new ParentResolutionResult(null, "parent_missing");
 
         if (!string.Equals(candidate.NestedRole, "outer", StringComparison.OrdinalIgnoreCase))
             return new ParentResolutionResult(null, "parent_not_outer");
 
-        if (!string.Equals(recording.NestedSessionId, candidate.NestedSessionId, StringComparison.Ordinal))
+        if (!string.Equals(presentation.NestedSessionId, candidate.NestedSessionId, StringComparison.Ordinal))
             return new ParentResolutionResult(null, "session_mismatch");
 
         return new ParentResolutionResult(candidate, null);
     }
 
-    public void SetIdle(object rec)
+    public void SetIdle(RecordingUiPresentation presentation)
     {
-        var recording = rec as Recording;
         RunOnUi(() =>
         {
-            if (recording != null)
-            {
-                _activeRecordings.Remove(recording.Id);
-                _stoppingIds.Remove(recording.Id);
-                _indicatorManager.CloseFor(recording.Id, "recording.set_idle");
-            }
+            _activeRecordings.Remove(presentation.RecordingId);
+            _stoppingIds.Remove(presentation.RecordingId);
+            _indicatorManager.CloseFor(presentation.RecordingId, "recording.set_idle");
             if (_activeRecordings.Count == 0)
                 SetAllIdleUi();
             else
@@ -832,15 +805,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         }
     }
 
-    private static bool IsExactRecording(Recording recording)
-    {
-        lock (recording)
-        {
-            return recording.State == RecState.recording && !recording.IsScreenshotSeries;
-        }
-    }
+    private static bool IsExactRecording(RecordingUiPresentation presentation)
+        => presentation.State == RecordingUiState.Recording && !presentation.IsScreenshotSeries;
 
-    private Recording[] SnapshotExactRecordings()
+    private RecordingUiPresentation[] SnapshotExactRecordings()
     {
         return _activeRecordings.Values
             .Where(IsExactRecording)
@@ -864,7 +832,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             {
                 try
                 {
-                    _engine.AddMark(recording.Id, label, "hotkey");
+                    _engine.AddMark(recording.RecordingId, label, "hotkey");
                     successCount++;
                 }
                 catch
@@ -897,14 +865,14 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
             try
             {
-                _chapterMarkFeedbackPresenter.Show(feedback, ChapterMarkFeedbackDuration, feedbackTarget.Id);
+                _chapterMarkFeedbackPresenter.Show(feedback, ChapterMarkFeedbackDuration, feedbackTarget.RecordingId);
             }
             catch
             {
                 _audit.Log("tray.chapter_mark_feedback_error", new
                 {
                     error_code = "presentation_failed",
-                    recording_id = feedbackTarget.Id,
+                    recording_id = feedbackTarget.RecordingId,
                     attempted_count = snapshot.Length,
                     successful_count = successCount
                 });
@@ -993,22 +961,22 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         {
             switch (r.State)
             {
-                case RecState.preparing:
+                case RecordingUiState.Preparing:
                     preparingCount++;
                     break;
-                case RecState.countdown:
+                case RecordingUiState.Countdown:
                     countdownCount++;
-                    anyCountdownValue ??= r.Id switch
+                    anyCountdownValue ??= r.RecordingId switch
                     {
-                        _ when _indicatorManager.IndicatorsForTests.TryGetValue(r.Id, out var ind) => ind.CountdownValueForTests,
+                        _ when _indicatorManager.IndicatorsForTests.TryGetValue(r.RecordingId, out var ind) => ind.CountdownValueForTests,
                         _ => null
                     };
                     break;
-                case RecState.finalizing:
+                case RecordingUiState.Finalizing:
                     finalizingCount++;
                     break;
-                case RecState.recording:
-                case RecState.stopping:
+                case RecordingUiState.Recording:
+                case RecordingUiState.Stopping:
                     recordingCount++;
                     break;
             }
@@ -1386,19 +1354,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             a();
     }
 
-    private static string GetString(JsonNode node, string key)
-    {
-        var val = node[key];
-        if (val == null) return "";
-        return val.ToString();
-    }
-
-    private static int? GetInt(JsonNode node, string key)
-    {
-        var val = node[key];
-        if (val == null) return null;
-        return (int?)val;
-    }
 }
 
 /// <summary>
@@ -1406,7 +1361,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 /// <see cref="Parent"/> is non-null only for a fully valid parent; otherwise
 /// <see cref="FallbackReason"/> carries the exact failure classification.
 /// </summary>
-internal sealed record ParentResolutionResult(Recording? Parent, string? FallbackReason);
+internal sealed record ParentResolutionResult(RecordingUiPresentation? Parent, string? FallbackReason);
 
 /// <summary>
 /// Minimal seam that decides how a recording is presented by the tray UI.
@@ -1417,7 +1372,7 @@ internal sealed record ParentResolutionResult(Recording? Parent, string? Fallbac
 /// </summary>
 internal interface IIndicatorPresenter
 {
-    void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null);
+    void ShowFor(RecordingUiPresentation presentation, RecordingUiPresentation? parent, string? parentFallbackReason = null);
 }
 
 /// <summary>
@@ -1433,8 +1388,8 @@ internal sealed class DefaultIndicatorPresenter : IIndicatorPresenter
         _manager = manager;
     }
 
-    public void ShowFor(Recording recording, Recording? parent, string? parentFallbackReason = null)
+    public void ShowFor(RecordingUiPresentation presentation, RecordingUiPresentation? parent, string? parentFallbackReason = null)
     {
-        _manager.ShowFor(recording, parent, parentFallbackReason);
+        _manager.ShowFor(presentation, parent, parentFallbackReason);
     }
 }

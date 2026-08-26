@@ -33,11 +33,11 @@ public class RecordingEngineSingleRecordingContractTests
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { /* never called synchronously */ }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { /* never called synchronously */ }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback) { /* no-op */ }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

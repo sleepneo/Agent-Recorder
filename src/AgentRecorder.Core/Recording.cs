@@ -134,10 +134,29 @@ public sealed class Recording
     public string? StopReason { get; set; }
 
     /// <summary>
-    /// Guards FinalizeRecording so a recording can only be terminalized once,
-    /// even if the backend's natural-exit callback races with an explicit Stop(...).
+    /// Published only after the complete terminal snapshot has been written.
+    /// Lock-free readers use this acquire read as the publication barrier;
+    /// lifecycle ownership is still established by the recording-local lock.
     /// </summary>
-    public bool IsFinalized { get; set; }
+    private int _isFinalized;
+
+    public bool IsFinalized => Volatile.Read(ref _isFinalized) != 0;
+
+    /// <summary>
+    /// Publishes a complete terminal snapshot. Callers must already hold
+    /// <c>lock (this)</c>; this method is the final publication step and does
+    /// not replace the existing lock-based exactly-once ownership.
+    /// </summary>
+    internal bool PublishFinalized()
+    {
+        if (State is not (RecState.completed or RecState.failed or RecState.cancelled or RecState.rejected or RecState.expired))
+            return false;
+
+        // Interlocked.CompareExchange is an acquire/release-equivalent
+        // atomic publication and keeps duplicate publication impossible even
+        // if an internal caller accidentally invokes this twice.
+        return Interlocked.CompareExchange(ref _isFinalized, 1, 0) == 0;
+    }
 
     public string? NestedRole { get; set; }
     public string? NestedSessionId { get; set; }

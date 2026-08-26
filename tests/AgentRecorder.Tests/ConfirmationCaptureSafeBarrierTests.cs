@@ -45,7 +45,7 @@ public class ConfirmationCaptureSafeBarrierTests : IDisposable
         string confirmationId = "conf_1",
         string recordingId = "rec_1")
     {
-        return new PendingConfirmationItem(
+        return ConfirmationPresentationTestData.CreateItem(
             confirmationId,
             recordingId,
             new

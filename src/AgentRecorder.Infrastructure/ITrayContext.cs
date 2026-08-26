@@ -67,7 +67,7 @@ public interface ITrayContext
     /// 包括是否批准、本次保存目录覆盖以及是否记住为默认目录。
     /// 注意：这是唯一的确认入口，不允许通过 HTTP API 远程调用确认。
     /// </summary>
-    void RequestConfirmation(object summary, Action<ConfirmationDecision> callback);
+    void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback);
 
     /// <summary>
     /// 请求本地用户进行区域选择，弹出全屏选区窗口。
@@ -80,13 +80,13 @@ public interface ITrayContext
     /// </summary>
     void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback);
 
-    void SetRecording(object rec);
+    void SetRecording(RecordingUiPresentation presentation);
     /// <summary>
     /// Notifies the local host that a recording entered stopping before capture
     /// finalization. Default no-op keeps existing host fakes source-compatible.
     /// </summary>
-    void SetStopping(object rec) { }
-    void SetIdle(object rec);
+    void SetStopping(RecordingUiPresentation presentation) { }
+    void SetIdle(RecordingUiPresentation presentation);
     void SetAllIdle();
     void ShowError(string text);
 
@@ -94,22 +94,25 @@ public interface ITrayContext
     /// Shows a non-intrusive "preparing" indicator (e.g. amber border) for the
     /// recording while the microphone or backend initializes.
     /// </summary>
-    void SetPreparing(object rec) { }
+    void SetPreparing(RecordingUiPresentation presentation) { }
 
     /// <summary>
     /// Shows a countdown overlay for the recording. The engine drives the timing;
-    /// the host only updates the visible number. Passing null hides the overlay.
+    /// the host only updates the visible number. A null
+    /// <see cref="RecordingUiPresentation.CountdownRemainingSeconds"/> hides the overlay.
     /// </summary>
-    void SetCountdown(object rec, int? remainingSeconds) { }
+    void SetCountdown(RecordingUiPresentation presentation) { }
 
     /// <summary>
     /// Updates the existing recording indicator for screenshot-series progress.
-    /// Hosts that do not have local UI may ignore this notification.
+    /// Captured/planned counts and the next due timestamp are carried by the
+    /// immutable presentation. Hosts that do not have local UI may ignore this
+    /// notification.
     /// </summary>
-    void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc) { }
+    void SetSeriesProgress(RecordingUiPresentation presentation) { }
 
     /// <summary>
     /// Shows a "finalizing" / "saving" indicator after screen capture has ended.
     /// </summary>
-    void SetFinalizing(object rec) { }
+    void SetFinalizing(RecordingUiPresentation presentation) { }
 }

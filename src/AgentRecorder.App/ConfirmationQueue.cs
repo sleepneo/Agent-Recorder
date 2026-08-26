@@ -9,30 +9,23 @@ namespace AgentRecorder.App;
 /// </summary>
 internal sealed class PendingConfirmationItem
 {
-    public string ConfirmationId { get; }
-    public string RecordingId { get; }
-    public object Summary { get; }
+    public RecordingConfirmationPresentation Presentation { get; }
+    public string ConfirmationId => Presentation.ConfirmationId;
+    public string RecordingId => Presentation.RecordingId;
+    public RecordingRequestSummary Summary => Presentation.Summary;
     public Action<ConfirmationDecision> Callback { get; }
-    public int TimeoutSeconds { get; }
-    public DateTime CreatedAtUtc { get; }
-    public DateTime ExpiresAtUtc { get; }
+    public int TimeoutSeconds => Presentation.TimeoutSeconds;
+    public DateTime CreatedAtUtc => Presentation.CreatedAtUtc;
+    public DateTime ExpiresAtUtc => Presentation.ExpiresAtUtc;
 
     private int _callbackCalled;
 
     public PendingConfirmationItem(
-        string confirmationId,
-        string recordingId,
-        object summary,
-        Action<ConfirmationDecision> callback,
-        int timeoutSeconds)
+        RecordingConfirmationPresentation presentation,
+        Action<ConfirmationDecision> callback)
     {
-        ConfirmationId = confirmationId;
-        RecordingId = recordingId;
-        Summary = summary;
-        Callback = callback;
-        TimeoutSeconds = timeoutSeconds;
-        CreatedAtUtc = DateTime.UtcNow;
-        ExpiresAtUtc = CreatedAtUtc.AddSeconds(timeoutSeconds);
+        Presentation = presentation ?? throw new ArgumentNullException(nameof(presentation));
+        Callback = callback ?? throw new ArgumentNullException(nameof(callback));
         _callbackCalled = 0;
     }
 
@@ -58,7 +51,7 @@ internal sealed class PendingConfirmationItem
     /// Returns true if the confirmation has expired based on local time.
     /// Note: Engine handles actual expiration; this is for UI display only.
     /// </summary>
-    public bool IsExpiredLocal => DateTime.UtcNow > ExpiresAtUtc;
+    public bool IsExpiredLocal => DateTime.UtcNow >= ExpiresAtUtc;
 }
 
 /// <summary>

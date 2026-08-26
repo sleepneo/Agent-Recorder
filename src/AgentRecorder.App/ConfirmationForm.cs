@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Windows.Forms;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
@@ -132,7 +130,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private readonly IPerformanceTracer _tracer;
     private readonly IReadOnlyList<Rectangle> _workingAreas;
     private readonly Rectangle _fallbackWorkingArea;
-    private CaptureBounds? _captureBounds;
+    private ConfirmationCaptureBounds? _captureBounds;
     private Rectangle _targetWorkingArea;
     private int _targetScreenIndex = -1;
     private int _foregroundAttempts;
@@ -143,9 +141,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private string? _foregroundErrorStage;
     private readonly IUiTextProvider _text;
     private readonly IDwmThumbnailProvider _dwmThumbnailProvider;
+    private readonly IConfirmationThemeProvider _themeProvider;
+    private readonly IConfirmationNativeChromeAdapter _nativeChromeAdapter;
+    private readonly IConfirmationScrollThemeAdapter _scrollThemeAdapter;
+    private readonly bool _previewOnly;
+    private ConfirmationThemeSnapshot _themeSnapshot;
+    private int _themeApplyCount;
     private readonly ToolTip _tooltip;
     private readonly List<(Label Label, Label Value)> _infoRows = new();
-    private JsonNode? _summaryNode;
     private IDwmThumbnail? _dwmThumbnail;
     private Size _dwmSourceSize;
     private Rectangle _dwmDestination;
@@ -191,7 +194,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private Label _previewFallbackLabel = null!;
     private Label _previewBoundsLabel = null!;
     private Panel _previewPanel = null!;
-    private ProgressBar _timeoutProgressBar = null!;
+    private ConfirmationCountdownRing _countdownRing = null!;
     private Label _timeoutLabel = null!;
     private Label _warningLabel = null!;
     private System.Windows.Forms.Timer _countdownTimer = null!;
@@ -200,10 +203,27 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private Panel _infoPanel = null!;
     private TableLayoutPanel _infoTable = null!;
     private TableLayoutPanel _outputTable = null!;
+    private TableLayoutPanel _rootTable = null!;
+    private FlowLayoutPanel _headerPanel = null!;
+    private TableLayoutPanel _contentTable = null!;
+    private TableLayoutPanel _previewContainer = null!;
+    private FlowLayoutPanel _outputActionsPanel = null!;
+    private Label _titleLabel = null!;
+    private Label _queueLabel = null!;
+    private Label _outputTitleLabel = null!;
+    private bool _timeoutIsExpired;
+    private bool _timeoutIsUrgent;
 
     internal bool HasPreviewAreaForTests => _previewPanel != null;
     internal bool HasContentScrollPanelForTests => _mainContentPanel != null;
     internal Rectangle ContentScrollPanelBoundsForTests => _mainContentPanel?.Bounds ?? Rectangle.Empty;
+    internal Size ContentScrollAutoScrollMinSizeForTests => _mainContentPanel?.AutoScrollMinSize ?? Size.Empty;
+    internal Point ContentScrollPositionForTests => _mainContentPanel?.AutoScrollPosition ?? Point.Empty;
+    internal void ScrollContentToBottomForTests()
+    {
+        if (_mainContentPanel != null && !_mainContentPanel.IsDisposed)
+            _mainContentPanel.AutoScrollPosition = new Point(0, _mainContentPanel.AutoScrollMinSize.Height);
+    }
     internal bool HasPreviewImageForTests => _previewBox?.Image != null;
     internal string PreviewBoundsTextForTests => _previewBoundsLabel?.Text ?? "";
     internal string PreviewFallbackTextForTests => _previewFallbackLabel?.Text ?? "";
@@ -226,7 +246,15 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     internal bool CountdownTimerEnabledForTests => _countdownTimer?.Enabled ?? false;
     internal Button? DefaultActionForTests => AcceptButton as Button;
     internal Button? CancelActionForTests => CancelButton as Button;
-    internal int TimeoutProgressValueForTests => _timeoutProgressBar?.Value ?? 0;
+    internal double CountdownRingRatioForTests => _countdownRing?.Snapshot.Ratio ?? 0d;
+    internal int CountdownRingSecondsForTests => _countdownRing?.Snapshot.RemainingSeconds ?? 0;
+    internal bool CountdownRingUrgentForTests => _countdownRing?.Snapshot.IsUrgent ?? false;
+    internal bool CountdownRingExpiredForTests => _countdownRing?.Snapshot.IsExpired ?? true;
+    internal bool CountdownRingEnabledForTests => _countdownRing?.Enabled ?? false;
+    internal bool CountdownRingTabStopForTests => _countdownRing?.TabStop ?? true;
+    internal AccessibleRole CountdownRingAccessibleRoleForTests => _countdownRing?.AccessibleRole ?? AccessibleRole.None;
+    internal string CountdownRingAccessibleNameForTests => _countdownRing?.AccessibleName ?? "";
+    internal Rectangle CountdownRingBoundsForTests => GetFormRelativeBounds(_countdownRing);
     internal string OutputPathTextForTests => _outputPathLabel?.Text ?? "";
     internal bool ChangeOutputButtonEnabledForTests => _changeOutputButton?.Enabled ?? false;
     internal bool RememberOutputCheckedForTests
@@ -236,7 +264,6 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     }
 
     internal Rectangle OutputPanelBoundsForTests => _outputPanel?.Bounds ?? Rectangle.Empty;
-    internal Rectangle TimeoutProgressBoundsForTests => _timeoutProgressBar?.Bounds ?? Rectangle.Empty;
     internal Rectangle TimeoutLabelBoundsForTests => _timeoutLabel?.Bounds ?? Rectangle.Empty;
     internal Rectangle WarningLabelBoundsForTests => _warningLabel?.Bounds ?? Rectangle.Empty;
     internal string WarningTextForTests => _warningLabel?.Text ?? "";
@@ -246,6 +273,17 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     internal string RejectButtonTextForTests => _rejectButton?.Text ?? "";
     internal Button? ApproveButtonForTests => _approveButton;
     internal Button? RejectButtonForTests => _rejectButton;
+    internal ConfirmationThemeKind ThemeKindForTests => _themeSnapshot.Kind;
+    internal ConfirmationThemePalette ThemePaletteForTests => _themeSnapshot.Palette;
+    internal int ThemeApplyCountForTests => _themeApplyCount;
+    internal bool PreviewOnlyForTests => _previewOnly;
+    internal Color InfoPanelBackColorForTests => _infoPanel?.BackColor ?? Color.Empty;
+    internal Color OutputPanelBackColorForTests => _outputPanel?.BackColor ?? Color.Empty;
+    internal Color TimeoutLabelForeColorForTests => _timeoutLabel?.ForeColor ?? Color.Empty;
+    internal Color WarningLabelForeColorForTests => _warningLabel?.ForeColor ?? Color.Empty;
+    internal Color PreviewFallbackForeColorForTests => _previewFallbackLabel?.ForeColor ?? Color.Empty;
+    internal void ApplyThemeChangeForTests() => ApplyThemeFromProvider();
+    internal void RefreshCountdownForTests() => UpdateCountdown();
 
     private Rectangle GetFormRelativeBounds(Control? control)
     {
@@ -328,7 +366,11 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         Rectangle? fallbackWorkingArea = null,
         IUiTextProvider? textProvider = null,
         IPerformanceTracer? tracer = null,
-        IDwmThumbnailProvider? dwmThumbnailProvider = null)
+        IDwmThumbnailProvider? dwmThumbnailProvider = null,
+        IConfirmationThemeProvider? themeProvider = null,
+        bool previewOnly = false,
+        IConfirmationNativeChromeAdapter? nativeChromeAdapter = null,
+        IConfirmationScrollThemeAdapter? scrollThemeAdapter = null)
     {
         _item = item;
         _queuePosition = queuePosition;
@@ -346,6 +388,11 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _auditLogger = auditLogger;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _dwmThumbnailProvider = dwmThumbnailProvider ?? new DwmThumbnailProvider();
+        _themeProvider = themeProvider ?? new WindowsConfirmationThemeProvider();
+        _nativeChromeAdapter = nativeChromeAdapter ?? new WindowsConfirmationNativeChromeAdapter();
+        _scrollThemeAdapter = scrollThemeAdapter ?? new WindowsConfirmationScrollThemeAdapter();
+        _themeSnapshot = ResolveInitialTheme();
+        _previewOnly = previewOnly;
         _workingAreas = workingAreas ?? Array.Empty<Rectangle>();
         _fallbackWorkingArea = fallbackWorkingArea ?? Rectangle.Empty;
 
@@ -353,6 +400,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         SetupForm();
         BuildLayout();
+        ApplyTheme(_themeSnapshot);
+        try { _themeProvider.ThemeChanged += OnThemeChanged; }
+        catch { }
         SetupCountdownTimer();
 
         LogAudit("confirmation.form_created", CreateLifecyclePayload("handle_created"));
@@ -368,6 +418,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             StopCountdownTimer();
             StopForegroundVerificationTimer();
             _countdownTimer?.Dispose();
+            try { _themeProvider.ThemeChanged -= OnThemeChanged; }
+            catch { }
+            try { _themeProvider.Dispose(); }
+            catch { }
+            try { _nativeChromeAdapter.Dispose(); }
+            catch { }
+            try { _scrollThemeAdapter.Dispose(); }
+            catch { }
             _tooltip?.Dispose();
             DisposeDwmThumbnail();
             _previewBox?.Image?.Dispose();
@@ -383,6 +441,171 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             }
         }
         base.Dispose(disposing);
+    }
+
+    private ConfirmationThemeSnapshot ResolveInitialTheme()
+    {
+        try { return _themeProvider.Resolve(); }
+        catch { return new ConfirmationThemeSnapshot(ConfirmationThemeKind.Light, ConfirmationThemePalette.Light); }
+    }
+
+    private void OnThemeChanged(object? sender, EventArgs e)
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        if (IsHandleCreated && InvokeRequired)
+        {
+            try { BeginInvoke((MethodInvoker)ApplyThemeFromProvider); }
+            catch { }
+            return;
+        }
+
+        ApplyThemeFromProvider();
+    }
+
+    private void ApplyThemeFromProvider()
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        var snapshot = _themeSnapshot;
+        try { snapshot = _themeProvider.Resolve(); }
+        catch { }
+
+        try { ApplyTheme(snapshot); }
+        catch { }
+    }
+
+    private void ApplyTheme(ConfirmationThemeSnapshot snapshot)
+    {
+        var palette = snapshot.Palette;
+        _themeSnapshot = snapshot;
+        _themeApplyCount++;
+
+        BackColor = palette.WindowBackground;
+        ForeColor = palette.PrimaryText;
+
+        _rootTable.BackColor = palette.WindowBackground;
+        _headerPanel.BackColor = palette.WindowBackground;
+        _contentTable.BackColor = palette.WindowBackground;
+        _mainContentPanel.BackColor = palette.WindowBackground;
+        _infoPanel.BackColor = palette.Surface;
+        _infoTable.BackColor = palette.Surface;
+        _previewContainer.BackColor = palette.WindowBackground;
+        _outputPanel.BackColor = palette.SecondarySurface;
+        _outputTable.BackColor = palette.SecondarySurface;
+        _outputActionsPanel.BackColor = palette.SecondarySurface;
+        _buttonPanel.BackColor = palette.WindowBackground;
+
+        _titleLabel.BackColor = Color.Transparent;
+        _titleLabel.ForeColor = palette.PrimaryText;
+        _queueLabel.BackColor = Color.Transparent;
+        _queueLabel.ForeColor = palette.SecondaryText;
+
+        foreach (var (label, value) in _infoRows)
+        {
+            label.BackColor = Color.Transparent;
+            label.ForeColor = palette.SecondaryText;
+            value.BackColor = Color.Transparent;
+            value.ForeColor = palette.PrimaryText;
+        }
+
+        _previewPanel.BackColor = _windowSurfacePreview
+            ? Color.Transparent
+            : palette.PreviewBackground;
+        _previewBox.BackColor = palette.PreviewBackground;
+        _previewFallbackLabel.BackColor = Color.Transparent;
+        _previewFallbackLabel.ForeColor = palette.PreviewFallbackText;
+        _previewBoundsLabel.BackColor = Color.Transparent;
+        _previewBoundsLabel.ForeColor = palette.SecondaryText;
+
+        _outputTitleLabel.BackColor = Color.Transparent;
+        _outputTitleLabel.ForeColor = palette.SecondaryText;
+        _outputPathLabel.BackColor = Color.Transparent;
+        _outputPathLabel.ForeColor = palette.PrimaryText;
+        _rememberOutputCheckBox.BackColor = palette.SecondarySurface;
+        _rememberOutputCheckBox.ForeColor = palette.PrimaryText;
+
+        _countdownRing.ApplyPalette(palette);
+        _timeoutLabel.BackColor = Color.Transparent;
+        _timeoutLabel.ForeColor = _timeoutIsExpired || _timeoutIsUrgent
+            ? palette.ErrorText
+            : palette.SecondaryText;
+        _warningLabel.BackColor = Color.Transparent;
+        _warningLabel.ForeColor = palette.WarningText;
+
+        ApplyThemeToButtons(palette);
+        ApplyNativeSurfaceThemes();
+    }
+
+    private void ApplyNativeSurfaceThemes()
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        if (IsHandleCreated)
+        {
+            try { _nativeChromeAdapter.Apply(Handle, _themeSnapshot.Kind); }
+            catch { }
+        }
+
+        if (_mainContentPanel != null && _mainContentPanel.IsHandleCreated && !_mainContentPanel.IsDisposed)
+        {
+            try { _scrollThemeAdapter.Apply(_mainContentPanel, _themeSnapshot.Kind); }
+            catch { }
+        }
+    }
+
+    private void ApplyThemeToButtons(ConfirmationThemePalette palette)
+    {
+        ApplyButtonTheme(
+            _changeOutputButton,
+            palette.NeutralButtonBackground,
+            palette.NeutralButtonHover,
+            palette.NeutralButtonPressed,
+            palette.NeutralButtonText,
+            palette.NeutralButtonBorder,
+            palette.NeutralButtonBackground,
+            palette.DisabledText);
+        ApplyButtonTheme(
+            _approveButton,
+            palette.ApproveBackground,
+            palette.ApproveHover,
+            palette.ApprovePressed,
+            palette.ApproveText,
+            palette.FocusBorder,
+            palette.ApproveDisabled,
+            palette.DisabledText);
+        ApplyButtonTheme(
+            _rejectButton,
+            palette.RejectBackground,
+            palette.RejectHover,
+            palette.RejectPressed,
+            palette.RejectText,
+            palette.FocusBorder,
+            palette.RejectDisabled,
+            palette.DisabledText);
+    }
+
+    private static void ApplyButtonTheme(
+        Button button,
+        Color background,
+        Color hover,
+        Color pressed,
+        Color text,
+        Color border,
+        Color disabledBackground,
+        Color disabledText)
+    {
+        button.FlatStyle = FlatStyle.Flat;
+        button.UseVisualStyleBackColor = false;
+        button.BackColor = button.Enabled ? background : disabledBackground;
+        button.ForeColor = button.Enabled ? text : disabledText;
+        button.FlatAppearance.BorderColor = border;
+        button.FlatAppearance.MouseOverBackColor = hover;
+        button.FlatAppearance.MouseDownBackColor = pressed;
+        button.FlatAppearance.BorderSize = 1;
     }
 
     private void SetupForm()
@@ -420,9 +643,11 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     {
         base.OnShown(e);
 
+        ApplyNativeSurfaceThemes();
+
         ApplyWindowLocation();
 
-        var traceId = GetTraceIdFromSummary();
+        var traceId = _item.Presentation.TraceId;
         if (!string.IsNullOrEmpty(traceId))
             _tracer.ConfirmationShown(traceId, _item.RecordingId, _item.ConfirmationId);
 
@@ -444,6 +669,10 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+
+        ApplyNativeSurfaceThemes();
+        try { BeginInvoke((MethodInvoker)ApplyNativeSurfaceThemes); }
+        catch { }
 
         bool restoreAfterRecreation = _restoreDwmAfterHandleCreated;
         _restoreDwmAfterHandleCreated = false;
@@ -510,10 +739,10 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private void EnsureWindowSurfaceThumbnail()
     {
         if (!_windowSurfacePreview || _dwmThumbnail != null ||
-            !IsHandleCreated || IsDisposed || _summaryNode == null)
+            !IsHandleCreated || IsDisposed || string.IsNullOrWhiteSpace(_item.Presentation.WindowId))
             return;
 
-        if (!WindowIdParser.TryParse(GetString(_summaryNode, "window_id"), out var sourceWindow) ||
+        if (!WindowIdParser.TryParse(_item.Presentation.WindowId, out var sourceWindow) ||
             sourceWindow == nint.Zero)
             return;
 
@@ -542,7 +771,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private void ScheduleWindowSurfaceThumbnailEnsure(bool allowTransientlyHiddenForm)
     {
         if (_dwmDisposed || _dwmEnsurePosted || !_windowSurfacePreview ||
-            !IsHandleCreated || IsDisposed || _summaryNode == null)
+            !IsHandleCreated || IsDisposed || string.IsNullOrWhiteSpace(_item.Presentation.WindowId))
             return;
 
         int generation = _dwmHandleGeneration;
@@ -615,25 +844,25 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         if (_windowSurfacePreview && _previewFallbackLabel != null && !_previewFallbackLabel.IsDisposed)
         {
-            _previewPanel.BackColor = Color.FromArgb(32, 32, 32);
-            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(_summaryNode);
+            _previewPanel.BackColor = _themeSnapshot.Palette.PreviewBackground;
+            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(_item.Presentation);
             _previewFallbackLabel.Visible = true;
         }
     }
 
-    private string BuildWindowSurfaceFallback(JsonNode? summary)
+    private string BuildWindowSurfaceFallback(RecordingConfirmationPresentation presentation)
     {
-        string title = summary == null ? "N/A" : GetString(summary, "source_title");
-        string application = summary == null ? "" : GetString(summary, "source_application");
+        string title = DisplayValue(presentation.SourceTitle);
+        string application = presentation.SourceApplication ?? "";
         string identity = string.IsNullOrWhiteSpace(application) || application == "N/A"
             ? title
             : $"{title} ({application})";
         return _text.Format("Confirmation_Preview_WindowSurface_Fallback", identity);
     }
 
-    private string GetCaptureSemanticsDisplay(JsonNode summary)
+    private string GetCaptureSemanticsDisplay()
     {
-        string semantics = GetString(summary, "capture_semantics");
+        string semantics = _item.Presentation.CaptureSemantics;
         return semantics switch
         {
             "window_surface" => _text.Get("Confirmation_CaptureSemantics_WindowSurface"),
@@ -644,9 +873,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         };
     }
 
-    private string BuildPreviewSemanticsLabel(JsonNode summary)
+    private string BuildPreviewSemanticsLabel()
     {
-        string semantics = GetString(summary, "capture_semantics");
+        string semantics = _item.Presentation.CaptureSemantics;
         string label = semantics switch
         {
             "window_surface" => _text.Get("Confirmation_Preview_WindowSurface_Label"),
@@ -694,29 +923,28 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
     private void BuildLayout()
     {
-        var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary))!;
-        _summaryNode = s;
+        var presentation = _item.Presentation;
+        var summary = presentation.Summary;
 
-        var rootTable = new TableLayoutPanel
+        _rootTable = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(20),
-            RowCount = 7,
+            RowCount = 6,
             ColumnCount = 1,
             AutoSize = false
         };
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 0 header
-        rootTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // 1 main content (info + preview)
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 2 output
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 3 progress
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 4 timeout
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 5 warning
-        rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 6 buttons
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 0 header
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // 1 main content (info + preview)
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 2 output
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 3 timeout
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 4 warning
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 5 buttons
 
-        var maxTextWidth = Math.Max(200, ClientSize.Width - rootTable.Padding.Horizontal - 20);
+        var maxTextWidth = Math.Max(200, ClientSize.Width - _rootTable.Padding.Horizontal - 20);
 
         // Header (outside scrollable area)
-        var titleLabel = new Label
+        _titleLabel = new Label
         {
             Text = _text.Get("Confirmation_RequestTitle"),
             Font = new Font("Segoe UI", 12, FontStyle.Bold),
@@ -725,17 +953,16 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Margin = new Padding(0, 0, 0, 4)
         };
 
-        var queueLabel = new Label
+        _queueLabel = new Label
         {
             Text = _text.Format("Confirmation_QueuePosition", _queuePosition, _totalCount),
             Font = new Font("Segoe UI", 9),
-            ForeColor = Color.Gray,
             AutoSize = true,
             MaximumSize = new Size(maxTextWidth, 0),
             Margin = new Padding(0, 0, 0, 12)
         };
 
-        var headerPanel = new FlowLayoutPanel
+        _headerPanel = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
             AutoSize = true,
@@ -743,9 +970,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Margin = new Padding(0),
             Padding = new Padding(0)
         };
-        headerPanel.Controls.Add(titleLabel);
-        headerPanel.Controls.Add(queueLabel);
-        rootTable.Controls.Add(headerPanel, 0, 0);
+        _headerPanel.Controls.Add(_titleLabel);
+        _headerPanel.Controls.Add(_queueLabel);
+        _rootTable.Controls.Add(_headerPanel, 0, 0);
 
         // Main content: info + preview, scrollable only when below preferred minimum height.
         _mainContentPanel = new Panel
@@ -756,7 +983,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Margin = new Padding(0, 0, 0, 12)
         };
 
-        var contentTable = new TableLayoutPanel
+        _contentTable = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
@@ -764,14 +991,13 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Padding = new Padding(0),
             Margin = new Padding(0)
         };
-        contentTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, InfoColumnProportion * 100f));
-        contentTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, PreviewColumnProportion * 100f));
+        _contentTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, InfoColumnProportion * 100f));
+        _contentTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, PreviewColumnProportion * 100f));
 
         // Info panel
         _infoPanel = new Panel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(245, 245, 245),
             BorderStyle = BorderStyle.FixedSingle,
             Padding = new Padding(10),
             Margin = new Padding(0, 0, 10, 0)
@@ -791,23 +1017,21 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 12f));
 
         int row = 0;
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Source"), GetString(s, "source"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceType"), GetString(s, "source_type"));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Source"), DisplayValue(summary.Source));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceType"), DisplayValue(presentation.SourceType));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_CaptureSemantics"),
-            GetCaptureSemanticsDisplay(s));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), GetString(s, "source_title"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), GetString(s, "duration"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Countdown"), GetCountdownDisplay(s));
-        var rawAudio = GetString(s, "audio");
-        var audioSourceKind = GetString(s, "audio_source_kind");
+            GetCaptureSemanticsDisplay());
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), DisplayValue(presentation.SourceTitle));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), DisplayValue(summary.Duration));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Countdown"), GetCountdownDisplay());
+        var rawAudio = DisplayValue(summary.Audio);
+        var audioSourceKind = DisplayValue(summary.AudioSourceKind);
         string audioLabel;
         string audioDisplayValue;
         if (string.Equals(audioSourceKind, "system-loopback", StringComparison.Ordinal))
         {
-            var outputName = TryGetString(s, "audio_system_output_name", out var systemOutputName)
-                ? systemOutputName
-                : GetString(s, "audio_system_default_output");
-            var outputSelection = GetString(s, "audio_system_output_selection");
+            var outputName = DisplayValue(summary.AudioSystemOutputName ?? summary.AudioSystemDefaultOutput);
+            var outputSelection = DisplayValue(summary.AudioSystemOutputSelection);
             audioLabel = _text.Get("Confirmation_Info_SystemAudio");
             audioDisplayValue = string.Format(
                 System.Globalization.CultureInfo.CurrentCulture,
@@ -819,38 +1043,41 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         else
         {
             audioLabel = _text.Get("Confirmation_Info_Audio");
-            audioDisplayValue = TryGetString(s, "audio_device", out var audioDeviceName)
-                ? audioDeviceName
+            audioDisplayValue = !string.IsNullOrWhiteSpace(summary.AudioDevice)
+                ? summary.AudioDevice
                 : (rawAudio == "No audio" ? _text.Get("Confirmation_Info_NoAudio") : rawAudio);
         }
         AddInfoRow(_infoTable, row++, audioLabel, audioDisplayValue);
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), GetString(s, "nested_role"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_RecordingId"), GetString(s, "recording_id"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), GetString(s, "confirmation_id"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Timeout"), GetString(s, "timeout_seconds"));
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ExpiresAt"), GetString(s, "expires_at"));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), DisplayValue(summary.NestedRole));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_RecordingId"), DisplayValue(presentation.RecordingId));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), DisplayValue(presentation.ConfirmationId));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Timeout"), presentation.TimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ExpiresAt"), FormatUtc(presentation.ExpiresAtUtc));
 
-        if (string.Equals(GetString(s, "mode"), "screenshot_series", StringComparison.Ordinal))
+        if (string.Equals(summary.Mode, "screenshot_series", StringComparison.Ordinal))
         {
             AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Mode"), _text.Get("Confirmation_Value_ScreenshotSeries"));
-            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Interval"), GetString(s, "series_interval_ms") + " ms");
-            var bound = GetString(s, "series_max_count");
+            var series = summary.Series;
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Interval"),
+                (series?.IntervalMs.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "N/A") + " ms");
+            var bound = series?.MaxCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "N/A";
             if (bound == "N/A" || string.IsNullOrWhiteSpace(bound) || bound == "0")
-                bound = GetString(s, "series_max_duration_seconds") + " s";
+                bound = (series?.MaxDurationSeconds?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "N/A") + " s";
             AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Bound"), bound);
-            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_PlannedFrames"), GetString(s, "series_planned_frame_count"));
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_PlannedFrames"),
+                series?.PlannedFrameCount.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "N/A");
             AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_OutputKind"), _text.Get("Confirmation_Value_PngSequence"));
-            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_OutputDirectory"), GetString(s, "output"));
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_OutputDirectory"), DisplayValue(summary.Output));
         }
 
         _infoPanel.Controls.Add(_infoTable);
-        contentTable.Controls.Add(_infoPanel, 0, 0);
+        _contentTable.Controls.Add(_infoPanel, 0, 0);
 
         // Preview panel
         _previewPanel = new Panel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(32, 32, 32),
+            BackColor = _themeSnapshot.Palette.PreviewBackground,
             BorderStyle = BorderStyle.FixedSingle,
             Margin = new Padding(0),
             MinimumSize = new Size(120, 120)
@@ -867,7 +1094,6 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
-            ForeColor = Color.LightGray,
             BackColor = Color.Transparent,
             Visible = false
         };
@@ -875,9 +1101,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _previewPanel.Controls.Add(_previewBox);
         _previewPanel.Controls.Add(_previewFallbackLabel);
 
-        _captureBounds = ConfirmationPreviewBuilder.ParseBounds(s);
+        _captureBounds = presentation.CaptureBounds;
         _windowSurfacePreview = string.Equals(
-            GetString(s, "capture_semantics"),
+            presentation.CaptureSemantics,
             "window_surface",
             StringComparison.Ordinal);
 
@@ -893,12 +1119,11 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _previewBoundsLabel = new Label
         {
             Dock = DockStyle.Bottom,
-            ForeColor = Color.Gray,
             TextAlign = ContentAlignment.MiddleCenter,
             AutoSize = true,
             Margin = new Padding(0, 4, 0, 0)
         };
-        _previewBoundsLabel.Text = BuildPreviewSemanticsLabel(s);
+        _previewBoundsLabel.Text = BuildPreviewSemanticsLabel();
 
         var previewContainer = new TableLayoutPanel
         {
@@ -912,17 +1137,18 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         previewContainer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         previewContainer.Controls.Add(_previewPanel, 0, 0);
         previewContainer.Controls.Add(_previewBoundsLabel, 0, 1);
-        contentTable.Controls.Add(previewContainer, 1, 0);
+        _previewContainer = previewContainer;
+        _contentTable.Controls.Add(_previewContainer, 1, 0);
 
-        _mainContentPanel.Controls.Add(contentTable);
-        rootTable.Controls.Add(_mainContentPanel, 0, 1);
+        _mainContentPanel.Controls.Add(_contentTable);
+        _rootTable.Controls.Add(_mainContentPanel, 0, 1);
 
         // Keep header/warning labels wrapped/ellipsed after DPI scaling or size changes.
         SizeChanged += (_, _) =>
         {
-            var available = Math.Max(200, ClientSize.Width - rootTable.Padding.Horizontal - 20);
-            titleLabel.MaximumSize = new Size(available, 0);
-            queueLabel.MaximumSize = new Size(available, 0);
+            var available = Math.Max(200, ClientSize.Width - _rootTable.Padding.Horizontal - 20);
+            _titleLabel.MaximumSize = new Size(available, 0);
+            _queueLabel.MaximumSize = new Size(available, 0);
             if (_warningLabel != null)
                 _warningLabel.MaximumSize = new Size(available, 0);
             if (_timeoutLabel != null)
@@ -936,7 +1162,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             // A window_surface promise can never use a desktop screenshot.
             // DWM registration is deferred until the confirmation HWND exists.
             _previewBox.Visible = false;
-            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(s);
+            _previewFallbackLabel.Text = BuildWindowSurfaceFallback(presentation);
             _previewFallbackLabel.Visible = true;
         }
         else
@@ -944,7 +1170,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             // Display/region/window-rectangle plans truthfully show composed
             // desktop pixels using the existing GDI provider.
             var previewMaxSize = ComputePreviewMaxSize();
-            var previewBitmap = ConfirmationPreviewBuilder.TryBuildPreview(s, _previewProvider, previewMaxSize, out var fallbackMessage);
+            var previewBitmap = ConfirmationPreviewBuilder.TryBuildPreview(presentation.CaptureBounds, _previewProvider, previewMaxSize, out var fallbackMessage);
             if (previewBitmap != null)
             {
                 _previewBox.Image = previewBitmap;
@@ -965,38 +1191,23 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         // Output directory panel (layout container, no absolute coordinates)
         BuildOutputPanel();
-        rootTable.Controls.Add(_outputPanel, 0, 2);
-
-        // Countdown progress bar
-        _timeoutProgressBar = new ProgressBar
-        {
-            Dock = DockStyle.Fill,
-            Height = 16,
-            Minimum = 0,
-            Maximum = 1000,
-            Value = 1000,
-            Style = ProgressBarStyle.Continuous,
-            Margin = new Padding(0, 0, 0, 8)
-        };
-        rootTable.Controls.Add(_timeoutProgressBar, 0, 3);
+        _rootTable.Controls.Add(_outputPanel, 0, 2);
 
         _timeoutLabel = new Label
         {
             Text = _text.Get("Confirmation_Timeout_Initializing"),
             Font = new Font("Segoe UI", 9),
-            ForeColor = Color.Gray,
             AutoSize = true,
             MaximumSize = new Size(maxTextWidth, 0),
             Margin = new Padding(0, 0, 0, 8)
         };
-        rootTable.Controls.Add(_timeoutLabel, 0, 4);
+        _rootTable.Controls.Add(_timeoutLabel, 0, 3);
 
         // Warning label
         _warningLabel = new Label
         {
             Text = _text.Get("Confirmation_Warning"),
             Font = new Font("Segoe UI", 9),
-            ForeColor = Color.DarkRed,
             AutoSize = true,
             MaximumSize = new Size(maxTextWidth, 0),
             Margin = new Padding(0, 0, 0, 16)
@@ -1005,12 +1216,12 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         // Low-volume warning: if the microphone is enabled and the volume is
         // below 10%, show an explicit warning but do not block recording.
         // Muted devices are rejected before the confirmation form is created.
-        if (s["audio_volume_percent"]?.GetValue<int?>() is int volumePercent && volumePercent >= 0 && volumePercent < 10)
+        if (summary.AudioVolumePercent is int volumePercent && volumePercent >= 0 && volumePercent < 10)
         {
             _warningLabel.Text = _text.Format("Confirmation_Warning_LowVolume", volumePercent);
         }
 
-        rootTable.Controls.Add(_warningLabel, 0, 5);
+        _rootTable.Controls.Add(_warningLabel, 0, 4);
 
         // Buttons
         _buttonPanel = new FlowLayoutPanel
@@ -1028,33 +1239,38 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Text = _text.Get("Confirmation_Button_Reject"),
             Size = MeasureButtonSize(_text.Get("Confirmation_Button_Reject"), buttonFont),
-            BackColor = Color.FromArgb(200, 50, 50),
-            ForeColor = Color.White,
             Font = buttonFont,
             FlatStyle = FlatStyle.Flat,
             Margin = new Padding(8, 0, 0, 0)
         };
-        _rejectButton.FlatAppearance.BorderColor = Color.FromArgb(150, 50, 50);
         _rejectButton.Click += (_, _) => Reject();
 
         _approveButton = new Button
         {
             Text = _text.Get("Confirmation_Button_Approve"),
             Size = MeasureButtonSize(_text.Get("Confirmation_Button_Approve"), buttonFont),
-            BackColor = Color.FromArgb(0, 128, 0),
-            ForeColor = Color.White,
             Font = buttonFont,
             FlatStyle = FlatStyle.Flat,
             Margin = new Padding(0)
         };
-        _approveButton.FlatAppearance.BorderColor = Color.FromArgb(0, 100, 0);
+        _approveButton.Enabled = !_previewOnly;
         _approveButton.Click += (_, _) => Approve();
+
+        _countdownRing = new ConfirmationCountdownRing
+        {
+            Margin = new Padding(8, 0, 8, 0),
+            TabStop = false,
+            Enabled = false
+        };
 
         _buttonPanel.Controls.Add(_rejectButton);
         _buttonPanel.Controls.Add(_approveButton);
-        rootTable.Controls.Add(_buttonPanel, 0, 6);
+        // RightToLeft keeps the ring immediately to the left of Confirm while
+        // leaving both command buttons as independent hit targets.
+        _buttonPanel.Controls.Add(_countdownRing);
+        _rootTable.Controls.Add(_buttonPanel, 0, 5);
 
-        Controls.Add(rootTable);
+        Controls.Add(_rootTable);
 
         // Safe default: Enter maps to reject, not approve.
         AcceptButton = _rejectButton;
@@ -1098,7 +1314,6 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _outputPanel = new Panel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(250, 250, 250),
             BorderStyle = BorderStyle.FixedSingle,
             Padding = new Padding(10),
             Margin = new Padding(0, 0, 0, 12),
@@ -1120,17 +1335,16 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _outputTable.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // path
         _outputTable.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // actions
 
-        var outputTitleLabel = new Label
+        _outputTitleLabel = new Label
         {
             Text = _text.Get("Confirmation_Output_Title"),
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
-            ForeColor = Color.Gray,
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 4)
         };
 
         var pathFont = new Font("Segoe UI", 9);
-        var pathText = GetCurrentOutputPath(null);
+        var pathText = GetCurrentOutputPath();
         int pathTextHeight = TextRenderer.MeasureText(pathText, pathFont).Height;
 
         _outputPathLabel = new Label
@@ -1139,14 +1353,13 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Font = pathFont,
             AutoSize = false,
             Dock = DockStyle.Fill,
-            ForeColor = Color.Black,
             AutoEllipsis = true,
             Margin = new Padding(0, 0, 0, 8),
             MinimumSize = new Size(0, pathTextHeight)
         };
         _tooltip.SetToolTip(_outputPathLabel, _outputPathLabel.Text);
 
-        var outputActionsPanel = new FlowLayoutPanel
+        _outputActionsPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
@@ -1174,12 +1387,12 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Margin = new Padding(0, 2, 0, 0)
         };
 
-        outputActionsPanel.Controls.Add(_changeOutputButton);
-        outputActionsPanel.Controls.Add(_rememberOutputCheckBox);
+        _outputActionsPanel.Controls.Add(_changeOutputButton);
+        _outputActionsPanel.Controls.Add(_rememberOutputCheckBox);
 
-        _outputTable.Controls.Add(outputTitleLabel, 0, 0);
+        _outputTable.Controls.Add(_outputTitleLabel, 0, 0);
         _outputTable.Controls.Add(_outputPathLabel, 0, 1);
-        _outputTable.Controls.Add(outputActionsPanel, 0, 2);
+        _outputTable.Controls.Add(_outputActionsPanel, 0, 2);
         _outputPanel.Controls.Add(_outputTable);
     }
 
@@ -1197,7 +1410,6 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Text = label + ":",
             Font = new Font("Segoe UI", 9),
-            ForeColor = Color.Gray,
             AutoSize = true,
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 2, 8, 2)
@@ -1220,36 +1432,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _infoRows.Add((labelLabel, valueLabel));
     }
 
-    private static string GetString(JsonNode node, string key)
-    {
-        var val = node[key];
-        if (val == null) return "N/A";
-        if (val is JsonValue jsonValue)
-        {
-            try
-            {
-                return jsonValue.GetValue<string?>() ?? "N/A";
-            }
-            catch
-            {
-                // Numeric and boolean metadata still use their JSON text form.
-            }
-        }
-        return val.ToString();
-    }
+    private static string DisplayValue(string? value) => string.IsNullOrWhiteSpace(value) ? "N/A" : value;
 
-    private static bool TryGetString(JsonNode node, string key, out string value)
-    {
-        value = GetString(node, key);
-        return value != "N/A" && !string.IsNullOrEmpty(value);
-    }
+    private static string FormatUtc(DateTime value) => value.ToUniversalTime()
+        .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
 
-    private string GetCountdownDisplay(JsonNode summary)
+    private string GetCountdownDisplay()
     {
-        var raw = GetString(summary, "countdown_seconds");
-        if (!int.TryParse(raw, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var seconds))
-            return _text.Get("Confirmation_Value_NA");
+        var seconds = _item.Presentation.Summary.CountdownSeconds;
 
         return seconds <= 0
             ? _text.Get("Confirmation_Info_Countdown_Off")
@@ -1278,7 +1468,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         return Paths.DefaultOutputDir;
     }
 
-    private string GetCurrentOutputPath(JsonNode? summary)
+    private string GetCurrentOutputPath()
     {
         var path = GetCurrentOutputPathFromSummary();
         if (!string.IsNullOrWhiteSpace(path))
@@ -1290,31 +1480,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
     private string? GetCurrentOutputPathFromSummary()
     {
-        try
-        {
-            var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary));
-            var output = s?["output"];
-            if (output != null)
-                return output.GetValue<string?>();
-        }
-        catch { }
-        return null;
-    }
-
-    private string? GetTraceIdFromSummary()
-    {
-        try
-        {
-            var s = JsonNode.Parse(JsonSerializer.Serialize(_item.Summary, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
-            }));
-            var traceId = s?["trace_id"];
-            if (traceId != null)
-                return traceId.GetValue<string?>();
-        }
-        catch { }
-        return null;
+        return _item.Presentation.Summary.Output;
     }
 
     private void ChangeOutputDirectory()
@@ -1376,33 +1542,40 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     {
         var now = _utcNowProvider();
         var total = _item.ExpiresAtUtc - _item.CreatedAtUtc;
-        var remaining = _item.ExpiresAtUtc - now;
+        var snapshot = ConfirmationCountdownCalculator.Compute(total, _item.ExpiresAtUtc, now);
+        _countdownRing.ApplySnapshot(snapshot);
 
-        if (remaining <= TimeSpan.Zero || _item.IsExpiredLocal)
+        if (snapshot.IsExpired)
         {
-            _timeoutProgressBar.Value = 0;
+            _timeoutIsExpired = true;
+            _timeoutIsUrgent = false;
             _timeoutLabel.Text = _text.Get("Confirmation_Timeout_Expired");
-            _timeoutLabel.ForeColor = Color.DarkRed;
+            _timeoutLabel.ForeColor = _themeSnapshot.Palette.ErrorText;
+            _countdownRing.ApplyAccessibilityText(_timeoutLabel.Text);
             _approveButton.Enabled = false;
             _changeOutputButton.Enabled = false;
+            ApplyThemeToButtons(_themeSnapshot.Palette);
             StopCountdownTimer();
             return;
         }
 
-        var totalMs = Math.Max(1, (int)total.TotalMilliseconds);
-        var remainingMs = (int)remaining.TotalMilliseconds;
-        var ratio = Math.Max(0, Math.Min(1.0, (double)remainingMs / totalMs));
-        _timeoutProgressBar.Value = (int)(ratio * _timeoutProgressBar.Maximum);
-
-        var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        var seconds = snapshot.RemainingSeconds;
+        _timeoutIsExpired = false;
+        _timeoutIsUrgent = snapshot.IsUrgent;
         _timeoutLabel.Text = seconds <= 5
             ? _text.Format("Confirmation_Timeout_SecondsUrgent", seconds)
             : _text.Format("Confirmation_Timeout_Seconds", seconds);
-        _timeoutLabel.ForeColor = seconds <= 5 ? Color.DarkRed : Color.Gray;
+        _timeoutLabel.ForeColor = _timeoutIsUrgent
+            ? _themeSnapshot.Palette.ErrorText
+            : _themeSnapshot.Palette.SecondaryText;
+        _countdownRing.ApplyAccessibilityText(_timeoutLabel.Text);
     }
 
     private void Approve()
     {
+        if (_previewOnly)
+            return;
+
         var rememberOutputDirectory = _rememberOutputCheckBox?.Checked ?? false;
         var outputDirectory = _selectedOutputDirectory;
         if (rememberOutputDirectory && string.IsNullOrWhiteSpace(outputDirectory))

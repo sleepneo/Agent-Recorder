@@ -76,8 +76,6 @@ public sealed class ApiServer
 
     private ISystemAudioEndpointProvider EffectiveSystemAudioEndpointProvider => _engine.SystemAudioEndpointProvider;
 
-    private ISystemAudioExperimentFlag EffectiveSystemAudioExperimentFlag => _engine.SystemAudioExperimentFlag;
-
     public void Start()
     {
         _listener.Start();
@@ -617,8 +615,7 @@ public sealed class ApiServer
                 cfg,
                 EffectiveMicrophoneProvider,
                 EffectiveMicrophoneStatusProvider,
-                EffectiveSystemAudioEndpointProvider,
-                EffectiveSystemAudioExperimentFlag);
+                EffectiveSystemAudioEndpointProvider);
             preResolvedSystemAudioEndpoint = audioIntent.SystemAudioEndpoint;
             if (audioIntent.SystemAudioEndpoint != null)
                 ConfigParser.BindResolvedSystemAudioEndpoint(cfg, audioIntent.SystemAudioEndpoint);
@@ -670,7 +667,6 @@ public sealed class ApiServer
                             EffectiveMicrophoneProvider,
                             EffectiveMicrophoneStatusProvider,
                             EffectiveSystemAudioEndpointProvider,
-                            EffectiveSystemAudioExperimentFlag,
                             preResolvedSystemAudioEndpoint);
                         var capBounds = preBuilt.Config.Bounds;
                         var result = _engine.CreateRecording(
@@ -1045,11 +1041,11 @@ public sealed class ApiServer
             {
                 modes = new[] { "video", ScreenshotSeriesConfig.ModeName },
                 sources = new[] { "display", "window", "region" },
-                audio = new[] { "microphone" },
+                audio = new[] { "microphone", "system_audio" },
                 audio_capabilities = new
                 {
                     microphone = new { supported = true, status = GetFreshMicrophoneAvailability() },
-                    system_audio = new { supported = false, status = "not_implemented" }
+                    system_audio = new { supported = true, status = GetFreshSystemAudioAvailability() }
                 },
                 containers = new[] { "mp4" },
                 screenshot_series = new
@@ -1398,11 +1394,15 @@ public sealed class ApiServer
     {
         var devices = GetFreshMicrophoneDevices(out var enumerationAvailable);
         var availability = AvailabilityFromDevices(devices, enumerationAvailable);
+        var outputDevices = GetFreshSystemAudioDevices(out var outputEnumerationAvailable);
+        var outputAvailability = AvailabilityFromDevices(outputDevices, outputEnumerationAvailable);
         return new
         {
             status = availability,
+            microphone_status = availability,
+            system_audio_status = outputAvailability,
             microphone_supported = true,
-            system_audio_supported = false,
+            system_audio_supported = true,
             input_devices = devices.Select(d => new
             {
                 id = d.Id,
@@ -1411,6 +1411,14 @@ public sealed class ApiServer
                 state = d.State,
                 is_muted = d.IsMuted,
                 volume_percent = d.VolumePercent
+            }).ToArray(),
+            output_devices = outputDevices.Select(d => new
+            {
+                id = d.Id,
+                name = d.Name,
+                is_default = d.IsDefaultMultimedia,
+                state = d.State,
+                direction = "render"
             }).ToArray()
         };
     }
@@ -1449,12 +1457,42 @@ public sealed class ApiServer
         return AvailabilityFromDevices(devices, enumerationAvailable);
     }
 
+    private IReadOnlyList<SystemAudioEndpointInfo> GetFreshSystemAudioDevices(
+        out bool enumerationAvailable)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var devices = EffectiveSystemAudioEndpointProvider
+                .GetRenderEndpointsAsync(cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(5))
+                .GetAwaiter()
+                .GetResult();
+            enumerationAvailable = true;
+            return devices ?? Array.Empty<SystemAudioEndpointInfo>();
+        }
+        catch
+        {
+            enumerationAvailable = false;
+            return Array.Empty<SystemAudioEndpointInfo>();
+        }
+    }
+
+    private string GetFreshSystemAudioAvailability()
+    {
+        var devices = GetFreshSystemAudioDevices(out var enumerationAvailable);
+        return AvailabilityFromDevices(devices, enumerationAvailable);
+    }
+
     /// <summary>
     /// Maps a fresh device list to the stable availability status: "ready" when
     /// devices are present, "no_devices" when the enumeration succeeded but
     /// returned nothing, and "unavailable" when enumeration failed.
     /// </summary>
     private static string AvailabilityFromDevices(IReadOnlyList<MicrophoneDeviceInfo> devices, bool enumerationAvailable)
+        => !enumerationAvailable ? "unavailable" : devices.Count > 0 ? "ready" : "no_devices";
+
+    private static string AvailabilityFromDevices(IReadOnlyList<SystemAudioEndpointInfo> devices, bool enumerationAvailable)
         => !enumerationAvailable ? "unavailable" : devices.Count > 0 ? "ready" : "no_devices";
 
     private MicrophoneStatus QueryMicrophoneStatusSafe(string deviceId)
@@ -1488,10 +1526,17 @@ public sealed class ApiServer
         {
             screen_capture = new { status = "granted" },
             microphone = new { supported = true, status = permissionStatus },
-            system_audio = new { supported = false, status = "not_implemented" },
+            system_audio = new
+            {
+                supported = true,
+                status = PermissionStatusFromAvailability(GetFreshSystemAudioAvailability())
+            },
             output_directory = new { status = "granted", default_path = Paths.DefaultOutputDir, selection_ui = true }
         };
     }
+
+    private static string PermissionStatusFromAvailability(string availability)
+        => availability == "ready" ? "available" : availability;
 }
 
 internal sealed class HttpRequest

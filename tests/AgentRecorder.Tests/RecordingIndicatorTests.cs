@@ -83,23 +83,20 @@ public class RecordingIndicatorTests
         field!.SetValue(obj, value);
     }
 
-    private static Recording MakeRecording(
+    private static RecordingUiPresentation MakeRecording(
         (int x, int y, int w, int h) bounds,
         int? duration = null,
         string? nestedRole = null)
     {
-        return new Recording
+        return new RecordingUiPresentation
         {
+            RecordingId = "rec_" + Guid.NewGuid().ToString("N")[..12],
+            State = RecordingUiState.Recording,
             SourceType = "region",
+            CaptureBounds = new RecordingUiBounds(bounds.x, bounds.y, bounds.w, bounds.h),
             StartedAtUtc = DateTime.UtcNow,
             DurationSeconds = duration,
-            NestedRole = nestedRole,
-            Config = new CaptureConfig
-            {
-                SourceKind = "region",
-                Bounds = bounds,
-                OutputPath = Path.Combine(Path.GetTempPath(), $"test-indicator-{Guid.NewGuid():N}.mp4")
-            }
+            NestedRole = nestedRole
         };
     }
 
@@ -525,10 +522,10 @@ public class RecordingIndicatorTests
             var rec = MakeRecording((100, 100, 800, 600), 30);
 
             mgr.ShowFor(rec);
-            var first = mgr.IndicatorsForTests[rec.Id];
+            var first = mgr.IndicatorsForTests[rec.RecordingId];
 
             mgr.ShowFor(rec);
-            var second = mgr.IndicatorsForTests[rec.Id];
+            var second = mgr.IndicatorsForTests[rec.RecordingId];
 
             Assert.NotSame(first, second);
             Assert.Contains(audit.Events, e => e.evt == "recording_indicator.closed");
@@ -547,7 +544,7 @@ public class RecordingIndicatorTests
             var rec = MakeRecording((100, 100, 800, 600), 30);
 
             mgr.ShowFor(rec);
-            mgr.CloseFor(rec.Id, "test.close");
+            mgr.CloseFor(rec.RecordingId, "test.close");
 
             Assert.Empty(mgr.IndicatorsForTests);
             Assert.Contains(audit.Events, e => e.evt == "recording_indicator.closed");
@@ -587,10 +584,10 @@ public class RecordingIndicatorTests
             mgr.ShowFor(inner);
             Assert.Equal(2, mgr.IndicatorsForTests.Count);
 
-            mgr.CloseFor(inner.Id, "inner.done");
+            mgr.CloseFor(inner.RecordingId, "inner.done");
             Assert.Single(mgr.IndicatorsForTests);
 
-            mgr.CloseFor(outer.Id, "outer.done");
+            mgr.CloseFor(outer.RecordingId, "outer.done");
             Assert.Empty(mgr.IndicatorsForTests);
         });
     }
@@ -607,7 +604,7 @@ public class RecordingIndicatorTests
             var rec1 = MakeRecording((100, 100, 800, 600), 30);
             mgr.ShowFor(rec1);
 
-            var first = mgr.StopControlsForTests[rec1.Id];
+            var first = mgr.StopControlsForTests[rec1.RecordingId];
             Assert.Contains("停止", first.ButtonTextForTests);
             Assert.Contains("停止本次录制", first.TooltipTextForTests);
 
@@ -617,7 +614,7 @@ public class RecordingIndicatorTests
             var rec2 = MakeRecording((500, 500, 640, 480), 60);
             mgr.ShowFor(rec2);
 
-            var second = mgr.StopControlsForTests[rec2.Id];
+            var second = mgr.StopControlsForTests[rec2.RecordingId];
             Assert.Contains("Stop", second.ButtonTextForTests);
             Assert.Contains("Stop this recording", second.TooltipTextForTests);
 
@@ -768,11 +765,11 @@ public class RecordingIndicatorTests
             using var ctx = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create());
             var rec = MakeRecording((100, 100, 800, 600), 30);
 
-            ctx.SetPreparing(rec);
-            ctx.SetCountdown(rec, 3);
+            ctx.SetPreparing(rec with { State = RecordingUiState.Preparing });
+            ctx.SetCountdown(rec with { State = RecordingUiState.Countdown, CountdownRemainingSeconds = 3 });
 
             var mgr = GetPrivateField<RecordingIndicatorManager>(ctx, "_indicatorManager");
-            var indicator = mgr.IndicatorsForTests[rec.Id];
+            var indicator = mgr.IndicatorsForTests[rec.RecordingId];
             Assert.Equal(RecordingIndicatorPhase.Countdown, indicator.PhaseForTests);
             var overlays = GetPrivateField<Dictionary<string, CountdownOverlayForm>>(mgr, "_countdownOverlays");
             Assert.Single(overlays);
@@ -780,7 +777,7 @@ public class RecordingIndicatorTests
             // Countdown zero: the large digit overlay must disappear, but the
             // indicator must stay in the amber preparing phase. The red
             // recording phase is reserved for real first-frame evidence.
-            ctx.SetCountdown(rec, null);
+            ctx.SetCountdown(rec with { State = RecordingUiState.Countdown, CountdownRemainingSeconds = null });
 
             Assert.Empty(overlays);
             Assert.Equal(RecordingIndicatorPhase.Preparing, indicator.PhaseForTests);
@@ -790,7 +787,7 @@ public class RecordingIndicatorTests
             ctx.SetRecording(rec);
             Assert.Equal(RecordingIndicatorPhase.Recording, indicator.PhaseForTests);
 
-            ctx.SetIdle(rec);
+            ctx.SetIdle(rec with { State = RecordingUiState.Idle });
         });
     }
 

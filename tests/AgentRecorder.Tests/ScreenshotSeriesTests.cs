@@ -142,6 +142,9 @@ public sealed class ScreenshotSeriesTests : IDisposable
 
         Assert.Equal("UNSUPPORTED_FEATURE", ex.Code);
         Assert.Equal(0, runner.Calls);
+        Assert.True(SpinWait.SpinUntil(
+            () => engine.ActiveScreenshotSeriesOperationCountForTests == 0,
+            TimeSpan.FromSeconds(1)));
         Assert.Equal(0, engine.ActiveScreenshotSeriesOperationCountForTests);
     }
 
@@ -367,6 +370,9 @@ public sealed class ScreenshotSeriesTests : IDisposable
         Assert.Equal(2, rec.ScreenshotSeries.PlannedFrameCount);
         Assert.NotNull(rec.ScreenshotSeries.FinalDirectory);
         Assert.Null(rec.ScreenshotSeries.StagingDirectory);
+        Assert.True(SpinWait.SpinUntil(
+            () => engine.ActiveScreenshotSeriesOperationCountForTests == 0,
+            TimeSpan.FromSeconds(1)));
         Assert.Equal(0, engine.ActiveScreenshotSeriesOperationCountForTests);
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(rec.ScreenshotSeries.FinalDirectory!, "series.json")))!;
         Assert.Equal("completed", manifest["status"]!.GetValue<string>());
@@ -1218,14 +1224,14 @@ public sealed class ScreenshotSeriesTests : IDisposable
         public bool SupportsRegionSelectionUi => false;
         public int CountdownUpdates;
         public int SeriesUpdates;
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Reject());
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => callback(ConfirmationDecision.Reject());
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) => callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
-        public void SetCountdown(object rec, int? remainingSeconds) => CountdownUpdates++;
-        public void SetSeriesProgress(object rec, int captured, int planned, DateTime? nextCaptureDueAtUtc) => SeriesUpdates++;
+        public void SetCountdown(RecordingUiPresentation rec) => CountdownUpdates++;
+        public void SetSeriesProgress(RecordingUiPresentation rec) => SeriesUpdates++;
     }
 
     private sealed class CountingMicrophoneProvider : IMicrophoneDeviceProvider

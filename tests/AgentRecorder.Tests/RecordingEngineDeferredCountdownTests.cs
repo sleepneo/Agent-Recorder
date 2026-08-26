@@ -89,23 +89,23 @@ public class RecordingEngineDeferredCountdownTests : IDisposable
         public readonly List<int?> CountdownValues = new();
         public readonly object CountdownGate = new();
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds,
             Action<string, int, int, int, int, string, string> callback)
         {
             callback("display_unavailable", 0, 0, 0, 0, "", "virtual_screen");
         }
 
-        public void SetRecording(object rec) { Interlocked.Increment(ref SetRecordingCallCount); }
-        public void SetIdle(object rec) { Interlocked.Increment(ref SetIdleCallCount); }
+        public void SetRecording(RecordingUiPresentation rec) { Interlocked.Increment(ref SetRecordingCallCount); }
+        public void SetIdle(RecordingUiPresentation rec) { Interlocked.Increment(ref SetIdleCallCount); }
         public void SetAllIdle() { Interlocked.Increment(ref SetIdleCallCount); }
         public void ShowError(string text) { LastError = text; }
-        public void SetPreparing(object rec) { Interlocked.Increment(ref SetPreparingCallCount); }
-        public void SetCountdown(object rec, int? remainingSeconds)
+        public void SetPreparing(RecordingUiPresentation rec) { Interlocked.Increment(ref SetPreparingCallCount); }
+        public void SetCountdown(RecordingUiPresentation rec)
         {
-            lock (CountdownGate) CountdownValues.Add(remainingSeconds);
+            lock (CountdownGate) CountdownValues.Add(rec.CountdownRemainingSeconds);
         }
-        public void SetFinalizing(object rec) { Interlocked.Increment(ref SetFinalizingCallCount); }
+        public void SetFinalizing(RecordingUiPresentation rec) { Interlocked.Increment(ref SetFinalizingCallCount); }
 
         public int?[] SnapshotCountdownValues()
         {

@@ -142,11 +142,10 @@ The tray menu provides a Chinese/English language selector. The choice is
 persisted locally and applies to newly opened selection, confirmation, and
 recording-control windows.
 
-## Controlled System-Audio Preview
+## Public System Audio
 
-This release contains a default-off system-audio preview for supervised local
-evaluation. Start Agent Recorder with
-`AGENT_RECORDER_EXPERIMENTAL_SYSTEM_AUDIO=true`, then include:
+System audio is public and still requires the same local confirmation as every
+recording. A quick request can use the current Windows multimedia output:
 
 ```json
 {
@@ -156,13 +155,23 @@ evaluation. Start Agent Recorder with
 }
 ```
 
-The current Windows multimedia output endpoint is used unless an explicit
-render-endpoint ID is supplied. Microphone and system audio cannot be enabled in
-the same recording. The endpoint shown in the local confirmation is fixed for
-that recording: changing the Windows default output does not switch capture to
-another device. Because this is not yet a public capability, the default
-`/capabilities`, `/permissions`, and `/audio/devices` contract continues to
-report system audio as unavailable.
+The raw endpoint uses the same audio object:
+
+```json
+{
+  "source": { "type": "display", "display_id": "display_1" },
+  "stop_condition": { "type": "duration", "seconds": 30 },
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+Omit `audio.system_audio.device_id` to use the current Windows multimedia
+output. For an explicit endpoint, use an exact `id` from
+`GET /api/v1/audio/devices` → `output_devices`; only active render endpoints
+are listed. Microphone and system audio are mutually exclusive. The endpoint
+shown in local confirmation is fixed for that recording: changing the Windows
+default output does not switch capture, and returning to the approved endpoint
+uses bounded recovery with any silence gap reported in continuity metadata.
 
 ## Bounded Screenshot Series
 

@@ -12,6 +12,7 @@ using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Windows;
+using SharedStopControlGeometry = AgentRecorder.UI.Geometry.StopControlGeometry;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -70,21 +71,18 @@ public class RecordingStopControlTests : IDisposable
         field!.SetValue(obj, value);
     }
 
-    private static Recording MakeRecording(
+    private static RecordingUiPresentation MakeRecording(
         (int x, int y, int w, int h) bounds,
         string? nestedRole = null)
     {
-        return new Recording
+        return new RecordingUiPresentation
         {
+            RecordingId = "rec_" + Guid.NewGuid().ToString("N")[..12],
+            State = RecordingUiState.Recording,
             SourceType = "region",
+            CaptureBounds = new RecordingUiBounds(bounds.x, bounds.y, bounds.w, bounds.h),
             StartedAtUtc = DateTime.UtcNow,
-            NestedRole = nestedRole,
-            Config = new CaptureConfig
-            {
-                SourceKind = "region",
-                Bounds = bounds,
-                OutputPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"test-stop-{Guid.NewGuid():N}.mp4")
-            }
+            NestedRole = nestedRole
         };
     }
 
@@ -134,28 +132,28 @@ public class RecordingStopControlTests : IDisposable
     [Fact]
     public void ComputeBounds_RegularRegion_PrefersOutsideTopRight()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 800, 600);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(vs.X + 100, vs.Y + 100, 800, 600);
 
-        var result = RecordingStopControlGeometry.ComputeBounds(recording, null);
+        var result = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), null, vs);
 
-        Assert.Equal(recording.X + recording.Width + RecordingStopControlGeometry.OutsideMargin, result.X);
+        Assert.Equal(recording.X + recording.Width + SharedStopControlGeometry.OutsideMargin, result.X);
         Assert.Equal(recording.Y, result.Y);
-        Assert.Equal(RecordingStopControlGeometry.DefaultButtonWidth, result.Width);
-        Assert.Equal(RecordingStopControlGeometry.DefaultButtonHeight, result.Height);
+        Assert.Equal(SharedStopControlGeometry.DefaultButtonWidth, result.Width);
+        Assert.Equal(SharedStopControlGeometry.DefaultButtonHeight, result.Height);
     }
 
     [Fact]
     public void ComputeBounds_NearRightEdge_FallsBackInside()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(
             vs.X + vs.Width - 100,
             vs.Y + 100,
             100,
             100);
 
-        var result = RecordingStopControlGeometry.ComputeBounds(recording, null);
+        var result = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), null, vs);
 
         // Should be inside the recording's top-right corner.
         Assert.True(result.X < recording.X + recording.Width);
@@ -166,10 +164,10 @@ public class RecordingStopControlTests : IDisposable
     [Fact]
     public void ComputeBounds_NegativeCoordinates_ClampedToVirtualScreen()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(vs.X - 100, vs.Y - 100, 800, 600);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(vs.X - 100, vs.Y - 100, 800, 600);
 
-        var result = RecordingStopControlGeometry.ComputeBounds(recording, null);
+        var result = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), null, vs);
 
         Assert.True(result.X >= vs.X);
         Assert.True(result.Y >= vs.Y);
@@ -180,10 +178,10 @@ public class RecordingStopControlTests : IDisposable
     [Fact]
     public void ComputeBounds_FullScreenRecording_ClampedAndVisible()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(vs.X, vs.Y, vs.Width, vs.Height);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(vs.X, vs.Y, vs.Width, vs.Height);
 
-        var result = RecordingStopControlGeometry.ComputeBounds(recording, null);
+        var result = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), null, vs);
 
         // Outside placement would overflow, so it falls back inside and clamps.
         Assert.True(result.X >= vs.X);
@@ -195,11 +193,11 @@ public class RecordingStopControlTests : IDisposable
     [Fact]
     public void ComputeBounds_NestedInner_OffsetsDownFromOuter()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(vs.X + 100, vs.Y + 100, 800, 600);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(vs.X + 100, vs.Y + 100, 800, 600);
 
-        var outer = RecordingStopControlGeometry.ComputeBounds(recording, "outer");
-        var inner = RecordingStopControlGeometry.ComputeBounds(recording, "inner");
+        var outer = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), "outer", vs);
+        var inner = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), "inner", vs);
 
         Assert.True(inner.Y > outer.Y, "inner button should be offset below outer button");
 
@@ -212,60 +210,61 @@ public class RecordingStopControlTests : IDisposable
     [Fact]
     public void ComputeBounds_NestedInner_BottomEdge_DoesNotIntersect()
     {
-        var controlSize = new Size(RecordingStopControlGeometry.DefaultButtonWidth, RecordingStopControlGeometry.DefaultButtonHeight);
+        var controlSize = new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight);
         var virtualScreen = new Rectangle(0, 0, 3200, 1610);
 
         // Place recording so the outer button is flush with the bottom of the virtual screen.
         // This forces the inner "below" candidate to overflow and proves the algorithm picks
         // a non-overlapping alternative (above/left/right) instead of clamping back onto outer.
-        var recording = new RecordingIndicatorBounds(
+        var recording = new Rectangle(
             100,
             virtualScreen.Height - controlSize.Height,
             200,
             100);
 
-        var outer = RecordingStopControlGeometry.ComputeBounds(recording, "outer", virtualScreen);
-        var inner = RecordingStopControlGeometry.ComputeBounds(recording, "inner", virtualScreen);
+        var outer = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "outer", virtualScreen);
+        var inner = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "inner", virtualScreen);
 
-        Assert.True(RecordingStopControlGeometry.IsInside(outer, virtualScreen));
-        Assert.True(RecordingStopControlGeometry.IsInside(inner, virtualScreen));
-        Assert.False(RecordingStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect at bottom edge");
+        Assert.True(SharedStopControlGeometry.IsInside(outer, virtualScreen));
+        Assert.True(SharedStopControlGeometry.IsInside(inner, virtualScreen));
+        Assert.False(SharedStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect at bottom edge");
     }
 
     [Fact]
     public void ComputeBounds_NestedInner_BottomRightCorner_DoesNotIntersect()
     {
-        var controlSize = new Size(RecordingStopControlGeometry.DefaultButtonWidth, RecordingStopControlGeometry.DefaultButtonHeight);
+        var controlSize = new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight);
         var virtualScreen = new Rectangle(0, 0, 3200, 1610);
 
         // Recording fills the bottom-right corner; outer is clamped to bottom-right.
-        var recording = new RecordingIndicatorBounds(
+        var recording = new Rectangle(
             virtualScreen.Width - 200,
             virtualScreen.Height - controlSize.Height,
             200,
             100);
 
-        var outer = RecordingStopControlGeometry.ComputeBounds(recording, "outer", virtualScreen);
-        var inner = RecordingStopControlGeometry.ComputeBounds(recording, "inner", virtualScreen);
+        var outer = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "outer", virtualScreen);
+        var inner = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "inner", virtualScreen);
 
-        Assert.True(RecordingStopControlGeometry.IsInside(outer, virtualScreen));
-        Assert.True(RecordingStopControlGeometry.IsInside(inner, virtualScreen));
-        Assert.False(RecordingStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect at bottom-right corner");
+        Assert.True(SharedStopControlGeometry.IsInside(outer, virtualScreen));
+        Assert.True(SharedStopControlGeometry.IsInside(inner, virtualScreen));
+        Assert.False(SharedStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect at bottom-right corner");
     }
 
     [Fact]
     public void ComputeBounds_InjectedNegativeVirtualScreen_ActuallyUsesNegativeCoordinates()
     {
+        var controlSize = new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight);
         var virtualScreen = new Rectangle(-1920, -200, 3200, 1280);
-        var recording = new RecordingIndicatorBounds(-1500, -100, 800, 600);
+        var recording = new Rectangle(-1500, -100, 800, 600);
 
-        var outer = RecordingStopControlGeometry.ComputeBounds(recording, "outer", virtualScreen);
-        var inner = RecordingStopControlGeometry.ComputeBounds(recording, "inner", virtualScreen);
+        var outer = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "outer", virtualScreen);
+        var inner = SharedStopControlGeometry.ComputeBounds(recording, controlSize, "inner", virtualScreen);
 
         Assert.True(outer.X < 0 || outer.Y < 0, "outer should have at least one negative coordinate");
-        Assert.True(RecordingStopControlGeometry.IsInside(outer, virtualScreen));
-        Assert.True(RecordingStopControlGeometry.IsInside(inner, virtualScreen));
-        Assert.False(RecordingStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect with negative virtual screen origin");
+        Assert.True(SharedStopControlGeometry.IsInside(outer, virtualScreen));
+        Assert.True(SharedStopControlGeometry.IsInside(inner, virtualScreen));
+        Assert.False(SharedStopControlGeometry.Intersects(outer, inner), "nested stop controls must not intersect with negative virtual screen origin");
     }
 
     [Fact]
@@ -274,7 +273,7 @@ public class RecordingStopControlTests : IDisposable
         var virtualScreen = new Rectangle(0, 0, 3200, 1610);
         var preferred = new RecordingStopControlBounds(500, 500, 76, 28);
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred,
             new Size(76, 28),
             virtualScreen,
@@ -293,14 +292,14 @@ public class RecordingStopControlTests : IDisposable
         };
         var preferred = occupied[0];
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred,
             new Size(76, 28),
             virtualScreen,
             occupied);
 
-        Assert.True(RecordingStopControlGeometry.IsInside(result, virtualScreen));
-        Assert.False(RecordingStopControlGeometry.Intersects(result, occupied[0]));
+        Assert.True(SharedStopControlGeometry.IsInside(result, virtualScreen));
+        Assert.False(SharedStopControlGeometry.Intersects(result, occupied[0]));
     }
 
     [Fact]
@@ -315,23 +314,23 @@ public class RecordingStopControlTests : IDisposable
             new RecordingStopControlBounds(500, 564, 76, 28)
         };
 
-        var result = RecordingStopControlGeometry.ResolveCollision(
+        var result = SharedStopControlGeometry.ResolveCollision(
             preferred,
             new Size(76, 28),
             virtualScreen,
             occupied);
 
-        Assert.True(RecordingStopControlGeometry.IsInside(result, virtualScreen));
-        Assert.All(occupied, o => Assert.False(RecordingStopControlGeometry.Intersects(result, o)));
+        Assert.True(SharedStopControlGeometry.IsInside(result, virtualScreen));
+        Assert.All(occupied, o => Assert.False(SharedStopControlGeometry.Intersects(result, o)));
     }
 
     [Fact]
     public void ComputeBounds_TinyRegion_ButtonFitsInsideVirtualScreen()
     {
-        var vs = SystemInformation.VirtualScreen;
-        var recording = new RecordingIndicatorBounds(vs.X + 10, vs.Y + 10, 32, 32);
+        var vs = new Rectangle(0, 0, 3200, 1610);
+        var recording = new Rectangle(vs.X + 10, vs.Y + 10, 32, 32);
 
-        var result = RecordingStopControlGeometry.ComputeBounds(recording, null);
+        var result = SharedStopControlGeometry.ComputeBounds(recording, new Size(SharedStopControlGeometry.DefaultButtonWidth, SharedStopControlGeometry.DefaultButtonHeight), null, vs);
 
         Assert.True(result.Width > 0);
         Assert.True(result.Height > 0);
@@ -446,14 +445,14 @@ public class RecordingStopControlTests : IDisposable
             var rec = MakeRecording((100, 100, 800, 600));
 
             mgr.ShowFor(rec);
-            var stopControl = mgr.StopControlsForTests[rec.Id];
+            var stopControl = mgr.StopControlsForTests[rec.RecordingId];
             var button = GetPrivateField<Button>(stopControl, "_button");
             stopControl.Show();
             Application.DoEvents();
             button.PerformClick();
             Application.DoEvents();
 
-            Assert.Equal(rec.Id, requestedId);
+            Assert.Equal(rec.RecordingId, requestedId);
             Assert.Contains(audit.Events, e => e.evt == "recording_stop_control.clicked");
 
             mgr.CloseAll("test");
@@ -473,7 +472,7 @@ public class RecordingStopControlTests : IDisposable
             Assert.Single(mgr.IndicatorsForTests);
             Assert.Single(mgr.StopControlsForTests);
 
-            mgr.CloseFor(rec.Id, "test.close");
+            mgr.CloseFor(rec.RecordingId, "test.close");
 
             Assert.Empty(mgr.IndicatorsForTests);
             Assert.Empty(mgr.StopControlsForTests);
@@ -494,8 +493,8 @@ public class RecordingStopControlTests : IDisposable
             mgr.ShowFor(outer);
             mgr.ShowFor(inner);
 
-            var outerBounds = mgr.StopControlsForTests[outer.Id].PlacementBounds;
-            var innerBounds = mgr.StopControlsForTests[inner.Id].PlacementBounds;
+            var outerBounds = mgr.StopControlsForTests[outer.RecordingId].PlacementBounds;
+            var innerBounds = mgr.StopControlsForTests[inner.RecordingId].PlacementBounds;
 
             Assert.False(RecordingStopControlGeometry.Intersects(outerBounds, innerBounds),
                 "nested stop controls must not intersect");
@@ -527,8 +526,8 @@ public class RecordingStopControlTests : IDisposable
             mgr.ShowFor(outer);
             mgr.ShowFor(inner);
 
-            var outerBounds = mgr.StopControlsForTests[outer.Id].PlacementBounds;
-            var innerBounds = mgr.StopControlsForTests[inner.Id].PlacementBounds;
+            var outerBounds = mgr.StopControlsForTests[outer.RecordingId].PlacementBounds;
+            var innerBounds = mgr.StopControlsForTests[inner.RecordingId].PlacementBounds;
 
             Assert.True(RecordingStopControlGeometry.IsInside(outerBounds, vs));
             Assert.True(RecordingStopControlGeometry.IsInside(innerBounds, vs));
@@ -735,7 +734,7 @@ public class RecordingStopControlTests : IDisposable
             var rec = MakeRecording((100, 100, 800, 600));
 
             mgr.ShowFor(rec);
-            var stopControl = mgr.StopControlsForTests[rec.Id];
+            var stopControl = mgr.StopControlsForTests[rec.RecordingId];
             var button = GetPrivateField<Button>(stopControl, "_button");
             stopControl.Show();
             Application.DoEvents();
@@ -745,7 +744,7 @@ public class RecordingStopControlTests : IDisposable
             Assert.False(stopControl.ButtonEnabledForTests);
             Assert.Equal("停止中...", stopControl.ButtonTextForTests);
 
-            mgr.ResetStopControlAfterFailure(rec.Id);
+            mgr.ResetStopControlAfterFailure(rec.RecordingId);
 
             Assert.True(stopControl.ButtonEnabledForTests);
             Assert.Equal("\u25A0 停止", stopControl.ButtonTextForTests);
@@ -839,7 +838,7 @@ public class RecordingStopControlTests : IDisposable
 
             mgr.ShowFor(rec);
 
-            var stopControl = mgr.StopControlsForTests[rec.Id];
+            var stopControl = mgr.StopControlsForTests[rec.RecordingId];
             var placement = stopControl.PlacementBounds;
             var formBounds = stopControl.Bounds;
 
@@ -865,8 +864,8 @@ public class RecordingStopControlTests : IDisposable
             mgr.ShowFor(outer);
             mgr.ShowFor(inner);
 
-            var outerBounds = mgr.StopControlsForTests[outer.Id].PlacementBounds;
-            var innerBounds = mgr.StopControlsForTests[inner.Id].PlacementBounds;
+            var outerBounds = mgr.StopControlsForTests[outer.RecordingId].PlacementBounds;
+            var innerBounds = mgr.StopControlsForTests[inner.RecordingId].PlacementBounds;
 
             var text = new UiTextProvider(UiLanguageStore.LoadOrDefault());
             var font = new Font("Segoe UI", 8, FontStyle.Bold);
@@ -1055,7 +1054,7 @@ public class RecordingStopControlTests : IDisposable
 
             mgr.ShowFor(rec);
 
-            var stopControl = mgr.StopControlsForTests[rec.Id];
+            var stopControl = mgr.StopControlsForTests[rec.RecordingId];
             var formBounds = stopControl.Bounds;
 
             var shown = Assert.Single(audit.Events, e => e.evt == "recording_stop_control.shown");
@@ -1309,7 +1308,7 @@ public class RecordingStopControlTests : IDisposable
                 Assert.Equal(expectedHeight, firstFactorySize.Value.Height);
 
                 // Final form bounds and placement use the size passed to its factory call.
-                var stopControl = mgr.StopControlsForTests[rec.Id];
+                var stopControl = mgr.StopControlsForTests[rec.RecordingId];
                 var finalSize = factorySizes[^1];
                 Assert.Equal(finalSize.Width, stopControl.PlacementBounds.Width);
                 Assert.Equal(finalSize.Height, stopControl.PlacementBounds.Height);
@@ -1363,13 +1362,13 @@ public class RecordingStopControlTests : IDisposable
                 mgr.ShowFor(rec1);
                 mgr.ShowFor(rec2);
 
-                Assert.Equal("display_1", captured[rec1.Id].MonitorId);
-                Assert.Equal(96, captured[rec1.Id].DpiX);
-                Assert.Equal("display_2", captured[rec2.Id].MonitorId);
-                Assert.Equal(192, captured[rec2.Id].DpiX);
+                Assert.Equal("display_1", captured[rec1.RecordingId].MonitorId);
+                Assert.Equal(96, captured[rec1.RecordingId].DpiX);
+                Assert.Equal("display_2", captured[rec2.RecordingId].MonitorId);
+                Assert.Equal(192, captured[rec2.RecordingId].DpiX);
                 Assert.False(RecordingStopControlGeometry.Intersects(
-                    mgr.StopControlsForTests[rec1.Id].PlacementBounds,
-                    mgr.StopControlsForTests[rec2.Id].PlacementBounds),
+                    mgr.StopControlsForTests[rec1.RecordingId].PlacementBounds,
+                    mgr.StopControlsForTests[rec2.RecordingId].PlacementBounds),
                     "stop controls on different DPI displays must not intersect");
 
                 mgr.CloseAll("test");

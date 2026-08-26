@@ -1,16 +1,10 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Windows.Forms;
+using AgentRecorder.Infrastructure;
 
 namespace AgentRecorder.App;
-
-/// <summary>
-/// Immutable description of a capture rectangle in virtual screen coordinates.
-/// </summary>
-internal sealed record CaptureBounds(int X, int Y, int Width, int Height);
 
 /// <summary>
 /// Abstraction over screen capture so tests can inject a fake provider.
@@ -21,7 +15,7 @@ internal interface IScreenPreviewProvider
     /// Captures the given virtual screen bounds and returns a bitmap no larger
     /// than <paramref name="maxSize"/>, preserving aspect ratio and never upscaling.
     /// </summary>
-    Bitmap Capture(CaptureBounds bounds, Size maxSize);
+    Bitmap Capture(ConfirmationCaptureBounds bounds, Size maxSize);
 }
 
 /// <summary>
@@ -30,7 +24,7 @@ internal interface IScreenPreviewProvider
 /// </summary>
 internal sealed class GdiScreenPreviewProvider : IScreenPreviewProvider
 {
-    public Bitmap Capture(CaptureBounds bounds, Size maxSize)
+    public Bitmap Capture(ConfirmationCaptureBounds bounds, Size maxSize)
     {
         var virtualScreen = SystemInformation.VirtualScreen;
 
@@ -80,66 +74,25 @@ internal static class ConfirmationPreviewBuilder
     private const int HighlightBorderWidth = 3;
 
     /// <summary>
-    /// Parses capture_bounds from the summary node. Returns null if missing or invalid.
-    /// Never throws for malformed nodes.
-    /// </summary>
-    public static CaptureBounds? ParseBounds(JsonNode summary)
-    {
-        try
-        {
-            var captureBounds = summary["capture_bounds"];
-            if (captureBounds == null)
-                return null;
-            if (captureBounds.GetValueKind() != JsonValueKind.Object)
-                return null;
-
-            if (!TryGetInt(captureBounds["x"], out var x)) return null;
-            if (!TryGetInt(captureBounds["y"], out var y)) return null;
-            if (!TryGetInt(captureBounds["width"], out var w)) return null;
-            if (!TryGetInt(captureBounds["height"], out var h)) return null;
-
-            if (w <= 0 || h <= 0)
-                return null;
-
-            return new CaptureBounds(x, y, w, h);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool TryGetInt(JsonNode? node, out int value)
-    {
-        value = 0;
-        if (node == null)
-            return false;
-        try
-        {
-            value = node.GetValue<int>();
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Attempts to build a preview bitmap for the given summary.
+    /// Attempts to build a preview bitmap for typed capture bounds.
     /// Returns null and a fallback message if bounds are missing or capture fails.
     /// The returned bitmap has a highlight border drawn on its edges.
     /// </summary>
-    public static Bitmap? TryBuildPreview(JsonNode summary, IScreenPreviewProvider provider, Size maxSize, out string fallbackMessage)
+    public static Bitmap? TryBuildPreview(ConfirmationCaptureBounds? bounds, IScreenPreviewProvider provider, Size maxSize, out string fallbackMessage)
     {
         fallbackMessage = string.Empty;
 
         try
         {
-            var bounds = ParseBounds(summary);
             if (bounds == null)
             {
                 fallbackMessage = "无法生成预览：未包含录制范围信息。";
+                return null;
+            }
+
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                fallbackMessage = FallbackMessage;
                 return null;
             }
 
@@ -165,7 +118,7 @@ internal static class ConfirmationPreviewBuilder
     /// Clamps capture bounds to the current virtual screen so providers do not
     /// receive out-of-screen coordinates.
     /// </summary>
-    public static CaptureBounds ClampToVirtualScreen(CaptureBounds bounds)
+    public static ConfirmationCaptureBounds ClampToVirtualScreen(ConfirmationCaptureBounds bounds)
     {
         var virtualScreen = SystemInformation.VirtualScreen;
 
@@ -176,7 +129,7 @@ internal static class ConfirmationPreviewBuilder
         int width = Math.Max(0, right - x);
         int height = Math.Max(0, bottom - y);
 
-        return new CaptureBounds(x, y, width, height);
+        return new ConfirmationCaptureBounds(x, y, width, height);
     }
 
     private static void DrawHighlightBorder(Bitmap bitmap)

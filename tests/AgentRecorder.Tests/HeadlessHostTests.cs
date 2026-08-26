@@ -55,7 +55,7 @@ public class HeadlessHostTests
             var tray = new HeadlessTrayContext(audit);
 
             bool? approved = null;
-            tray.RequestConfirmation(new { source = "display" }, result => approved = result.Approved);
+            tray.RequestConfirmation(new RecordingConfirmationPresentation(), result => approved = result.Approved);
 
             Assert.False(approved);
             Assert.Contains("confirmation.headless_unavailable", audit.Events);
@@ -76,8 +76,15 @@ public class HeadlessHostTests
             var audit = new CapturingAuditLogger();
             var tray = new HeadlessTrayContext(audit);
 
-            tray.SetRecording(new object());
-            tray.SetIdle(new object());
+            var presentation = new RecordingUiPresentation
+            {
+                RecordingId = "rec-headless",
+                State = RecordingUiState.Recording,
+                SourceType = "region",
+                CaptureBounds = new RecordingUiBounds(0, 0, 100, 100)
+            };
+            tray.SetRecording(presentation);
+            tray.SetIdle(presentation with { State = RecordingUiState.Idle });
             tray.SetAllIdle();
             tray.ShowError("test error");
 

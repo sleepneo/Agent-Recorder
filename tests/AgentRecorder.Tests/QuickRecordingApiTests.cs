@@ -34,7 +34,7 @@ public class QuickRecordingApiTests
         public int ConfirmationCallbackDelayMs { get; set; } = 0;
         public bool AutoApprove { get; set; } = false;
 
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
             var decision = AutoApprove ? ConfirmationDecision.Approve() : ConfirmationDecision.Reject();
             if (ConfirmationCallbackDelayMs > 0)
@@ -52,8 +52,8 @@ public class QuickRecordingApiTests
             callback(RegionSelectionStatus, RegionX, RegionY, RegionW, RegionH, RegionDisplayId, RegionCoordSpace);
         }
 
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -1217,6 +1217,7 @@ public class QuickRecordingApiTests
         var server = CreateServer(tray, out var dataDir);
         try
         {
+            SetSingleDisplayTopology();
             server.Start();
             using var client = CreateClient();
 
@@ -1246,6 +1247,69 @@ public class QuickRecordingApiTests
             var afterLastRegionRecipe = FindRecipe(afterRecipes, "record_last_region");
             Assert.True(afterLastRegionRecipe.GetProperty("available").GetBoolean());
             Assert.Null(afterLastRegionRecipe.GetProperty("unavailable_reason").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_SelectedRegion_SyntheticNonZeroOrigin_UsesInjectedTopology()
+    {
+        var tray = new ControllableTray
+        {
+            RegionSelectionStatus = "selected",
+            RegionX = -1500,
+            RegionY = 125,
+            RegionW = 800,
+            RegionH = 600,
+            RegionDisplayId = "display_1",
+            RegionCoordSpace = "virtual_screen"
+        };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            var bounds = new SystemQuery.Bounds(-1600, 100, 1920, 1080);
+            var fingerprint = DisplayIdentityDeriver.Resolve("quick-negative-origin-source", new[]
+            {
+                new DisplayTargetMapping("quick-negative-origin-source", "quick-negative-origin-display")
+            }).Fingerprint!;
+            var providerCalls = 0;
+            SystemQuery.SetDisplayProvider(() =>
+            {
+                providerCalls++;
+                return new List<SystemQuery.DisplayInfo>
+                {
+                    new("display_1", "Display 1", true, bounds, 1.0)
+                };
+            });
+            SystemQuery.SetDisplayTopologyProvider(() =>
+            {
+                providerCalls++;
+                return new List<SystemQuery.DisplayTopologyInfo>
+                {
+                    new("display_1", "Display 1", true, bounds, 1.0,
+                        fingerprint, DisplayIdentityResolutionStatus.Resolved)
+                };
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"selected_region\"},\"duration_seconds\":120}"));
+
+            Assert.Equal(200, (int)response.StatusCode);
+            Assert.True(providerCalls > 0, "The request must use the injected synthetic topology providers.");
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var resolved = doc.RootElement.GetProperty("data").GetProperty("quick").GetProperty("resolved_source");
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal(-1500, resolved.GetProperty("bounds").GetProperty("x").GetInt32());
+            Assert.Equal(125, resolved.GetProperty("bounds").GetProperty("y").GetInt32());
         }
         finally
         {

@@ -1556,10 +1556,10 @@ public class RecordingBundleTests : IDisposable
     {
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback) { }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }
@@ -1753,18 +1753,18 @@ public class RecordingBundleTests : IDisposable
 
     private sealed class CallbackTray : ITrayContext
     {
-        private readonly Func<object, Action<ConfirmationDecision>, bool> _onConfirm;
-        public CallbackTray(Func<object, Action<ConfirmationDecision>, bool> onConfirm) => _onConfirm = onConfirm;
+        private readonly Func<RecordingConfirmationPresentation, Action<ConfirmationDecision>, bool> _onConfirm;
+        public CallbackTray(Func<RecordingConfirmationPresentation, Action<ConfirmationDecision>, bool> onConfirm) => _onConfirm = onConfirm;
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => false;
-        public void RequestConfirmation(object summary, Action<ConfirmationDecision> callback)
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
-            if (!_onConfirm(summary, callback))
+            if (!_onConfirm(presentation, callback))
                 callback(new ConfirmationDecision(false));
         }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
-        public void SetRecording(object rec) { }
-        public void SetIdle(object rec) { }
+        public void SetRecording(RecordingUiPresentation rec) { }
+        public void SetIdle(RecordingUiPresentation rec) { }
         public void SetAllIdle() { }
         public void ShowError(string text) { }
     }

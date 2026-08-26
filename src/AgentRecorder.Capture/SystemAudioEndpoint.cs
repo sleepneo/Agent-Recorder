@@ -18,6 +18,14 @@ public sealed record SystemAudioEndpointInfo(
 
 public interface ISystemAudioEndpointProvider
 {
+    /// <summary>
+    /// Enumerates the current active render endpoints. The result contains
+    /// only safe, read-only metadata suitable for public capability/device
+    /// responses; it never opens an audio client.
+    /// </summary>
+    Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
+        CancellationToken cancellationToken = default);
+
     Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
         CancellationToken cancellationToken = default);
 
@@ -38,9 +46,10 @@ public sealed class SystemAudioEndpointEnumerationException : Exception
 }
 
 /// <summary>
-/// Windows CoreAudio provider used only by the controlled experiment. It reads
-/// the current eRender/eMultimedia default and validates explicit ids through
-/// the same endpoint reader. It does not open an audio client or capture data.
+/// Windows CoreAudio provider for public system-audio capability and capture
+/// flows. It reads active eRender endpoints and the eRender/eMultimedia default
+/// and validates explicit ids through the same endpoint reader. It does not
+/// open an audio client or capture data.
 /// </summary>
 public sealed class CoreAudioSystemAudioEndpointProvider : ISystemAudioEndpointProvider
 {
@@ -51,50 +60,61 @@ public sealed class CoreAudioSystemAudioEndpointProvider : ISystemAudioEndpointP
         _nativeClient = nativeClient ?? new CoreAudioSystemAudioEndpointNativeClient();
     }
 
-    public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+    public async Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(
         CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            return Task.FromResult(_nativeClient.GetDefaultMultimediaRenderEndpoint());
-        }
-        catch (SystemAudioEndpointEnumerationException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new SystemAudioEndpointEnumerationException(
-                "system_audio_endpoint_enumeration_unavailable",
-                $"Could not enumerate the default render endpoint: {ex.Message}");
-        }
+        var endpoints = await ExecuteNativeAsync(
+            ct => _nativeClient.GetRenderEndpoints(ct), cancellationToken).ConfigureAwait(false);
+        return endpoints
+            .OrderByDescending(endpoint => endpoint.IsDefaultMultimedia)
+            .ThenBy(endpoint => endpoint.Name, StringComparer.Ordinal)
+            .ThenBy(endpoint => endpoint.Id, StringComparer.Ordinal)
+            .ToArray();
     }
+
+    public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(
+        CancellationToken cancellationToken = default)
+        => ExecuteNativeAsync(ct => _nativeClient.GetDefaultMultimediaRenderEndpoint(ct), cancellationToken);
 
     public Task<SystemAudioEndpointInfo?> GetEndpointAsync(
         string endpointId,
         CancellationToken cancellationToken = default)
+        => ExecuteNativeAsync(ct => _nativeClient.GetEndpoint(endpointId, ct), cancellationToken);
+
+    private static async Task<T> ExecuteNativeAsync<T>(Func<CancellationToken, T> operation,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            return Task.FromResult(_nativeClient.GetEndpoint(endpointId));
+            // CoreAudio calls are synchronous COM calls. Run them off the API
+            // request thread so the caller's WaitAsync timeout remains a real
+            // response bound; cancellation is checked before and after the
+            // native operation.
+            var result = await Task.Run(() => operation(cancellationToken), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (SystemAudioEndpointEnumerationException)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             throw new SystemAudioEndpointEnumerationException(
                 "system_audio_endpoint_enumeration_unavailable",
-                $"Could not enumerate the requested render endpoint: {ex.Message}");
+                "Could not enumerate the render endpoint.");
         }
     }
 }
 
 public interface ISystemAudioEndpointNativeClient
 {
-    SystemAudioEndpointInfo? GetDefaultMultimediaRenderEndpoint();
-    SystemAudioEndpointInfo? GetEndpoint(string endpointId);
+    IReadOnlyList<SystemAudioEndpointInfo> GetRenderEndpoints(CancellationToken cancellationToken = default);
+    SystemAudioEndpointInfo? GetDefaultMultimediaRenderEndpoint(CancellationToken cancellationToken = default);
+    SystemAudioEndpointInfo? GetEndpoint(string endpointId, CancellationToken cancellationToken = default);
 }
