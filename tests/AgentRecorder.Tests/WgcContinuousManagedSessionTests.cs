@@ -2202,6 +2202,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
+    [InlineData("display_unavailable")]
     public async Task HelperLifecycleFail_PreservesSpecificReasonAcrossExitArbitration(string reason)
     {
         var recId = $"rec_{Guid.NewGuid():N}";
@@ -2684,6 +2685,127 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     }
 
     [Fact]
+    public async Task SixtySecondNaturalCompletion_Reports1800FramesAnd60000Ms()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        const long fileSize = 15000000L;
+        var opts = CreateOptions(recId, o =>
+        {
+            o.DurationMs = WgcContinuousDurationPolicy.MaxMilliseconds;
+            o.ProcessTimeoutMs = WgcContinuousDurationPolicy.MaxMilliseconds + 15000;
+        });
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(Progress(1, 1000, 50000))
+            .Concat(Progress(900, 30000, 7500000))
+            .Concat(Ok(1800, WgcContinuousDurationPolicy.MaxMilliseconds, fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.NotNull(result.Summary);
+        Assert.Equal(1800, result.Summary!.FramesCaptured);
+        Assert.Equal(WgcContinuousDurationPolicy.MaxMilliseconds, result.Summary.DurationMs);
+        Assert.True(result.OutputFileExists);
+        Assert.Equal(fileSize, result.OutputFileSizeBytes);
+        Assert.Empty(result.Summary.ValidationErrors);
+    }
+
+    [Fact]
+    public async Task SixtySecondDuration_EarlyStopProducesStoppedSummary()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        const long fileSize = 7500000L;
+        var opts = CreateOptions(recId, o =>
+        {
+            o.DurationMs = WgcContinuousDurationPolicy.MaxMilliseconds;
+            o.StopWaitTimeoutMs = 3000;
+        });
+        var initial = Started(recId, opts.OutputPath)
+            .Concat(Progress(1, 1000, 50000))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(initial,
+            Stopped(90, 3000, fileSize),
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            autoContinueOnStopSignalPath: opts.StopSignalPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var stopped = await session.RequestStop();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(stopped);
+        Assert.Equal(WgcContinuousManagedSessionState.Stopped, result.State);
+        Assert.Equal(ContinuousSessionState.Stopped, result.Summary!.State);
+        Assert.Equal(90, result.Summary.FramesCaptured);
+        Assert.Equal(3000, result.Summary.DurationMs);
+        Assert.True(result.OutputFileExists);
+    }
+
+    [Fact]
+    public async Task SixtySecondDuration_LifecycleTimeoutRemainsFailure()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.DurationMs = WgcContinuousDurationPolicy.MaxMilliseconds;
+            o.ProcessTimeoutMs = 500;
+            o.StopWaitTimeoutMs = 200;
+        });
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(Progress(1, 1000))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            ignoreStopSignal: true,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("lifecycle", result.FailurePhase);
+        Assert.Equal("process_timeout", result.FailureCategory);
+    }
+
+    [Fact]
+    public async Task SixtySecondDuration_IsAcceptedAndEmittedAs60000Ms()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+            o.DurationMs = WgcContinuousDurationPolicy.MaxMilliseconds);
+        var fake = new FakeWgcContinuousProcess(Array.Empty<string>());
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+
+        Assert.NotNull(fake.CapturedArguments);
+        var args = fake.CapturedArguments!.ToList();
+        Assert.Equal(
+            WgcContinuousDurationPolicy.MaxMilliseconds.ToString(),
+            args[args.IndexOf("--duration-ms") + 1]);
+
+        session.Dispose();
+    }
+
+    [Fact]
     public void WindowTarget_ZeroHwndRejectedBeforeProcessStart()
     {
         var opts = CreateOptions($"rec_{Guid.NewGuid():N}", o =>
@@ -2702,7 +2824,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
     [Theory]
     [InlineData(500)]
-    [InlineData(15000)]
+    [InlineData(61000)]
     public void Duration_OutOfRange_Rejected(int durationMs)
     {
         var recId = $"rec_{Guid.NewGuid():N}";

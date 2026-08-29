@@ -257,6 +257,18 @@ BytesWritten: 5000";
         Assert.Equal(5000, evt.BytesWritten);
     }
 
+    [Fact]
+    public void ValidateAndSummarize_DisplayUnavailableFail_PreservesExactReason()
+    {
+        var stdout = "RESULT: FAIL\nReason: The approved target display is no longer available\nErrorCode: display_unavailable";
+
+        var summary = WgcContinuousEventStreamParser.ValidateAndSummarize(
+            WgcContinuousEventStreamParser.ParseEvents(stdout));
+
+        Assert.Equal("display_unavailable", summary.ErrorCode);
+        Assert.Equal("display_unavailable", summary.GetStopReasonForEvidence());
+    }
+
     // -----------------------------------------------------------------
     // State machine validation tests - happy paths
     // -----------------------------------------------------------------
@@ -1009,6 +1021,7 @@ Stage: wat";
     [InlineData("window_minimized")]
     [InlineData("window_closed")]
     [InlineData("size_changed")]
+    [InlineData("display_unavailable")]
     [InlineData("zero_frames")]
     [InlineData("timeout")]
     [InlineData("cancelled")]

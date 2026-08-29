@@ -173,8 +173,14 @@ TEST_REGISTRAR(OptionsDurationTooShortFails, []() {
     ASSERT_FALSE(result.error.empty());
 });
 
+TEST_REGISTRAR(OptionsDurationMaxAcceptedAndStored, []() {
+    auto result = ParseArgs({ L"--duration-ms", L"60000" });
+    ASSERT_TRUE(result.error.empty());
+    ASSERT_EQ(result.options.durationMs, kWgcContinuousMaxDurationMs);
+});
+
 TEST_REGISTRAR(OptionsDurationTooLongFails, []() {
-    auto result = ParseArgs({ L"--duration-ms", L"20000" });
+    auto result = ParseArgs({ L"--duration-ms", L"60001" });
     ASSERT_FALSE(result.error.empty());
 });
 

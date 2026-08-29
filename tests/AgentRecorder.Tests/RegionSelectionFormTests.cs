@@ -310,20 +310,21 @@ public class RegionSelectionFormTests
                 initial.Width,
                 initial.Height);
 
-            string expectedId;
+            string expectedDisplayName;
             try
             {
                 var displays = SystemQuery.EnumDisplays();
-                expectedId = RegionSelectionGeometry.FindDisplayId(virtualBounds, displays)
-                          ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, displays)
-                          ?? "unknown";
+                var expectedId = RegionSelectionGeometry.FindDisplayId(virtualBounds, displays)
+                              ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, displays);
+                expectedDisplayName = displays.FirstOrDefault(display => display.id == expectedId)?.name
+                                   ?? "unknown";
             }
             catch
             {
-                expectedId = "unknown";
+                expectedDisplayName = "unknown";
             }
 
-            Assert.Contains(expectedId, displayLabel.Text);
+            Assert.Contains(expectedDisplayName, displayLabel.Text);
 
             form.Close();
         });

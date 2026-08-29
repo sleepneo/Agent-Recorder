@@ -16,7 +16,13 @@ public static class SystemQuery
     /// public API contract for <c>GET /api/v1/displays</c>; its ordinal ID is
     /// intentionally not a topology-stable identity.
     /// </summary>
-    public record DisplayInfo(string id, string name, bool is_primary, Bounds bounds, double scale_factor);
+    public record DisplayInfo(
+        string id,
+        string name,
+        bool is_primary,
+        Bounds bounds,
+        double scale_factor,
+        int? windows_display_number = null);
 
     /// <summary>
     /// One active-display topology entry. <see cref="id"/> remains the public
@@ -31,13 +37,23 @@ public static class SystemQuery
         Bounds bounds,
         double scale_factor,
         string? stable_identity,
-        DisplayIdentityResolutionStatus identity_status);
+        DisplayIdentityResolutionStatus identity_status,
+        int? windows_display_number = null);
 
     /// <summary>
     /// Internal display information used by the floating stop-control layout logic.
     /// Contains the effective DPI and monitor handle needed for PerMonitorV2 sizing.
     /// </summary>
-    internal record DisplayDetail(string id, string name, bool is_primary, Bounds bounds, double scale_factor, int dpiX, int dpiY, IntPtr handle);
+    internal record DisplayDetail(
+        string id,
+        string name,
+        bool is_primary,
+        Bounds bounds,
+        double scale_factor,
+        int dpiX,
+        int dpiY,
+        IntPtr handle,
+        int? windows_display_number = null);
 
     public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds);
 
@@ -61,6 +77,12 @@ public static class SystemQuery
     private static readonly AsyncLocal<Func<List<DisplayTopologyInfo>>?> _displayTopologyProvider = new();
 
     /// <summary>
+    /// Injectable raw monitor snapshot for deterministic tests of the production
+    /// monitor reader's shared DPI and Windows-number path.
+    /// </summary>
+    private static readonly AsyncLocal<Func<List<DisplayMonitorEntry>>?> _displayMonitorEntriesProvider = new();
+
+    /// <summary>
     /// Injectable detail provider for tests that need to control DPI/handle values
     /// consumed by <see cref="DisplayDpiResolver"/>.
     /// </summary>
@@ -72,6 +94,8 @@ public static class SystemQuery
     public static void SetDisplayProvider(Func<List<DisplayInfo>>? provider) => _displayProvider.Value = provider;
     public static void SetDisplayTopologyProvider(Func<List<DisplayTopologyInfo>>? provider)
         => _displayTopologyProvider.Value = provider;
+    internal static void SetDisplayMonitorEntriesProvider(Func<List<DisplayMonitorEntry>>? provider)
+        => _displayMonitorEntriesProvider.Value = provider;
     internal static void SetDisplayDetailProvider(Func<List<DisplayDetail>>? provider) => _displayDetailProvider.Value = provider;
     public static void SetActiveWindowProvider(Func<WindowInfo?>? provider) => _activeWindowProvider.Value = provider;
     public static void SetWindowProvider(Func<bool, bool, List<WindowInfo>>? provider) => _windowProvider.Value = provider;
@@ -80,20 +104,35 @@ public static class SystemQuery
     {
         var displayProvider = _displayProvider.Value;
         if (displayProvider != null)
-            return displayProvider();
+            return NormalizeDisplayInfos(displayProvider());
 
         var topologyProvider = _displayTopologyProvider.Value;
         if (topologyProvider != null)
-            return topologyProvider()
-                .Select(d => new DisplayInfo(d.id, d.name, d.is_primary, d.bounds, d.scale_factor))
+        {
+            var topology = NormalizeDisplayTopologyInfos(topologyProvider());
+            return topology
+                .Select(d => new DisplayInfo(
+                    d.id,
+                    d.name,
+                    d.is_primary,
+                    d.bounds,
+                    d.scale_factor,
+                    d.windows_display_number))
                 .ToList();
+        }
 
         // The public metadata endpoint and virtual-screen helpers do not need
         // internal identity material. Keep them on the lightweight monitor
         // enumeration; the complete active topology reader is used by the
         // parser and approval barrier.
         return EnumDisplayDetails()
-            .Select(d => new DisplayInfo(d.id, d.name, d.is_primary, d.bounds, d.scale_factor))
+            .Select(d => new DisplayInfo(
+                d.id,
+                d.name,
+                d.is_primary,
+                d.bounds,
+                d.scale_factor,
+                d.windows_display_number))
             .ToList();
     }
 
@@ -106,12 +145,13 @@ public static class SystemQuery
     {
         var topologyProvider = _displayTopologyProvider.Value;
         if (topologyProvider != null)
-            return topologyProvider();
+            return NormalizeDisplayTopologyInfos(topologyProvider());
 
         var displayProvider = _displayProvider.Value;
         if (displayProvider != null)
         {
-            return displayProvider()
+            var displays = NormalizeDisplayInfos(displayProvider());
+            return displays
                 .Select(d => new DisplayTopologyInfo(
                     d.id,
                     d.name,
@@ -119,49 +159,38 @@ public static class SystemQuery
                     d.bounds,
                     d.scale_factor,
                     null,
-                    DisplayIdentityResolutionStatus.Unresolved))
+                    DisplayIdentityResolutionStatus.Unresolved,
+                    d.windows_display_number))
                 .ToList();
         }
 
         var mappingsAvailable = TryReadActiveDisplayConfigMappings(
             out var mappings,
             out var deviceInfoFailure);
-        var list = new List<DisplayTopologyInfo>();
-        int idx = 0;
-        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr _, ref RECT _, IntPtr _) =>
+        var monitors = ReadDisplayMonitorEntries();
+        var metadata = AlignDisplayMetadata(monitors
+            .Select(m => new DisplayMetadata(m.Id, "", m.WindowsDisplayNumber))
+            .ToArray());
+        var list = new List<DisplayTopologyInfo>(monitors.Count);
+        for (int i = 0; i < monitors.Count; i++)
         {
-            var mi = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
-            if (GetMonitorInfo(hMon, ref mi))
-            {
-                idx++;
-                bool primary = (mi.dwFlags & 1) != 0;
-                var r = mi.rcMonitor;
-                int w = r.right - r.left;
-                int h = r.bottom - r.top;
-                double scale = 1.0;
-                try
-                {
-                    if (GetDpiForMonitor(hMon, 0 /* MDT_EFFECTIVE_DPI */, out uint dx, out _ ) == 0 && w > 0)
-                        scale = dx / 96.0;
-                }
-                catch { }
-
-                var identity = !mappingsAvailable
-                    ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unresolved)
-                    : deviceInfoFailure
-                        ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unavailable)
-                        : DisplayIdentityDeriver.Resolve(mi.szDevice, mappings);
-                list.Add(new DisplayTopologyInfo(
-                    $"display_{idx}",
-                    $"Display {idx}",
-                    primary,
-                    new Bounds(r.left, r.top, w, h),
-                    scale,
-                    identity.Fingerprint,
-                    identity.Status));
-            }
-            return true;
-        }, IntPtr.Zero);
+            var monitor = monitors[i];
+            var identity = !mappingsAvailable
+                ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unresolved)
+                : deviceInfoFailure
+                    ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unavailable)
+                    : DisplayIdentityDeriver.Resolve(monitor.DeviceName, mappings);
+            var display = metadata[i];
+            list.Add(new DisplayTopologyInfo(
+                monitor.Id,
+                display.Name,
+                monitor.IsPrimary,
+                monitor.Bounds,
+                monitor.ScaleFactor,
+                identity.Fingerprint,
+                identity.Status,
+                display.WindowsDisplayNumber));
+        }
         return list;
     }
 
@@ -173,25 +202,74 @@ public static class SystemQuery
     {
         var displayDetailProvider = _displayDetailProvider.Value;
         if (displayDetailProvider != null)
-            return displayDetailProvider();
+            return NormalizeDisplayDetails(displayDetailProvider());
 
         var topologyProvider = _displayTopologyProvider.Value;
         if (topologyProvider != null)
         {
-            return topologyProvider()
-                .Select(d => new DisplayDetail(d.id, d.name, d.is_primary, d.bounds, d.scale_factor, 96, 96, IntPtr.Zero))
+            var topology = NormalizeDisplayTopologyInfos(topologyProvider());
+            return topology
+                .Select(d => new DisplayDetail(
+                    d.id,
+                    d.name,
+                    d.is_primary,
+                    d.bounds,
+                    d.scale_factor,
+                    96,
+                    96,
+                    IntPtr.Zero,
+                    d.windows_display_number))
                 .ToList();
         }
 
         var displayProvider = _displayProvider.Value;
         if (displayProvider != null)
         {
-            return displayProvider()
-                .Select(d => new DisplayDetail(d.id, d.name, d.is_primary, d.bounds, d.scale_factor, 96, 96, IntPtr.Zero))
+            var displays = NormalizeDisplayInfos(displayProvider());
+            return displays
+                .Select(d => new DisplayDetail(
+                    d.id,
+                    d.name,
+                    d.is_primary,
+                    d.bounds,
+                    d.scale_factor,
+                    96,
+                    96,
+                    IntPtr.Zero,
+                    d.windows_display_number))
                 .ToList();
         }
 
-        var list = new List<DisplayDetail>();
+        var monitors = ReadDisplayMonitorEntries();
+        var metadata = AlignDisplayMetadata(monitors
+            .Select(m => new DisplayMetadata(m.Id, "", m.WindowsDisplayNumber))
+            .ToArray());
+        return monitors.Select((monitor, index) =>
+            new DisplayDetail(
+                monitor.Id,
+                metadata[index].Name,
+                monitor.IsPrimary,
+                monitor.Bounds,
+                monitor.ScaleFactor,
+                monitor.DpiX,
+                monitor.DpiY,
+                monitor.Handle,
+                metadata[index].WindowsDisplayNumber))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Reads the monitor metadata once and assigns the compatibility API token
+    /// from enumeration order. The independent Windows number is parsed from
+    /// MONITORINFOEX.szDevice and is never derived from this index.
+    /// </summary>
+    private static List<DisplayMonitorEntry> ReadDisplayMonitorEntries()
+    {
+        var provider = _displayMonitorEntriesProvider.Value;
+        if (provider != null)
+            return provider();
+
+        var list = new List<DisplayMonitorEntry>();
         int idx = 0;
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr _, ref RECT _, IntPtr _) =>
         {
@@ -217,14 +295,141 @@ public static class SystemQuery
                     }
                 }
                 catch { }
-                list.Add(new DisplayDetail(
-                    $"display_{idx}", $"Display {idx}", primary,
-                    new Bounds(r.left, r.top, w, h), scale, dpiX, dpiY, hMon));
+
+                var deviceName = mi.szDevice ?? "";
+                var windowsNumber = WindowsDisplayNumberParser.TryParse(deviceName, out var parsed)
+                    ? parsed
+                    : (int?)null;
+                list.Add(new DisplayMonitorEntry(
+                    $"display_{idx}",
+                    deviceName,
+                    primary,
+                    new Bounds(r.left, r.top, w, h),
+                    scale,
+                    dpiX,
+                    dpiY,
+                    hMon,
+                    windowsNumber));
             }
             return true;
         }, IntPtr.Zero);
         return list;
     }
+
+    private static List<DisplayInfo> NormalizeDisplayInfos(IEnumerable<DisplayInfo> displays)
+    {
+        var source = displays.ToArray();
+        var metadata = AlignDisplayMetadata(source
+            .Select(d => new DisplayMetadata(d.id, d.name, d.windows_display_number))
+            .ToArray());
+        return source.Select((display, index) => display with
+        {
+            name = metadata[index].Name,
+            windows_display_number = metadata[index].WindowsDisplayNumber
+        }).ToList();
+    }
+
+    private static List<DisplayTopologyInfo> NormalizeDisplayTopologyInfos(
+        IEnumerable<DisplayTopologyInfo> displays)
+    {
+        var source = displays.ToArray();
+        var metadata = AlignDisplayMetadata(source
+            .Select(d => new DisplayMetadata(d.id, d.name, d.windows_display_number))
+            .ToArray());
+        return source.Select((display, index) => display with
+        {
+            name = metadata[index].Name,
+            windows_display_number = metadata[index].WindowsDisplayNumber
+        }).ToList();
+    }
+
+    private static List<DisplayDetail> NormalizeDisplayDetails(IEnumerable<DisplayDetail> displays)
+    {
+        var source = displays.ToArray();
+        var metadata = AlignDisplayMetadata(source
+            .Select(d => new DisplayMetadata(d.id, d.name, d.windows_display_number))
+            .ToArray());
+        return source.Select((display, index) => display with
+        {
+            name = metadata[index].Name,
+            windows_display_number = metadata[index].WindowsDisplayNumber
+        }).ToList();
+    }
+
+    private static DisplayMetadata[] AlignDisplayMetadata(IReadOnlyList<DisplayMetadata> source)
+    {
+        var duplicateNumbers = source
+            .Where(item => item.WindowsDisplayNumber is int number && number > 0)
+            .GroupBy(item => item.WindowsDisplayNumber!.Value)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet();
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new DisplayMetadata[source.Count];
+
+        for (int i = 0; i < source.Count; i++)
+        {
+            var item = source[i];
+            var rawNumber = item.WindowsDisplayNumber;
+            bool validUniqueNumber = rawNumber is int positive && positive > 0
+                && !duplicateNumbers.Contains(positive);
+            int? number = validUniqueNumber ? rawNumber : null;
+            bool mustUseApiFallback = rawNumber is int raw
+                && (raw <= 0 || duplicateNumbers.Contains(raw));
+            string name = number is int windowsNumber
+                ? $"Display {windowsNumber}"
+                : mustUseApiFallback || string.IsNullOrWhiteSpace(item.Name)
+                    || LooksLikeOrdinalDisplayName(item.Name)
+                    ? ApiFallbackName(item.Id, i + 1)
+                    : item.Name.Trim();
+
+            if (!usedNames.Add(name))
+            {
+                name = ApiFallbackName(item.Id, i + 1);
+                if (!usedNames.Add(name))
+                    name = $"{name} #{i + 1}";
+                number = null;
+            }
+
+            result[i] = new DisplayMetadata(item.Id, name, number);
+        }
+
+        return result;
+    }
+
+    private static bool LooksLikeOrdinalDisplayName(string name)
+    {
+        var value = name.Trim();
+        foreach (var prefix in new[] { "Display ", "显示器 " })
+        {
+            if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var suffix = value[prefix.Length..];
+            if (suffix.Length == 0 || suffix.Any(character => character is < '0' or > '9'))
+                return false;
+            return int.TryParse(suffix, out var parsed) && parsed > 0;
+        }
+        return false;
+    }
+
+    private static string ApiFallbackName(string id, int index)
+    {
+        var token = string.IsNullOrWhiteSpace(id) ? $"item_{index}" : id.Trim();
+        return $"Display (API {token})";
+    }
+
+    private readonly record struct DisplayMetadata(string Id, string Name, int? WindowsDisplayNumber);
+
+    internal sealed record DisplayMonitorEntry(
+        string Id,
+        string DeviceName,
+        bool IsPrimary,
+        Bounds Bounds,
+        double ScaleFactor,
+        int DpiX,
+        int DpiY,
+        IntPtr Handle,
+        int? WindowsDisplayNumber);
 
     /// <summary>
     /// Returns the union of all display bounds (virtual screen).

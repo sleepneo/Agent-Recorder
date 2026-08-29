@@ -54,10 +54,43 @@ public sealed class WgcRegionVerticalSliceTests
         Assert.Equal(1, probe.CallCount);
     }
 
+    [Fact]
+    public void RegionSixtySecondDuration_RemainsEligibleForWgc()
+    {
+        var config = RegionConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+        var probe = new CountingProbe(healthy: true, IncludeTargetDisplay: true);
+
+        var result = WithRegionBackend(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal(CaptureBackendSelector.WgcContinuousBackend, result.BackendType);
+        Assert.Equal("wgc_probe_success", result.Evidence.SelectionReasonCode);
+        Assert.False(result.Evidence.Fallback);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void RegionSixtyOneSecondDuration_FallsBackWithStableReason()
+    {
+        var config = RegionConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1;
+        var probe = new CountingProbe(healthy: true, IncludeTargetDisplay: true);
+
+        var plan = WithRegionBackend(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.BuildPlan(config, probe));
+
+        Assert.Equal("ffmpeg-region", plan.PlannedBackend);
+        Assert.Equal("duration_not_eligible", plan.Evidence.SelectionReasonCode);
+        Assert.True(plan.Evidence.Fallback);
+        Assert.Equal(0, probe.CallCount);
+    }
+
     [Theory]
     [InlineData(true, 5, 30, "microphone_not_eligible")]
+    [InlineData(true, 60, 30, "microphone_not_eligible")]
     [InlineData(false, 0, 30, "duration_not_eligible")]
-    [InlineData(false, 11, 30, "duration_not_eligible")]
+    [InlineData(false, 61, 30, "duration_not_eligible")]
     [InlineData(false, 5, 0, "fps_not_eligible")]
     [InlineData(false, 5, 61, "fps_not_eligible")]
     public void RegionExperimentIneligible_FallsBackBeforeProbe(

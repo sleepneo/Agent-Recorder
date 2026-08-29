@@ -52,7 +52,7 @@ public sealed class WgcContinuousSessionOptions
     /// <summary>Absolute output MP4 path.</summary>
     public string OutputPath { get; set; } = "";
 
-    /// <summary>Recording duration in milliseconds, 1000-10000.</summary>
+    /// <summary>Recording duration in milliseconds, 1000-60000.</summary>
     public int DurationMs { get; set; } = 5000;
 
     /// <summary>Target frame rate, 1-60.</summary>

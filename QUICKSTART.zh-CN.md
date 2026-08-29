@@ -23,9 +23,10 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 4. AI agent 应该负责：
    - 运行 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
    - 从返回的 `api_key_file` 读取 API key
-   - 优先调用 `POST /api/v1/recordings/quick`
-   - 轮询 `/confirmations/{id}` 等待本地用户确认
-   - 轮询 `/recordings/{id}` 等待录制完成
+   - 优先调用 `POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000`
+   - 以 `wait.goal_reached=true` 作为可信开始信号
+   - 有界等待超时后，再继续长轮询录制状态
+   - 等待录制完成
    - 录制完成后报告 MP4 输出路径和元数据
 
 5. 人类用户只需要：
@@ -39,8 +40,10 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 | target.type | 说明 |
 | --- | --- |
 | `primary_display` | 录制主显示器 |
+| `windows_display` | 按 Windows“标识”显示的正整数录制指定显示器 |
 | `active_window` | 按当前活动窗口的可见边界录制 |
 | `selected_region` | 弹出选区 UI，让用户框选区域后录制 |
+| `last_region` | 复用最近一次成功选区 |
 
 请求示例：
 
@@ -52,6 +55,13 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
   "video": { "fps": 30, "quality": "medium" }
 }
 ```
+
+`windows_display` 的 `windows_display_number` 必须是 Windows“标识”界面显示的正
+JSON integer，例如 `2`，不是 API `display_id` 的数字后缀；成功后仍需本地确认。
+
+有界创建等待只观察本地批准、准备、倒计时和可信首帧，不会通过 HTTP 批准录制。
+返回 `timed_out=true` 时，使用返回的 `recording_id` 继续
+`GET /recordings/{id}` 长轮询；省略 `wait_for` 时保持原有的立即创建响应。
 
 `countdown_seconds` 对 raw API 和 quick API 都可选，省略时为 `3`，只接受 `0..10`
 的整数。设为 `0` 可关闭可见倒计时，但仍保留本地确认、准备、预检和可信首帧门槛。

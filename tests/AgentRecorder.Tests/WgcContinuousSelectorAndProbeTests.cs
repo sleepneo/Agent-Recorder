@@ -49,6 +49,54 @@ public sealed class WgcContinuousSelectorTests
     }
 
     [Fact]
+    public void DisplaySixtySecondDuration_RemainsEligibleForWgc()
+    {
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithDisplayFlag(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal(CaptureBackendSelector.WgcContinuousBackend, result.BackendType);
+        Assert.Equal("wgc_probe_success", result.Evidence.SelectionReasonCode);
+        Assert.False(result.Evidence.Fallback);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void DisplayOneSecondDuration_RemainsEligibleForWgc()
+    {
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MinSeconds;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithDisplayFlag(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal(CaptureBackendSelector.WgcContinuousBackend, result.BackendType);
+        Assert.Equal("wgc_probe_success", result.Evidence.SelectionReasonCode);
+        Assert.False(result.Evidence.Fallback);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void DisplaySixtyOneSecondDuration_FallsBackWithStableReason()
+    {
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithDisplayFlag(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.BuildPlan(config, probe));
+
+        Assert.Equal("ffmpeg", result.PlannedBackend);
+        Assert.Equal("duration_not_eligible", result.Evidence.SelectionReasonCode);
+        Assert.True(result.Evidence.Fallback);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
     public void WindowContinuousFlagAndHealthyProbe_UsesWgcContinuous()
     {
         var probe = new FakeAvailabilityProbe(true);
@@ -58,6 +106,38 @@ public sealed class WgcContinuousSelectorTests
         Assert.Equal("wgc-continuous", result.BackendType);
         Assert.IsType<WgcContinuousCaptureBackend>(result.Backend);
         Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowSixtySecondDuration_RemainsEligibleForWgc()
+    {
+        var config = EligibleWindowConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal(CaptureBackendSelector.WgcContinuousBackend, result.BackendType);
+        Assert.Equal("wgc_probe_success", result.Evidence.SelectionReasonCode);
+        Assert.False(result.Evidence.Fallback);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void WindowSixtyOneSecondDuration_FallsBackWithStableReason()
+    {
+        var config = EligibleWindowConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1;
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithWindowFlag(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.BuildPlan(config, probe));
+
+        Assert.Equal("ffmpeg-window-region", result.PlannedBackend);
+        Assert.Equal("duration_not_eligible", result.Evidence.SelectionReasonCode);
+        Assert.True(result.Evidence.Fallback);
+        Assert.Equal(0, probe.CallCount);
     }
 
     [Fact]
@@ -89,7 +169,7 @@ public sealed class WgcContinuousSelectorTests
     }
 
     [Theory]
-    [InlineData("wgc", 30, "duration_not_eligible")]
+    [InlineData("wgc", 61, "duration_not_eligible")]
     [InlineData(" WGC ", 5, "microphone_not_eligible")]
     public void WindowLegacyAlias_UsesContinuousEligibilityAndScreenRectangleFallback(
         string flag,
@@ -135,6 +215,7 @@ public sealed class WgcContinuousSelectorTests
     {
         var config = EligibleWindowConfig();
         config.Microphone = true;
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
         var probe = new FakeAvailabilityProbe(true);
 
         var result = WithWindowFlag("wgc-continuous", () =>
@@ -150,6 +231,7 @@ public sealed class WgcContinuousSelectorTests
     {
         var config = EligibleConfig();
         config.Microphone = true;
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
         var probe = new FakeAvailabilityProbe(true);
 
         var result = WithDisplayFlag("wgc-continuous", () =>
@@ -161,13 +243,31 @@ public sealed class WgcContinuousSelectorTests
     }
 
     [Fact]
+    public void DisplayWithSystemAudioAtSixtySeconds_UsesAvSplit_WithoutProbe()
+    {
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+        config.AudioSourceKind = AudioCaptureSourceKind.SystemLoopback;
+        config.SystemLoopbackEndpoint = "{endpoint}";
+        var probe = new FakeAvailabilityProbe(true);
+
+        var result = WithDisplayFlag("wgc-continuous", () =>
+            CaptureBackendSelector.SelectWithEvidence(config, probe));
+
+        Assert.Equal("ffmpeg-av-split", result.BackendType);
+        Assert.IsType<AvSplitCaptureBackend>(result.Backend);
+        Assert.Equal("audio_not_eligible", result.Evidence.SelectionReasonCode);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
     public void InvalidWgcCandidate_UsesOriginalBackend_WithoutProbe()
     {
         var configs = new[]
         {
             ConfigWith(duration: null),
             ConfigWith(duration: 0),
-            ConfigWith(duration: 11),
+            ConfigWith(duration: WgcContinuousDurationPolicy.MaxSeconds + 1),
             ConfigWith(fps: 0),
             ConfigWith(fps: 61),
             ConfigWith(bounds: (0, 0, 0, 1080)),
@@ -346,6 +446,125 @@ public sealed class WgcContinuousAvailabilityProbeTests
         Assert.Equal(WgcContinuousAvailabilityProbe.VersionTimeoutMs, runner.Calls[0].TimeoutMs);
         Assert.Equal(new[] { "--probe" }, runner.Calls[1].Arguments);
         Assert.Equal(WgcContinuousAvailabilityProbe.ProbeTimeoutMs, runner.Calls[1].TimeoutMs);
+    }
+
+    [Fact]
+    public void DisplaySixtySecondDuration_RealProbePassesCandidateGate()
+    {
+        var runner = HealthyRunner();
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.True(result.Available);
+        Assert.Equal("available", result.ReasonCode);
+        Assert.Equal(2, runner.Calls.Count);
+    }
+
+    [Fact]
+    public void WindowSixtySecondDuration_RealProbePreservesWindowTargetChecks()
+    {
+        var runner = HealthyRunner();
+        var config = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = (nint)0x1234,
+            Bounds = (701, 811, 1280, 720),
+            DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds,
+            Fps = 30,
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.True(result.Available);
+        Assert.True(result.Evidence!.WindowCaptureSupported);
+        Assert.Equal(2, runner.Calls.Count);
+    }
+
+    [Fact]
+    public void RegionSixtySecondDuration_RealProbePreservesDisplayAndCropChecks()
+    {
+        var runner = HealthyRunner();
+        var config = new CaptureConfig
+        {
+            SourceKind = "region",
+            DisplayId = "display-left",
+            DisplayBounds = Bounds,
+            Bounds = (100, 80, 640, 480),
+            DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds,
+            Fps = 30,
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.True(result.Available);
+        Assert.Equal(Bounds, (
+            result.Evidence!.Monitors.Single().X,
+            result.Evidence.Monitors.Single().Y,
+            result.Evidence.Monitors.Single().Width,
+            result.Evidence.Monitors.Single().Height));
+        Assert.Equal(2, runner.Calls.Count);
+    }
+
+    [Theory]
+    [InlineData("display")]
+    [InlineData("window")]
+    [InlineData("region")]
+    public void SixtyOneSecondDuration_RealProbeRejectsBeforeStartingHelper(string sourceKind)
+    {
+        var runner = new FakeProbeProcessRunner();
+        var config = sourceKind switch
+        {
+            "window" => new CaptureConfig
+            {
+                SourceKind = "window",
+                WindowHandle = (nint)0x1234,
+                Bounds = (701, 811, 1280, 720),
+                DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1,
+                Fps = 30,
+            },
+            "region" => new CaptureConfig
+            {
+                SourceKind = "region",
+                DisplayId = "display-left",
+                DisplayBounds = Bounds,
+                Bounds = (100, 80, 640, 480),
+                DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1,
+                Fps = 30,
+            },
+            _ => new CaptureConfig
+            {
+                SourceKind = "display",
+                Bounds = Bounds,
+                DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds + 1,
+                Fps = 30,
+            },
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.False(result.Available);
+        Assert.Equal("invalid_config", result.ReasonCode);
+        Assert.Empty(runner.Calls);
+    }
+
+    [Fact]
+    public void SelectorWithRealProbe_AtSixtySecondsPlansWgcWithoutFallback()
+    {
+        var runner = HealthyRunner();
+        var probe = CreateProbe(runner);
+        var config = EligibleConfig();
+        config.DurationSeconds = WgcContinuousDurationPolicy.MaxSeconds;
+
+        var plan = WithDisplayBackend(CaptureBackendSelector.WgcContinuousBackend, () =>
+            CaptureBackendSelector.BuildPlan(config, probe));
+
+        Assert.Equal(CaptureBackendSelector.WgcContinuousBackend, plan.PlannedBackend);
+        Assert.Equal("wgc_probe_success", plan.Evidence.SelectionReasonCode);
+        Assert.Equal("fresh_probe", plan.Evidence.AvailabilitySource);
+        Assert.False(plan.Evidence.Fallback);
+        Assert.Equal(2, runner.Calls.Count);
     }
 
     [Fact]
@@ -600,6 +819,32 @@ public sealed class WgcContinuousAvailabilityProbeTests
         DurationSeconds = 5,
         Fps = 30,
     };
+
+    private static FakeProbeProcessRunner HealthyRunner() => new(
+        new WgcHelperProcessResult
+        {
+            ExitCode = 0,
+            StandardOutput = "wgc-native-helper 0.3.0\n",
+        },
+        new WgcHelperProcessResult
+        {
+            ExitCode = 0,
+            StandardOutput = HealthyProbeOutput(),
+        });
+
+    private static T WithDisplayBackend<T>(string? value, Func<T> action)
+    {
+        string? previous = Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar, value);
+            return action();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar, previous);
+        }
+    }
 
     private static WgcContinuousAvailabilityProbe CreateProbe(FakeProbeProcessRunner runner) =>
         new(

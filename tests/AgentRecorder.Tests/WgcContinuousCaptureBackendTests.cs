@@ -387,7 +387,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     }
 
     // -----------------------------------------------------------------
-    // 3. window/region、无 duration、>10 秒、microphone、非法输出在启动前拒绝
+    // 3. window/region、无 duration、>60 秒、microphone、非法输出在启动前拒绝
     // -----------------------------------------------------------------
 
     [Fact]
@@ -412,7 +412,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         Assert.NotNull(_lastHarness);
         Assert.Equal(WgcContinuousTargetKind.Window, _lastHarness!.Options.TargetKind);
         Assert.Equal((nint)0x1234, _lastHarness.Options.WindowHandle);
-        var args = _lastHarness.Process.CapturedArguments!;
+        var args = _lastHarness.Process.CapturedArguments!.ToList();
         Assert.Equal("--capture-continuous-window", args[0]);
         Assert.Equal("--window-hwnd", args[1]);
         Assert.Equal("0x1234", args[2]);
@@ -442,6 +442,29 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             (fake.Options.DisplayX, fake.Options.DisplayY, fake.Options.DisplayWidth, fake.Options.DisplayHeight));
         Assert.Equal((-1800, -100, 640, 480),
             (fake.Options.RegionX, fake.Options.RegionY, fake.Options.RegionWidth, fake.Options.RegionHeight));
+
+        backend.Dispose();
+    }
+
+    [Fact]
+    public void Start_SixtySecondDuration_Passes60000MsToManagedSession()
+    {
+        var process = new FakeWgcContinuousProcess(Array.Empty<string>());
+        var backend = CreateBackend(process, out _, out _);
+        var cfg = CreateValidConfig(durationSeconds: WgcContinuousDurationPolicy.MaxSeconds);
+
+        backend.Start(cfg);
+
+        Assert.NotNull(_lastHarness);
+        Assert.Equal(WgcContinuousDurationPolicy.MaxMilliseconds, _lastHarness!.Options.DurationMs);
+        Assert.Equal(
+            WgcContinuousDurationPolicy.MaxMilliseconds + 15000,
+            _lastHarness.Options.ProcessTimeoutMs);
+        var args = _lastHarness.Process.CapturedArguments!.ToList();
+        Assert.Equal(
+            WgcContinuousDurationPolicy.MaxMilliseconds.ToString(),
+            args[args.IndexOf("--duration-ms") + 1]);
+        Assert.Equal(1, process.StartInvocationCount);
 
         backend.Dispose();
     }
@@ -533,7 +556,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
     [Theory]
     [InlineData(0)]
-    [InlineData(11)]
+    [InlineData(61)]
     [InlineData(-1)]
     public void Start_DurationOutOfRange_RejectedBeforeHelperStart(int duration)
     {
@@ -545,7 +568,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
-        Assert.Contains("1 and 10", ex.Message);
+        Assert.Contains("1 and 60", ex.Message);
         Assert.Equal(0, process.StartInvocationCount);
     }
 
@@ -871,6 +894,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
+    [InlineData("display_unavailable")]
     public void HelperLifecycleFailure_OutputMetaKeepsSpecificStopReason(string reason)
     {
         string outputPath = Path.Combine(_finalDir, $"{reason}.mp4");

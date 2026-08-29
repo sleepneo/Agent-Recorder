@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -18,6 +19,48 @@ public enum DisplayIdentityResolutionStatus
     Unresolved,
     Ambiguous,
     Conflict
+}
+
+/// <summary>
+/// Parses the Windows display number exposed by the GDI monitor device name.
+/// This is deliberately separate from Agent Recorder's public display token:
+/// the latter is assigned from the current enumeration order for compatibility,
+/// while this value comes from the complete <c>\\.\DISPLAY&lt;N&gt;</c> device name.
+/// </summary>
+public static class WindowsDisplayNumberParser
+{
+    private const string GdiDevicePrefix = @"\\.\DISPLAY";
+
+    /// <summary>
+    /// Parses only a complete, case-insensitive GDI device name such as
+    /// <c>\\.\DISPLAY1</c>. The suffix must be ASCII decimal digits for a
+    /// positive Int32; signs, whitespace, suffixes, zero, overflow, and
+    /// approximate names are rejected.
+    /// </summary>
+    public static bool TryParse(string? deviceName, out int number)
+    {
+        number = 0;
+        if (string.IsNullOrEmpty(deviceName) ||
+            deviceName.Length <= GdiDevicePrefix.Length ||
+            !deviceName.StartsWith(GdiDevicePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var suffix = deviceName[GdiDevicePrefix.Length..];
+        foreach (var character in suffix)
+        {
+            if (character is < '0' or > '9')
+                return false;
+        }
+
+        return int.TryParse(
+                   suffix,
+                   NumberStyles.None,
+                   CultureInfo.InvariantCulture,
+                   out number)
+            && number > 0;
+    }
 }
 
 /// <summary>

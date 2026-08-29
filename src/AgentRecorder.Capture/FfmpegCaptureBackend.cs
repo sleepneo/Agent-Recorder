@@ -27,6 +27,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     private OutputMeta? _completionMeta;
     private bool _hasExited = false;
     private bool _manualStopped = false;
+    private CaptureAbortReason? _abortReason;
     private int _firstFrameObserved;
     private long _runtimeAudioLostAtMs;
     private IMicrophoneStatusProvider? _microphoneStatusProvider;
@@ -51,6 +52,16 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     public void Start(CaptureConfig cfg)
     {
         DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
+        lock (_lock)
+        {
+            _completionMeta = null;
+            _hasExited = false;
+            _manualStopped = false;
+            _abortReason = null;
+            _firstFrameObserved = 0;
+            _runtimeAudioLostAtMs = 0;
+            _stderrLog.Clear();
+        }
         _cfg = cfg;
         _output = cfg.OutputPath;
 
@@ -232,10 +243,17 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
         var meta = Probe(output);
         string stderr;
-        lock (_lock) stderr = stderrLog.ToString();
+        CaptureAbortReason? abortReason;
+        lock (_lock)
+        {
+            stderr = stderrLog.ToString();
+            abortReason = _abortReason;
+        }
         meta.StderrLog = stderr;
         ClassifyAudioOutcome(meta, stderr, _cfg, _runtimeAudioLostAtMs);
-        _completionMeta = meta;
+        if (abortReason.HasValue)
+            meta.StopReason = CaptureAbortReasonCodes.ToCode(abortReason.Value);
+        lock (_lock) _completionMeta = meta;
 
         StopMicrophoneMonitor();
 
@@ -263,13 +281,25 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         return meta;
     }
 
-    public OutputMeta Stop()
+    public OutputMeta Stop() => StopCore(null);
+
+    /// <summary>
+    /// Terminates FFmpeg for an application-owned lifecycle failure. This is
+    /// deliberately distinct from the user Stop path so the engine can keep
+    /// the trusted reason through finalization even when FFmpeg exits cleanly
+    /// or leaves a probeable partial file.
+    /// </summary>
+    public OutputMeta Abort(CaptureAbortReason reason) => StopCore(reason);
+
+    private OutputMeta StopCore(CaptureAbortReason? abortReason)
     {
         string stderr;
 
         lock (_lock)
         {
             _manualStopped = true;
+            if (abortReason.HasValue)
+                _abortReason = abortReason;
             stderr = _stderrLog.ToString();
         }
 
@@ -282,17 +312,43 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
                 if (!_proc.WaitForExit(8000))
                 {
                     try { _proc.Kill(true); } catch { }
+                    try { _proc.WaitForExit(2000); } catch { }
                 }
             }
-            catch { try { _proc?.Kill(true); } catch { } }
+            catch
+            {
+                try { _proc?.Kill(true); } catch { }
+                try { _proc?.WaitForExit(2000); } catch { }
+            }
         }
 
         // Wait for any remaining -progress lines to be processed before the
         // caller finalizes the recording. This keeps first-frame observations
         // ordered before recording.terminal in the performance trace.
         var meta = RunStopLifecycle(_stdoutReader!, _output, stderr, StdoutDrainTimeout);
+        CaptureAbortReason? effectiveAbortReason;
+        lock (_lock)
+        {
+            effectiveAbortReason = _abortReason;
+        }
+        if (effectiveAbortReason.HasValue)
+        {
+            meta.StopReason = CaptureAbortReasonCodes.ToCode(effectiveAbortReason.Value);
+            lock (_lock) _completionMeta = meta;
+            TryDeleteOutputAfterAbort();
+        }
         StopMicrophoneMonitor();
         return meta;
+    }
+
+    private void TryDeleteOutputAfterAbort()
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_output) && File.Exists(_output))
+                File.Delete(_output);
+        }
+        catch { }
     }
 
     public bool HasExited => _proc?.HasExited ?? _hasExited;
@@ -842,5 +898,9 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         return null;
     }
 
-    public void Dispose() { try { _proc?.Dispose(); } catch { } }
+    public void Dispose()
+    {
+        try { _proc?.Dispose(); } catch { }
+        StopMicrophoneMonitor();
+    }
 }

@@ -53,6 +53,7 @@ struct CaptureSessionTestTargetRequest {
 struct CaptureSessionTestSignals {
     std::function<void()> signalWindowClosed;
     std::function<void()> signalWindowMinimized;
+    std::function<void()> signalDisplayUnavailable;
     std::function<void()> signalSizeChanged;
 };
 
@@ -178,6 +179,11 @@ struct CaptureSessionTestHooks {
     // Synthetic window-state query used by lifecycle tests. Production uses
     // IsWindow/IsIconic for the exact configured HWND and never calls this hook.
     std::function<CaptureSessionTestWindowState(std::uint64_t)> onWindowStateQuery;
+
+    // Synthetic display-availability query used by display/region lifecycle
+    // tests. Production polls EnumDisplayMonitors for the exact approved
+    // display bounds and treats query failure as unavailable.
+    std::function<bool(const Rect&)> onDisplayAvailabilityQuery;
 };
 
 // Encapsulates a single display or window continuous capture session.

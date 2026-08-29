@@ -44,8 +44,12 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
 推荐录制入口：
 
 ```http
-POST /api/v1/recordings/quick
+POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 ```
+
+`wait.goal_reached=true` 表示已经出现可信首帧；若 `timed_out=true`，使用返回的
+`recording_id` 继续长轮询录制状态。这个等待只观察本地批准、准备、倒计时和开始状态，
+不会通过 HTTP 批准录制；省略 query 时仍保持原有的立即创建响应。
 
 运行数据目录：
 
@@ -58,16 +62,34 @@ POST /api/v1/recordings/quick
 | target.type | 说明 |
 | --- | --- |
 | `primary_display` | 录制主显示器 |
+| `windows_display` | 按 Windows“标识”数字录制指定显示器 |
 | `active_window` | 录制当前活动窗口 |
 | `selected_region` | 弹出选区 UI，让用户框选区域后录制 |
+| `last_region` | 复用最近一次成功选区 |
 
-复杂或精确控制场景可继续使用底层 API：`/displays`、`/windows`、`/region-selections`、`/recordings`、`/confirmations/{id}`、`/recordings/{id}`。
+“录制 Windows 显示器 N”优先使用一次 quick 请求，例如：
+
+```json
+{
+  "target": { "type": "windows_display", "windows_display_number": 2 },
+  "duration_seconds": 30
+}
+```
+
+这里的数字来自 Windows“设置 > 系统 > 显示 > 标识”，必须是正 JSON integer，
+不是 `display_2` 的 API ID 后缀。服务端找不到可靠唯一编号时返回
+`SOURCE_NOT_FOUND`，应刷新 capabilities/displays 或请用户消歧；成功后仍需本地
+确认，API 不会自批准。raw API 仍使用 `/displays` 返回的 opaque `id`，原样传入
+`source.display_id`。
+
+复杂或精确控制场景可继续使用底层 API：`/displays`、`/windows`、`/region-selections`、`/recordings`、`/confirmations/{id}`、`/recordings/{id}`。使用 raw API 录制指定显示器时，应按 `windows_display_number` 查找条目，再把其 opaque `id` 原样作为 `source.display_id` 传回；不要自行拼接 `display_N`。
 
 ## 当前能力
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | quick API | 已实现 | 一次请求表达常见录制意图 |
+| 有界创建等待 | 已实现 | raw/quick 创建请求可在同一 POST 中等待本地批准、准备、倒计时和可信首帧；不改变本地确认边界 |
 | 显示器录制 | 已实现 | 录制整个显示器 |
 | 窗口录制 | 已实现 | 默认解析窗口可见边界并通过 `ffmpeg-window-region` 连续录制；符合条件的短时无麦克风请求可通过本地实验开关使用 WGC continuous；确认信息会区分窗口表面与屏幕矩形，并在批准后、捕获前重新校验语义 |
 | 选区录制 | 已实现 | 支持拖拽、精确坐标、尺寸预设、边缘/窗口吸附、点击窗口选区和双屏可靠置顶 |
@@ -88,7 +110,7 @@ POST /api/v1/recordings/quick
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退 |
 | 系统声音 | 已实现 | 隔离 WASAPI loopback、音视频分离采集、AAC 合流、确认 UI、倒计时和连续性诊断已接通；本地确认时批准的端点在本次录制中保持固定，切换 Windows 默认输出不会暗中改录其他设备，切回批准端点时采用有界同端点恢复。公开能力契约通过 `/capabilities`、`/permissions` 和 `/audio/devices.output_devices` 报告实时状态与 render endpoint |
-| WGC 连续录制 | 实验性实现 | 已支持符合条件的 display/window/region 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败、稳定显示器身份、topology 复核、GPU 区域裁剪和 FFmpeg 自动回退；display 稳定性、遮挡窗口及 10 秒选区录制已通过真实桌面验收；默认关闭，未作为公共 API 能力开放 |
+| WGC 连续录制 | 实验性实现 | 已支持符合条件的 1–60 秒无音频 display/window/region 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败、稳定显示器身份、topology 复核、运行中显示器丢失处理、GPU 区域裁剪和 FFmpeg 自动回退；当前硬件已通过显示器断连、遮挡窗口及 60 秒真实桌面验收；默认关闭，未作为公共 API 能力开放 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 ### 每条录制的开始前倒计时

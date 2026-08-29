@@ -409,6 +409,9 @@ public sealed class ScreenshotSeriesTests : IDisposable
         Assert.Equal(2, runner.Calls);
         Assert.Equal(2, rec.ScreenshotSeries!.Frames.Count);
         Assert.Equal(3, rec.ScreenshotSeries.PlannedFrameCount);
+        Assert.True(SpinWait.SpinUntil(
+            () => engine.ActiveScreenshotSeriesOperationCountForTests == 0,
+            TimeSpan.FromSeconds(5)));
         Assert.Equal(0, engine.ActiveScreenshotSeriesOperationCountForTests);
     }
 
@@ -987,6 +990,9 @@ public sealed class ScreenshotSeriesTests : IDisposable
         var manifest = Encoding.UTF8.GetString(manifestBytes);
         Assert.Contains("\"schema_version\": 1", manifest);
         Assert.Contains("\"mode\": \"screenshot_series\"", manifest);
+        Assert.True(SpinWait.SpinUntil(
+            () => engine.ActiveScreenshotSeriesOperationCountForTests == 0,
+            TimeSpan.FromSeconds(5)));
         Assert.Equal(0, engine.ActiveScreenshotSeriesOperationCountForTests);
     }
 

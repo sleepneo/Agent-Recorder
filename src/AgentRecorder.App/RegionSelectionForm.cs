@@ -1237,7 +1237,8 @@ public sealed class RegionSelectionForm : Form
             var displayId = RegionSelectionGeometry.FindDisplayId(virtualBounds, displays)
                          ?? RegionSelectionGeometry.FindDisplayIdByOverlap(virtualBounds, displays)
                          ?? "unknown";
-            _displayLabel.Text = _text.Format("RegionSelection_Display", displayId);
+            var display = displays.FirstOrDefault(candidate => candidate.id == displayId);
+            _displayLabel.Text = _text.Format("RegionSelection_Display", display?.name ?? displayId);
         }
         catch
         {
@@ -1288,17 +1289,17 @@ public sealed class RegionSelectionForm : Form
         }
 
         var display = GetSelectionDisplay();
-        string displayId = display?.id ?? "";
+        string displayName = display?.name ?? "";
         using var font = CreateSelectionTagFont();
         int maxTextWidth = Math.Max(64, ClientSize.Width - _visualMetrics.LabelPadding * 4);
         string text = RegionSelectionGeometry.FormatSelectionLabelText(
-            _selection.Width, _selection.Height, displayId, maxDisplayIdCharacters: 24);
+            _selection.Width, _selection.Height, displayName, maxDisplayIdCharacters: 24);
         Size textSize = MeasureSelectionTagText(text, font);
 
         if (textSize.Width > maxTextWidth)
         {
             text = RegionSelectionGeometry.FormatSelectionLabelText(
-                _selection.Width, _selection.Height, displayId, maxDisplayIdCharacters: 10);
+                _selection.Width, _selection.Height, displayName, maxDisplayIdCharacters: 10);
             textSize = MeasureSelectionTagText(text, font);
         }
 

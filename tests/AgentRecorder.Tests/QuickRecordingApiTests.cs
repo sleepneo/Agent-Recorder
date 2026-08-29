@@ -33,9 +33,11 @@ public class QuickRecordingApiTests
 
         public int ConfirmationCallbackDelayMs { get; set; } = 0;
         public bool AutoApprove { get; set; } = false;
+        public int ConfirmationRequestCount { get; private set; }
 
         public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
         {
+            ConfirmationRequestCount++;
             var decision = AutoApprove ? ConfirmationDecision.Approve() : ConfirmationDecision.Reject();
             if (ConfirmationCallbackDelayMs > 0)
                 _ = Task.Delay(ConfirmationCallbackDelayMs).ContinueWith(_ => callback(decision));
@@ -102,6 +104,35 @@ public class QuickRecordingApiTests
             new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
                 fingerprint, DisplayIdentityResolutionStatus.Resolved)
         });
+    }
+
+    private static List<SystemQuery.DisplayInfo> ThreeWindowsDisplays() => new()
+    {
+        new("display_1", "stale", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, 2),
+        new("display_2", "stale", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 1.0, 3),
+        new("display_3", "stale", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.0, 1)
+    };
+
+    private static string ResolvedDisplayFingerprint(string source)
+        => DisplayIdentityDeriver.Resolve(source, new[]
+        {
+            new DisplayTargetMapping(source, $"{source}-target")
+        }).Fingerprint!;
+
+    private static List<SystemQuery.DisplayTopologyInfo> ThreeWindowsDisplayTopology() => new()
+    {
+        new("display_1", "stale", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0,
+            ResolvedDisplayFingerprint("quick-windows-display-1"), DisplayIdentityResolutionStatus.Resolved, 2),
+        new("display_2", "stale", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 1.0,
+            ResolvedDisplayFingerprint("quick-windows-display-2"), DisplayIdentityResolutionStatus.Resolved, 3),
+        new("display_3", "stale", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.0,
+            ResolvedDisplayFingerprint("quick-windows-display-3"), DisplayIdentityResolutionStatus.Resolved, 1)
+    };
+
+    private static void SetThreeWindowsDisplayProviders()
+    {
+        SystemQuery.SetDisplayProvider(ThreeWindowsDisplays);
+        SystemQuery.SetDisplayTopologyProvider(ThreeWindowsDisplayTopology);
     }
 
     [Fact]
@@ -210,6 +241,231 @@ public class QuickRecordingApiTests
             var resolved = quick.GetProperty("resolved_source");
             Assert.Equal("display", resolved.GetProperty("type").GetString());
             Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_WindowsDisplay_ResolvesWindowsTwoToDisplayOne_AndReturnsMetadata()
+    {
+        var tray = new ControllableTray { AutoApprove = false };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SetThreeWindowsDisplayProviders();
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30,\"countdown_seconds\":0}"));
+
+            Assert.Equal(200, (int)response.StatusCode);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data");
+
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+            Assert.Equal(1, tray.ConfirmationRequestCount);
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("windows_display", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("display", resolved.GetProperty("type").GetString());
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal(2, resolved.GetProperty("windows_display_number").GetInt32());
+            Assert.Equal("Display 2", resolved.GetProperty("name").GetString());
+            Assert.True(resolved.GetProperty("is_primary").GetBoolean());
+            Assert.Equal(1920, resolved.GetProperty("bounds").GetProperty("width").GetInt32());
+            Assert.Equal(1080, resolved.GetProperty("bounds").GetProperty("height").GetInt32());
+
+            var summary = data.GetProperty("summary");
+            Assert.Equal("30s", summary.GetProperty("duration").GetString());
+            Assert.Equal(0, summary.GetProperty("countdown_seconds").GetInt32());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_WindowsDisplay_PreservesSharedRequestFields()
+    {
+        var tray = new ControllableTray { AutoApprove = false };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SetThreeWindowsDisplayProviders();
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30,\"countdown_seconds\":0,\"video\":{\"fps\":24,\"quality\":\"high\"},\"audio\":{\"microphone\":{\"enabled\":false},\"system_audio\":{\"enabled\":false}},\"output\":{\"directory\":\"default\",\"filename_template\":\"quick-windows-{datetime}\"},\"nested\":{\"role\":\"outer\",\"session_id\":\"quick-windows-session\"}}"));
+
+            Assert.Equal(200, (int)response.StatusCode);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data");
+            var summary = data.GetProperty("summary");
+
+            Assert.Equal("video", summary.GetProperty("mode").GetString());
+            Assert.Equal("30s", summary.GetProperty("duration").GetString());
+            Assert.Equal(0, summary.GetProperty("countdown_seconds").GetInt32());
+            Assert.Equal("No audio", summary.GetProperty("audio").GetString());
+            Assert.Equal("outer", summary.GetProperty("nested_role").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(summary.GetProperty("output").GetString()));
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Theory]
+    [InlineData("{\"target\":{\"type\":\"windows_display\"}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":null}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":\"2\"}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":true}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2.0}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":0}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":-1}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":999999999999999999999999}}")]
+    [InlineData("{\"target\":{\"type\":\"windows_display\",\"display_id\":\"display_1\"}}")]
+    public async Task QuickRecording_WindowsDisplay_InvalidNumber_FailsBeforeDisplayProviderAndConfirmation(string body)
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        var displayProviderCalls = 0;
+        try
+        {
+            SystemQuery.SetDisplayProvider(() =>
+            {
+                displayProviderCalls++;
+                return ThreeWindowsDisplays();
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent(body));
+
+            Assert.Equal(400, (int)response.StatusCode);
+            var responseBody = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(responseBody);
+            Assert.Equal("INVALID_ARGUMENT", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal(0, displayProviderCalls);
+            Assert.Equal(0, tray.ConfirmationRequestCount);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Theory]
+    [InlineData("empty")]
+    [InlineData("missing_number")]
+    [InlineData("duplicate_number")]
+    public async Task QuickRecording_WindowsDisplay_NotFoundOrAmbiguous_FailsClosedWithoutConfirmation(string scenario)
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        var displayProviderCalls = 0;
+        try
+        {
+            SystemQuery.SetDisplayProvider(() =>
+            {
+                displayProviderCalls++;
+                return scenario switch
+                {
+                    "empty" => new List<SystemQuery.DisplayInfo>(),
+                    "missing_number" => new List<SystemQuery.DisplayInfo>
+                    {
+                        new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, null)
+                    },
+                    "duplicate_number" => new List<SystemQuery.DisplayInfo>
+                    {
+                        new("display_1", "Display A", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, 2),
+                        new("display_2", "Display B", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 1.0, 2)
+                    },
+                    _ => throw new InvalidOperationException("unknown test scenario")
+                };
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30}"));
+
+            Assert.Equal(400, (int)response.StatusCode);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var error = doc.RootElement.GetProperty("error");
+            Assert.Equal("SOURCE_NOT_FOUND", error.GetProperty("code").GetString());
+            Assert.Equal(2, error.GetProperty("details").GetProperty("requested_windows_display_number").GetInt32());
+            Assert.Equal("refresh_displays_or_ask_user_to_disambiguate",
+                error.GetProperty("details").GetProperty("suggested_action").GetString());
+            Assert.Equal(1, displayProviderCalls);
+            Assert.Equal(0, tray.ConfirmationRequestCount);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickRecording_WindowsDisplay_UsesExactlyOneDisplaySnapshotForResolution()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        var displayProviderCalls = 0;
+        try
+        {
+            SetThreeWindowsDisplayProviders();
+
+            // Reinstall the counted public provider after the shared topology setup.
+            SystemQuery.SetDisplayProvider(() =>
+            {
+                displayProviderCalls++;
+                return displayProviderCalls == 1
+                    ? ThreeWindowsDisplays()
+                    : new List<SystemQuery.DisplayInfo>
+                    {
+                        new("display_1", "Changed", true, new SystemQuery.Bounds(0, 0, 100, 100), 1.0, 99)
+                    };
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30}"));
+
+            Assert.Equal(200, (int)response.StatusCode);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var resolved = doc.RootElement.GetProperty("data").GetProperty("quick").GetProperty("resolved_source");
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal(2, resolved.GetProperty("windows_display_number").GetInt32());
+            Assert.Equal("Display 2", resolved.GetProperty("name").GetString());
+            Assert.Equal(1, displayProviderCalls);
         }
         finally
         {
@@ -394,6 +650,51 @@ public class QuickRecordingApiTests
                 Assert.Equal(1920, summary.GetProperty("target_display_bounds").GetProperty("width").GetInt32());
                 Assert.Equal(1080, summary.GetProperty("target_display_bounds").GetProperty("height").GetInt32());
             }
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task QuickScreenshotSeries_WindowsDisplay_ResolvesOpaqueIdAndStillRequiresConfirmation()
+    {
+        var tray = new ControllableTray { AutoApprove = false };
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SetThreeWindowsDisplayProviders();
+
+            server.Start();
+            using var client = CreateClient();
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var response = await client.PostAsync(
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                JsonContent("{\"mode\":\"screenshot_series\",\"interval_ms\":1000,\"max_count\":2,\"countdown_seconds\":0,\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2}}"));
+
+            Assert.Equal(200, (int)response.StatusCode);
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data");
+            Assert.Equal("requires_user_confirmation", data.GetProperty("status").GetString());
+            Assert.Equal(1, tray.ConfirmationRequestCount);
+
+            var summary = data.GetProperty("summary");
+            Assert.Equal("screenshot_series", summary.GetProperty("mode").GetString());
+            Assert.Equal(1000, summary.GetProperty("series_interval_ms").GetInt32());
+            Assert.Equal(2, summary.GetProperty("series_max_count").GetInt32());
+            Assert.Equal(2, summary.GetProperty("series_planned_frame_count").GetInt32());
+
+            var quick = data.GetProperty("quick");
+            Assert.Equal("windows_display", quick.GetProperty("target_type").GetString());
+            Assert.True(quick.GetProperty("recording_created").GetBoolean());
+            Assert.True(quick.GetProperty("requires_user_confirmation").GetBoolean());
+            var resolved = quick.GetProperty("resolved_source");
+            Assert.Equal("display", resolved.GetProperty("type").GetString());
+            Assert.Equal("display_1", resolved.GetProperty("display_id").GetString());
+            Assert.Equal(2, resolved.GetProperty("windows_display_number").GetInt32());
+            Assert.Equal("Display 2", resolved.GetProperty("name").GetString());
         }
         finally
         {
@@ -685,6 +986,10 @@ public class QuickRecordingApiTests
         var server = CreateServer(tray, out var dataDir);
         try
         {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, null)
+            });
             server.Start();
             using var client = CreateClient();
             var response = await client.GetAsync(
@@ -696,7 +1001,7 @@ public class QuickRecordingApiTests
             var data = doc.RootElement.GetProperty("data");
             var interaction = data.GetProperty("interaction");
 
-            Assert.Equal("0.1.10", data.GetProperty("app").GetProperty("version").GetString());
+            Assert.Equal("0.1.11", data.GetProperty("app").GetProperty("version").GetString());
 
             Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
@@ -713,6 +1018,96 @@ public class QuickRecordingApiTests
             Assert.Contains("record_selected_region", recipeNames);
             Assert.Contains("record_last_region", recipeNames);
             Assert.Contains("screenshot_selected_region", recipeNames);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_WindowsDisplay_AdvertisesOnlyReliableNumbersWithDynamicRecipes()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SetThreeWindowsDisplayProviders();
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var interaction = doc.RootElement.GetProperty("data").GetProperty("interaction");
+            var capability = interaction.GetProperty("windows_display");
+
+            Assert.True(capability.GetProperty("supported").GetBoolean());
+            Assert.True(capability.GetProperty("available").GetBoolean());
+            Assert.Equal(new[] { 1, 2, 3 }, capability.GetProperty("available_numbers").EnumerateArray().Select(n => n.GetInt32()));
+            Assert.Equal(JsonValueKind.Null, capability.GetProperty("unavailable_reason").ValueKind);
+
+            var screenshotTargets = doc.RootElement.GetProperty("data")
+                .GetProperty("recording")
+                .GetProperty("screenshot_series")
+                .GetProperty("targets");
+            Assert.Contains(screenshotTargets.EnumerateArray(),
+                target => target.GetString() == "windows_display");
+
+            var recipes = interaction.GetProperty("quick_recipes");
+            var windowsRecipes = recipes.EnumerateArray()
+                .Where(recipe => recipe.GetProperty("target_type").GetString() == "windows_display")
+                .ToArray();
+            Assert.Equal(3, windowsRecipes.Length);
+            foreach (var recipe in windowsRecipes)
+            {
+                var number = recipe.GetProperty("windows_display_number").GetInt32();
+                Assert.True(number > 0);
+                Assert.Equal($"record_windows_display_{number}", recipe.GetProperty("name").GetString());
+                Assert.True(recipe.GetProperty("available").GetBoolean());
+                Assert.Equal(number,
+                    recipe.GetProperty("request_template").GetProperty("target").GetProperty("windows_display_number").GetInt32());
+            }
+
+            Assert.DoesNotContain("\\\\.\\DISPLAY", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("stable_identity", body, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task Capabilities_WindowsDisplay_DoesNotClaimAvailabilityWithoutReliableNumbers()
+    {
+        var tray = new ControllableTray();
+        var server = CreateServer(tray, out var dataDir);
+        try
+        {
+            SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+            {
+                new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, null),
+                new("display_2", "Display 2", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 1.0, null)
+            });
+
+            server.Start();
+            using var client = CreateClient();
+            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            Assert.Equal(200, (int)response.StatusCode);
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var interaction = doc.RootElement.GetProperty("data").GetProperty("interaction");
+            var capability = interaction.GetProperty("windows_display");
+            Assert.True(capability.GetProperty("supported").GetBoolean());
+            Assert.False(capability.GetProperty("available").GetBoolean());
+            Assert.Empty(capability.GetProperty("available_numbers").EnumerateArray());
+            Assert.Equal("no_reliable_windows_display_number", capability.GetProperty("unavailable_reason").GetString());
+            Assert.DoesNotContain(interaction.GetProperty("quick_recipes").EnumerateArray(),
+                recipe => recipe.GetProperty("target_type").GetString() == "windows_display");
         }
         finally
         {

@@ -88,11 +88,11 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     }
 
     [Fact]
-    public void BuildPlan_ThirtySecondWgcRequestFallsBackBeforeConfirmationAndDisclosesScreenRectangle()
+    public void BuildPlan_SixtyOneSecondWgcRequestFallsBackBeforeConfirmationAndDisclosesScreenRectangle()
     {
         var probe = new FakeAvailabilityProbe(true);
         var plan = WithWindowBackend("wgc-continuous", () =>
-            CaptureBackendSelector.BuildPlan(WindowConfig(30), probe));
+            CaptureBackendSelector.BuildPlan(WindowConfig(61), probe));
 
         Assert.Equal("ffmpeg-window-region", plan.PlannedBackend);
         Assert.Equal("screen_rectangle", plan.CaptureSemantics);
@@ -113,7 +113,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
 
         WithWindowBackend("wgc-continuous", () =>
         {
-            engine.CreateRecording(WindowJson("window_4660", 30), "test-agent", tray);
+            engine.CreateRecording(WindowJson("window_4660", 61), "test-agent", tray);
             return true;
         });
 

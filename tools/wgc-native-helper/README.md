@@ -48,7 +48,7 @@ wgc-native-helper.exe
   --window-hwnd <non-zero-64-bit-hwnd>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
-  --duration-ms <1000..10000>
+  --duration-ms <1000..60000>
   --fps <1..60>
   --begin-signal <absolute-path>
   --begin-token <unguessable-token>
@@ -65,7 +65,7 @@ wgc-native-helper.exe
 | `--display-bounds` | 目标显示器的完整矩形（虚拟屏幕坐标），用于精确匹配 `HMONITOR`。 |
 | `--recording-id` | 1–64 个字符，仅允许字母、数字、`-`、`_`、`.`。 |
 | `--output` | 绝对 `.mp4` 输出路径，必须位于 `.local-data\wgc-tests\` 或系统临时目录。 |
-| `--duration-ms` | 录制时长，1000–10000 毫秒。 |
+| `--duration-ms` | 录制时长，1000–60000 毫秒（1–60 秒）。 |
 | `--fps` | 目标帧率，1–60。 |
 | `--begin-signal` | 授权信号文件路径，必须位于 `.local-data\wgc-control\` 或系统临时目录。 |
 | `--begin-token` | 授权令牌，信号文件内容必须与之完全匹配。 |
@@ -115,7 +115,7 @@ WindowCaptureSupported: true
 
 ### 连续 window 录制模式（helper 0.3.0）
 
-托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–10 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；历史值 `AGENT_RECORDER_WINDOW_BACKEND=wgc` 仅作为兼容别名，并在进入 selector 后归一化为 `wgc-continuous`，不会再选择单帧后端。
+托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–60 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；历史值 `AGENT_RECORDER_WINDOW_BACKEND=wgc` 仅作为兼容别名，并在进入 selector 后归一化为 `wgc-continuous`，不会再选择单帧后端。61 秒及其他不符合条件的请求会自动回退 FFmpeg。
 
 ```text
 wgc-native-helper.exe
@@ -123,7 +123,7 @@ wgc-native-helper.exe
   --window-hwnd <non-zero-64-bit-hwnd>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
-  --duration-ms <1000..10000>
+  --duration-ms <1000..60000>
   --fps <1..60>
   --encoder-mode <software|hardware-preferred>
   --begin-signal <absolute-path>
@@ -137,7 +137,7 @@ wgc-native-helper.exe
 
 ### 隐藏连续 region 实验模式（helper 0.3.0）
 
-托管 selector 只在 `AGENT_RECORDER_REGION_BACKEND=wgc-continuous`、无麦克风、时长 1–10 秒、帧率 1–60、区域为正数且偶数尺寸、区域完整包含于唯一目标显示器，并且非捕获 `--probe` 证据匹配该显示器时选择此模式。环境变量为空、未知或使用已退役的 `wgc` 值时仍走 FFmpeg；此能力不改变公开 API 或默认后端。
+托管 selector 只在 `AGENT_RECORDER_REGION_BACKEND=wgc-continuous`、无麦克风、时长 1–60 秒、帧率 1–60、区域为正数且偶数尺寸、区域完整包含于唯一目标显示器，并且非捕获 `--probe` 证据匹配该显示器时选择此模式。环境变量为空、未知或使用已退役的 `wgc` 值时仍走 FFmpeg；61 秒及其他不符合条件的请求也回退 FFmpeg；此能力不改变公开 API 或默认后端。
 
 ```text
 wgc-native-helper.exe
@@ -146,7 +146,7 @@ wgc-native-helper.exe
   --region-bounds <x,y,width,height>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
-  --duration-ms <1000..10000>
+  --duration-ms <1000..60000>
   --fps <1..60>
   --begin-signal <absolute-path>
   --begin-token <unguessable-token>
@@ -290,7 +290,7 @@ BytesWritten: <bytes>
 
 ## 已知限制
 
-- 当前 helper 共享 display、window、region 三条连续 WGC capture 路径；region 仍是隐藏实验，受托管 selector 的显式开关、稳定显示器身份和非捕获 probe barrier 约束。公共 API 和默认后端仍不启用 WGC continuous。
+- 当前 helper 共享 display、window、region 三条连续 WGC capture 路径；受控时长为 1–60 秒，region 仍是隐藏实验，受托管 selector 的显式开关、稳定显示器身份和非捕获 probe barrier 约束。WGC 默认关闭且仍不支持麦克风或系统声音；不满足条件的请求回退 FFmpeg，公共 API 仍不提供后端选择参数。60 秒只是当前验收边界，不代表所有 GPU、驱动、Windows 版本或应用都已兼容。
 - 硬件 H.264 仍是隐藏实验。`HardwareH264Available` 和 candidate count 只是 probe 能力证据，不是硬件录制成功；只有 Sink Writer 实际 transform chain 经过分类并报告 `hardware/hardware_selected` 才算硬件选择成功。Task 200B 的自动化验证不替代真实桌面硬件验收。
 - 默认软件路径请求并验证 software H.264 transform；CPU RGB32 输入、GPU→CPU 拷贝和非 zero-copy 编码路径保持不变。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。
@@ -309,4 +309,4 @@ C# 侧覆盖 `WgcContinuousEventStreamParser`、托管异步会话、`WgcContinu
 
 ## 真实桌面验收边界
 
-`--capture-continuous-display` 涉及真实屏幕内容采集，**不得在没有人类当场确认的情况下自动执行**。真实 10 秒桌面验收由项目负责人确认 display bounds、输出路径和 begin token 后执行。
+`--capture-continuous-display` 涉及真实屏幕内容采集，**不得在没有人类当场确认的情况下自动执行**。真实桌面验收必须由项目负责人确认 display bounds、输出路径和 begin token 后执行；Task 227 的自动化覆盖了 60 秒参数与生命周期契约，但不替代真实 60 秒 display/window/region 兼容性验收。

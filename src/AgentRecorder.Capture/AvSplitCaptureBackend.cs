@@ -26,6 +26,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     private bool _manualStopped;
     private bool _captureEndedRaised;
     private bool _concluded;
+    private CaptureAbortReason? _abortReason;
     private string? _tempVideoPath;
     private string? _tempAudioPath;
     private readonly IAvWorkerFactory _workerFactory;
@@ -206,6 +207,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 _completionMeta = meta;
                 _hasExited = true;
                 _concluded = true;
+                NormalizeTerminalOutputMeta(meta, published: false);
                 try { _onNaturalExit?.Invoke(exitCode, meta); }
                 catch { }
                 return;
@@ -288,6 +290,28 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     }
 
     /// <summary>
+    /// Stops both split workers for an application-owned lifecycle failure.
+    /// The convergence owner preserves the typed reason and skips mux/final
+    /// publication, even when the temporary video is probeable.
+    /// </summary>
+    public OutputMeta Abort(CaptureAbortReason reason)
+    {
+        // Keep the backend's single natural/finalization callback contract for
+        // lifecycle aborts. ConcludeCapture still actively stops the workers
+        // because the typed abort is not a process-natural exit.
+        lock (_lock)
+        {
+            // A natural worker may already own convergence while it is still
+            // draining/stabilizing. Upgrade that in-flight convergence before
+            // it can reach mux/publish; a completed result is already terminal
+            // and is left untouched for the engine's exactly-once gate.
+            if (_completionMeta == null)
+                _abortReason = reason;
+        }
+        return EnterConcludeCapture(0, "", invokeNaturalExit: true, abortReason: reason);
+    }
+
+    /// <summary>
     /// Exactly-once convergence entry point for both natural video exit and
     /// manual Stop(). The first caller becomes the owner and executes the full
     /// stop/finalize sequence; all concurrent callers wait for and receive the
@@ -295,7 +319,11 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     /// owner's entire legitimate convergence window, so a timeout can only mean
     /// the owner itself failed to converge, never a premature placeholder result.
     /// </summary>
-    private OutputMeta EnterConcludeCapture(int videoExitCode, string videoStderr, bool invokeNaturalExit)
+    private OutputMeta EnterConcludeCapture(
+        int videoExitCode,
+        string videoStderr,
+        bool invokeNaturalExit,
+        CaptureAbortReason? abortReason = null)
     {
         TaskCompletionSource<OutputMeta>? tcs;
         bool isOwner;
@@ -317,6 +345,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             {
                 _manualStopped = true;
                 _concluded = true;
+                _abortReason = abortReason;
                 tcs = _convergenceTcs = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
                 isOwner = true;
             }
@@ -341,6 +370,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                     StderrLog = "convergence_owner_timeout",
                     Warnings = new[] { "convergence_owner_timeout" }
                 };
+                NormalizeTerminalOutputMeta(timeoutResult, published: false);
                 tcs.TrySetResult(timeoutResult);
             }
             return tcs.Task.Result;
@@ -358,6 +388,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 StderrLog = "finalize_exception: " + ex,
                 Warnings = new[] { "finalize_exception: " + ex.Message }
             };
+            NormalizeTerminalOutputMeta(candidate, published: false);
         }
 
         // The TCS is the single source of truth. The owner publishes its
@@ -407,6 +438,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                     AudioStatus = "not_requested",
                     AudioContinuityStatus = "not_checked"
                 };
+                NormalizeTerminalOutputMeta(cancelMeta, published: false);
             }
             else
             {
@@ -474,6 +506,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     /// </summary>
     private OutputMeta ConcludeCapture(int videoExitCode, string videoStderr, bool invokeNaturalExit)
     {
+        var abortCode = ReadAbortCode();
+
         // Active stop path: terminate and drain the video worker first so the
         // temporary MP4 is fully closed before we stop audio or run the finalizer.
         var video = _videoWorker;
@@ -482,7 +516,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         bool videoExited = true;
         bool videoStable = true;
 
-        if (invokeNaturalExit)
+        if (invokeNaturalExit && abortCode == null)
         {
             // Natural exit: the video worker has already exited. Still ensure the
             // temp file is closed and stable before proceeding.
@@ -507,7 +541,12 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
                 videoStable = WaitForFileStable(_tempVideoPath, VideoStabilizeTimeout);
         }
 
-        RaiseCaptureEnded(localVideoExitCode, invokeNaturalExit ? "natural" : "manual");
+        // Abort may have arrived while a natural owner was waiting for the
+        // temp video to stabilize. Re-read the typed reason at this boundary
+        // so that the capture-ended observation and the finalization branch
+        // agree and the natural path cannot proceed to mux/publish.
+        abortCode = ReadAbortCode() ?? abortCode;
+        RaiseCaptureEnded(localVideoExitCode, abortCode ?? (invokeNaturalExit ? "natural" : "manual"));
 
         // Stop the audio worker. On the natural-exit path the video worker has
         // already stopped, but the audio worker may still be running with its
@@ -537,6 +576,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             audioStderr = CombineStderr(audioStderr, _audioPrematureStderr);
         }
         var combinedStderr = CombineStderr(audioStderr, localVideoStderr);
+
+        abortCode = ReadAbortCode() ?? abortCode;
 
         // Video exit, video stability, audio exit, or WAV stability failures block
         // finalization and produce a clear failure result while preserving temp
@@ -611,11 +652,44 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             meta = videoMeta;
             success = false;
         }
+        else if (abortCode != null)
+        {
+            // A runtime lifecycle abort must never enter the mux/publish path.
+            // Keep the probe as diagnostics only; TempRetentionPolicy will move
+            // any partial workers' output into the controlled failed directory.
+            var abortedMeta = FfmpegCaptureBackend.Probe(_tempVideoPath ?? "");
+            abortedMeta.StderrLog = combinedStderr;
+            abortedMeta.StopReason = abortCode;
+            abortedMeta.AudioStatus = audioRequested ? "lost" : "not_requested";
+            abortedMeta.AudioSourceKind = _cfg?.AudioSourceKind switch
+            {
+                AudioCaptureSourceKind.SystemLoopback => "system-loopback",
+                AudioCaptureSourceKind.Microphone => "microphone",
+                _ => "none"
+            };
+            abortedMeta.Warnings = (abortedMeta.Warnings ?? Array.Empty<string>())
+                .Append(abortCode)
+                .ToArray();
+            meta = abortedMeta;
+            success = false;
+        }
         else
         {
             var result = FinalizeOutput(combinedStderr, localVideoStderr, audioStderr);
             meta = result.Meta;
             success = result.Success;
+        }
+
+        if (abortCode != null)
+        {
+            // Preserve the engine-owned lifecycle reason even when a worker
+            // shutdown precondition failed before the abort-only branch ran.
+            meta.StopReason = abortCode;
+            meta.Warnings = (meta.Warnings ?? Array.Empty<string>())
+                .Append(abortCode)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            success = false;
         }
 
         // Preserve both the launch anchor used for A/V alignment and the
@@ -658,7 +732,48 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             TryWriteFailureDiagnostics(retention.FailedDirectoryPath, recordingId, meta);
         }
 
+        // Probe() is intentionally allowed to describe staging files while
+        // collecting diagnostics. Once the split pipeline reaches its single
+        // terminal result, expose only the approved final target and make the
+        // file evidence correspond to this run's publication outcome. Failed
+        // artifacts remain owned by TempRetentionPolicy and are not encoded in
+        // the public OutputMeta path.
+        NormalizeTerminalOutputMeta(meta, published: success);
+
         return meta;
+    }
+
+    private void NormalizeTerminalOutputMeta(OutputMeta meta, bool published)
+    {
+        meta.OutputPath = _finalOutputPath;
+        if (!published)
+        {
+            meta.OutputFileExists = false;
+            meta.SizeBytes = 0;
+            return;
+        }
+
+        try
+        {
+            var finalFile = new FileInfo(_finalOutputPath);
+            meta.OutputFileExists = finalFile.Exists && finalFile.Length > 0;
+            meta.SizeBytes = finalFile.Exists ? finalFile.Length : 0;
+        }
+        catch
+        {
+            meta.OutputFileExists = false;
+            meta.SizeBytes = 0;
+        }
+    }
+
+    private string? ReadAbortCode()
+    {
+        lock (_lock)
+        {
+            return _abortReason.HasValue
+                ? CaptureAbortReasonCodes.ToCode(_abortReason.Value)
+                : null;
+        }
     }
 
     /// <summary>

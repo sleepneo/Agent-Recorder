@@ -255,7 +255,7 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的短时无麦克风 display/window/region 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态；region 模式按稳定显示器身份复核 topology，并在编码前执行 GPU 裁剪。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
+**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的 **1–60 秒、无音频** display/window/region 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态；region 模式按稳定显示器身份复核 topology，并在编码前执行 GPU 裁剪。60 秒是当前受控验收边界，不代表所有 GPU、驱动、Windows 版本或应用都已兼容。请求带麦克风/系统声音、时长不合格、能力探测失败或运行期目标失效时，继续自动回退现有 FFmpeg（需要时为 A/V split）路径。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
 
 **音频能力**：麦克风和系统声音均由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone", "system_audio"]`。`recording.audio_capabilities.microphone` 与 `.system_audio` 都返回 `supported: true`，状态为新鲜的 `ready`、`no_devices` 或 `unavailable`。系统声音请求仍须本地确认；批准的 render endpoint 在本次录制中保持固定，默认输出切换不会自动跟随，切回批准端点后执行有界同端点恢复并通过连续性指标披露缺口。麦克风和系统声音不能在同一请求中同时启用。
 
@@ -565,6 +565,7 @@ Context 指标校验与冲突检测：`ensure_elapsed_ms` 和 `service_startup_e
 
 - 启动后优先调用 `/capabilities` 获取 `context` 快照
 - 对“录当前窗口”“录主屏幕”“录上次选区”这类请求，优先基于 `context` 和 `quick_recipes` 决策
+- 对“录制显示器 N”优先使用 `windows_display` quick target；`quick_recipes` 仅在当前快照有可靠编号时生成对应的实际正整数模板
 - 如果 `context.windows.active == null`，应让用户聚焦窗口或改用 `selected_region`
 - 如果 `context.last_selected_region == null`，不要假设存在上次选区；可改用 `selected_region` 先让用户选区
 - 显示器/窗口枚举失败时，`/capabilities` 仍返回 200，错误信息在对应 `error` 字段中
@@ -672,13 +673,30 @@ X-Agent-Recorder-Key: <api-key>
   "displays": [
     {
       "id": "display_1",
-      "name": "Display 1",
+      "name": "Display 2",
+      "windows_display_number": 2,
       "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
       "is_primary": true
     }
   ]
 }
 ```
+
+`id` 是兼容性的 API 选择 token，`display_id` 请求字段也使用它；其数字后缀
+不承诺等于 Windows“设置 > 系统 > 显示 > 标识”中的屏幕序号。每个条目还提供
+`windows_display_number`：来源是 GDI `MONITORINFOEX.szDevice`，只接受严格的
+`\\.\DISPLAY<N>`（正的 ASCII 十进制后缀）形式，且活动快照内没有重复时才返回正整数；
+否则为 `null`。该来源已在当前机器与 Windows“标识”显示的屏幕编号视图核对；这只是
+当前显示配置下的观测，不是跨机器或跨驱动永不变化的稳定身份。能可靠获取时，
+`name` 使用同一个 Windows 序号，因此 `id: "display_1"`、
+`windows_display_number: 2`、`name: "Display 2"` 是合法且预期的组合。
+
+对 quick API 的“录制显示器 N”请求，应直接使用 `windows_display` 和 Windows
+标识数字。只有在使用原始 API 时，才从 `/displays` 或
+`/capabilities.context.displays.items` 找到 `windows_display_number == N` 的条目，
+再将该条目的 `id` 原样传给 `source.display_id`，不要自行拼接 `display_N`。若该字段为
+`null`，应结合 `is_primary`、bounds、name 请求用户消歧，而不是猜测。原始 GDI
+设备名、DisplayConfig 路径、adapter 信息和稳定身份指纹不会出现在公共响应中。
 
 ## 3. 列出窗口
 
@@ -774,7 +792,8 @@ X-Agent-Name: <agent-name>
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `target.type` | 是 | `primary_display` / `active_window` / `selected_region` / `last_region` |
+| `target.type` | 是 | `primary_display` / `windows_display` / `active_window` / `selected_region` / `last_region` |
+| `target.windows_display_number` | `windows_display` 必填 | Windows“设置 > 系统 > 显示 > 标识”显示的正整数；必须是 JSON integer，不能使用 API ID 后缀 |
 | `target.selection_timeout_seconds` | 否 | 仅 `selected_region` 生效，默认 `120`，范围 `10..600` |
 | `duration_seconds` | 否 | 转换为 `stop_condition: { type: "duration", seconds: n }`；不填则手动停止 |
 | `video` | 否 | 透传到原始录制配置，默认值同原始 API |
@@ -782,7 +801,26 @@ X-Agent-Name: <agent-name>
 | `output` | 否 | 透传到原始录制配置 |
 | `nested` | 否 | 透传到原始录制配置，使用现有 nested 规则 |
 
-### 三种目标类型
+### Windows 显示器目标
+
+**`windows_display`**：按当前显示快照中唯一可靠的 Windows 显示器序号录制。推荐直接使用 quick API：
+
+```json
+{
+  "target": { "type": "windows_display", "windows_display_number": 2 },
+  "duration_seconds": 30
+}
+```
+
+这里的 `2` 是 Windows“标识”界面看到的数字，不是 `display_2`，也不能从
+API ID 后缀、列表顺序、名称或 bounds 推测。服务端只接受正 JSON integer，
+从同一次当前显示器快照匹配恰好一项，并把匹配项的 opaque `id` 交给现有录制流程。
+找不到可靠唯一编号时返回 `SOURCE_NOT_FOUND`，应刷新 `/capabilities` 或 `/displays`
+后重试，或请用户消歧；不会创建 recording 或确认窗。成功响应的
+`quick.resolved_source` 会返回 `display_id`、`windows_display_number` 和对齐后的
+`name`。成功创建后仍须本地用户确认，HTTP API 不能自批准。
+
+### 其他目标类型
 
 **`primary_display`**：自动选择主显示器（`is_primary=true`），没有 primary 则选第一个。
 
@@ -896,6 +934,58 @@ X-Agent-Name: <agent-name>
   "request_id": "req_xxx"
 }
 ```
+
+### 可选的有界创建等待
+
+两个创建接口都支持 opt-in 的生命周期等待参数：
+
+```http
+POST /recordings?wait_for=recording&wait_ms=25000
+POST /recordings/quick?wait_for=recording&wait_ms=25000
+```
+
+`wait_for` 当前只接受 `recording`。省略 `wait_for` 时沿用原有的立即创建响应；此时
+若单独提供 `wait_ms`，请求无效。只有提供 `wait_for=recording` 时，`wait_ms` 才可选，
+省略即使用 `25000`；显式值必须是 `1..25000` 的 JSON query integer。未知
+`wait_for`、非法/越界 `wait_ms` 都在来源解析、设备枚举、选区 UI、确认和捕获副作用之前
+返回 `400 INVALID_ARGUMENT`。
+
+等待预算从 recording 创建成功后才开始。服务等待两者中最先发生者：已有可信首帧门槛
+之后的公共 `recording` 状态，或 `rejected`、`expired`、`cancelled`、`failed`、
+`completed` 终态。批准、preparing、countdown、backend Start 和 plan revalidation
+都不是成功里程碑；该参数是只读观察，不会批准、拒绝、启动、停止或缩短录制。quick 的
+`selected_region` 会先完成选区再创建 recording；取消/超时/不可用时沿用原有业务响应，
+不会伪造 `wait` 或 `recording` 对象。
+
+创建成功且 recording 仍存在时，原有的 `recording_id`、`confirmation_id`、`summary`、
+`bundle`、`performance_trace_id` 以及 quick 元数据全部保留，并新增当前公共 `status`、
+与 `GET /recordings/{recording_id}` 完全相同的规范 `recording` 投影，以及：
+
+```json
+{
+  "status": "pending_confirmation",
+  "recording_id": "rec_xxx",
+  "confirmation_id": "conf_xxx",
+  "summary": {},
+  "performance_trace_id": "trace_xxx",
+  "recording": { "recording_id": "rec_xxx", "status": "pending_confirmation" },
+  "wait": {
+    "wait_for": "recording",
+    "requested_ms": 25000,
+    "elapsed_ms": 25000,
+    "timed_out": true,
+    "goal_reached": false,
+    "terminal": false
+  }
+}
+```
+
+超时仍返回 HTTP 200 和真实当前状态，不改变录制。`goal_reached` 只有可信视频首帧
+转换到 `recording` 时为 `true`；`terminal` 只有终态为 `true`。如果观察者启动前已经
+进入终态，返回 `terminal: true`，不会伪报 `goal_reached`。`performance_trace` 使用稳定
+事件 kind `creation_recording`，只记录有界等待测量和生命周期 ID，不记录请求体或输出
+路径。能力发现通过 `/capabilities.interaction.creation_wait` 暴露 endpoints、支持值、
+默认/最大等待和 `trusted_first_frame_or_terminal` 里程碑。
 
 ### 错误响应
 
@@ -1072,6 +1162,8 @@ AI agent 必须等待本地用户确认。
 用户批准之后、真正启动 FFmpeg 之前会再次执行 **before-start** preflight，复查上述项目并额外检查目标窗口/显示器是否仍然可用。如果复查失败，录制状态会变为 `failed`，`warnings` 包含 `preflight_failed: <ERROR_CODE>`，审计日志记录 `recording.preflight_failed`，本地托盘弹出错误提示。这能避免"用户已确认但窗口已关闭"导致的空录制。
 
 若本机显式启用了实验性 WGC continuous window 后端，录制开始后的目标窗口关闭、最小化或尺寸变化也会明确失败，终态原因分别为 `window_closed`、`window_minimized`、`size_changed`，并通过本地失败提示告知用户。这三个值属于 recording 终态原因，不是 HTTP 请求错误码。
+
+默认 FFmpeg 与实验性 WGC 的 display/region 路径在批准的目标显示器丢失时都会 fail closed。默认 FFmpeg 的 display/region 路径（包括分离式 A/V 变体）在可信首帧之后也会监督批准时绑定的显示器。引擎只重新枚举显示器元数据，并要求批准计划中的内部稳定显示器身份恰好匹配一个 `Resolved` 项；运行期不使用公共 `display_N` 序号、名称、坐标边界或后端自报文本作为身份。如果目标缺失、身份歧义/未解析、被替换，或 topology provider 查询失败，应用会执行强类型的内部中止，录制终态原因为 `display_unavailable`。这不是用户 Stop：不会发布最终 MP4 或 bundle，本地托盘 host 只收到一次失败通知。A/V split 会停止两个 worker 并跳过 mux；部分 worker 文件仍按受控 failed-artifact 保留策略处理。显示器拓扑恢复后，需要重新发起请求才能重新绑定。
 
 常见 preflight 错误码：
 
@@ -1270,6 +1362,7 @@ X-Agent-Recorder-Key: <api-key>
 - 捕获结束时状态切换到 `finalizing`，`elapsed_seconds` 冻结在实际屏幕捕获时长；合流、探测和 bundle 生成时间不会加入。
 - 已结束录制计算到 `completed_at`；终态后重复查询结果稳定，不会继续增长。
 - `output.duration_seconds` 是媒体产物时长（由 ffprobe 探测），两者允许因编码、取整和后端行为存在小幅差异，不要把它直接当作 `elapsed_seconds`。
+- `output.path` 始终是本地用户确认后批准的最终保存目标（`Recording.OutputPath`）。成功时它指向已发布的最终媒体；失败时最终媒体不存在，`bytes_written` 为 `0`。A/V split 的 worker 临时文件、mux staging 文件和失败诊断留存文件只属于本地内部证据，不会作为公共输出路径返回。
 
 新增字段说明：
 
@@ -1670,7 +1763,7 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 | `selection_reason_code` / `selection_fallback` | 稳定的选择原因与是否发生回退。 |
 
 `wgc-continuous` 的合格窗口计划使用 `window_surface`；窗口 FFmpeg 区域路径
-使用 `screen_rectangle`。30 秒等不符合 WGC 实验条件的请求会在确认前显示
+使用 `screen_rectangle`。61 秒及其他不符合 WGC 实验条件的请求会在确认前显示
 `screen_rectangle`，不会先承诺窗口表面语义。
 
 ### 每条录制的开始前倒计时

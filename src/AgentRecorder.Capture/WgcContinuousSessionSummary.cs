@@ -184,7 +184,7 @@ public sealed class WgcContinuousSessionSummary
     /// Returns the evidence stop-reason value. STOPPED maps to user_requested,
     /// OK maps to duration_reached, and FAIL surfaces the specific failure
     /// category (timeout, cancelled, encoding_error, disk_full,
-    /// window_not_found, window_minimized, window_unavailable, window_closed,
+    /// display_unavailable, window_not_found, window_minimized, window_unavailable, window_closed,
     /// size_changed, zero_frames, error) when possible.
     /// </summary>
     public string GetStopReasonForEvidence()
@@ -200,6 +200,7 @@ public sealed class WgcContinuousSessionSummary
         string[] allowedCategories = new[]
         {
             "timeout", "cancelled", "encoding_error", "disk_full",
+            "display_unavailable",
             "window_not_found", "window_minimized", "window_unavailable",
             "window_factory_failed", "window_item_failed", "window_closed",
             "invalid_window_handle", "window_size_unsupported", "size_changed",
@@ -209,6 +210,7 @@ public sealed class WgcContinuousSessionSummary
         string[] preciseCategories = new[]
         {
             "timeout", "cancelled", "encoding_error", "disk_full",
+            "display_unavailable",
             "window_not_found", "window_minimized", "window_unavailable",
             "window_factory_failed", "window_item_failed", "window_closed",
             "invalid_window_handle", "window_size_unsupported", "size_changed",

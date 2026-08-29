@@ -198,8 +198,10 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
         } else if (EqualsArg(arg, L"duration-ms")) {
             std::wstring value;
             if (!takeNext(value, L"duration-ms")) return result;
-            if (!ParseInt(TrimWide(value), opts.durationMs) || opts.durationMs < 1000 || opts.durationMs > 10000) {
-                result.error = "Invalid duration-ms; expected 1000..10000";
+            if (!ParseInt(TrimWide(value), opts.durationMs) ||
+                opts.durationMs < kWgcContinuousMinDurationMs ||
+                opts.durationMs > kWgcContinuousMaxDurationMs) {
+                result.error = "Invalid duration-ms; expected 1000..60000";
                 return result;
             }
         } else if (EqualsArg(arg, L"fps")) {

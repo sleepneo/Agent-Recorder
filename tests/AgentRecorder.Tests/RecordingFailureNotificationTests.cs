@@ -30,6 +30,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     }
 
     [Theory]
+    [InlineData("display_unavailable")]
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
@@ -53,6 +54,11 @@ public sealed class RecordingFailureNotificationTests : IDisposable
         if (reasonCode == "audio_capture_discontinuous")
         {
             Assert.Contains("系统音频", attempt.Text.Get(BodyKey(reasonCode)));
+            Assert.Contains("未保存最终视频", attempt.Text.Get(BodyKey(reasonCode)));
+        }
+        if (reasonCode == "display_unavailable")
+        {
+            Assert.Contains("显示器", attempt.Text.Get(BodyKey(reasonCode)));
             Assert.Contains("未保存最终视频", attempt.Text.Get(BodyKey(reasonCode)));
         }
         Assert.Contains(audit.Events, e => e == "recording_failure_notification.requested");
@@ -106,6 +112,22 @@ public sealed class RecordingFailureNotificationTests : IDisposable
         var attempt = Assert.Single(presenter.Attempts);
         var body = attempt.Text.Get("Tray_RecordingFailure_SystemAudioBody");
         Assert.Contains("System audio", body, StringComparison.Ordinal);
+        Assert.Contains("no final video was saved", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Manager_DisplayUnavailableNotification_LocalizesEnglishFailureMessage()
+    {
+        var audit = new CaptureAuditLogger();
+        var presenter = new FakePresenter();
+        using var manager = new RecordingFailureNotificationManager(
+            audit, () => new UiTextProvider(UiLanguage.EnUs), () => 0, presenter);
+
+        manager.Request("rec-display-en", "display_unavailable");
+
+        var attempt = Assert.Single(presenter.Attempts);
+        var body = attempt.Text.Get("Tray_RecordingFailure_DisplayUnavailableBody");
+        Assert.Contains("target display", body, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("no final video was saved", body, StringComparison.Ordinal);
     }
 
@@ -221,7 +243,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     public void Layout_FitsLocalizedLongestTextAt100_150_And200Dpi(UiLanguage language)
     {
         var text = new UiTextProvider(language);
-        foreach (var reason in new[] { "window_closed", "window_minimized", "size_changed", "audio_capture_discontinuous" })
+        foreach (var reason in new[] { "display_unavailable", "window_closed", "window_minimized", "size_changed", "audio_capture_discontinuous" })
         {
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 96));
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 144));
@@ -301,6 +323,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
 
     private static string BodyKey(string reasonCode) => reasonCode switch
     {
+        "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
         "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
         "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
         "audio_capture_discontinuous" => "Tray_RecordingFailure_SystemAudioBody",

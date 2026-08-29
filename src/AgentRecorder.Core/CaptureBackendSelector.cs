@@ -137,7 +137,7 @@ public static class CaptureBackendSelector
             cfg.Bounds.w > 0 && cfg.Bounds.h > 0
                 ? new CapturePlanBounds(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h)
                 : null,
-            cfg.SourceKind == "region" ? cfg.DisplayStableIdentity : null,
+            cfg.SourceKind is "region" or "display" ? cfg.DisplayStableIdentity : null,
             cfg.DisplayBounds.HasValue
                 ? new CapturePlanBounds(
                     cfg.DisplayBounds.Value.x,
@@ -247,7 +247,7 @@ public static class CaptureBackendSelector
                 fallbackBackend,
                 requestedBackend,
                 cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
-        if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
+        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(cfg.DurationSeconds))
             return FallbackDecision(fallbackBackend, requestedBackend, "duration_not_eligible");
         if (cfg.Fps is < 1 or > 60)
             return FallbackDecision(fallbackBackend, requestedBackend, "fps_not_eligible");
@@ -326,7 +326,7 @@ public static class CaptureBackendSelector
                 cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
         if (cfg.WindowHandle == nint.Zero)
             return FallbackDecision(fallbackBackend, requestedBackend, "window_handle_not_eligible");
-        if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
+        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(cfg.DurationSeconds))
             return FallbackDecision(fallbackBackend, requestedBackend, "duration_not_eligible");
         if (cfg.Fps is < 1 or > 60)
             return FallbackDecision(fallbackBackend, requestedBackend, "fps_not_eligible");
@@ -403,7 +403,7 @@ public static class CaptureBackendSelector
                 "ffmpeg-av-split",
                 requestedBackend,
                 cfg.IsMicrophone ? "microphone_not_eligible" : "audio_not_eligible");
-        if (!cfg.DurationSeconds.HasValue || cfg.DurationSeconds.Value is < 1 or > 10)
+        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(cfg.DurationSeconds))
             return FallbackDecision("ffmpeg", requestedBackend, "duration_not_eligible");
         if (cfg.Fps is < 1 or > 60)
             return FallbackDecision("ffmpeg", requestedBackend, "fps_not_eligible");

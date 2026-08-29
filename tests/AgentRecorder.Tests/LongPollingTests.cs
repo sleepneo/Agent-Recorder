@@ -3,7 +3,9 @@ using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -247,6 +249,239 @@ public class LongPollingTests : IDisposable
     }
 
     [Fact]
+    public void GetCreationRecordingWait_PendingConfirmation_TimesOutWithoutTransition()
+    {
+        var rec = CreateRecording(RecState.pending_confirmation);
+        _engine._recs[rec.Id] = rec;
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 120);
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+        var recording = result.GetType().GetProperty("Recording")!.GetValue(result)!;
+
+        Assert.Equal("pending_confirmation", result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.Equal("pending_confirmation", recording.GetType().GetProperty("status")!.GetValue(recording));
+        Assert.Equal("recording", wait.GetType().GetProperty("WaitFor")!.GetValue(wait));
+        Assert.Equal(120, wait.GetType().GetProperty("RequestedMs")!.GetValue(wait));
+        Assert.True((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+        Assert.Equal(RecState.pending_confirmation, rec.State);
+    }
+
+    [Fact]
+    public async Task GetCreationRecordingWait_ReturnsOnlyAfterTrustedRecordingOrTerminal()
+    {
+        var rec = CreateRecording(RecState.preparing);
+        _engine._recs[rec.Id] = rec;
+
+        var waitTask = Task.Run(() => _engine.GetCreationRecordingWait(rec.Id, 5000));
+        await Task.Delay(100);
+        rec.State = RecState.countdown;
+        _engine.BumpStateVersion();
+        await Task.Delay(100);
+        Assert.False(waitTask.IsCompleted);
+
+        rec.State = RecState.recording;
+        _engine.BumpStateVersion();
+        var result = await waitTask;
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        Assert.Equal("recording", result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.True((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+    }
+
+    [Fact]
+    public void GetCreationRecordingWait_AlreadyTerminal_ReturnsImmediately()
+    {
+        var rec = CreateRecording(RecState.rejected);
+        _engine._recs[rec.Id] = rec;
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 25000);
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        Assert.Equal("rejected", result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.True((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+        Assert.True((int)wait.GetType().GetProperty("ElapsedMs")!.GetValue(wait)! < 1000);
+    }
+
+    [Fact]
+    public void GetCreationRecordingWait_AlreadyRecording_ReturnsGoalImmediately()
+    {
+        var rec = CreateRecording(RecState.recording);
+        _engine._recs[rec.Id] = rec;
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 25000);
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        Assert.Equal("recording", result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.True((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+    }
+
+    [Fact]
+    public void GetCreationRecordingWait_TimeoutBoundaryTransition_ReturnsOneCoherentGoalSnapshot()
+    {
+        var rec = CreateRecording(RecState.pending_confirmation);
+        _engine._recs[rec.Id] = rec;
+
+        long nowTicks = 0;
+        _engine.CreationWaitTimestampProviderForTests = () => Volatile.Read(ref nowTicks);
+        _engine.CreationWaitTimestampFrequencyForTests = 1000;
+        _engine.BeforeCreationWaitBlocksForTests = _ => Volatile.Write(ref nowTicks, 5);
+        _engine.BeforeCreationWaitSnapshotForTests = recording =>
+        {
+            lock (recording)
+            {
+                recording.State = RecState.recording;
+                _engine.BumpStateVersion();
+            }
+            Volatile.Write(ref nowTicks, 5);
+        };
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 5);
+
+        AssertCoherentCreationWait(result, "recording", goalReached: true);
+    }
+
+    [Fact]
+    public async Task GetCreationRecordingWait_MilestoneAdvancesBeforeProjection_ContinuesToTerminal()
+    {
+        var rec = CreateRecording(RecState.preparing);
+        _engine._recs[rec.Id] = rec;
+        using var transitionObserved = new ManualResetEventSlim();
+        int transitionCount = 0;
+        _engine.BeforeCreationWaitSnapshotForTests = recording =>
+        {
+            if (Interlocked.Exchange(ref transitionCount, 1) != 0)
+                return;
+
+            lock (recording)
+            {
+                recording.State = RecState.stopping;
+                _engine.BumpStateVersion();
+            }
+            transitionObserved.Set();
+        };
+
+        var waitTask = Task.Run(() => _engine.GetCreationRecordingWait(rec.Id, 5000));
+        lock (rec)
+        {
+            rec.State = RecState.recording;
+            _engine.BumpStateVersion();
+        }
+
+        Assert.True(transitionObserved.Wait(TimeSpan.FromSeconds(2)));
+        Assert.False(waitTask.IsCompleted);
+
+        lock (rec)
+        {
+            rec.State = RecState.completed;
+            rec.CompletedAtUtc = DateTime.UtcNow;
+            rec.PublishFinalized();
+            _engine.BumpStateVersion();
+        }
+
+        var result = await waitTask;
+        AssertCoherentCreationWait(result, "completed", terminal: true);
+    }
+
+    [Fact]
+    public void GetCreationRecordingWait_TransientRace_DoesNotRestartOriginalBudget()
+    {
+        var rec = CreateRecording(RecState.recording);
+        _engine._recs[rec.Id] = rec;
+
+        long nowTicks = 0;
+        _engine.CreationWaitTimestampProviderForTests = () => Volatile.Read(ref nowTicks);
+        _engine.CreationWaitTimestampFrequencyForTests = 1000;
+        int snapshotCount = 0;
+        _engine.BeforeCreationWaitSnapshotForTests = recording =>
+        {
+            if (Interlocked.Exchange(ref snapshotCount, 1) != 0)
+                return;
+
+            lock (recording)
+            {
+                recording.State = RecState.stopping;
+                _engine.BumpStateVersion();
+            }
+            Volatile.Write(ref nowTicks, 1);
+        };
+        _engine.BeforeCreationWaitBlocksForTests = _ => Volatile.Write(ref nowTicks, 10);
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 10);
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        AssertCoherentCreationWait(result, "stopping", timedOut: true);
+        Assert.Equal(10, wait.GetType().GetProperty("ElapsedMs")!.GetValue(wait));
+    }
+
+    [Fact]
+    public async Task GetCreationRecordingWait_ConfirmationExpiryWhileBlocked_ReturnsTerminalSnapshot()
+    {
+        var rec = CreateRecording(RecState.pending_confirmation);
+        var conf = new Confirmation { RecordingId = rec.Id };
+        rec.ConfirmationId = conf.Id;
+        _engine._recs[rec.Id] = rec;
+        _engine._confs[conf.Id] = conf;
+
+        using var aboutToBlock = new ManualResetEventSlim();
+        _engine.BeforeCreationWaitBlocksForTests = _ => aboutToBlock.Set();
+        var waitTask = Task.Run(() => _engine.GetCreationRecordingWait(rec.Id, 5000));
+
+        Assert.True(aboutToBlock.Wait(TimeSpan.FromSeconds(2)));
+        _engine.TriggerConfirmationExpiryForTests(conf.Id);
+
+        var result = await waitTask;
+        AssertCoherentCreationWait(result, "expired", terminal: true);
+        Assert.Equal("expired", conf.Status);
+    }
+
+    [Theory]
+    [InlineData(RecState.expired)]
+    [InlineData(RecState.cancelled)]
+    [InlineData(RecState.failed)]
+    [InlineData(RecState.completed)]
+    public void GetCreationRecordingWait_AllTerminalStatesAreTerminal(RecState state)
+    {
+        var rec = CreateRecording(state);
+        _engine._recs[rec.Id] = rec;
+
+        var result = _engine.GetCreationRecordingWait(rec.Id, 25000);
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        Assert.Equal(state.ToString(), result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.True((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+    }
+
+    [Fact]
+    public async Task GetCreationRecordingWait_UnrelatedPulse_DoesNotSatisfyWait()
+    {
+        var rec = CreateRecording(RecState.preparing);
+        _engine._recs[rec.Id] = rec;
+        var unrelated = CreateRecording(RecState.preparing);
+        _engine._recs[unrelated.Id] = unrelated;
+
+        var waitTask = Task.Run(() => _engine.GetCreationRecordingWait(rec.Id, 350));
+        await Task.Delay(80);
+        unrelated.State = RecState.recording;
+        _engine.BumpStateVersion();
+
+        var result = await waitTask;
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+        Assert.Equal("preparing", result.GetType().GetProperty("Status")!.GetValue(result));
+        Assert.True((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+    }
+
+    [Fact]
     public async Task GetStatusWait_UnrelatedStateChange_DoesNotPrematurelyReturn()
     {
         var rec1 = CreateRecording(RecState.recording);
@@ -294,6 +529,42 @@ public class LongPollingTests : IDisposable
         Assert.Equal(1000, method.Invoke(null, new object?[] { "1000" }));
         Assert.Equal(25000, method.Invoke(null, new object?[] { "25000" }));
         Assert.Equal(25000, method.Invoke(null, new object?[] { "999999" }));
+    }
+
+    [Fact]
+    public void ParseCreationWaitMs_RequiresRecordingAndUsesBoundedIntegerContract()
+    {
+        var method = typeof(AgentRecorder.Api.ApiServer).GetMethod("ParseCreationWaitMs",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+
+        object? Invoke(params (string Key, string Value)[] pairs)
+        {
+            var query = new System.Collections.Generic.Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in pairs)
+                query[pair.Key] = pair.Value;
+            return method!.Invoke(null, new object?[] { query });
+        }
+
+        Assert.Equal(25000, Invoke(("wait_for", "recording")));
+        Assert.Equal(1, Invoke(("wait_for", "recording"), ("wait_ms", "1")));
+        Assert.Equal(25000, Invoke(("wait_for", "recording"), ("wait_ms", "25000")));
+
+        foreach (var pairs in new[]
+        {
+            new[] { ("wait_for", "other") },
+            new[] { ("wait_ms", "1") },
+            new[] { ("wait_for", "recording"), ("wait_ms", "0") },
+            new[] { ("wait_for", "recording"), ("wait_ms", "25001") },
+            new[] { ("wait_for", "recording"), ("wait_ms", "abc") }
+        })
+        {
+            var exception = Assert.Throws<System.Reflection.TargetInvocationException>(() => Invoke(pairs));
+            var apiException = Assert.IsType<ApiException>(exception.InnerException);
+            Assert.Equal(400, apiException.Status);
+            Assert.Equal("INVALID_ARGUMENT", apiException.Code);
+        }
     }
 
     // =====================================================================
@@ -404,6 +675,32 @@ public class LongPollingTests : IDisposable
         Assert.Equal(200, json["wait"]!["requested_ms"]!.GetValue<int>());
         Assert.True(json["wait"]!["timed_out"]!.GetValue<bool>());
         Assert.Equal(1000, json["next_poll_hint_ms"]!.GetValue<int>());
+    }
+
+    private static void AssertCoherentCreationWait(
+        object result,
+        string expectedStatus,
+        bool goalReached = false,
+        bool terminal = false,
+        bool timedOut = false)
+    {
+        var status = (string)result.GetType().GetProperty("Status")!.GetValue(result)!;
+        var recording = result.GetType().GetProperty("Recording")!.GetValue(result)!;
+        var recordingStatus = (string)recording.GetType().GetProperty("status")!.GetValue(recording)!;
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+        var flags = new[]
+        {
+            (bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!,
+            (bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!,
+            (bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!
+        };
+
+        Assert.Equal(expectedStatus, status);
+        Assert.Equal(status, recordingStatus);
+        Assert.Equal(1, flags.Count(flag => flag));
+        Assert.Equal(goalReached, flags[0]);
+        Assert.Equal(terminal, flags[1]);
+        Assert.Equal(timedOut, flags[2]);
     }
 
     private Recording CreateRecording(RecState state)

@@ -307,6 +307,201 @@ struct ScopedJoiningThread {
     }
 };
 
+void RunDisplayUnavailableSignalTest(CaptureMode mode, const wchar_t* prefix) {
+    TempDir dir(prefix);
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect bounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(bounds, outputPath, beginPath, stopPath, 5000);
+    opts.mode = mode;
+    opts.regionBounds = bounds;
+    if (mode == CaptureMode::ContinuousRegion) {
+        opts.regionBounds.x = bounds.x;
+        opts.regionBounds.y = bounds.y;
+        opts.regionBounds.width = 64;
+        opts.regionBounds.height = 64;
+    }
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::function<void()> signalUnavailable;
+    std::atomic<bool> started{false};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onStarted = [&]() {
+        {
+            std::lock_guard<std::mutex> lock(startedMutex);
+            started.store(true);
+        }
+        startedCv.notify_all();
+    };
+    hooks.onTestSignalsCreated = [&](const CaptureSessionTestSignals& signals) {
+        signalUnavailable = signals.signalDisplayUnavailable;
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x71);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+    ASSERT_TRUE(static_cast<bool>(signalUnavailable));
+    signalUnavailable();
+    signalUnavailable();
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    CaptureOutcome outcome = future.get();
+
+    ASSERT_EQ(outcome.result, CaptureResult::Failed);
+    ASSERT_EQ(outcome.errorCode, "display_unavailable");
+    ASSERT_FALSE(FileExists(outputPath));
+    ASSERT_TRUE(FileExists(partialPath));
+    ASSERT_GT(outcome.bytesWritten, 0);
+}
+
+void RunDisplayMonitorScenario(CaptureMode mode,
+                               bool targetGone,
+                               bool queryThrows,
+                               const wchar_t* prefix) {
+    TempDir dir(prefix);
+    const std::wstring outputPath = JoinPath(dir.path, L"out.mp4");
+    const std::wstring partialPath = JoinPath(dir.path, L"out.partial.mp4");
+    const std::wstring beginPath = JoinPath(dir.path, L"begin.signal");
+    const std::wstring stopPath = JoinPath(dir.path, L"stop.signal");
+    WriteFile(beginPath, L"test-token-175c");
+
+    Rect displayBounds = GetPrimaryMonitorBounds();
+    Options opts = MakeContinuousOptions(displayBounds, outputPath, beginPath, stopPath, 5000);
+    opts.mode = mode;
+    opts.regionBounds = displayBounds;
+    if (mode == CaptureMode::ContinuousRegion) {
+        opts.regionBounds.x = displayBounds.x;
+        opts.regionBounds.y = displayBounds.y;
+        opts.regionBounds.width = 64;
+        opts.regionBounds.height = 64;
+    }
+
+    EventWriter writer;
+    BeginGate gate(opts.beginSignalPath, opts.beginToken,
+                   opts.stopSignalPath, opts.beginTimeoutMs);
+    CaptureSession session(opts, ValidateOutputPathOrFail(outputPath),
+                           partialPath, gate, writer);
+
+    std::atomic<bool> started{false};
+    std::atomic<bool> gone{false};
+    std::atomic<int> queryCount{0};
+    std::atomic<int> markCaptureEndedCount{0};
+    std::mutex startedMutex;
+    std::condition_variable startedCv;
+    CaptureSessionTestHooks hooks;
+    hooks.onEncoderInitialize = [](int, int, int, const std::wstring&) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onStartCapture = []() {};
+    hooks.onMarkCaptureEnded = [&]() {
+        markCaptureEndedCount.fetch_add(1);
+    };
+    hooks.onStarted = [&]() {
+        started.store(true);
+        startedCv.notify_all();
+    };
+    hooks.onDisplayAvailabilityQuery = [&](const Rect&) {
+        queryCount.fetch_add(1);
+        if (queryThrows) {
+            throw std::runtime_error("injected display topology query failure");
+        }
+        return !gone.load();
+    };
+    hooks.onCopyFrame = [](const QueuedFrame&, int width, int height,
+                           std::vector<uint8_t>& outPixels) {
+        outPixels.assign(static_cast<size_t>(width) * height * 4, 0x72);
+        return true;
+    };
+    hooks.onWriteFrame = [](const std::vector<uint8_t>&, int64_t, int64_t) {
+        return EncoderResult{EncoderStatus::Ok};
+    };
+    hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
+    hooks.onCaptureActive = [](FrameQueue& queue) {
+        QueuedFrame frame;
+        frame.systemRelativeTimeHns = 0;
+        frame.contentWidth = 64;
+        frame.contentHeight = 64;
+        queue.Push(frame);
+    };
+    session.SetTestHooks(hooks);
+    WriteSyntheticPartial(partialPath);
+
+    std::packaged_task<CaptureOutcome()> task([&]() { return session.Run(); });
+    auto future = task.get_future();
+    ScopedJoiningThread runner{std::thread(std::move(task))};
+
+    {
+        std::unique_lock<std::mutex> lock(startedMutex);
+        ASSERT_TRUE(startedCv.wait_for(lock, std::chrono::milliseconds(3000),
+                                       [&]() { return started.load(); }));
+    }
+
+    if (targetGone) {
+        gone.store(true);
+    } else if (!queryThrows) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        ASSERT_GT(queryCount.load(), 0);
+        ASSERT_EQ(future.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        WriteFile(stopPath, L"stop");
+    }
+
+    ASSERT_EQ(future.wait_for(std::chrono::milliseconds(3000)), std::future_status::ready);
+    CaptureOutcome outcome = future.get();
+    ASSERT_GT(queryCount.load(), 0);
+
+    if (targetGone || queryThrows) {
+        ASSERT_EQ(outcome.result, CaptureResult::Failed);
+        ASSERT_EQ(outcome.errorCode, "display_unavailable");
+        ASSERT_FALSE(FileExists(outputPath));
+        ASSERT_TRUE(FileExists(partialPath));
+        ASSERT_GT(outcome.bytesWritten, 0);
+        ASSERT_EQ(markCaptureEndedCount.load(), 1);
+    } else {
+        ASSERT_EQ(outcome.result, CaptureResult::Stopped);
+        ASSERT_TRUE(FileExists(outputPath));
+        ASSERT_FALSE(FileExists(partialPath));
+        ASSERT_EQ(markCaptureEndedCount.load(), 1);
+    }
+}
+
 [[noreturn]] void TerminateTestProcess(const char* reason) {
     std::cerr << "[TEST FATAL] " << reason << "\n";
     ::TerminateProcess(::GetCurrentProcess(), 2);
@@ -2382,6 +2577,31 @@ TEST_REGISTRAR(CaptureSessionWindowSizeChangedAfterStart_FailsClosedWithPartialE
     ASSERT_TRUE(FileExists(partialPath));
     ASSERT_GT(FileSize(partialPath), 0);
     ASSERT_GT(outcome.bytesWritten, 0);
+});
+
+TEST_REGISTRAR(CaptureSessionDisplayClosedAfterStart_FailsDisplayUnavailable, []() {
+    RunDisplayUnavailableSignalTest(CaptureMode::ContinuousDisplay,
+                                    L"wgc-test-display-unavailable");
+});
+
+TEST_REGISTRAR(CaptureSessionRegionClosedAfterStart_FailsDisplayUnavailable, []() {
+    RunDisplayUnavailableSignalTest(CaptureMode::ContinuousRegion,
+                                    L"wgc-test-region-display-unavailable");
+});
+
+TEST_REGISTRAR(CaptureSessionDisplayMonitor_TargetPresentDoesNotStop, []() {
+    RunDisplayMonitorScenario(CaptureMode::ContinuousDisplay, false, false,
+                              L"wgc-test-display-monitor-present");
+});
+
+TEST_REGISTRAR(CaptureSessionRegionMonitor_TargetGoneFailsOnce, []() {
+    RunDisplayMonitorScenario(CaptureMode::ContinuousRegion, true, false,
+                              L"wgc-test-region-monitor-gone");
+});
+
+TEST_REGISTRAR(CaptureSessionDisplayMonitor_QueryExceptionFailsClosed, []() {
+    RunDisplayMonitorScenario(CaptureMode::ContinuousDisplay, false, true,
+                              L"wgc-test-display-monitor-exception");
 });
 
 TEST_REGISTRAR(CaptureSessionWindowClosedByHwndMonitor_FailsPromptly, []() {

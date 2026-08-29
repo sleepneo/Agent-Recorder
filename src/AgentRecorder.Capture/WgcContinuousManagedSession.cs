@@ -458,8 +458,10 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         if (!string.Equals(Path.GetExtension(_options.OutputPath), ".mp4", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Output path must have .mp4 extension.", nameof(_options));
 
-        if (_options.DurationMs is < 1000 or > 10000)
-            throw new ArgumentException("Duration must be between 1000 and 10000 ms.", nameof(_options));
+        if (!WgcContinuousDurationPolicy.IsEligibleMilliseconds(_options.DurationMs))
+            throw new ArgumentException(
+                $"Duration must be between {WgcContinuousDurationPolicy.MinMilliseconds} and {WgcContinuousDurationPolicy.MaxMilliseconds} ms.",
+                nameof(_options));
 
         if (_options.Fps is < 1 or > 60)
             throw new ArgumentException("Fps must be between 1 and 60.", nameof(_options));

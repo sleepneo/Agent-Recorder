@@ -575,6 +575,7 @@ public static class WgcContinuousEventStreamParser
                     string[] failureStopReasons = new[]
                     {
                         "timeout", "cancelled", "encoding_error", "disk_full",
+                        "display_unavailable",
                         "window_not_found", "window_minimized", "window_unavailable",
                         "window_factory_failed", "window_item_failed", "window_closed",
                         "invalid_window_handle", "window_size_unsupported", "size_changed",

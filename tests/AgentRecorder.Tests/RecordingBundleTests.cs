@@ -1254,7 +1254,7 @@ public class RecordingBundleTests : IDisposable
     }
 
     [Fact]
-    public async Task RecordingEngine_MetaOutputPath_DiffersFromRecordingOutputPath_GeneratingUsesMetaPath()
+    public async Task RecordingEngine_MetaOutputPath_DiffersFromRecordingOutputPath_GeneratingUsesApprovedFinalPath()
     {
         var audit = new CaptureAuditLogger();
         var generator = new CapturingBundleGenerator();
@@ -1266,6 +1266,7 @@ public class RecordingBundleTests : IDisposable
 
         var recOutputPath = MediaPath("recording-output");
         var metaOutputPath = MediaPath("actual-media");
+        File.WriteAllText(recOutputPath, "approved final video bytes");
         File.WriteAllText(metaOutputPath, "actual video bytes");
 
         var rec = new Recording
@@ -1289,8 +1290,8 @@ public class RecordingBundleTests : IDisposable
         });
 
         await Task.Delay(100);
-        Assert.Equal(metaOutputPath, generator.LastRequest?.MediaPath);
-        Assert.EndsWith("actual-media.bundle", rec.BundleSnapshot.Path!);
+        Assert.Equal(recOutputPath, generator.LastRequest?.MediaPath);
+        Assert.EndsWith("recording-output.bundle", rec.BundleSnapshot.Path!);
     }
 
     [Fact]

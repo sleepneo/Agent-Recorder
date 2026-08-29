@@ -526,7 +526,7 @@ public sealed class WgcContinuousAvailabilityProbe :
             return false;
         if (config.Microphone || !config.DurationSeconds.HasValue)
             return false;
-        if (config.DurationSeconds.Value is < 1 or > 10)
+        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(config.DurationSeconds))
             return false;
         if (config.Fps is < 1 or > 60)
             return false;

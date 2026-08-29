@@ -232,8 +232,8 @@ public class ApiResponseSerializationTests : IDisposable
     {
         SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
         {
-            new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.5),
-            new("display_2", "Display 2", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 2.0)
+            new("display_1", "Display 1", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.5, 1),
+            new("display_2", "Display 2", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 2.0, 2)
         });
 
         var server = CreateServer();
@@ -257,6 +257,7 @@ public class ApiResponseSerializationTests : IDisposable
         Assert.Equal("display_1", first.GetProperty("id").GetString());
         Assert.Equal("Display 1", first.GetProperty("name").GetString());
         Assert.True(first.GetProperty("is_primary").GetBoolean());
+        Assert.Equal(1, first.GetProperty("windows_display_number").GetInt32());
 
         var bounds = first.GetProperty("bounds");
         Assert.Equal(0, bounds.GetProperty("x").GetInt32());
@@ -267,6 +268,7 @@ public class ApiResponseSerializationTests : IDisposable
 
         var second = displays[1];
         Assert.Equal("display_2", second.GetProperty("id").GetString());
+        Assert.Equal(2, second.GetProperty("windows_display_number").GetInt32());
         Assert.Equal(2.0, second.GetProperty("scale_factor").GetDouble());
     }
 
@@ -332,5 +334,51 @@ public class ApiResponseSerializationTests : IDisposable
         using var doc = JsonDocument.Parse(body);
         Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
         Assert.True(doc.RootElement.GetProperty("data").GetProperty("displays").GetArrayLength() > 0);
+    }
+
+    [Fact]
+    public async Task DisplaysAndCapabilities_ExposeTheSameWindowsDisplayNumberContract()
+    {
+        SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+        {
+            new("display_1", "Display 2", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, 2),
+            new("display_2", "Display 3", false, new SystemQuery.Bounds(1920, 0, 1920, 1080), 1.0, 3),
+            new("display_3", "Display 1", false, new SystemQuery.Bounds(-1920, 0, 1920, 1080), 1.0, 1)
+        });
+
+        var server = CreateServer();
+        server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+        using var displaysDocument = JsonDocument.Parse(await (
+            await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/displays"))
+            .Content.ReadAsStringAsync());
+        using var capabilitiesDocument = JsonDocument.Parse(await (
+            await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities"))
+            .Content.ReadAsStringAsync());
+
+        var displays = displaysDocument.RootElement.GetProperty("data").GetProperty("displays");
+        var capabilityItems = capabilitiesDocument.RootElement
+            .GetProperty("data")
+            .GetProperty("context")
+            .GetProperty("displays")
+            .GetProperty("items");
+        Assert.Equal(displays.GetArrayLength(), capabilityItems.GetArrayLength());
+        for (int i = 0; i < displays.GetArrayLength(); i++)
+        {
+            foreach (var field in new[] { "id", "name", "windows_display_number" })
+                Assert.Equal(displays[i].GetProperty(field).ToString(), capabilityItems[i].GetProperty(field).ToString());
+        }
+
+        Assert.Equal("display_1", displays[0].GetProperty("id").GetString());
+        Assert.Equal(2, displays[0].GetProperty("windows_display_number").GetInt32());
+        Assert.Equal("Display 2", displays[0].GetProperty("name").GetString());
+        Assert.Equal("display_2", displays[1].GetProperty("id").GetString());
+        Assert.Equal(3, displays[1].GetProperty("windows_display_number").GetInt32());
+        Assert.Equal("display_3", displays[2].GetProperty("id").GetString());
+        Assert.Equal(1, displays[2].GetProperty("windows_display_number").GetInt32());
+        Assert.DoesNotContain(@"\.\DISPLAY", displaysDocument.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("stable_identity", displaysDocument.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 }

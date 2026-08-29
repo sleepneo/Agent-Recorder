@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -419,6 +420,7 @@ public sealed class ApiServer
 
     private string CreateRecording(HttpRequest req, string reqBody, string reqId)
     {
+        var creationWaitMs = ParseCreationWaitMs(req.Query);
         var agent = req.Headers.GetValueOrDefault("X-Agent-Name") ?? "unknown";
         var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
         var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
@@ -454,7 +456,7 @@ public sealed class ApiServer
             throw;
         }
 
-        return ApiResponse.Ok(result, reqId);
+        return ApiResponse.Ok(ApplyCreationWait(result, creationWaitMs), reqId);
     }
 
     private string CreateRegionSelection(HttpRequest req, string reqBody, string reqId)
@@ -542,6 +544,7 @@ public sealed class ApiServer
 
     private string CreateQuickRecording(HttpRequest req, string reqBody, string reqId)
     {
+        var creationWaitMs = ParseCreationWaitMs(req.Query);
         var agent = req.Headers.GetValueOrDefault("X-Agent-Name") ?? "unknown";
         var traceId = "trace_" + Guid.NewGuid().ToString("N")[..16];
         var clientSentAtUtc = req.Headers.GetValueOrDefault("X-Agent-Sent-At");
@@ -582,11 +585,41 @@ public sealed class ApiServer
             throw new ApiException(400, "INVALID_ARGUMENT", "target is required");
         }
 
-        var targetType = targetNode["type"]?.GetValue<string>();
+        if (targetNode is not JsonObject targetObject)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
+            throw new ApiException(400, "INVALID_ARGUMENT", "target must be a JSON object");
+        }
+
+        string? targetType = null;
+        try
+        {
+            if (targetObject["type"] is JsonValue typeValue)
+            {
+                var typeElement = typeValue.GetValue<JsonElement>();
+                if (typeElement.ValueKind == JsonValueKind.String)
+                    targetType = typeElement.GetString();
+            }
+        }
+        catch { }
         if (string.IsNullOrWhiteSpace(targetType))
         {
             _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
             throw new ApiException(400, "INVALID_ARGUMENT", "target.type is required");
+        }
+
+        int? windowsDisplayNumber = null;
+        if (string.Equals(targetType, "windows_display", StringComparison.Ordinal))
+        {
+            try
+            {
+                windowsDisplayNumber = ParseWindowsDisplayNumber(targetObject);
+            }
+            catch (ApiException ex)
+            {
+                _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+                throw;
+            }
         }
 
         // Validate the shared top-level countdown contract before any quick
@@ -646,7 +679,36 @@ public sealed class ApiServer
                             ["display_id"] = display.id
                         };
                         var data = AddQuickMetadataToObject(result, "primary_display", resolved, true);
-                        return ApiResponse.Ok(data, reqId);
+                        return ApiResponse.Ok(ApplyCreationWait(data, creationWaitMs), reqId);
+                    }
+
+                case "windows_display":
+                    {
+                        var display = ResolveWindowsDisplay(windowsDisplayNumber!.Value);
+                        cfg["source"] = new JsonObject
+                        {
+                            ["type"] = "display",
+                            ["display_id"] = display.id
+                        };
+                        var result = _engine.CreateRecording(
+                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
+                        var resolved = new JsonObject
+                        {
+                            ["type"] = "display",
+                            ["display_id"] = display.id,
+                            ["windows_display_number"] = display.windows_display_number,
+                            ["name"] = display.name,
+                            ["is_primary"] = display.is_primary,
+                            ["bounds"] = new JsonObject
+                            {
+                                ["x"] = display.bounds.x,
+                                ["y"] = display.bounds.y,
+                                ["width"] = display.bounds.width,
+                                ["height"] = display.bounds.height
+                            }
+                        };
+                        var data = AddQuickMetadataToObject(result, "windows_display", resolved, true);
+                        return ApiResponse.Ok(ApplyCreationWait(data, creationWaitMs), reqId);
                     }
 
                 case "active_window":
@@ -692,7 +754,7 @@ public sealed class ApiServer
                             }
                         };
                         var data = AddQuickMetadataToObject(result, "active_window", resolved, true);
-                        return ApiResponse.Ok(data, reqId);
+                        return ApiResponse.Ok(ApplyCreationWait(data, creationWaitMs), reqId);
                     }
 
                 case "selected_region":
@@ -772,7 +834,7 @@ public sealed class ApiServer
                             }
                         };
                         var data = AddQuickMetadataToObject(result, "selected_region", resolved, true);
-                        return ApiResponse.Ok(data, reqId);
+                        return ApiResponse.Ok(ApplyCreationWait(data, creationWaitMs), reqId);
                     }
 
                 case "last_region":
@@ -818,12 +880,12 @@ public sealed class ApiServer
                             ["source"] = "last_selected_region"
                         };
                         var data = AddQuickMetadataToObject(result, "last_region", resolved, true);
-                        return ApiResponse.Ok(data, reqId);
+                        return ApiResponse.Ok(ApplyCreationWait(data, creationWaitMs), reqId);
                     }
 
                 default:
                     throw new ApiException(400, "INVALID_ARGUMENT",
-                        $"target.type '{targetType}' is not supported. Supported: primary_display, active_window, selected_region, last_region");
+                        $"target.type '{targetType}' is not supported. Supported: primary_display, windows_display, active_window, selected_region, last_region");
             }
         }
         catch (ApiException ex)
@@ -917,6 +979,72 @@ public sealed class ApiServer
         return primary;
     }
 
+    private static int ParseWindowsDisplayNumber(JsonObject target)
+    {
+        if (target["windows_display_number"] is not JsonValue value)
+            throw InvalidWindowsDisplayNumber();
+
+        try
+        {
+            var element = value.GetValue<JsonElement>();
+            var raw = element.GetRawText();
+            if (element.ValueKind == JsonValueKind.Number
+                && raw.Length > 0
+                && raw.All(character => character is >= '0' and <= '9')
+                && element.TryGetInt32(out var number)
+                && number > 0)
+            {
+                return number;
+            }
+        }
+        catch { }
+
+        throw InvalidWindowsDisplayNumber();
+    }
+
+    private static ApiException InvalidWindowsDisplayNumber()
+        => new(400, "INVALID_ARGUMENT",
+            "target.windows_display_number must be a positive JSON integer.",
+            new
+            {
+                field = "target.windows_display_number",
+                reason = "must_be_positive_json_integer",
+                suggested_action = "use_the_positive_number_shown_by_windows_identify"
+            });
+
+    private static SystemQuery.DisplayInfo ResolveWindowsDisplay(int windowsDisplayNumber)
+    {
+        List<SystemQuery.DisplayInfo> displays;
+        try
+        {
+            // This is the only display snapshot consumed by the quick resolver.
+            // The selected API ID and all public metadata below come from this
+            // same list; do not reconstruct a target from another enumeration.
+            displays = SystemQuery.EnumDisplays();
+        }
+        catch
+        {
+            throw WindowsDisplaySourceNotFound(windowsDisplayNumber);
+        }
+
+        var matches = displays
+            .Where(display => display.windows_display_number == windowsDisplayNumber)
+            .ToArray();
+        if (matches.Length != 1)
+            throw WindowsDisplaySourceNotFound(windowsDisplayNumber);
+
+        return matches[0];
+    }
+
+    private static ApiException WindowsDisplaySourceNotFound(int windowsDisplayNumber)
+        => new(400, "SOURCE_NOT_FOUND",
+            "The requested Windows display number is not available as a unique current display.",
+            new
+            {
+                requested_windows_display_number = windowsDisplayNumber,
+                suggested_action = "refresh_displays_or_ask_user_to_disambiguate"
+            });
+
     private static SystemQuery.WindowInfo ResolveActiveWindow()
     {
         var window = SystemQuery.ActiveWindow();
@@ -960,6 +1088,84 @@ public sealed class ApiServer
             ["requires_user_confirmation"] = requiresConfirmation
         };
         return node;
+    }
+
+    private static int? ParseCreationWaitMs(IReadOnlyDictionary<string, string> query)
+    {
+        const int maxWaitMs = 25000;
+
+        if (!query.TryGetValue("wait_for", out var waitFor))
+        {
+            if (query.ContainsKey("wait_ms"))
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "wait_ms requires wait_for=recording.",
+                    new { field = "wait_ms", reason = "requires_wait_for" });
+            }
+
+            return null;
+        }
+
+        if (!string.Equals(waitFor, "recording", StringComparison.Ordinal))
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "wait_for must be 'recording'.",
+                new { field = "wait_for", allowed = new[] { "recording" } });
+        }
+
+        if (!query.TryGetValue("wait_ms", out var rawWaitMs))
+            return maxWaitMs;
+
+        if (!int.TryParse(rawWaitMs, NumberStyles.None, CultureInfo.InvariantCulture, out var waitMs)
+            || waitMs < 1 || waitMs > maxWaitMs)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "wait_ms must be an integer between 1 and 25000.",
+                new { field = "wait_ms", min = 1, max = maxWaitMs });
+        }
+
+        return waitMs;
+    }
+
+    private object ApplyCreationWait(object createResult, int? waitMs)
+    {
+        if (!waitMs.HasValue)
+            return createResult;
+
+        var node = JsonSerializer.SerializeToNode(createResult, ApiResponse.Json) as JsonObject;
+        if (node == null || !TryGetRecordingId(node, out var recordingId))
+            return createResult;
+
+        var waitResult = _engine.GetCreationRecordingWait(recordingId, waitMs.Value);
+        var waitNode = JsonSerializer.SerializeToNode(waitResult, ApiResponse.Json) as JsonObject;
+        if (waitNode == null)
+            return createResult;
+
+        foreach (var property in waitNode)
+            node[property.Key] = property.Value?.DeepClone();
+
+        return node;
+    }
+
+    private static bool TryGetRecordingId(JsonObject node, out string recordingId)
+    {
+        recordingId = string.Empty;
+        try
+        {
+            var value = node["recording_id"];
+            if (value is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var parsed)
+                || string.IsNullOrWhiteSpace(parsed))
+            {
+                return false;
+            }
+
+            recordingId = parsed;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string ReasonFrom(string body)
@@ -1010,6 +1216,18 @@ public sealed class ApiServer
         SelectedRegionState? lastRegion;
         lock (_regionLock) { lastRegion = _lastSelectedRegion; }
         bool hasLastRegion = lastRegion != null;
+        var reliableWindowsDisplayNumbers = displaysContext.DisplaySnapshot
+            .Where(display => display.windows_display_number is int number && number > 0)
+            .Select(display => display.windows_display_number!.Value)
+            .Distinct()
+            .OrderBy(number => number)
+            .ToArray();
+        var quickRecipes = BuildQuickRecipes(
+            hasPrimaryDisplay,
+            hasActiveWindow,
+            supportsRegionSelection,
+            hasLastRegion,
+            displaysContext.DisplaySnapshot);
 
         return new
         {
@@ -1060,7 +1278,7 @@ public sealed class ApiServer
                     min_count = ScreenshotSeriesConfig.MinCount,
                     min_duration_seconds = ScreenshotSeriesConfig.MinDurationSeconds,
                     max_planned_frames = ScreenshotSeriesConfig.MaxFrameCount,
-                    targets = new[] { "primary_display", "active_window", "selected_region", "last_region" },
+                    targets = new[] { "primary_display", "windows_display", "active_window", "selected_region", "last_region" },
                     capture_semantics = "one single-frame capture per anchored schedule point; no continuous video extraction"
                 },
                 codecs = new[] { "h264" },
@@ -1096,6 +1314,15 @@ public sealed class ApiServer
                 region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi,
                 quick_recording_endpoint = "/api/v1/recordings/quick",
                 quick_recording_supported = true,
+                windows_display = new
+                {
+                    supported = true,
+                    available = reliableWindowsDisplayNumbers.Length > 0,
+                    available_numbers = reliableWindowsDisplayNumbers,
+                    unavailable_reason = reliableWindowsDisplayNumbers.Length > 0
+                        ? null
+                        : "no_reliable_windows_display_number"
+                },
                 countdown = new
                 {
                     supported = true,
@@ -1103,6 +1330,15 @@ public sealed class ApiServer
                     max_seconds = ConfigParser.MaxCountdownSeconds,
                     default_seconds = ConfigParser.DefaultCountdownSeconds,
                     capture_during_countdown = false
+                },
+                creation_wait = new
+                {
+                    supported = true,
+                    endpoints = new[] { "/api/v1/recordings", "/api/v1/recordings/quick" },
+                    wait_for = new[] { "recording" },
+                    default_wait_ms = 25000,
+                    max_wait_ms = 25000,
+                    milestone = "trusted_first_frame_or_terminal"
                 },
                 stop_controls = new
                 {
@@ -1116,72 +1352,7 @@ public sealed class ApiServer
                         behavior = "stop_all_active_recordings"
                     }
                 },
-                quick_recipes = new object[]
-                {
-                    new
-                    {
-                        name = "record_primary_display",
-                        target_type = "primary_display",
-                        description = "Record the primary display with local confirmation.",
-                        endpoint = "/api/v1/recordings/quick",
-                        method = "POST",
-                        request_template = new { target = new { type = "primary_display" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
-                        available = hasPrimaryDisplay,
-                        unavailable_reason = hasPrimaryDisplay ? null : "no_primary_display"
-                    },
-                    new
-                    {
-                        name = "record_active_window",
-                        target_type = "active_window",
-                        description = "Record the current active window with local confirmation.",
-                        endpoint = "/api/v1/recordings/quick",
-                        method = "POST",
-                        request_template = new { target = new { type = "active_window" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
-                        available = hasActiveWindow,
-                        unavailable_reason = hasActiveWindow ? null : "no_active_window"
-                    },
-                    new
-                    {
-                        name = "record_selected_region",
-                        target_type = "selected_region",
-                        description = "Ask the local user to select a region, then create a recording with local confirmation.",
-                        endpoint = "/api/v1/recordings/quick",
-                        method = "POST",
-                        request_template = new { target = new { type = "selected_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
-                        available = supportsRegionSelection,
-                        unavailable_reason = supportsRegionSelection ? null : "headless_host"
-                    },
-                    new
-                    {
-                        name = "record_last_region",
-                        target_type = "last_region",
-                        description = "Record the last selected region with local confirmation.",
-                        endpoint = "/api/v1/recordings/quick",
-                        method = "POST",
-                        request_template = new { target = new { type = "last_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
-                        available = hasLastRegion,
-                        unavailable_reason = hasLastRegion ? null : "no_last_selected_region"
-                    },
-                    new
-                    {
-                        name = "screenshot_selected_region",
-                        target_type = "selected_region",
-                        mode = ScreenshotSeriesConfig.ModeName,
-                        description = "Ask the local user to select a region, then capture a bounded PNG screenshot series with local confirmation.",
-                        endpoint = "/api/v1/recordings/quick",
-                        method = "POST",
-                        request_template = new
-                        {
-                            target = new { type = "selected_region" },
-                            mode = ScreenshotSeriesConfig.ModeName,
-                            interval_ms = 5000,
-                            max_count = 12,
-                            countdown_seconds = ConfigParser.DefaultCountdownSeconds
-                        },
-                        available = supportsRegionSelection,
-                        unavailable_reason = supportsRegionSelection ? null : "headless_host"
-                    }
-                }
+                quick_recipes = quickRecipes
             },
             safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
@@ -1260,17 +1431,122 @@ public sealed class ApiServer
         source = state.Source
     };
 
-    private (bool Available, int Count, string? PrimaryDisplayId, object? VirtualBounds, object[] Items, string? Error) BuildDisplaysContext()
+    private static object[] BuildQuickRecipes(
+        bool hasPrimaryDisplay,
+        bool hasActiveWindow,
+        bool supportsRegionSelection,
+        bool hasLastRegion,
+        IReadOnlyList<SystemQuery.DisplayInfo> displaySnapshot)
+    {
+        var recipes = new List<object>
+        {
+            new
+            {
+                name = "record_primary_display",
+                target_type = "primary_display",
+                description = "Record the primary display with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                request_template = new { target = new { type = "primary_display" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
+                available = hasPrimaryDisplay,
+                unavailable_reason = hasPrimaryDisplay ? null : "no_primary_display"
+            },
+            new
+            {
+                name = "record_active_window",
+                target_type = "active_window",
+                description = "Record the current active window with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                request_template = new { target = new { type = "active_window" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
+                available = hasActiveWindow,
+                unavailable_reason = hasActiveWindow ? null : "no_active_window"
+            },
+            new
+            {
+                name = "record_selected_region",
+                target_type = "selected_region",
+                description = "Ask the local user to select a region, then create a recording with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                request_template = new { target = new { type = "selected_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
+                available = supportsRegionSelection,
+                unavailable_reason = supportsRegionSelection ? null : "headless_host"
+            },
+            new
+            {
+                name = "record_last_region",
+                target_type = "last_region",
+                description = "Record the last selected region with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                request_template = new { target = new { type = "last_region" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
+                available = hasLastRegion,
+                unavailable_reason = hasLastRegion ? null : "no_last_selected_region"
+            },
+            new
+            {
+                name = "screenshot_selected_region",
+                target_type = "selected_region",
+                mode = ScreenshotSeriesConfig.ModeName,
+                description = "Ask the local user to select a region, then capture a bounded PNG screenshot series with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                request_template = new
+                {
+                    target = new { type = "selected_region" },
+                    mode = ScreenshotSeriesConfig.ModeName,
+                    interval_ms = 5000,
+                    max_count = 12,
+                    countdown_seconds = ConfigParser.DefaultCountdownSeconds
+                },
+                available = supportsRegionSelection,
+                unavailable_reason = supportsRegionSelection ? null : "headless_host"
+            }
+        };
+
+        foreach (var display in displaySnapshot
+            .Where(display => display.windows_display_number is int number && number > 0)
+            .OrderBy(display => display.windows_display_number))
+        {
+            var number = display.windows_display_number!.Value;
+            recipes.Add(new
+            {
+                name = $"record_windows_display_{number}",
+                target_type = "windows_display",
+                description = $"Record Windows display {number} ({display.name}) with local confirmation.",
+                endpoint = "/api/v1/recordings/quick",
+                method = "POST",
+                windows_display_number = number,
+                request_template = new
+                {
+                    target = new { type = "windows_display", windows_display_number = number },
+                    duration_seconds = 60,
+                    countdown_seconds = ConfigParser.DefaultCountdownSeconds
+                },
+                available = true,
+                unavailable_reason = (string?)null
+            });
+        }
+
+        return recipes.ToArray();
+    }
+
+    private (bool Available, int Count, string? PrimaryDisplayId, object? VirtualBounds, object[] Items, string? Error, SystemQuery.DisplayInfo[] DisplaySnapshot) BuildDisplaysContext()
     {
         try
         {
             var displays = SystemQuery.EnumDisplays();
-            var virtualBounds = SystemQuery.VirtualScreenBounds();
+            // Compute this from the same display list used for items. This
+            // keeps one capabilities response internally consistent even if
+            // the desktop topology changes between native enumerations.
+            var virtualBounds = ComputeVirtualScreenBounds(displays);
 
             var items = displays.Select(d => new
             {
                 id = d.id,
                 name = d.name,
+                windows_display_number = d.windows_display_number,
                 is_primary = d.is_primary,
                 bounds = new { x = d.bounds.x, y = d.bounds.y, width = d.bounds.width, height = d.bounds.height },
                 scale_factor = d.scale_factor
@@ -1282,7 +1558,8 @@ public sealed class ApiServer
                 PrimaryDisplayId: displays.FirstOrDefault(d => d.is_primary)?.id,
                 VirtualBounds: new { x = virtualBounds.x, y = virtualBounds.y, width = virtualBounds.width, height = virtualBounds.height },
                 Items: items,
-                Error: null
+                Error: null,
+                DisplaySnapshot: displays.ToArray()
             );
         }
         catch (Exception ex)
@@ -1293,9 +1570,30 @@ public sealed class ApiServer
                 PrimaryDisplayId: null,
                 VirtualBounds: null,
                 Items: Array.Empty<object>(),
-                Error: ex.Message
+                Error: ex.Message,
+                DisplaySnapshot: Array.Empty<SystemQuery.DisplayInfo>()
             );
         }
+    }
+
+    private static SystemQuery.Bounds ComputeVirtualScreenBounds(IReadOnlyList<SystemQuery.DisplayInfo> displays)
+    {
+        if (displays.Count == 0)
+            return new SystemQuery.Bounds(0, 0, 0, 0);
+
+        int minX = displays[0].bounds.x;
+        int minY = displays[0].bounds.y;
+        int maxRight = displays[0].bounds.x + displays[0].bounds.width;
+        int maxBottom = displays[0].bounds.y + displays[0].bounds.height;
+        foreach (var display in displays.Skip(1))
+        {
+            minX = Math.Min(minX, display.bounds.x);
+            minY = Math.Min(minY, display.bounds.y);
+            maxRight = Math.Max(maxRight, display.bounds.x + display.bounds.width);
+            maxBottom = Math.Max(maxBottom, display.bounds.y + display.bounds.height);
+        }
+
+        return new SystemQuery.Bounds(minX, minY, maxRight - minX, maxBottom - minY);
     }
 
     private (bool Available, object? Active, int VisibleCount, object[] ItemsSample, string? Error) BuildWindowsContext()

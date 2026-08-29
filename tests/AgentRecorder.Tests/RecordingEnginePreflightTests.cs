@@ -322,6 +322,45 @@ public class RecordingEnginePreflightTests : IDisposable
     }
 
     [Fact]
+    public async Task CreationWait_BeforeStartPreflightFailureWhileBlocked_ReturnsCoherentTerminalSnapshot()
+    {
+        var hwnd = new nint(12345);
+        var windowId = $"window_{hwnd.ToInt64()}";
+        SystemQuery.SetWindowProvider((_, _) => new()
+        {
+            new SystemQuery.WindowInfo(windowId, "Notepad", "notepad.exe", 42, false, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+
+        var audit = new CapturingAuditLogger();
+        var tray = new ControllableTray { DeferCallback = true };
+        var engine = MakeEngine(audit, tray);
+        engine.CreateRecording(WindowConfig(windowId, "out.mp4"), "test-agent", tray);
+        var rec = engine._recs.Values.Single();
+
+        using var aboutToBlock = new ManualResetEventSlim();
+        engine.BeforeCreationWaitBlocksForTests = _ => aboutToBlock.Set();
+        var waitTask = Task.Run(() => engine.GetCreationRecordingWait(rec.Id, 5000));
+
+        Assert.True(aboutToBlock.Wait(TimeSpan.FromSeconds(2)));
+        SystemQuery.SetWindowProvider((_, _) => new());
+        tray.InvokeApproved();
+
+        var result = await waitTask;
+        var status = (string)result.GetType().GetProperty("Status")!.GetValue(result)!;
+        var recording = result.GetType().GetProperty("Recording")!.GetValue(result)!;
+        var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
+
+        Assert.Equal("failed", status);
+        Assert.Equal("failed", recording.GetType().GetProperty("status")!.GetValue(recording));
+        Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
+        Assert.True((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
+        Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
+        Assert.Equal(RecState.failed, rec.State);
+        Assert.Contains(rec.Warnings, warning => warning.StartsWith("preflight_failed: SOURCE_NOT_FOUND"));
+    }
+
+    [Fact]
     public void CreateRecording_BeforeStart_WindowMinimized_DoesNotStartBackend()
     {
         var hwnd = new nint(12345);

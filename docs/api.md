@@ -168,8 +168,8 @@ The response includes:
 
 A native `wgc-native-helper.exe`, managed continuous session, and
 capture-backend adapter are present in the repository. Guarded selectors can
-use this pipeline for eligible short, silent display, window, or region requests
-only when the corresponding local experiment is explicitly enabled. Availability
+use this pipeline for eligible 1–60 second, silent display, window, or region
+requests only when the corresponding local experiment is explicitly enabled. Availability
 is checked without capture, successful evidence is cached briefly, and an
 ineligible or unavailable request falls back to FFmpeg. Window mode uses the
 actual HWND and reports stable lifecycle failures when the target closes,
@@ -179,6 +179,12 @@ the GPU before encoding. The self-contained portable package contains one
 production helper. **WGC continuous recording is not exposed as a public API
 capability**, remains disabled by default, and cannot be selected through
 public request fields.
+
+The 1–60 second range is the current controlled acceptance boundary, not a claim
+that every GPU, driver, Windows version, or application is compatible. WGC stays
+default-off and does not support microphone or system audio; requests with audio,
+an ineligible duration, or failed capability/lifecycle checks continue through
+the existing FFmpeg (including A/V split where applicable) fallback.
 
 Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
@@ -280,6 +286,13 @@ Quick recipe fields:
   }
 }
 ```
+
+When reliable Windows display numbers are present, `quick_recipes` additionally
+contains one `record_windows_display_N` entry per current number. Its
+`request_template.target.windows_display_number` is the actual positive JSON
+integer for that snapshot, never a string placeholder. If no reliable number
+is available, `interaction.windows_display.available` is `false` and no such
+recipe is emitted.
 
 ### Performance summary
 
@@ -402,7 +415,8 @@ The response includes a `context` object that provides a snapshot of system stat
       "items": [
         {
           "id": "display_1",
-          "name": "Display 1",
+          "name": "Display 2",
+          "windows_display_number": 2,
           "is_primary": true,
           "bounds": { "x": 0, "y": 0, "width": 1920, "height": 1080 },
           "scale_factor": 1.0
@@ -452,6 +466,23 @@ The response includes a `context` object that provides a snapshot of system stat
 - `last_selected_region` is `null` if no region has been selected
 - `last_selected_region` is persisted to `<data-dir>\state\last-selected-region.json` and survives service restarts
 - The API returns 200 even if context enumeration partially fails
+
+Display selection uses two intentionally separate identifiers. `id` (also called
+`display_id` in recording requests) is an opaque API selection token kept for
+compatibility; its numeric suffix is not a Windows display number. Each display
+item also has `windows_display_number`, an integer when the current Windows GDI
+device mapping can be parsed strictly and uniquely, otherwise `null`. The source
+is `MONITORINFOEX.szDevice`; the accepted shape is exactly `\\.\DISPLAY<N>` with
+a positive ASCII decimal suffix. This mapping was checked against the current
+machine and the Windows Settings display-identification view during acceptance;
+it is an observation of the current configuration, not a cross-machine or
+cross-driver stable identity. When the number is available, `name` follows it
+(for example,
+`id: "display_1", windows_display_number: 2, name: "Display 2"`). Agents should
+match a user's “display N” request by `windows_display_number`, then pass that
+item's `id` unchanged to the recording API. If the field is `null`, use
+`is_primary`, bounds, and the name to ask the user to disambiguate; never invent
+or construct a `display_N` token.
 
 ## Permissions
 
@@ -586,9 +617,30 @@ Supported `target.type` values:
 | target.type | Behavior |
 | --- | --- |
 | `primary_display` | Resolve the primary display, then create a recording |
+| `windows_display` | Resolve one exact Windows display number from the current display snapshot, then create a recording |
 | `active_window` | Resolve the active window, clamp its visible bounds to the virtual desktop, then create a recording |
 | `selected_region` | Show local region-selection UI, then create a recording |
 | `last_region` | Reuse the last successful region selection, then create a recording without showing the UI |
+
+For “record Windows display N”, prefer this one-call target:
+
+```json
+{
+  "target": { "type": "windows_display", "windows_display_number": 2 },
+  "duration_seconds": 30
+}
+```
+
+`windows_display_number` must be a positive JSON integer. It is the number
+shown by Windows “Identify”, not the numeric suffix of the API `display_id`.
+The server matches exactly one reliable number from one current display
+snapshot and passes that entry's opaque `id` through the existing recording
+engine. If the number is missing, unreliable, duplicated, or not present,
+the request fails closed with `SOURCE_NOT_FOUND`; refresh `/capabilities` or
+`/displays`, or ask the user to disambiguate. It never guesses an API ID.
+The successful `quick.resolved_source` includes the resolved API ID,
+Windows number, and aligned public display name. Local confirmation is still
+required, and the HTTP API cannot approve the request.
 
 The selected-region UI covers the virtual desktop and supports dragging,
 moving, resizing, precise coordinates, common size presets, edge/window
@@ -666,6 +718,67 @@ recording is created:
 }
 ```
 
+### Optional bounded creation wait
+
+Both creation endpoints support an opt-in lifecycle wait:
+
+```http
+POST /recordings?wait_for=recording&wait_ms=25000
+POST /recordings/quick?wait_for=recording&wait_ms=25000
+```
+
+`wait_for` currently accepts only `recording`. If `wait_for=recording` is
+present, `wait_ms` defaults to `25000` and must be an integer from `1` through
+`25000`. `wait_ms` without `wait_for`, an unknown `wait_for`, or an invalid
+`wait_ms` returns `400 INVALID_ARGUMENT` before source resolution, device
+enumeration, region selection, confirmation, or capture side effects. Omitting
+`wait_for` preserves the ordinary immediate creation response.
+
+The wait begins only after a recording has been created. It observes the first
+of the trusted first-frame `recording` state or a terminal state
+(`rejected`, `expired`, `cancelled`, `failed`, or `completed`). Approval,
+preparing, countdown, backend start, and plan revalidation are not success
+milestones; this option never approves, rejects, starts, stops, or shortens a
+recording. For `selected_region`, region selection completes before the
+recording is created; cancellation or timeout returns the existing quick
+response without a synthetic wait object.
+
+When a recording exists, the response keeps the normal creation fields and adds
+the current public status, the same canonical object returned by
+`GET /recordings/{recording_id}`, and a bounded wait summary:
+
+```json
+{
+  "status": "pending_confirmation",
+  "recording_id": "rec_xxx",
+  "confirmation_id": "conf_xxx",
+  "summary": {},
+  "performance_trace_id": "trace_xxx",
+  "recording": {
+    "recording_id": "rec_xxx",
+    "status": "pending_confirmation"
+  },
+  "wait": {
+    "wait_for": "recording",
+    "requested_ms": 25000,
+    "elapsed_ms": 25000,
+    "timed_out": true,
+    "goal_reached": false,
+    "terminal": false
+  }
+}
+```
+
+`goal_reached` is true only for the trusted video `recording` milestone;
+`terminal` is true only for a terminal state. A timeout returns HTTP 200 with
+the current state and does not change the recording. A quick request that
+reaches a terminal state before the observer runs returns `terminal: true`, not
+`goal_reached: true`. The stable performance-trace event kind is
+`creation_recording`; it contains only bounded wait measurements and lifecycle
+IDs, never request bodies or output paths. `/capabilities.interaction.creation_wait`
+publishes the endpoints, supported value, default/max wait, and
+`trusted_first_frame_or_terminal` milestone.
+
 ## Lower-Level Endpoints
 
 ### Displays
@@ -674,8 +787,14 @@ recording is created:
 GET /displays
 ```
 
-Returns display IDs, names, primary flag, scale factor, and virtual-screen
-bounds.
+Returns the API display selection token, Windows display number when reliably
+available, user-facing name, primary flag, scale factor, and virtual-screen
+bounds. The API token and Windows number may differ; callers must pass the
+returned `id` unchanged when creating a recording.
+
+Example: `id: "display_1"`, `windows_display_number: 2`, and `name: "Display 2"`
+is valid. A `null` `windows_display_number` means the agent must request user
+clarification using the other metadata instead of guessing.
 
 ### Windows
 
@@ -800,6 +919,22 @@ starts is also terminal and explicit: `window_closed`, `window_minimized`, or
 the local failure notification. These are recording terminal reasons rather
 than HTTP request error codes.
 
+Both the default FFmpeg and experimental WGC display/region paths fail closed
+when the approved target display is lost. For the default FFmpeg display/region
+paths, including the split A/V variants, the engine also supervises the approved
+display binding after the first credible frame. It re-enumerates display metadata
+and requires exactly one
+resolved match for the approved internal stable display identity. Public
+`display_N` ordinals, names, bounds, and backend-reported text are not used as
+runtime identity. If the target is missing, ambiguous, unresolved, replaced,
+or the topology provider fails, the engine takes an application-owned typed
+abort and publishes the terminal reason `display_unavailable`. This is not a
+user stop: the final MP4 and bundle are not published, and the local tray host
+receives one failure notification. A/V split abort stops both workers and skips
+the mux step; any partial worker artifacts remain subject to the controlled
+failed-artifact retention policy. A later request can bind again after the
+display topology is restored.
+
 Common preflight error codes:
 
 | error_code | scenario | suggested_action |
@@ -906,6 +1041,7 @@ Long-polling response includes additional fields:
 - When capture ends the state switches to `finalizing` and `elapsed_seconds` freezes at the actual screen-capture duration; finalization time (mux, ffprobe, bundle) is not added.
 - For terminal recordings it is computed from `completed_at` and remains stable across repeated queries.
 - `output.duration_seconds` is the media file duration from ffprobe; the two may differ slightly due to encoding, rounding, and backend behavior. Do not use `duration_seconds` as a substitute for `elapsed_seconds`.
+- `output.path` is always the locally user-approved final save target (`Recording.OutputPath`). On success it points to the published final media; on failure the final media is not published and `bytes_written`/`size_bytes` is `0`. A/V split worker files, mux staging files, and failed diagnostic retention files are internal evidence and are never public output paths.
 
 New fields:
 

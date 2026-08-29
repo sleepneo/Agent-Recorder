@@ -28,7 +28,7 @@ public sealed class OutputMeta
 
     /// <summary>
     /// Stable backend terminal reason. WGC lifecycle failures use values such
-    /// as window_closed, window_minimized, or size_changed.
+    /// as display_unavailable, window_closed, window_minimized, or size_changed.
     /// </summary>
     public string? StopReason;
 

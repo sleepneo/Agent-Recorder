@@ -303,6 +303,7 @@ public class RecordingEngineStopResultTests
     [InlineData("window_closed")]
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
+    [InlineData("display_unavailable")]
     public void WgcLifecycleFailure_PropagatesPublicEvidenceAndNotifiesOnce(string reason)
     {
         var tray = new FailureTray();

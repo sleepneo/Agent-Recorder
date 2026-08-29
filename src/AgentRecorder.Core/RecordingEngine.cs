@@ -58,6 +58,15 @@ public sealed class RecordingEngine : IDisposable
     private readonly ConcurrentDictionary<string, ScreenshotSeriesOperation> _seriesOps = new();
     internal int ActiveScreenshotSeriesOperationCountForTests => _seriesOps.Count;
 
+    private sealed class DisplayRuntimeMonitorOperation
+    {
+        public CancellationTokenSource Cts { get; } = new();
+        public Task? Task { get; set; }
+    }
+
+    private readonly ConcurrentDictionary<string, DisplayRuntimeMonitorOperation> _displayRuntimeMonitors = new();
+    internal int ActiveDisplayRuntimeMonitorCountForTests => _displayRuntimeMonitors.Count;
+
     /// <summary>
     /// Diagnostic seam for resource-lifecycle tests: number of countdown
     /// operations still registered (not yet retired and disposed).
@@ -176,10 +185,34 @@ public sealed class RecordingEngine : IDisposable
     internal Action<Recording, string>? BeforeStartFailureForTests { get; set; }
 
     /// <summary>
+    /// Deterministic creation-wait race seams. The snapshot callback runs after
+    /// the wait signal returns and immediately before the coherent snapshot is
+    /// secured. The blocking callback runs while the engine signal lock is held,
+    /// immediately before Monitor.Wait; test callbacks must only coordinate with
+    /// the test and must not try to acquire the engine signal lock.
+    /// </summary>
+    internal Action<Recording>? BeforeCreationWaitSnapshotForTests { get; set; }
+    internal Action<Recording>? BeforeCreationWaitBlocksForTests { get; set; }
+
+    /// <summary>
+    /// Test-only monotonic clock seam for bounded creation-wait tests.
+    /// Production uses Stopwatch.GetTimestamp and Stopwatch.Frequency.
+    /// </summary>
+    internal Func<long> CreationWaitTimestampProviderForTests { get; set; } = Stopwatch.GetTimestamp;
+    internal long CreationWaitTimestampFrequencyForTests { get; set; } = Stopwatch.Frequency;
+
+    /// <summary>
     /// Test seam: timeout waiting for the first video frame after StartVideo.
     /// Production default is 10 seconds.
     /// </summary>
     internal TimeSpan FirstFrameTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Test seam for the per-recording display topology monitor. Production
+    /// polls once per second; tests use a short interval without a sleep or a
+    /// global provider.
+    /// </summary>
+    internal TimeSpan DisplayRuntimeMonitorInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     internal TimeSpan ScreenshotFrameTimeout { get; set; } = TimeSpan.FromSeconds(15);
     internal Func<CaptureConfig, IScreenshotFrameRunner> ScreenshotFrameRunnerFactoryForTests { get; set; } =
@@ -463,9 +496,13 @@ public sealed class RecordingEngine : IDisposable
     /// terminal recording. Never returns free-text messages, paths, or ffmpeg args.
     /// </summary>
     private static string ResolveTerminalErrorCode(string? backendType, AudioCaptureSourceKind audioSourceKind, OutputMeta meta, int exitCode,
-        bool fileOk, bool durationOk, bool rangeOk, bool exitOk, bool allowWgcLifecycleReason)
+        bool fileOk, bool durationOk, bool rangeOk, bool exitOk, bool allowWgcLifecycleReason,
+        string? trustedLifecycleAbortCode = null)
     {
         bool audioRequested = audioSourceKind != AudioCaptureSourceKind.None;
+        if (trustedLifecycleAbortCode != null)
+            return trustedLifecycleAbortCode;
+
         // Native WGC lifecycle reasons are already authenticated by the
         // helper and must outrank generic exit/file heuristics.
         if (IsWgcContinuousBackend(backendType) &&
@@ -829,9 +866,12 @@ public sealed class RecordingEngine : IDisposable
                         // here is an owned-state adjustment after the output-directory
                         // override failed, not a bypass of the atomic decision gate.
                         conf.Status = "rejected";
-                        rec.State = RecState.rejected;
-                        MarkBundleNotApplicable(rec);
-                        BumpStateVersion();
+                        lock (rec)
+                        {
+                            rec.State = RecState.rejected;
+                            MarkBundleNotApplicable(rec);
+                            BumpStateVersion();
+                        }
                         _audit.Log("confirmation.output_directory_rejected", new
                         {
                             recording_id = rec.Id,
@@ -856,9 +896,12 @@ public sealed class RecordingEngine : IDisposable
                     if (!conf.TryDecide("rejected"))
                         return;
 
-                    rec.State = RecState.rejected;
-                    MarkBundleNotApplicable(rec);
-                    BumpStateVersion();
+                    lock (rec)
+                    {
+                        rec.State = RecState.rejected;
+                        MarkBundleNotApplicable(rec);
+                        BumpStateVersion();
+                    }
                     _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
                     _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
                     _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected");
@@ -1557,11 +1600,14 @@ public sealed class RecordingEngine : IDisposable
         if (preflight.Passed)
             return true;
 
-        MarkBundleNotApplicable(rec);
-        rec.Error = preflight.Message;
-        rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
-        rec.State = RecState.failed;
-        BumpStateVersion();
+        lock (rec)
+        {
+            MarkBundleNotApplicable(rec);
+            rec.Error = preflight.Message;
+            rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
+            rec.State = RecState.failed;
+            BumpStateVersion();
+        }
         _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "failed", errorCode: preflight.ErrorCode);
         _audit.Log("recording.preflight_failed", new
         {
@@ -1738,8 +1784,11 @@ public sealed class RecordingEngine : IDisposable
         // Enter preparing: backend initialization (including microphone warmup)
         // has begun, but no REC UI, no elapsed timer, and no user-visible start
         // until credible first-frame evidence arrives.
-        rec.State = RecState.preparing;
-        BumpStateVersion();
+        lock (rec)
+        {
+            rec.State = RecState.preparing;
+            BumpStateVersion();
+        }
 
         // Ordinary no-audio FFmpeg must not be started and discarded during
         // the countdown: its first backend.Start happens only at countdown
@@ -1896,8 +1945,11 @@ public sealed class RecordingEngine : IDisposable
         };
         runtime.OutputDirectory = rec.OutputPath;
         rec.BackendType = plan.PlannedBackend;
-        rec.State = RecState.preparing;
-        BumpStateVersion();
+        lock (rec)
+        {
+            rec.State = RecState.preparing;
+            BumpStateVersion();
+        }
 
         var op = new ScreenshotSeriesOperation();
         if (!_seriesOps.TryAdd(rec.Id, op))
@@ -2406,6 +2458,156 @@ public sealed class RecordingEngine : IDisposable
 
         StartDeadlineWatchdog(rec, traceId, tray);
         tray.SetRecording(CreateRecordingUiPresentation(rec, RecordingUiState.Recording));
+        StartDisplayRuntimeMonitor(rec, traceId, tray);
+    }
+
+    private void StartDisplayRuntimeMonitor(Recording rec, string? traceId, ITrayContext tray)
+    {
+        var plan = rec.ApprovedCapturePlan;
+        if (plan == null || !CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
+            rec.Config.SourceKind is not ("display" or "region"))
+            return;
+
+        var operation = new DisplayRuntimeMonitorOperation();
+        if (!_displayRuntimeMonitors.TryAdd(rec.Id, operation))
+            return;
+
+        // Do not pass the cancellation token to Task.Run. The owner must still
+        // enter the delegate and retire the operation when cancellation wins
+        // the scheduling race.
+        operation.Task = Task.Run(() => RunDisplayRuntimeMonitorAsync(rec, operation, traceId, tray));
+    }
+
+    private async Task RunDisplayRuntimeMonitorAsync(
+        Recording rec,
+        DisplayRuntimeMonitorOperation operation,
+        string? traceId,
+        ITrayContext tray)
+    {
+        try
+        {
+            while (!operation.Cts.IsCancellationRequested)
+            {
+                lock (rec)
+                {
+                    if (rec.IsFinalized || rec.State != RecState.recording)
+                        return;
+                }
+
+                if (!IsApprovedDisplayAvailable(rec))
+                {
+                    HandleRuntimeDisplayUnavailable(rec, traceId, tray, operation);
+                    return;
+                }
+
+                var interval = DisplayRuntimeMonitorInterval;
+                if (interval <= TimeSpan.Zero)
+                    interval = TimeSpan.FromMilliseconds(1);
+                await Task.Delay(interval, operation.Cts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown during stop, terminal finalization, or Dispose.
+        }
+        catch
+        {
+            // A topology query failure is fail-closed for this approved target.
+            if (!operation.Cts.IsCancellationRequested)
+                HandleRuntimeDisplayUnavailable(rec, traceId, tray, operation);
+        }
+        finally
+        {
+            _displayRuntimeMonitors.TryRemove(rec.Id, out _);
+            try { operation.Cts.Dispose(); } catch { }
+        }
+    }
+
+    private bool IsApprovedDisplayAvailable(Recording rec)
+    {
+        var plan = rec.ApprovedCapturePlan;
+        var identity = plan?.TargetDisplayIdentity ?? rec.Config.DisplayStableIdentity;
+        if (string.IsNullOrWhiteSpace(identity) ||
+            (plan != null && plan.TargetDisplayIdentityStatus != DisplayIdentityResolutionStatus.Resolved))
+            return false;
+
+        IReadOnlyList<DisplayTopologySnapshot> displays;
+        try
+        {
+            displays = _displayTopologyProvider.GetCurrentDisplays();
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (displays == null)
+            return false;
+
+        var identityMatches = displays
+            .Where(display => string.Equals(display.StableIdentity, identity, StringComparison.Ordinal))
+            .ToArray();
+        return identityMatches.Length == 1 &&
+            identityMatches[0].IdentityStatus == DisplayIdentityResolutionStatus.Resolved;
+    }
+
+    private void HandleRuntimeDisplayUnavailable(
+        Recording rec,
+        string? traceId,
+        ITrayContext tray,
+        DisplayRuntimeMonitorOperation? currentOperation = null)
+    {
+        const string code = "display_unavailable";
+        if (!TryRecordCaptureEnded(
+                rec,
+                DateTime.UtcNow,
+                0,
+                code,
+                traceId,
+                tray,
+                CaptureAbortReason.DisplayUnavailable))
+            return;
+
+        // The monitor owns the current async task. Remove it from the registry
+        // before synchronous abort/finalization so finalization never waits for
+        // the task that is currently running. The monitor finally block remains
+        // the sole CTS disposer.
+        if (currentOperation != null)
+        {
+            try { currentOperation.Cts.Cancel(); } catch { }
+            _displayRuntimeMonitors.TryRemove(rec.Id, out _);
+        }
+
+        OutputMeta meta;
+        int exitCode;
+        try
+        {
+            meta = rec.Backend?.Abort(CaptureAbortReason.DisplayUnavailable) ?? new OutputMeta();
+            exitCode = rec.Backend?.ExitCode ?? -1;
+        }
+        catch (Exception ex)
+        {
+            meta = new OutputMeta { StderrLog = "display_abort_failed: " + ex };
+            exitCode = -1;
+        }
+
+        // The engine-owned claim is authoritative even if a backend fails to
+        // attach its reason to the returned metadata.
+        meta.StopReason = code;
+        FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: code, tray);
+    }
+
+    private void StopDisplayRuntimeMonitor(string recordingId)
+    {
+        if (!_displayRuntimeMonitors.TryGetValue(recordingId, out var operation))
+            return;
+
+        try { operation.Cts.Cancel(); } catch { }
+        var task = operation.Task;
+        if (task != null && task.Id != Task.CurrentId)
+        {
+            try { task.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        }
     }
 
     private void StartDeadlineWatchdog(Recording rec, string? traceId, ITrayContext tray)
@@ -2458,7 +2660,14 @@ public sealed class RecordingEngine : IDisposable
     /// tracer/audit/tray transition; later callers observe the timestamp and
     /// return false without producing duplicate events.
     /// </summary>
-    private bool TryRecordCaptureEnded(Recording rec, DateTime endedAtUtc, int exitCode, string reason, string? traceId, ITrayContext tray)
+    private bool TryRecordCaptureEnded(
+        Recording rec,
+        DateTime endedAtUtc,
+        int exitCode,
+        string reason,
+        string? traceId,
+        ITrayContext tray,
+        CaptureAbortReason? lifecycleAbortReason = null)
     {
         bool transitioned = false;
         lock (rec)
@@ -2466,8 +2675,13 @@ public sealed class RecordingEngine : IDisposable
             if (rec.IsFinalized || rec.CaptureEndedAtUtc.HasValue)
                 return false;
 
+            if (lifecycleAbortReason.HasValue && rec.State != RecState.recording)
+                return false;
+
             if (rec.State is RecState.recording or RecState.stopping or RecState.countdown or RecState.finalizing)
             {
+                if (lifecycleAbortReason.HasValue)
+                    rec.TrustedLifecycleAbortReason = lifecycleAbortReason;
                 if (rec.State != RecState.finalizing)
                 {
                     rec.State = RecState.finalizing;
@@ -3134,6 +3348,7 @@ public sealed class RecordingEngine : IDisposable
     private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
         CancelCountdown(rec.Id);
+        StopDisplayRuntimeMonitor(rec.Id);
         RecordingBundleRequest? bundleRequest = null;
         bool finalizationSuccess = false;
         lock (rec)
@@ -3143,11 +3358,17 @@ public sealed class RecordingEngine : IDisposable
 
             rec.AudioContinuityStatus = meta.AudioContinuityStatus;
 
+            var trustedLifecycleAbortCode = rec.TrustedLifecycleAbortReason.HasValue
+                ? CaptureAbortReasonCodes.ToCode(rec.TrustedLifecycleAbortReason.Value)
+                : null;
+            if (trustedLifecycleAbortCode != null)
+                meta.StopReason = trustedLifecycleAbortCode;
+
             // If a user-initiated stop is already in flight (rec.StopReason set by Stop(...)),
             // treat the backend's natural-exit callback as part of that explicit stop. This
             // prevents a race where the natural-exit callback would otherwise mark a short,
             // user-stopped output as failed due to the planned-duration range check.
-            bool treatAsUserStop = natural && !string.IsNullOrEmpty(rec.StopReason);
+            bool treatAsUserStop = natural && trustedLifecycleAbortCode == null && !string.IsNullOrEmpty(rec.StopReason);
             if (treatAsUserStop)
             {
                 natural = false;
@@ -3213,6 +3434,7 @@ public sealed class RecordingEngine : IDisposable
                 audioOk = false;
 
             bool success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
+                           trustedLifecycleAbortCode == null &&
                            !wgcContinuousOutputValidationFailed;
             if (!success)
             {
@@ -3295,13 +3517,24 @@ public sealed class RecordingEngine : IDisposable
             {
                 if (natural)
                 {
-                    rec.StopReason = IsWgcContinuousBackend(rec.BackendType) &&
+                    rec.StopReason = trustedLifecycleAbortCode ??
+                        (IsWgcContinuousBackend(rec.BackendType) &&
                                       (IsWgcLifecycleFailure(meta.StopReason) ||
                                        IsWgcContinuousOutputValidationFailure(meta.StopReason))
-                        ? meta.StopReason
-                        : "unexpected_exit";
+                            ? meta.StopReason
+                            : "unexpected_exit");
                 }
-                var stableErrorCode = ResolveTerminalErrorCode(rec.BackendType, rec.AudioSourceKind, meta, exitCode, fileOk, durationOk, rangeOk, exitOk, natural);
+                var stableErrorCode = ResolveTerminalErrorCode(
+                    rec.BackendType,
+                    rec.AudioSourceKind,
+                    meta,
+                    exitCode,
+                    fileOk,
+                    durationOk,
+                    rangeOk,
+                    exitOk,
+                    natural,
+                    trustedLifecycleAbortCode);
                 rec.Error = stableErrorCode;
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 rec.State = RecState.failed;
@@ -3365,10 +3598,12 @@ public sealed class RecordingEngine : IDisposable
         // The idle transition closes the REC/floating controls first. The
         // notifier then applies the tray host's language and bubble policy,
         // producing exactly one local message for native lifecycle failures.
-        if (!finalizationSuccess &&
-            IsWgcContinuousBackend(rec.BackendType) &&
-            IsWgcLifecycleFailure(rec.StopReason) &&
-            string.Equals(rec.StopReason, meta.StopReason, StringComparison.Ordinal))
+        bool trustedDisplayLifecycleFailure =
+            rec.TrustedLifecycleAbortReason == CaptureAbortReason.DisplayUnavailable ||
+            (IsWgcContinuousBackend(rec.BackendType) &&
+             IsWgcLifecycleFailure(rec.StopReason) &&
+             string.Equals(rec.StopReason, meta.StopReason, StringComparison.Ordinal));
+        if (!finalizationSuccess && trustedDisplayLifecycleFailure)
         {
             if (tray is IRecordingFailureNotifier notifier)
                 notifier.ShowRecordingFailure(rec.Id, meta.StopReason!);
@@ -3423,7 +3658,7 @@ public sealed class RecordingEngine : IDisposable
     }
 
     private static bool IsWgcLifecycleFailure(string? reason) => reason is
-        "window_closed" or "window_minimized" or "size_changed";
+        "display_unavailable" or "window_closed" or "window_minimized" or "size_changed";
 
     private static bool IsWgcContinuousOutputValidationFailure(string? reason) =>
         string.Equals(reason, "output_validation_failed", StringComparison.Ordinal);
@@ -3531,7 +3766,7 @@ public sealed class RecordingEngine : IDisposable
             nestedRole: rec.NestedRole,
             nestedSessionId: rec.NestedSessionId,
             parentRecordingId: rec.ParentRecordingId,
-            mediaPath: meta.OutputPath ?? rec.OutputPath,
+            mediaPath: rec.OutputPath,
             container: meta.Container ?? "mp4",
             codec: meta.Codec ?? "h264",
             width: meta.Width,
@@ -3844,9 +4079,9 @@ public sealed class RecordingEngine : IDisposable
             return BuildScreenshotSeriesResponse(rec);
         var elapsed = ComputeElapsedSeconds(rec);
 
-        // Prefer the backend-reported output path when available.
         var meta = rec.LastMeta;
-        string actualPath = meta?.OutputPath ?? rec.OutputPath;
+        var publicOutput = GetPublicVideoOutput(rec);
+        string actualPath = publicOutput.Path;
 
         string container = meta?.Container ?? string.Empty;
         string codec = meta?.Codec ?? string.Empty;
@@ -3855,7 +4090,7 @@ public sealed class RecordingEngine : IDisposable
         {
             recording_id = rec.Id,
             mode = rec.Mode,
-            status = rec.State.ToString(),
+            status = PublicRecordingStatus(rec),
             source = new { type = rec.SourceType, title = rec.SourceTitle },
             backend = rec.BackendType,
             config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
@@ -3898,7 +4133,7 @@ public sealed class RecordingEngine : IDisposable
             output = new
             {
                 path = actualPath,
-                bytes_written = SafeSize(actualPath),
+                bytes_written = publicOutput.SizeBytes,
                 duration_seconds = meta?.DurationSeconds ?? 0,
                 container,
                 codec,
@@ -4035,6 +4270,152 @@ public sealed class RecordingEngine : IDisposable
     }
 
     /// <summary>
+    /// Waits for the creation-time recording milestone: a video recording must
+    /// reach the trusted first-frame <c>recording</c> state, or any recording
+    /// must reach a terminal state. The wait is a read-only lifecycle
+    /// observation; it never approves, rejects, starts, or stops a recording.
+    /// </summary>
+    public object GetCreationRecordingWait(string id, int waitMs)
+    {
+        var rec = Get(id);
+        var startTicks = CreationWaitNowTicks();
+        var deadlineTicks = CreationWaitDeadlineTicks(startTicks, waitMs);
+
+        while (true)
+        {
+            // The same deadline is passed through every wake-up and snapshot
+            // retry. A milestone that advanced to a transitional state cannot
+            // restart the caller's original wait budget.
+            WaitForCreationMilestone(rec, deadlineTicks);
+            BeforeCreationWaitSnapshotForTests?.Invoke(rec);
+
+            object recordingSnapshot = null!;
+            string publicStatus = string.Empty;
+            bool goalReached;
+            bool terminal;
+            bool timedOut;
+            int elapsedMs;
+
+            lock (rec)
+            {
+                // GetStatus is the canonical public projection. Holding the
+                // recording lock across classification and this projection
+                // makes status, recording.status, and the wait flags one
+                // logical observation. No blocking or engine-lock acquisition
+                // occurs in this short snapshot section.
+                recordingSnapshot = GetStatus(rec.Id);
+                publicStatus = PublicRecordingStatus(rec);
+                goalReached = IsRecordingMilestone(rec);
+                terminal = IsTerminalState(rec.State);
+
+                var nowTicks = CreationWaitNowTicks();
+                elapsedMs = CreationWaitElapsedMilliseconds(startTicks, nowTicks);
+                bool deadlineReached = nowTicks >= deadlineTicks;
+
+                if (!goalReached && !terminal && !deadlineReached)
+                    continue;
+
+                // Exactly one outcome is selected from the secured snapshot.
+                // A goal or terminal state wins even when it becomes visible at
+                // the deadline boundary; otherwise the deadline is the timeout.
+                timedOut = !goalReached && !terminal;
+            }
+
+            var traceId = _tracer.ResolveTraceId(rec.Id);
+            if (traceId != null)
+            {
+                _tracer.LongPollCompleted(traceId, "creation_recording", waitMs, elapsedMs,
+                    goalReached || terminal, recordingId: rec.Id);
+            }
+
+            return new
+            {
+                Status = publicStatus,
+                Recording = recordingSnapshot,
+                Wait = new
+                {
+                    WaitFor = "recording",
+                    RequestedMs = waitMs,
+                    ElapsedMs = elapsedMs,
+                    TimedOut = timedOut,
+                    GoalReached = goalReached,
+                    Terminal = terminal
+                }
+            };
+        }
+    }
+
+    private static bool IsRecordingMilestone(Recording rec)
+        => !rec.IsScreenshotSeries && rec.State == RecState.recording;
+
+    private static bool IsCreationMilestone(Recording rec)
+        => IsRecordingMilestone(rec) || IsTerminalState(rec.State);
+
+    /// <summary>
+    /// Waits on the engine-level lifecycle signal with a monotonic deadline.
+    /// The recording object is never locked while blocking, and every wake-up
+    /// re-evaluates the recording-specific predicate so unrelated or spurious
+    /// pulses cannot satisfy the wait.
+    /// </summary>
+    private bool WaitForCreationMilestone(Recording rec, long deadlineTicks)
+    {
+        lock (_lock)
+        {
+            while (!IsCreationMilestone(rec))
+            {
+                var remainingMs = CreationWaitRemainingMilliseconds(deadlineTicks);
+                if (remainingMs <= 0)
+                    return true;
+
+                BeforeCreationWaitBlocksForTests?.Invoke(rec);
+                Monitor.Wait(_lock, remainingMs);
+            }
+        }
+
+        return false;
+    }
+
+    private static string PublicRecordingStatus(Recording rec)
+        => rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : rec.State.ToString();
+
+    private long CreationWaitNowTicks()
+    {
+        var now = CreationWaitTimestampProviderForTests();
+        return Math.Max(0, now);
+    }
+
+    private long CreationWaitDeadlineTicks(long startTicks, int waitMs)
+    {
+        var frequency = Math.Max(1L, CreationWaitTimestampFrequencyForTests);
+        var delta = Math.Ceiling((decimal)Math.Max(0, waitMs) * frequency / 1000m);
+        if (delta >= long.MaxValue - startTicks)
+            return long.MaxValue;
+        return startTicks + (long)delta;
+    }
+
+    private int CreationWaitRemainingMilliseconds(long deadlineTicks)
+    {
+        var nowTicks = CreationWaitNowTicks();
+        if (nowTicks >= deadlineTicks)
+            return 0;
+
+        var frequency = Math.Max(1L, CreationWaitTimestampFrequencyForTests);
+        var remainingTicks = deadlineTicks - nowTicks;
+        var remainingMs = Math.Ceiling((decimal)remainingTicks * 1000m / frequency);
+        return (int)Math.Clamp(remainingMs, 1m, int.MaxValue);
+    }
+
+    private int CreationWaitElapsedMilliseconds(long startTicks, long nowTicks)
+    {
+        if (nowTicks <= startTicks)
+            return 0;
+
+        var frequency = Math.Max(1L, CreationWaitTimestampFrequencyForTests);
+        var elapsedMs = Math.Floor((decimal)(nowTicks - startTicks) * 1000m / frequency);
+        return (int)Math.Clamp(elapsedMs, 0m, int.MaxValue);
+    }
+
+    /// <summary>
     /// Shared wait logic: blocks on _lock using Monitor.Wait with remaining time.
     /// _stateVersion is only a wake-up signal; after waking, the predicate is re-evaluated.
     /// This prevents unrelated state changes from causing premature returns.
@@ -4085,7 +4466,8 @@ public sealed class RecordingEngine : IDisposable
 
         var elapsed = ComputeElapsedSeconds(rec);
         var meta = rec.LastMeta;
-        string actualPath = meta?.OutputPath ?? rec.OutputPath;
+        var publicOutput = GetPublicVideoOutput(rec);
+        string actualPath = publicOutput.Path;
 
         // next_poll_hint_ms: null for terminal states, 1000 for active states.
         bool isTerminal = rec.State is RecState.completed or RecState.failed or RecState.cancelled
@@ -4139,7 +4521,7 @@ public sealed class RecordingEngine : IDisposable
             Output = new
             {
                 Path = actualPath,
-                BytesWritten = SafeSize(actualPath),
+                BytesWritten = publicOutput.SizeBytes,
                 DurationSeconds = meta?.DurationSeconds ?? 0,
                 Container = meta?.Container ?? "",
                 Codec = meta?.Codec ?? "",
@@ -4197,6 +4579,9 @@ public sealed class RecordingEngine : IDisposable
 
     public void Dispose()
     {
+        foreach (var recordingId in _displayRuntimeMonitors.Keys.ToArray())
+            StopDisplayRuntimeMonitor(recordingId);
+
         foreach (var pair in _seriesOps)
         {
             var operation = pair.Value;
@@ -4225,6 +4610,9 @@ public sealed class RecordingEngine : IDisposable
             try { operation.Task?.Wait(TimeSpan.FromSeconds(10)); } catch { }
         }
         StopAllSync("dispose");
+
+        foreach (var recordingId in _displayRuntimeMonitors.Keys.ToArray())
+            StopDisplayRuntimeMonitor(recordingId);
     }
 
     /// <summary>
@@ -4251,12 +4639,15 @@ public sealed class RecordingEngine : IDisposable
         if (!conf.TryDecide("expired"))
             return;
 
-        if (rec.State == RecState.pending_confirmation)
+        lock (rec)
         {
-            rec.State = RecState.expired;
-            MarkBundleNotApplicable(rec);
+            if (rec.State == RecState.pending_confirmation)
+            {
+                rec.State = RecState.expired;
+                MarkBundleNotApplicable(rec);
+            }
+            BumpStateVersion();
         }
-        BumpStateVersion();
         _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
         _tracer.ConfirmationExpired(traceId, rec.Id, conf.Id);
         _tracer.RecordingTerminal(traceId, rec.Id, status: "expired");
@@ -4271,8 +4662,9 @@ public sealed class RecordingEngine : IDisposable
 
     private static object OutputObj(Recording rec, OutputMeta m, bool full = false)
     {
-        string actualPath = m.OutputPath ?? rec.OutputPath;
-        bool exists = File.Exists(actualPath);
+        var publicOutput = GetPublicVideoOutput(rec);
+        string actualPath = publicOutput.Path;
+        bool exists = publicOutput.Exists;
         string container = m.Container ?? "mp4";
         string codec = m.Codec ?? "h264";
 
@@ -4298,7 +4690,7 @@ public sealed class RecordingEngine : IDisposable
             return new
             {
                 path = actualPath,
-                size_bytes = m.SizeBytes,
+                size_bytes = publicOutput.SizeBytes,
                 duration_seconds = m.DurationSeconds,
                 container,
                 codec,
@@ -4313,7 +4705,7 @@ public sealed class RecordingEngine : IDisposable
             };
         return new
         {
-            path = actualPath, exists, size_bytes = m.SizeBytes,
+            path = actualPath, exists, size_bytes = publicOutput.SizeBytes,
             duration_seconds = m.DurationSeconds, created_at = Iso(rec.CompletedAtUtc ?? DateTime.UtcNow),
             container, codec, width = m.Width, height = m.Height, fps = m.Fps,
             capture_method = m.CaptureMethod ?? "",
@@ -4367,6 +4759,28 @@ public sealed class RecordingEngine : IDisposable
     }
 
     private static long SafeSize(string p) { try { return new FileInfo(p).Length; } catch { return 0; } }
+
+    private static (string Path, bool Exists, long SizeBytes) GetPublicVideoOutput(Recording rec)
+    {
+        var path = rec.OutputPath ?? "";
+
+        // A failed/cancelled run may leave an older file at the requested
+        // target. It is not the current recording's publication, so do not
+        // report that stale file as this run's output evidence.
+        if (rec.State is RecState.failed or RecState.cancelled or RecState.rejected or RecState.expired)
+            return (path, false, 0);
+
+        try
+        {
+            var file = new FileInfo(path);
+            return (path, file.Exists && file.Length > 0, file.Exists ? file.Length : 0);
+        }
+        catch
+        {
+            return (path, false, 0);
+        }
+    }
+
     private static string Iso(DateTime t) => t.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
     private static RecordingConfirmationPresentation BuildConfirmationPresentation(

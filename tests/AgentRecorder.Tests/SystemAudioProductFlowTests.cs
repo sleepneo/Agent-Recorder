@@ -229,6 +229,12 @@ public sealed class SystemAudioProductFlowTests : IDisposable
             var tray = new PendingTray();
             var engine = new RecordingEngine(
                 new AuditLogger(),
+                displayTopologyProvider: new FixedDisplayTopologyProvider(
+                    new DisplayTopologySnapshot(
+                        "display_1",
+                        "synthetic-test-display:display_1",
+                        DisplayIdentityResolutionStatus.Resolved,
+                        new CapturePlanBounds(0, 0, 1920, 1080))),
                 systemAudioEndpointProvider: endpointProvider)
             {
                 CountdownInterval = TimeSpan.FromMilliseconds(5),
@@ -374,6 +380,16 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public FakeAvailabilityProbe(bool available = false) => _available = available;
         public WgcContinuousAvailabilityResult Check(CaptureConfig cfg)
             => new(_available, _available ? "probe_success" : "probe_unavailable", "fresh_probe", 1);
+    }
+
+    private sealed class FixedDisplayTopologyProvider : IDisplayTopologyProvider
+    {
+        private readonly IReadOnlyList<DisplayTopologySnapshot> _displays;
+
+        public FixedDisplayTopologyProvider(DisplayTopologySnapshot display)
+            => _displays = new[] { display };
+
+        public IReadOnlyList<DisplayTopologySnapshot> GetCurrentDisplays() => _displays;
     }
 
     private sealed class PendingTray : ITrayContext

@@ -276,11 +276,26 @@ AgentRecorder.Cli.exe autostart disable --json
 | `target.type` | 说明 | 适用场景 |
 |---------------|------|----------|
 | `primary_display` | 录主显示器 | "录整个屏幕"、"录主屏 5 分钟" |
+| `windows_display` | 按 Windows“标识”数字录制指定显示器 | "录 Windows 显示器 2" |
 | `active_window` | 录当前活动窗口 | "录当前窗口"、"录这个窗口 3 分钟" |
 | `selected_region` | 让用户选区后录制 | "录选区"、"录这个区域 1 分钟" |
 | `last_region` | 复用最近一次成功选区 | "录上次选区"、"录刚才那个区域 1 分钟" |
 
 所有 quick 请求仍然进入本地确认流程，不能绕过用户确认。
+
+录制 Windows 显示器 N 时，优先直接调用：
+
+```json
+{
+  "target": { "type": "windows_display", "windows_display_number": 2 },
+  "duration_seconds": 30
+}
+```
+
+其中的 `2` 必须是 Windows“设置 > 系统 > 显示 > 标识”显示的正 JSON integer，
+不是 API `display_2` 的后缀。服务端从一次当前显示器快照匹配唯一可靠编号，
+找不到、为 `null` 或冲突时返回 `SOURCE_NOT_FOUND`，应刷新 capabilities/displays
+或请求用户消歧，不要猜测。成功后仍会弹出本地确认窗；API 不会自批准。
 
 ### 快速调用模板
 
@@ -350,12 +365,41 @@ AgentRecorder.Cli.exe autostart disable --json
 
 **AI agent 行为**：
 - 只能等待确认状态变化，不能批准或拒绝
-- 推荐使用长轮询：`GET /confirmations/{id}?wait_ms=25000&since_status=pending`
+- 对普通“创建并等待真正开始”的请求，优先在同一个创建 POST 上使用
+  `?wait_for=recording&wait_ms=25000`，不要把确认长轮询和录制长轮询作为默认串行流程
 - 状态 `approved` -> 用户已批准，获取 `recording_id` 并继续轮询；此时可能仍处于准备或倒计时，不能直接声称录制已经开始
 - 状态 `rejected` -> 录制被拒绝，告知用户
 - 状态 `expired` -> 确认超时，建议重试
 
-用户批准后，录制可能依次经过 `preparing`（准备后端或麦克风）、`countdown`（3-2-1 倒计时，尚未采集屏幕）、`recording`（已出现可信首帧证据）、`finalizing`（保存处理）。Agent 只需继续轮询 `/recordings/{id}` 直到进入 `completed`/`failed`/`cancelled` 终态，无需单独处理中间状态。
+用户批准后，录制可能依次经过 `preparing`（准备后端或麦克风）、`countdown`（3-2-1 倒计时，尚未采集屏幕）、`recording`（已出现可信首帧证据）、`finalizing`（保存处理）。使用创建等待时，返回 `goal_reached=true` 才表示可信首帧已出现；返回 `timed_out=true` 后再继续使用 recording 长轮询。确认和 recording GET 长轮询保留给创建等待超时后的继续观察、兼容旧客户端或需要精确编排的高级流程。
+
+### 创建请求的可选有界等待
+
+如果 agent 需要把“创建请求 + 等到真正开始或明确失败”合并为一次调用，可以在
+`POST /api/v1/recordings` 或 `POST /api/v1/recordings/quick` 的 query 中使用：
+
+```text
+?wait_for=recording&wait_ms=25000
+```
+
+`wait_for` 只能是 `recording`；`wait_ms` 省略为 `25000`，有效范围为 `1..25000`。
+`wait_ms` 单独出现、未知 `wait_for`、空值、非整数或越界值都会在来源解析、设备枚举、
+选区和确认 UI 之前返回 `400 INVALID_ARGUMENT`。不需要等待时省略整个参数，沿用原有
+立即创建响应。
+
+推荐的简单 agent 流程是：先说明目标和时长，调用 quick API 并带上上述 query，不要先单独
+轮询 confirmation 再轮询 recording；然后读取
+顶层 `status`、`recording.status` 和 `wait`。返回 `goal_reached=true` 才能说已经出现
+可信首帧并开始录制；`terminal=true` 时根据当前终态报告拒绝、过期、失败、取消或完成；
+`timed_out=true` 只表示等待预算耗尽，录制状态没有被改变，应根据返回的真实状态继续使用
+`GET /recordings/{recording_id}` 长轮询。批准、preparing、countdown 或 backend 已启动
+都不能当作录制已开始，也不能用 API 自批准。
+
+等待预算只从 recording 创建后计算。`selected_region` 会先等待本地选区；用户取消或选区
+超时时没有 recording，不会返回假的 `wait`。该功能不会启动、停止或缩短录制；其里程碑由
+`/capabilities.interaction.creation_wait.milestone` 声明为
+`trusted_first_frame_or_terminal`。若等待超时，继续用 recording GET 长轮询；若要兼容旧客户端
+或独立处理确认，也可保留原有的 confirmation 与 recording GET 长轮询方式。
 
 复杂或需要精确控制的场景（如嵌套录制、自定义输出目录、精确来源与停止条件等）仍可使用原始 `POST /api/v1/recordings`。
 
@@ -436,6 +480,12 @@ X-Agent-Recorder-Key: <api-key>
 
 **决策逻辑：**
 
+当用户说“录制显示器 N”时，优先使用上面的 `windows_display` quick target。
+服务端只接受当前快照中唯一可靠的 `windows_display_number`，编号不可用或冲突时
+刷新 capabilities/displays 或请求用户消歧，不要猜测目标显示器。原始 API 仍使用
+从 `/displays` 返回的 opaque `id` 作为 `source.display_id`；其数字后缀不保证等于
+Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 `display_N`。
+
 | 用户请求 | 条件 | 推荐 action |
 |----------|------|-------------|
 | "录当前窗口" | `context.windows.active != null` | 使用 `quick_recipes.record_active_window` |
@@ -457,7 +507,7 @@ X-Agent-Recorder-Key: <api-key>
 2. 发起 quick 录制请求：
 
 ```http
-POST /api/v1/recordings/quick
+POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 Content-Type: application/json
 X-Agent-Recorder-Key: <api-key>
 X-Agent-Name: <your-agent-name>
@@ -478,13 +528,13 @@ X-Agent-Name: <your-agent-name>
 
 3. 如果返回 `selection_cancelled`、`selection_timeout` 或 `display_unavailable`，向用户说明没有创建录制。
 
-4. 如果返回 `requires_user_confirmation`，告诉用户：
+4. 如果返回带 `wait` 的响应，读取 `status`、`recording.status` 和 `wait`：
 
 ```text
-选区已确认。请在本地确认窗口或系统托盘中批准录制。录制会在你确认后开始。
+只有 `goal_reached=true` 才表示录制已出现可信首帧并开始；`terminal=true` 按终态说明没有开始或已经结束；`timed_out=true` 则继续使用 recording 长轮询。
 ```
 
-5. 使用长轮询等待确认状态变化（推荐）：
+5. 仅在创建等待超时、兼容旧客户端或需要高级编排时，才单独长轮询确认状态：
 
 ```http
 GET /api/v1/confirmations/{confirmation_id}?wait_ms=25000&since_status=pending
@@ -492,7 +542,7 @@ GET /api/v1/confirmations/{confirmation_id}?wait_ms=25000&since_status=pending
 
 直到 `status=approved` 并取得 `recording_id`。如果状态是 `rejected` 或 `expired`，向用户说明录制没有开始。
 
-6. 使用长轮询等待录制状态变化（推荐）：
+6. 取得 `recording_id` 后，使用长轮询等待录制状态变化：
 
 ```http
 GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording

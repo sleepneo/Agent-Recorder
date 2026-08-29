@@ -25,9 +25,10 @@ Record the current conversation window for 5 minutes.
 4. The AI agent should:
    - run `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
    - read the API key from the returned `api_key_file`
-   - call `POST /api/v1/recordings/quick`
-   - poll `/confirmations/{id}` until the local user approves or rejects
-   - poll `/recordings/{id}` until completion
+   - call `POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000`
+   - treat `wait.goal_reached=true` as the trusted start signal
+   - if the bounded wait times out, continue with recording long-polling
+   - wait for completion
    - report the final MP4 path
 
 5. The human user only selects the region, confirms recording locally, and plays
@@ -40,8 +41,10 @@ Record the current conversation window for 5 minutes.
 | target.type | Use case |
 | --- | --- |
 | `primary_display` | Record the primary display |
+| `windows_display` | Record the positive display number shown by Windows “Identify” |
 | `active_window` | Record the current active window using its visible bounds |
 | `selected_region` | Ask the user to draw a region, then record it |
+| `last_region` | Reuse the most recent successful region selection |
 
 Example request:
 
@@ -53,6 +56,16 @@ Example request:
   "video": { "fps": 30, "quality": "medium" }
 }
 ```
+
+For `windows_display`, send a positive JSON integer such as
+`"windows_display_number": 2`. It is the number shown by Windows “Identify”,
+not the suffix of an API `display_id`. Local confirmation is still mandatory.
+
+The optional bounded creation wait observes local approval, preparation,
+countdown, and the trusted first frame without approving the request. If it
+returns `timed_out=true`, use the returned `recording_id` to continue with
+`GET /recordings/{id}` long-polling. Omitting `wait_for` preserves the immediate
+creation response.
 
 `countdown_seconds` is optional for both raw and quick recording requests. It
 defaults to `3` and accepts only integer values `0` through `10`. Use `0` to

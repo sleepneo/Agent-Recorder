@@ -110,6 +110,17 @@ BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC /*hdcMonitor*/,
     return TRUE;
 }
 
+bool IsConfiguredDisplayAvailable(const Rect& target, HMONITOR expectedMonitor = nullptr) {
+    MonitorEnumContext context;
+    context.target = target;
+    if (!::EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc,
+                               reinterpret_cast<LPARAM>(&context))) {
+        return false;
+    }
+    return context.matchCount == 1 &&
+           (expectedMonitor == nullptr || context.match == expectedMonitor);
+}
+
 int64_t SteadyMs(std::chrono::steady_clock::time_point tp) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
 }
@@ -197,11 +208,13 @@ struct CapturePipelineState {
     std::atomic<bool> sizeChanged{false};
     std::atomic<bool> targetClosed{false};
     std::atomic<bool> targetMinimized{false};
+    std::atomic<bool> displayUnavailable{false};
     std::atomic<bool> captureFailed{false};
     enum class RuntimeSignal : int {
         None = 0,
         WindowClosed,
         WindowMinimized,
+        DisplayUnavailable,
         SizeChanged,
         CaptureFailed
     };
@@ -249,6 +262,8 @@ struct CapturePipelineState {
             targetClosed.store(true);
         } else if (signal == RuntimeSignal::WindowMinimized) {
             targetMinimized.store(true);
+        } else if (signal == RuntimeSignal::DisplayUnavailable) {
+            displayUnavailable.store(true);
         } else if (signal == RuntimeSignal::SizeChanged) {
             sizeChanged.store(true);
         } else if (signal == RuntimeSignal::CaptureFailed) {
@@ -260,6 +275,7 @@ struct CapturePipelineState {
 
     void SignalWindowClosed() { SignalRuntime(RuntimeSignal::WindowClosed); }
     void SignalWindowMinimized() { SignalRuntime(RuntimeSignal::WindowMinimized); }
+    void SignalDisplayUnavailable() { SignalRuntime(RuntimeSignal::DisplayUnavailable); }
     void SignalSizeChanged() { SignalRuntime(RuntimeSignal::SizeChanged); }
     void SignalCaptureFailure() {
         captureFailed.store(true);
@@ -336,6 +352,71 @@ private:
     Query query_;
     std::function<void()> onClosed_;
     std::function<void()> onMinimized_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    std::thread thread_;
+};
+
+// Polls only the exact, approved display bounds for display and region
+// captures. No display identity or device path is exposed. A failed topology
+// query is deliberately fail-closed so a transient/unsupported query cannot
+// silently continue capturing a lost target.
+class DisplayLifecycleMonitor {
+public:
+    using Query = std::function<bool(const Rect&)>;
+
+    DisplayLifecycleMonitor(Rect target,
+                            Query query,
+                            std::function<void()> onUnavailable)
+        : target_(target),
+          query_(std::move(query)),
+          onUnavailable_(std::move(onUnavailable)) {}
+
+    ~DisplayLifecycleMonitor() { Stop(); }
+
+    void Start() {
+        if (thread_.joinable()) return;
+        thread_ = std::thread([this]() { Run(); });
+    }
+
+    void Stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    void Run() {
+        constexpr auto kPollInterval = std::chrono::milliseconds(50);
+        for (;;) {
+            bool available = false;
+            try {
+                available = query_(target_);
+            } catch (...) {
+                available = false;
+            }
+
+            if (!available) {
+                onUnavailable_();
+                return;
+            }
+
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (cv_.wait_for(lock, kPollInterval, [this]() { return stop_; })) {
+                return;
+            }
+        }
+    }
+
+    Rect target_;
+    Query query_;
+    std::function<void()> onUnavailable_;
     std::mutex mutex_;
     std::condition_variable cv_;
     bool stop_ = false;
@@ -793,6 +874,9 @@ CaptureOutcome CaptureSession::Run() {
         signals.signalWindowMinimized = [state]() {
             state->SignalWindowMinimized();
         };
+        signals.signalDisplayUnavailable = [state]() {
+            state->SignalDisplayUnavailable();
+        };
         signals.signalSizeChanged = [state]() {
             state->SignalSizeChanged();
         };
@@ -826,9 +910,37 @@ CaptureOutcome CaptureSession::Run() {
             [state]() { state->SignalWindowMinimized(); });
     }
 
-    if (hasCaptureResources && options_.mode == CaptureMode::ContinuousWindow) {
-        itemClosedToken = item.Closed([state](GraphicsCaptureItem const&, winrt::Windows::Foundation::IInspectable const&) {
-            state->SignalWindowClosed();
+    std::unique_ptr<DisplayLifecycleMonitor> displayMonitor;
+    if (options_.mode == CaptureMode::ContinuousDisplay ||
+        options_.mode == CaptureMode::ContinuousRegion) {
+        const HMONITOR approvedMonitor = monitorCtx.match;
+        auto queryDisplayAvailability = [this, approvedMonitor](const Rect& target) {
+            if (hooks_.useSyntheticPlatformResources) {
+                if (hooks_.onDisplayAvailabilityQuery) {
+                    return hooks_.onDisplayAvailabilityQuery(target);
+                }
+                return true;
+            }
+            // Pair the approved bounds with the original HMONITOR handle so
+            // a newly enumerated display at the same coordinates is not
+            // treated as the original target. The WGC Closed event remains
+            // the identity-loss signal; this poll is the bounded fallback for
+            // topology loss when Closed is delayed or not delivered.
+            return IsConfiguredDisplayAvailable(target, approvedMonitor);
+        };
+        displayMonitor = std::make_unique<DisplayLifecycleMonitor>(
+            options_.displayBounds,
+            std::move(queryDisplayAvailability),
+            [state]() { state->SignalDisplayUnavailable(); });
+    }
+
+    if (hasCaptureResources) {
+        itemClosedToken = item.Closed([state, mode = options_.mode](GraphicsCaptureItem const&, winrt::Windows::Foundation::IInspectable const&) {
+            if (mode == CaptureMode::ContinuousWindow) {
+                state->SignalWindowClosed();
+            } else {
+                state->SignalDisplayUnavailable();
+            }
         });
         hasItemClosedSubscription = true;
     }
@@ -1309,6 +1421,17 @@ CaptureOutcome CaptureSession::Run() {
         }
     }
 
+    // Revalidate the approved display immediately before StartCapture. Consent
+    // and encoder initialization may outlive the topology snapshot used to
+    // create the WGC item.
+    if (!hooks_.useSyntheticPlatformResources &&
+        (options_.mode == CaptureMode::ContinuousDisplay ||
+         options_.mode == CaptureMode::ContinuousRegion) &&
+        !IsConfiguredDisplayAvailable(options_.displayBounds, monitorCtx.match)) {
+        return FailAndTeardown("display_unavailable",
+                               "The approved target display is no longer available");
+    }
+
     // Single clock: record begin time, start capture, then publish active state.
     beginTime = std::chrono::steady_clock::now();
     const int64_t beginTimeMs = SteadyMs(beginTime);
@@ -1339,10 +1462,13 @@ CaptureOutcome CaptureSession::Run() {
     }
     state->coordinator.SignalCaptureStarted(beginTimeMs);
 
-    // The HWND lifecycle monitor starts only after authenticated begin,
-    // encoder readiness, and StartCapture have all succeeded.
+    // Target lifecycle monitors start only after authenticated begin, encoder
+    // readiness, and StartCapture have all succeeded.
     if (windowMonitor) {
         windowMonitor->Start();
+    }
+    if (displayMonitor) {
+        displayMonitor->Start();
     }
 
     if (hooks_.onCaptureActive) {
@@ -1379,7 +1505,7 @@ CaptureOutcome CaptureSession::Run() {
             state->loopCv.wait_until(lock, waitUntil, [&] {
                 return state->stopRequested.load() || state->captureFailed.load() ||
                        state->sizeChanged.load() || state->targetClosed.load() ||
-                       state->targetMinimized.load() ||
+                       state->targetMinimized.load() || state->displayUnavailable.load() ||
                        std::chrono::steady_clock::now() >= waitUntil;
             });
         }
@@ -1390,6 +1516,9 @@ CaptureOutcome CaptureSession::Run() {
 
     if (windowMonitor) {
         windowMonitor->Stop();
+    }
+    if (displayMonitor) {
+        displayMonitor->Stop();
     }
     stopWatcher.Stop();
     scheduler.Stop();
@@ -1430,6 +1559,13 @@ CaptureOutcome CaptureSession::Run() {
                                        "", partialPath,
                                        framesCaptured, framesDropped, durationMs, bytesWritten,
                                        captureWidth, captureHeight);
+    } else if (state->runtimeSignal.load() == CapturePipelineState::RuntimeSignal::DisplayUnavailable ||
+               state->displayUnavailable.load()) {
+        auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);
+        outcome = MakeFailWithEvidence("display_unavailable",
+                                       "The approved target display is no longer available", "",
+                                       partialPath, framesCaptured, framesDropped, durationMs,
+                                       bytesWritten, captureWidth, captureHeight);
     } else if (state->runtimeSignal.load() == CapturePipelineState::RuntimeSignal::WindowClosed ||
                state->targetClosed.load()) {
         auto [partialPath, bytesWritten] = GetPartialEvidence(partialOutputPath_);

@@ -29,14 +29,30 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
 ```
 
 2. Read the API key from the returned `api_key_file`.
-3. Use `POST /api/v1/recordings/quick` for common intents:
+3. Use `POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000` for common intents:
    - `primary_display`
+   - `windows_display` (use the positive number shown by Windows “Identify”)
    - `active_window`
    - `selected_region`
-4. Poll confirmation and recording status, then report the MP4 path.
+   - `last_region`
+4. Treat `wait.goal_reached=true` as the trusted start signal. On timeout,
+   continue with recording long-polling; then report the final MP4 path.
 
 Advanced agents may still use the lower-level API for precise display, window,
 region, output, or nested-recording control.
+
+The bounded creation wait observes local approval, preparation, countdown, and
+the trusted first frame without approving anything over HTTP. Omitting the
+query preserves the immediate creation response for compatibility.
+
+For “record Windows display 2”, prefer one quick request:
+`{"target":{"type":"windows_display","windows_display_number":2},"duration_seconds":30}`.
+The number is the positive integer shown by Windows “Identify”, not the API
+ID suffix. The current snapshot must contain exactly one reliable match;
+otherwise refresh capabilities/displays or ask the user to disambiguate.
+The request still requires local confirmation. The raw API remains available
+for precise control and uses the opaque `id` from `/displays` unchanged as
+`source.display_id`.
 
 ## Runtime Data
 
@@ -54,7 +70,10 @@ Agents should use the paths returned by `ensure-running` or
 
 ## Capabilities
 
-- Quick intent API for primary display, active window, and selected region.
+- Quick intent API for primary display, a Windows display number, active window, and selected region.
+- Optional bounded creation wait that lets one raw or quick POST observe local
+  approval, preparation, countdown, and the trusted first frame without
+  weakening local confirmation.
 - Lower-level display, window, and region recording APIs.
 - Active-window recording defaults to visible window bounds clipped to the
   virtual desktop and the FFmpeg `ffmpeg-window-region` backend. A guarded
@@ -114,13 +133,15 @@ Agents should use the paths returned by `ensure-running` or
   `system_audio.supported: true` with fresh `ready`/`no_devices`/`unavailable`
   status, and `/audio/devices.output_devices` exposes safe active render
   endpoint IDs for explicit selection.
-- The experimental native WGC continuous pipeline supports eligible display,
-  window, and selected-region targets behind separate local environment switches. It provides
+- The experimental native WGC continuous pipeline supports eligible 1-60 second,
+  no-audio display, window, and selected-region targets behind separate local
+  environment switches. It provides
   non-capturing availability probes, short-lived success caching, authenticated
   first-frame evidence, explicit window lifecycle failures, stable display
-  identity and topology revalidation, GPU region cropping, and automatic FFmpeg
-  fallback. Display stability, occluded-window capture, and a 10-second region
-  capture have passed supervised desktop acceptance. The self-contained portable package includes exactly one
+  identity and topology revalidation, runtime display-loss failure, GPU region
+  cropping, bounded duration, and automatic FFmpeg fallback. Display stability,
+  disconnect handling, occluded-window capture, and 60-second recording have
+  passed supervised desktop acceptance on the current hardware. The self-contained portable package includes exactly one
   production `AgentRecorder.WgcHelper\wgc-native-helper.exe`. The pipeline
   remains disabled by default and is not exposed as a public API capability.
 - Local audit log and MP4 output.

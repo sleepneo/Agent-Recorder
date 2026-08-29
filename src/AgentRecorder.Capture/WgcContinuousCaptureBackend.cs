@@ -788,10 +788,10 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         }
 
         int duration = cfg.DurationSeconds.Value;
-        if (duration < 1 || duration > 10)
+        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(duration))
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
-                "WGC continuous backend DurationSeconds must be between 1 and 10.");
+                $"WGC continuous backend DurationSeconds must be between {WgcContinuousDurationPolicy.MinSeconds} and {WgcContinuousDurationPolicy.MaxSeconds}.");
         }
 
         if (cfg.Fps < 1 || cfg.Fps > 60)
@@ -851,7 +851,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         string stopSignal,
         string token)
     {
-        int durationMs = cfg.DurationSeconds!.Value * 1000;
+        int durationMs = WgcContinuousDurationPolicy.ToMilliseconds(cfg.DurationSeconds!.Value);
         return new WgcContinuousSessionOptions
         {
             HelperExePath = helperExePath,

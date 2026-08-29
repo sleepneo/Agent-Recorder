@@ -38,13 +38,13 @@ public sealed class RegionSelectionVisualFormTests
                     480));
                 form.Show();
 
-                Assert.Equal("640×480 @ display_1", form.SelectionLabelTextForTests);
+                Assert.Equal("640×480 @ Primary", form.SelectionLabelTextForTests);
                 Assert.True(form.SelectionLabelLayoutForTests.IsVisible);
                 Assert.True(form.ClientRectangle.Contains(form.SelectionLabelLayoutForTests.Bounds));
 
                 form.ApplyWindowPickForTest(new Rectangle(600, 300, 800, 600));
 
-                Assert.Equal("800×600 @ display_1", form.SelectionLabelTextForTests);
+                Assert.Equal("800×600 @ Primary", form.SelectionLabelTextForTests);
                 Assert.True(form.SelectionLabelLayoutForTests.IsVisible);
                 Assert.True(form.ClientRectangle.Contains(form.SelectionLabelLayoutForTests.Bounds));
                 Assert.Equal(1, displayEnumerationCount);

@@ -134,6 +134,14 @@ public sealed class Recording
     public string? StopReason { get; set; }
 
     /// <summary>
+    /// Internal application-owned lifecycle abort claimed by runtime
+    /// supervision. It is intentionally separate from <see cref="StopReason"/>
+    /// so an abort cannot be mistaken for a user-initiated stop while the
+    /// backend is being terminated.
+    /// </summary>
+    internal CaptureAbortReason? TrustedLifecycleAbortReason { get; set; }
+
+    /// <summary>
     /// Published only after the complete terminal snapshot has been written.
     /// Lock-free readers use this acquire read as the publication barrier;
     /// lifecycle ownership is still established by the recording-local lock.
