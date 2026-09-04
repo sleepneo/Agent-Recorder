@@ -512,7 +512,7 @@ public class RecordingEnginePreparingStateTests : IDisposable
 
         public event Action<FirstFrameObservation>? FirstFrameObserved;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             if (_delayBeforeAutoFirstFrame.HasValue)
             {
@@ -578,7 +578,7 @@ public class RecordingEnginePreparingStateTests : IDisposable
         public OutputMeta NaturalExitMeta { get; set; } = new();
         public int NaturalExitCallbackCount { get; private set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             if (_raiseAudioReadyOnStart)
             {
@@ -686,7 +686,7 @@ public class RecordingEnginePreparingStateTests : IDisposable
 
     private sealed class FakeNonObservableBackend : ICaptureBackend
     {
-        public void Start(CaptureConfig cfg) { }
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) { }
         public OutputMeta Stop() => new();
         public void OnNaturalExit(Action<int, OutputMeta> callback) { }
         public int ExitCode => 0;
@@ -697,7 +697,7 @@ public class RecordingEnginePreparingStateTests : IDisposable
     {
         private readonly string _message;
         public ThrowingBackend(string message) => _message = message;
-        public void Start(CaptureConfig cfg) => throw new Exception(_message);
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => throw new Exception(_message);
         public OutputMeta Stop() => new();
         public void OnNaturalExit(Action<int, OutputMeta> callback) { }
         public int ExitCode => -1;

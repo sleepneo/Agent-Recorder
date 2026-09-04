@@ -555,6 +555,17 @@ public sealed class RecordingEngine : IDisposable
         ExistingTerminal
     }
 
+    private sealed class CaptureAuthorizationStartException : InvalidOperationException
+    {
+        internal CaptureAuthorizationStartException(string reason)
+            : base(reason)
+        {
+            Reason = reason;
+        }
+
+        internal string Reason { get; }
+    }
+
     private static string AudioStatusFor(Recording rec, OutputMeta? meta)
     {
         if (!rec.Config.AudioRequested)
@@ -886,6 +897,15 @@ public sealed class RecordingEngine : IDisposable
                         return;
                     }
 
+                    // The proof is issued only after the real local approval,
+                    // plan revalidation and output-directory application have
+                    // succeeded. Its bounded post-approval startup deadline
+                    // begins here so it covers preflight, preparation and the
+                    // app-owned countdown. Rejected, stale-plan and failed
+                    // approval paths never receive a usable proof.
+                    if (!TryIssueInteractiveConfirmationProof(rec, conf, capturePlan, traceId, tray))
+                        return;
+
                     if (!TryPreflightBeforeStart(rec, conf, tray))
                         return;
 
@@ -1006,6 +1026,50 @@ public sealed class RecordingEngine : IDisposable
             }
         }
 
+        return true;
+    }
+
+    private bool TryIssueInteractiveConfirmationProof(
+        Recording rec,
+        Confirmation conf,
+        CapturePlan approvedPlan,
+        string traceId,
+        ITrayContext tray)
+    {
+        CaptureAuthorizationProof proof;
+        try
+        {
+            lock (rec)
+            {
+                if (rec.IsFinalized || rec.State != RecState.pending_confirmation ||
+                    !string.Equals(conf.Status, "approved", StringComparison.Ordinal))
+                    return false;
+
+                proof = CaptureAuthorizationProofIssuer.IssueInteractiveConfirmation(
+                    rec, conf, approvedPlan);
+                rec.AuthorizationProof = proof;
+            }
+        }
+        catch
+        {
+            // Issuance is fail closed when an internal binding invariant is
+            // violated or the approved recording became terminal.
+            FailCaptureAuthorizationStart(
+                rec,
+                traceId,
+                tray,
+                new CaptureAuthorizationStartException("proof_issue_failed"));
+            return false;
+        }
+
+        // Do not include proof_id, digests or session binding in audit/API
+        // output. The proof remains an in-process object only.
+        _audit.Log("recording.capture_authorization_issued", new
+        {
+            recording_id = rec.Id,
+            confirmation_id = conf.Id,
+            kind = "interactive_confirmation"
+        });
         return true;
     }
 
@@ -1634,9 +1698,30 @@ public sealed class RecordingEngine : IDisposable
     /// has already been populated (SourceType, Config, Backend, etc.).
     /// Bypasses CreateRecording and its window / display enum lookups.
     /// </summary>
-    public void StartCaptureForTests(Recording rec, ITrayContext tray, string? traceId = null)
+    internal void StartCaptureForTests(Recording rec, ITrayContext tray, string? traceId = null)
     {
         if (rec == null) throw new ArgumentNullException(nameof(rec));
+        rec.Config.NormalizeAudioSource();
+        if (rec.ApprovedCapturePlan == null)
+        {
+            rec.SyntheticCapturePlanForTests = true;
+            try
+            {
+                rec.ApprovedCapturePlan = rec.IsScreenshotSeries
+                    ? (_capturePlanFactory ?? CaptureBackendSelector.BuildScreenshotSeriesPlan)(rec.Config)
+                    : (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+            }
+            catch
+            {
+                // Direct engine tests intentionally avoid real display/window
+                // resolution. Keep their seam local while still exercising the
+                // same proof gate and digest binding.
+                rec.ApprovedCapturePlan = BuildSyntheticTestCapturePlan(rec);
+            }
+        }
+        rec.SyntheticAuthorizationForTests = true;
+        rec.AuthorizationProof ??= CaptureAuthorizationProofIssuer.IssueForTests(
+            rec, rec.ApprovedCapturePlan);
         // Mimic what CreateRecording does: register by id so GetStatus /
         // GetOutput / List can find it.
         _recs[rec.Id] = rec;
@@ -1644,6 +1729,96 @@ public sealed class RecordingEngine : IDisposable
         _tracer.IntentAccepted(traceId, "test_direct");
         _tracer.CorrelationSet(traceId, rec.Id, rec.ConfirmationId, rec.SourceType);
         StartCapture(rec, traceId, tray);
+    }
+
+    private static CapturePlan BuildSyntheticTestCapturePlan(Recording rec)
+    {
+        var cfg = rec.Config;
+        string semantics = cfg.SourceKind switch
+        {
+            "display" => "display_surface",
+            "region" => "region_rectangle",
+            "window" => "screen_rectangle",
+            _ => "test_capture"
+        };
+        var bounds = new CapturePlanBounds(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h);
+        var backend = rec.IsScreenshotSeries ? "ffmpeg-single-frame" : rec.BackendType;
+        return new CapturePlan(
+            requestedBackend: backend,
+            plannedBackend: backend,
+            evidence: new CaptureBackendSelectionEvidence(
+                backend, backend, "test_only", "not_run", null, false),
+            captureSemantics: semantics,
+            sourceKind: cfg.SourceKind,
+            targetIdentity: cfg.WindowTitle,
+            windowHandle: cfg.WindowHandle,
+            bounds: bounds,
+            targetDisplayIdentity: cfg.DisplayStableIdentity,
+            displayBounds: cfg.DisplayBounds.HasValue
+                ? new CapturePlanBounds(
+                    cfg.DisplayBounds.Value.x,
+                    cfg.DisplayBounds.Value.y,
+                    cfg.DisplayBounds.Value.w,
+                    cfg.DisplayBounds.Value.h)
+                : null,
+            targetDisplayId: cfg.DisplayId,
+            targetDisplayIdentityStatus: cfg.DisplayIdentityStatus,
+            audioSourceKind: cfg.AudioSourceKind,
+            audioEndpointId: cfg.IsSystemLoopback ? cfg.SystemLoopbackEndpoint : cfg.MicDevice,
+            audioEndpointName: cfg.IsSystemLoopback ? cfg.SystemLoopbackEndpointName : cfg.MicDeviceName,
+            audioEndpointIsDefault: cfg.IsSystemLoopback
+                ? cfg.SystemLoopbackEndpointIsDefault
+                : null,
+            coordinateSpace: "virtual_screen");
+    }
+
+    private CaptureAuthorizationProof RequireCaptureAuthorization(Recording rec)
+    {
+        lock (rec)
+        {
+            var proof = rec.AuthorizationProof;
+            Confirmation? confirmation = null;
+            if (!string.IsNullOrWhiteSpace(rec.ConfirmationId))
+                _confs.TryGetValue(rec.ConfirmationId, out confirmation);
+
+            if (!CaptureAuthorizationGate.TryConsumeInteractive(
+                    proof,
+                    rec,
+                    rec.ApprovedCapturePlan,
+                    confirmation,
+                    rec.SyntheticAuthorizationForTests,
+                    out var failureReason))
+            {
+                throw new CaptureAuthorizationStartException(failureReason);
+            }
+
+            return proof!;
+        }
+    }
+
+    private void FailCaptureAuthorizationStart(
+        Recording rec,
+        string? traceId,
+        ITrayContext tray,
+        CaptureAuthorizationStartException failure)
+    {
+        var ownership = TryClaimStartFailure(
+            rec,
+            error: "Recording authorization is not valid.",
+            warning: "authorization_gate_failed: " + failure.Reason,
+            stopReason: "capture_authorization_invalid");
+        if (ownership == StartFailureOwnership.Failed)
+        {
+            EmitStartFailure(
+                rec,
+                traceId,
+                tray,
+                errorCode: "capture_authorization_invalid",
+                errorType: nameof(CaptureAuthorizationStartException),
+                stopReason: "capture_authorization_invalid",
+                error: "Recording authorization is not valid.",
+                stage: "authorization_gate");
+        }
     }
 
     private void StartCapture(Recording rec, string? traceId, ITrayContext tray)
@@ -1655,6 +1830,18 @@ public sealed class RecordingEngine : IDisposable
 
         if (rec.IsScreenshotSeries)
         {
+            // The complete screenshot session is covered by one proof. Frames
+            // below this method do not re-enter or re-consume the gate.
+            try
+            {
+                _ = RequireCaptureAuthorization(rec);
+            }
+            catch (CaptureAuthorizationStartException ex)
+            {
+                FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+                return;
+            }
+
             StartScreenshotSeries(rec, traceId, tray);
             return;
         }
@@ -1776,6 +1963,21 @@ public sealed class RecordingEngine : IDisposable
         bool useOrdinaryFfmpegCountdown = !rec.Config.AudioRequested &&
             !useDeferredCountdown &&
             CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType);
+
+        CaptureAuthorizationProof? authorizationProof = null;
+        if (!useOrdinaryFfmpegCountdown)
+        {
+            try
+            {
+                authorizationProof = RequireCaptureAuthorization(rec);
+            }
+            catch (CaptureAuthorizationStartException ex)
+            {
+                FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+                return;
+            }
+        }
+
         if (rec.Backend is IDeferredCaptureStartBackend deferredObservable)
         {
             deferredObservable.CaptureAuthorizationCompleted += ok => OnCaptureAuthorizationCompleted(rec, ok);
@@ -1819,7 +2021,7 @@ public sealed class RecordingEngine : IDisposable
 
                 rec.BackendStartAtUtc = DateTime.UtcNow;
                 _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
-                rec.Backend.Start(rec.Config);
+                rec.Backend.Start(rec.Config, authorizationProof!);
                 _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
             }
 
@@ -2052,6 +2254,7 @@ public sealed class RecordingEngine : IDisposable
                             rec.ApprovedCapturePlan.SourceKind,
                             rec.ApprovedCapturePlan.TargetIdentity,
                             rec.ApprovedCapturePlan.CoordinateSpace),
+                        rec.AuthorizationProof!,
                         op.Cts.Token).ConfigureAwait(false);
                 }
                 finally
@@ -2464,7 +2667,8 @@ public sealed class RecordingEngine : IDisposable
     private void StartDisplayRuntimeMonitor(Recording rec, string? traceId, ITrayContext tray)
     {
         var plan = rec.ApprovedCapturePlan;
-        if (plan == null || !CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
+        if (rec.SyntheticCapturePlanForTests || plan == null ||
+            !CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
             rec.Config.SourceKind is not ("display" or "region"))
             return;
 
@@ -2913,9 +3117,10 @@ public sealed class RecordingEngine : IDisposable
         {
             return TryClaimAndRunStartAction(rec, op, () =>
             {
+                var authorizationProof = RequireCaptureAuthorization(rec);
                 rec.BackendStartAtUtc = DateTime.UtcNow;
                 _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
-                rec.Backend!.Start(rec.Config);
+                rec.Backend!.Start(rec.Config, authorizationProof);
                 _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
 
                 _audit.Log("recording.started", new
@@ -2929,6 +3134,12 @@ public sealed class RecordingEngine : IDisposable
         }
         catch (Exception ex)
         {
+            if (ex is CaptureAuthorizationStartException authorizationFailure)
+            {
+                FailCaptureAuthorizationStart(rec, traceId, tray, authorizationFailure);
+                return false;
+            }
+
             BeforeStartFailureForTests?.Invoke(rec, "countdown.backend.start");
             var ownership = TryClaimStartFailure(
                 rec,
@@ -3184,7 +3395,7 @@ public sealed class RecordingEngine : IDisposable
                             recording_id = rec.Id,
                             backend = rec.BackendType
                         });
-                        deferred.StartCapture();
+                        deferred.StartCapture(rec.AuthorizationProof!);
                     }))
                         return;
                 }

@@ -49,8 +49,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         set => _microphoneStatusProvider = value;
     }
 
-    public void Start(CaptureConfig cfg)
+    public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
     {
+        if (authorizationProof == null)
+            throw new ArgumentNullException(nameof(authorizationProof));
+        authorizationProof.RequireConsumed();
         DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         lock (_lock)
         {

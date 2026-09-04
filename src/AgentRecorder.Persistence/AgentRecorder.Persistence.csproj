@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Infrastructure\AgentRecorder.Infrastructure.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.30" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentRecorder.Tests" />
+  </ItemGroup>
+
+</Project>

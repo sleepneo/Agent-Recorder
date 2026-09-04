@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using AgentRecorder.Core.Automation;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.Core;
@@ -50,4 +51,54 @@ public sealed class SystemQueryDisplayTopologyProvider : IDisplayTopologyProvide
                     display.bounds.width,
                     display.bounds.height)))
             .ToArray();
+
+    internal IReadOnlyList<StandingLeaseDisplayMetadata> GetCurrentExecutionMetadata()
+        => SystemQuery.EnumDisplayTopologyMetadata()
+            .Select(display => new StandingLeaseDisplayMetadata(
+                display.Id,
+                display.IdentityStatus == DisplayIdentityResolutionStatus.Resolved
+                    ? display.StableIdentity
+                    : null,
+                display.IdentityStatus,
+                TryCreateBounds(display.Bounds),
+                display.DpiX,
+                display.DpiY,
+                display.PhysicalWidth,
+                display.PhysicalHeight,
+                ResolveOrientation(display.Bounds, display.Rotation)))
+            .ToArray();
+
+    private static AuthorizedPhysicalRectangle? TryCreateBounds(SystemQuery.Bounds bounds)
+    {
+        try
+        {
+            return new AuthorizedPhysicalRectangle(bounds.x, bounds.y, bounds.width, bounds.height);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static AuthorizedDisplayOrientation? ResolveOrientation(
+        SystemQuery.Bounds bounds,
+        uint? rotation)
+    {
+        // DISPLAYCONFIG_ROTATION identity/90/180/270 values. A missing or
+        // unknown rotation is intentionally not guessed from an ordinal.
+        if (rotation is null || bounds.width <= 0 || bounds.height <= 0)
+            return null;
+
+        bool portrait = bounds.height > bounds.width;
+        return rotation.Value switch
+        {
+            1 when portrait => AuthorizedDisplayOrientation.Portrait,
+            1 when bounds.width > bounds.height => AuthorizedDisplayOrientation.Landscape,
+            2 => AuthorizedDisplayOrientation.Portrait,
+            3 when portrait => AuthorizedDisplayOrientation.PortraitFlipped,
+            3 when bounds.width > bounds.height => AuthorizedDisplayOrientation.LandscapeFlipped,
+            4 => AuthorizedDisplayOrientation.PortraitFlipped,
+            _ => null,
+        };
+    }
 }

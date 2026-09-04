@@ -1432,7 +1432,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
             OutputPath = Path.Combine(_tmpDir, $"final-{Guid.NewGuid():N}.mp4")
         };
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
 
         File.Copy(muxedFixture, video.OutputPath!, overwrite: true);
@@ -1466,7 +1466,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
             OutputPath = Path.Combine(_tmpDir, $"final-{Guid.NewGuid():N}.mp4")
         };
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
 
         File.WriteAllText(video.OutputPath!, "not a video");

@@ -74,7 +74,8 @@ internal sealed record DisplayTargetMapping(
     bool TargetAvailable = true,
     bool TargetInUse = true,
     bool SourceDeviceInfoAvailable = true,
-    bool TargetDeviceInfoAvailable = true);
+    bool TargetDeviceInfoAvailable = true,
+    uint? Rotation = null);
 
 /// <summary>
 /// Privacy-safe result of resolving one active source to its target identity.

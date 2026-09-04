@@ -150,9 +150,9 @@ public class RecordingEngineDeferredCountdownTests : IDisposable
 
         public bool IsAwaitingCaptureStart => StartCalled && StartCaptureCallCount == 0 && !CancelCalled;
 
-        public void Start(CaptureConfig cfg) { StartCalled = true; }
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) { StartCalled = true; }
 
-        public void StartCapture()
+        public void StartCapture(CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref StartCaptureCallCount);
             if (ThrowOnStartCapture)
@@ -687,7 +687,7 @@ public class RecordingEngineDeferredCountdownTests : IDisposable
         public int StartVideoCallCount;
         public int ExitCode => 0;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             // Synchronously ready: the engine catch-up path starts the countdown.
             IsAudioReady = true;

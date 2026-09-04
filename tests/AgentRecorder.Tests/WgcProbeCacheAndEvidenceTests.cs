@@ -849,7 +849,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
 
         public bool Started { get; private set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Started = true;
             cfg.CommandArgs = "synthetic backend";

@@ -36,7 +36,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
         var request = Request(ScreenshotConfig(sourceKind, (0, 0, 32, 32)), semantics, "virtual_screen");
 
-        var result = await runner.CaptureAsync(request, CancellationToken.None);
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, request, CancellationToken.None);
 
         Assert.True(result.Success);
         Assert.True(process.Started);
@@ -48,8 +49,9 @@ public sealed class FfmpegScreenshotFrameRunnerTests
     {
         var process = new FakeScreenshotProcess();
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
-        var result = await runner.CaptureAsync(Request(
-            ScreenshotConfig("region", (0, 0, 32, 32)), "region_rectangle", "screen_pixels"),
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner,
+            Request(ScreenshotConfig("region", (0, 0, 32, 32)), "region_rectangle", "screen_pixels"),
             CancellationToken.None);
 
         Assert.False(result.Success);
@@ -64,7 +66,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var process = new FakeScreenshotProcess { ExitCode = 7 };
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
 
-        var result = await runner.CaptureAsync(Request(), CancellationToken.None);
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, Request(), CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("frame_capture_failed", result.ErrorCode);
@@ -79,7 +82,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var process = new FakeScreenshotProcess { ExitCode = 0 };
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
 
-        var result = await runner.CaptureAsync(Request(), CancellationToken.None);
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, Request(), CancellationToken.None);
 
         Assert.True(result.Success);
         Assert.Equal(0, result.SizeBytes);
@@ -91,7 +95,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var process = new FakeScreenshotProcess { StartException = new InvalidOperationException("start") };
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
 
-        var result = await runner.CaptureAsync(Request(), CancellationToken.None);
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, Request(), CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("frame_capture_failed", result.ErrorCode);
@@ -105,7 +110,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var process = new FakeScreenshotProcess { WaitForever = true };
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
 
-        var result = await runner.CaptureAsync(Request(timeout: TimeSpan.FromMilliseconds(30)), CancellationToken.None);
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, Request(timeout: TimeSpan.FromMilliseconds(30)), CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("frame_timeout", result.ErrorCode);
@@ -120,7 +126,8 @@ public sealed class FfmpegScreenshotFrameRunnerTests
         var process = new FakeScreenshotProcess { WaitForever = true };
         var runner = new FfmpegScreenshotFrameRunner(_ => process);
         using var cancellation = new CancellationTokenSource();
-        var capture = runner.CaptureAsync(Request(timeout: TimeSpan.FromSeconds(5)), cancellation.Token);
+        var capture = CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            runner, Request(timeout: TimeSpan.FromSeconds(5)), cancellation.Token);
         Assert.True(process.WaitEntered.Wait(TimeSpan.FromSeconds(2)));
 
         cancellation.Cancel();

@@ -646,7 +646,7 @@ public sealed class CountdownStartRaceTests
         public int StartCount;
         public int CancelCount;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref StartCount);
             StartEntered.Set();
@@ -687,7 +687,7 @@ public sealed class CountdownStartRaceTests
         public int CancelCount;
         private int _audioReady;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Volatile.Write(ref _audioReady, 1);
             AudioReady?.Invoke();
@@ -725,7 +725,7 @@ public sealed class CountdownStartRaceTests
         public int StartVideoCount;
         private int _audioReady;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Volatile.Write(ref _audioReady, 1);
             _ = Task.Run(() =>
@@ -766,8 +766,8 @@ public sealed class CountdownStartRaceTests
         public int CancelCount;
         private bool _prepared;
 
-        public void Start(CaptureConfig cfg) => _prepared = true;
-        public void StartCapture()
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => _prepared = true;
+        public void StartCapture(CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref StartCaptureCount);
             StartCaptureEntered.Set();

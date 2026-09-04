@@ -38,7 +38,7 @@ public sealed class ChapterMarksTests : IDisposable
         public event Action<FirstFrameObservation>? FirstFrameObserved;
         public bool EmitOnStart { get; set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             cfg.CommandArgs = "chapter-marks-test";
             if (EmitOnStart)

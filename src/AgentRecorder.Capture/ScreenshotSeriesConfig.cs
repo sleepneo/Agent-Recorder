@@ -62,5 +62,13 @@ public sealed record ScreenshotFrameResult(
 
 public interface IScreenshotFrameRunner
 {
-    Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken);
+    /// <summary>
+    /// Proof-bearing frame boundary. Core consumes one parent authorization
+    /// proof before the screenshot session starts; individual frames receive
+    /// that same already-consumed proof and never consume it again.
+    /// </summary>
+    Task<ScreenshotFrameResult> CaptureAsync(
+        ScreenshotFrameRequest request,
+        CaptureAuthorizationProof authorizationProof,
+        CancellationToken cancellationToken);
 }

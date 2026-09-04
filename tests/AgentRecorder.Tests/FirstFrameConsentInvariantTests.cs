@@ -60,7 +60,7 @@ public class FirstFrameConsentInvariantTests : IDisposable
     {
         public bool StartCalled { get; private set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCalled = true;
             cfg.CommandArgs = "fake args";

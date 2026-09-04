@@ -871,7 +871,7 @@ public class RecordingIndicatorTests
 
         try
         {
-            backend.Start(cfg);
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
             var procField = typeof(FfmpegCaptureBackend).GetField(
                 "_proc", BindingFlags.NonPublic | BindingFlags.Instance);

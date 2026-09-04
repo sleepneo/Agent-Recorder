@@ -171,12 +171,10 @@ internal static class RecordingPreflightChecker
             return Pass(warnings);
         }
 
-        long thresholdBytes = 100L * 1024 * 1024; // default 100 MB
-        if (rec.DurationSeconds is int secs && secs > 0)
-        {
-            long estimated = (long)secs * 2 * 1024 * 1024; // 2 MB/s
-            thresholdBytes = Math.Max(thresholdBytes, estimated);
-        }
+        long thresholdBytes = RequiredFreeSpaceBytes(
+            rec.DurationSeconds is int secs && secs > 0
+                ? TimeSpan.FromSeconds(secs)
+                : TimeSpan.Zero);
 
         if (freeBytes < thresholdBytes)
         {
@@ -186,6 +184,22 @@ internal static class RecordingPreflightChecker
         }
 
         return Pass(warnings);
+    }
+
+    internal static long RequiredFreeSpaceBytes(TimeSpan duration)
+    {
+        long thresholdBytes = 100L * 1024 * 1024; // default 100 MB
+        if (duration > TimeSpan.Zero)
+        {
+            long seconds = (long)duration.TotalSeconds;
+            if (seconds > 0)
+            {
+                long estimated = checked(seconds * 2 * 1024 * 1024); // 2 MB/s
+                thresholdBytes = Math.Max(thresholdBytes, estimated);
+            }
+        }
+
+        return thresholdBytes;
     }
 
     private static RecordingPreflightResult CheckEncoderAvailable()

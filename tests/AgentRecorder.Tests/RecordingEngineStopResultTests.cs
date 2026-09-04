@@ -108,7 +108,7 @@ public class RecordingEngineStopResultTests
         public int StopCallCount { get; private set; }
         private Action<int, OutputMeta>? _onNaturalExit;
 
-        public void Start(CaptureConfig cfg) => cfg.CommandArgs = "fake args";
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => cfg.CommandArgs = "fake args";
 
         public OutputMeta Stop()
         {
@@ -132,7 +132,7 @@ public class RecordingEngineStopResultTests
 
         public ThrowingBackend(string message) => Message = message;
 
-        public void Start(CaptureConfig cfg) => throw new Exception(Message);
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => throw new Exception(Message);
 
         public OutputMeta Stop()
         {

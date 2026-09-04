@@ -799,7 +799,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         public static int TotalStarts;
         public static int TotalConstructed;
         public int StartCalls { get; private set; }
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCalls++;
             TotalStarts++;

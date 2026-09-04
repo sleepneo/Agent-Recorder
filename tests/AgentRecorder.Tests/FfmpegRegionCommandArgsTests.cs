@@ -263,7 +263,7 @@ public class FfmpegRegionCommandArgsTests
         var backend = new FfmpegCaptureBackend();
         try
         {
-            backend.Start(cfg);
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
             // CommandArgs should be populated immediately after Start()
             Assert.NotEmpty(cfg.CommandArgs);

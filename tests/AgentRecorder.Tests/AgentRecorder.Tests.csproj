@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\src\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Capture\AgentRecorder.Capture.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Core\AgentRecorder.Core.csproj" />
+    <ProjectReference Include="..\..\src\AgentRecorder.Persistence\AgentRecorder.Persistence.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Api\AgentRecorder.Api.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.App\AgentRecorder.App.csproj" />
     <ProjectReference Include="..\..\src\AgentRecorder.Headless\AgentRecorder.Headless.csproj" />

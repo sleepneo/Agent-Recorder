@@ -128,7 +128,7 @@ public sealed class ManualSystemAudioAvAcceptance
             finalizationSource.TrySetResult(meta);
         });
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         await audioReadySource.Task.WaitAsync(AudioReadyTimeout);
         backend.StartVideo();
 

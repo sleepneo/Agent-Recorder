@@ -118,7 +118,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ConvergenceTimeoutOverride = TimeSpan.FromSeconds(2)
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -165,7 +165,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ConvergenceTimeoutOverride = TimeSpan.FromMilliseconds(50)
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -218,7 +218,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ConvergenceTimeoutOverride = TimeSpan.FromSeconds(2)
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -271,7 +271,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(CreateValidVideo(_tempDir), video.OutputPath!, overwrite: true);
         File.Copy(CreateValidAudio(_tempDir), audio.OutputPath!, overwrite: true);
@@ -475,7 +475,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(CreateValidVideo(_tempDir), video.OutputPath!, overwrite: true);
         File.Copy(CreateValidAudio(_tempDir), audio.OutputPath!, overwrite: true);
@@ -605,7 +605,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -777,7 +777,7 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
 
         private Action<int, OutputMeta>? _onNaturalExit;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             // Synchronously transition engine to recording so the deadline watchdog starts.
             FirstFrameObserved?.Invoke(new FirstFrameObservation

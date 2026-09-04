@@ -320,7 +320,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig(outputPath);
 
         var sw = Stopwatch.StartNew();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         sw.Stop();
 
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), "Start must return quickly.");
@@ -369,7 +369,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             outputFileSize: 1024);
 
         var backend = CreateBackend(process, out _, out _);
-        backend.Start(CreateValidConfig(outputPath, bounds: (-256, -128, 1920, 1080)));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath, bounds: (-256, -128, 1920, 1080)));
 
         Assert.NotNull(_lastHarness);
         var args = _lastHarness!.Process.CapturedArguments;
@@ -407,7 +407,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         cfg.SourceKind = "window";
         cfg.WindowHandle = (nint)0x1234;
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(_lastHarness);
         Assert.Equal(WgcContinuousTargetKind.Window, _lastHarness!.Options.TargetKind);
@@ -429,7 +429,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var backend = CreateBackend(options => fake = new FakeSession(options), out _, out _);
         var cfg = CreateRegionConfig(Path.Combine(_finalDir, "region-args.mp4"));
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(fake);
         Assert.StartsWith("--capture-continuous-region", cfg.CommandArgs, StringComparison.Ordinal);
@@ -453,7 +453,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var backend = CreateBackend(process, out _, out _);
         var cfg = CreateValidConfig(durationSeconds: WgcContinuousDurationPolicy.MaxSeconds);
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(_lastHarness);
         Assert.Equal(WgcContinuousDurationPolicy.MaxMilliseconds, _lastHarness!.Options.DurationMs);
@@ -478,7 +478,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateRegionConfig(outputPath);
         cfg.Bounds = (-1800, -100, 641, 480);
 
-        Assert.Throws<ApiException>(() => backend.Start(cfg));
+        Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(0, process.StartInvocationCount);
         Assert.False(File.Exists(outputPath));
     }
@@ -496,7 +496,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var backend = CreateBackend(process, out var publisher, out _);
         var cfg = CreateRegionConfig(outputPath, deferCaptureStart: false);
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         await WaitForConditionAsync(
             () => _lastHarness?.Session.IsCompleted == true,
             TimeSpan.FromSeconds(5),
@@ -516,7 +516,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig();
         cfg.SourceKind = "window";
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
         Assert.Contains("HWND", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -532,7 +532,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig();
         cfg.SourceKind = "region";
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
         Assert.Equal(0, process.StartInvocationCount);
@@ -547,7 +547,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig();
         cfg.DurationSeconds = null;
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
         Assert.Contains("DurationSeconds", ex.Message);
@@ -565,7 +565,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         var cfg = CreateValidConfig(durationSeconds: duration);
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
         Assert.Contains("1 and 60", ex.Message);
@@ -581,7 +581,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig();
         cfg.Microphone = true;
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("UNSUPPORTED_FEATURE", ex.Code);
         Assert.Contains("microphone", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -601,7 +601,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var cfg = CreateValidConfig();
         cfg.OutputPath = outputPath ?? string.Empty;
 
-        var ex = Assert.Throws<ApiException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<ApiException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(400, ex.Status);
         Assert.Equal("INVALID_ARGUMENT", ex.Code);
         Assert.Equal(0, process.StartInvocationCount);
@@ -624,7 +624,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         var backend = CreateBackend(process, out _, out _);
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(_lastHarness);
         string token = _lastHarness!.Options.BeginToken;
@@ -672,7 +672,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var tcs = new TaskCompletionSource();
         backend.OnNaturalExit((_, _) => tcs.TrySetResult());
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
         Assert.Equal(1, observedCount);
@@ -707,7 +707,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var tcs = new TaskCompletionSource();
         backend.OnNaturalExit((_, _) => tcs.TrySetResult());
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
         Assert.NotNull(_lastHarness);
@@ -754,7 +754,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var backend = CreateBackend(process, out var publisher, out var probe);
         var cfg = CreateValidConfig(outputPath);
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         // Wait for the process to be waiting on the stop signal, then stop.
         await WaitForConditionAsync(() => File.Exists(_lastHarness!.Options.BeginSignalPath), TimeSpan.FromSeconds(5));
@@ -809,7 +809,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         }
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         var meta = backend.Stop();
 
@@ -872,7 +872,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         var backend = CreateBackend(process, out var publisher, out _);
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         if (mode == "cancel")
         {
@@ -903,7 +903,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             exitCode: 1);
 
         var backend = CreateBackend(process, out var publisher, out _);
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         var meta = backend.Stop();
 
         Assert.Equal(reason, meta.StopReason);
@@ -940,7 +940,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             callbackMeta = m;
         });
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         // Race Stop against the natural completion.
         var stopTask = Task.Run(() => backend.Stop());
@@ -976,7 +976,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         int callbackCount = 0;
         backend.OnNaturalExit((_, _) => Interlocked.Increment(ref callbackCount));
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         var meta1 = backend.Stop();
         var meta2 = backend.Stop();
@@ -1022,7 +1022,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnNaturalExit((_, _) => throw new InvalidOperationException("callback exception"));
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         var meta = backend.Stop();
 
@@ -1050,7 +1050,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         var backend = CreateBackend(process, out _, out _);
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         var meta = backend.Stop();
         Assert.NotNull(_lastHarness);
@@ -1099,7 +1099,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var tcs = new TaskCompletionSource();
         backend.OnNaturalExit((_, _) => tcs.TrySetResult());
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(session);
         Assert.Equal(1, session!.StartCallCount);
@@ -1124,7 +1124,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         }, out var publisher, out _);
 
         var cfg = CreateValidConfig(outputPath);
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<InvalidOperationException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Contains("StartAsync synchronous failure", ex.Message);
 
         Assert.NotNull(session);
@@ -1149,7 +1149,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         }, out var publisher, out _);
 
         var cfg = CreateValidConfig(outputPath);
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<InvalidOperationException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Contains("StartAsync faulted task", ex.Message);
 
         Assert.NotNull(session);
@@ -1199,14 +1199,14 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         _disposables.Add(backend);
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         string originalArgs = cfg.CommandArgs;
         backend.Stop();
 
         Assert.Equal(1, resolverCalls);
         Assert.Equal(1, factoryCalls);
 
-        Assert.Throws<ObjectDisposedException>(() => backend.Start(cfg));
+        Assert.Throws<ObjectDisposedException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(1, resolverCalls);
         Assert.Equal(1, factoryCalls);
         Assert.Equal(originalArgs, cfg.CommandArgs);
@@ -1244,7 +1244,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             () => { resolverCalls++; throw new IOException("resolver failed"); });
 
         var cfg = CreateValidConfig();
-        var ex = Assert.Throws<IOException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<IOException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(1, resolverCalls);
         Assert.Contains("resolver failed", ex.Message);
 
@@ -1270,7 +1270,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             out _);
 
         var cfg = CreateValidConfig();
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.Start(cfg));
+        var ex = Assert.Throws<InvalidOperationException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.Equal(1, factoryCalls);
         Assert.Contains("factory failed", ex.Message);
 
@@ -1310,7 +1310,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnDisposeStartingWaitForTests = () => disposeStarting.Set();
 
         var cfg = CreateValidConfig();
-        var startTask = Task.Run(() => backend.Start(cfg));
+        var startTask = Task.Run(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.True(startBlocked.Wait(TimeSpan.FromSeconds(5)), "Resolver should enter.");
 
         var disposeTask = Task.Run(() => backend.Dispose());
@@ -1349,7 +1349,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnDisposeStartingWaitForTests = () => disposeStarting.Set();
 
         var cfg = CreateValidConfig();
-        var startTask = Task.Run(() => backend.Start(cfg));
+        var startTask = Task.Run(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
         Assert.True(factoryBlocked.Wait(TimeSpan.FromSeconds(5)), "Factory should enter.");
 
         var disposeTask = Task.Run(() => backend.Dispose());
@@ -1382,7 +1382,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnNaturalExit((_, _) => Interlocked.Increment(ref callbackCount));
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.NotNull(session);
         backend.Dispose();
@@ -1432,7 +1432,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnDisposeCompletingWaitForTests = () => disposeEntered.Set();
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         Assert.NotNull(session);
 
         _ = Task.Run(() => session!.CompletionTcs.TrySetResult(session.DefaultResult));
@@ -1482,7 +1482,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         backend.OnDisposeCompletingWaitForTests = () => disposeEntered.Set();
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         Assert.NotNull(session);
 
         _ = Task.Run(() => session!.CompletionTcs.TrySetResult(session.DefaultResult));
@@ -1531,7 +1531,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         };
 
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         var meta = backend.Stop();
         Assert.False(meta.OutputFileExists);
@@ -1565,7 +1565,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             SizeBytes = stagingSize
         };
 
-        backend.Start(CreateValidConfig(outputPath, durationSeconds: 10));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath, durationSeconds: 10));
         var meta = backend.Stop();
 
         Assert.True(meta.OutputFileExists);
@@ -1601,7 +1601,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             SizeBytes = stagingSize
         };
 
-        backend.Start(CreateValidConfig(outputPath, durationSeconds: 10));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath, durationSeconds: 10));
         var meta = backend.Stop();
 
         Assert.False(meta.OutputFileExists);
@@ -1654,7 +1654,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         var backend = CreateBackend(process, out var publisher, out _);
         var cfg = CreateValidConfig(outputPath);
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         await WaitForConditionAsync(() => File.Exists(_lastHarness!.Options.BeginSignalPath), TimeSpan.FromSeconds(5));
 
         var meta = backend.Stop();
@@ -1703,7 +1703,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
 
         await WaitForConditionAsync(() => probe.CallCount > 0, TimeSpan.FromSeconds(5),
             "Completion owner should have reached the probe.");
@@ -1751,7 +1751,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             return new PublishResult { Success = false, FailureCategory = "should_not_reach" };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
 
         await WaitForConditionAsync(() => publisher.CallCount > 0, TimeSpan.FromSeconds(5),
             "Completion owner should have reached the publisher.");
@@ -1799,7 +1799,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             return new PublishResult { Success = false, FailureCategory = "should_not_reach" };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
 
         await WaitForConditionAsync(() => publisher.CallCount > 0, TimeSpan.FromSeconds(5),
             "Completion owner should have reached the publisher.");
@@ -1845,7 +1845,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => probe.CallCount > 0, TimeSpan.FromSeconds(5));
 
         backend.Dispose();
@@ -1891,7 +1891,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => probe.CallCount > 0, TimeSpan.FromSeconds(5));
 
         backend.Dispose();
@@ -1913,7 +1913,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var backend = CreateBackend(_ => session, out _, out _);
         backend.OnCompletingForTests = () => throw new InvalidOperationException("boom");
 
-        backend.Start(CreateValidConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig());
 
         Assert.Equal("Completed", backend.LifecycleStateNameForTests);
         backend.Dispose();
@@ -1927,7 +1927,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         session.CompletionTcs.TrySetResult(session.DefaultResult);
 
         var backend = CreateBackend(_ => session, out _, out _);
-        backend.Start(CreateValidConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig());
 
         Assert.Equal("Completed", backend.LifecycleStateNameForTests);
         Assert.Equal(0, session.DisposeCount);
@@ -1949,7 +1949,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         });
 
         var backend = CreateBackend(_ => session, out _, out _);
-        backend.Start(CreateValidConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig());
 
         Assert.Equal("Completed", backend.LifecycleStateNameForTests);
         Assert.Equal(0, session.DisposeCount);
@@ -1966,7 +1966,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         session.CompletionTcs.TrySetResult(session.DefaultResult);
 
         var backend = CreateBackend(_ => session, out _, out _);
-        backend.Start(CreateValidConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig());
 
         backend.Dispose();
         backend.Dispose();
@@ -1983,7 +1983,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         session.CompletionTcs.TrySetResult(session.DefaultResult);
 
         var backend = CreateBackend(_ => session, out _, out _);
-        backend.Start(CreateValidConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig());
 
         // The test fixture removed the SessionHarness from _disposables; only
         // the backend should dispose the session it owns.
@@ -2022,7 +2022,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
                 : new PublishResult { Success = false, FailureCategory = "commit_closed" };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => publisher.CallCount > 0, TimeSpan.FromSeconds(5),
             "Completion owner should have reached the publisher.");
 
@@ -2076,7 +2076,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
                 : new PublishResult { Success = false, FailureCategory = "commit_closed" });
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => publisher.CallCount > 0, TimeSpan.FromSeconds(5),
             "Completion owner should have reached the publisher.");
 
@@ -2182,7 +2182,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => probe.CallCount > 0, TimeSpan.FromSeconds(5));
 
         backend.Dispose();
@@ -2219,7 +2219,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             return new PublishResult { Success = false, FailureCategory = "should_not_reach" };
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         await WaitForConditionAsync(() => publisher.CallCount > 0, TimeSpan.FromSeconds(5));
 
         backend.Dispose();
@@ -2286,7 +2286,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             callbackArbitrationBarrier.Task.Wait(TimeSpan.FromSeconds(10));
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
         // Trigger completion after Start has returned and the backend is Running.
@@ -2329,7 +2329,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         var callbackCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         backend.OnFireNaturalExitForTests = () => callbackCompleted.TrySetResult();
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         session.CompletionTcs.TrySetResult(session.DefaultResult);
 
         await callbackCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -2371,7 +2371,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             backend.OnCompletingForTests = () => completingEntered.TrySetResult();
             backend.OnFireNaturalExitForTests = () => callbackBarrier.Task.Wait(TimeSpan.FromSeconds(10));
 
-            backend.Start(CreateValidConfig(outputPath));
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
 
             Task? completionOwnerTask = null;
             Task? disposeOwnerTask = null;
@@ -2575,7 +2575,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         {
             // The outer try begins before Start and before either setup wait, so
             // setup failures use the same release-and-join path as body failures.
-            backend.Start(CreateValidConfig(outputPath));
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
             File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
             completionOwner = Task.Factory.StartNew(
@@ -2828,7 +2828,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         try
         {
-            backend.Start(CreateValidConfig(outputPath));
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
             // Match FakeSession.DefaultResult.Summary.FileSize and FakeProbe so
             // validation reaches the publisher gate instead of bypassing it.
             File.WriteAllBytes(session!.Options.OutputPath, new byte[10000]);
@@ -2962,7 +2962,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             callbackBarrier.Task.Wait(TimeSpan.FromSeconds(10));
         };
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
         // Use a long-running task for the synchronous completion continuation so
@@ -3034,7 +3034,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
 
         backend.OnFireNaturalExitForTests = () => callbackBarrier.Task.Wait(TimeSpan.FromSeconds(10));
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
         // Use a long-running task for the synchronous completion continuation so
@@ -3136,7 +3136,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
                 releaseBeforeCallbackArbiter.Task.Wait();
             };
 
-            backend.Start(CreateValidConfig(outputPath));
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
             File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
             // Completion continuation is ExecuteSynchronously; with a non-async TCS it
@@ -3218,7 +3218,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             callbackCompleted.TrySetResult();
         });
 
-        backend.Start(CreateValidConfig(outputPath));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(outputPath));
         File.WriteAllBytes(session.Options.OutputPath, new byte[1024]);
 
         _ = Task.Factory.StartNew(
@@ -3974,7 +3974,7 @@ public sealed class WgcContinuousCaptureBackendRealProcessTests : IDisposable
                 OutputPath = outputPath
             };
 
-            backend.Start(cfg);
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
             // Wait for structured ready evidence that includes both parent and child
             // PIDs. The helper only writes this after it has received the begin

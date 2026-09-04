@@ -32,7 +32,7 @@ public class RecordingEngineFirstFrameTracerTests
         public Action? OnStop { get; set; }
         public bool Started { get; private set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Started = true;
             cfg.CommandArgs = "fake-observable";
@@ -66,7 +66,7 @@ public class RecordingEngineFirstFrameTracerTests
     private sealed class FakeNonObservableBackend : ICaptureBackend
     {
         public bool Started { get; private set; }
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Started = true;
             cfg.CommandArgs = "fake-non-observable";

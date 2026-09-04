@@ -58,7 +58,7 @@ public sealed class AvSplitFailedOutputPathContractTests : IDisposable
             new FakeExternalProcessRunner(),
             new TempRetentionPolicy(_dataDir));
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -96,7 +96,7 @@ public sealed class AvSplitFailedOutputPathContractTests : IDisposable
             runner,
             new TempRetentionPolicy(_dataDir));
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         video.EmitNaturalExit(0, "");
@@ -133,7 +133,7 @@ public sealed class AvSplitFailedOutputPathContractTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         video.EmitNaturalExit(0, "");
@@ -170,7 +170,7 @@ public sealed class AvSplitFailedOutputPathContractTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         video.EmitNaturalExit(0, "");

@@ -26,7 +26,8 @@ public interface IDeferredCaptureStartBackend
     /// Authorizes and starts screen capture exactly once. Later calls are
     /// no-ops. Must only be invoked after the app-owned countdown has reached
     /// zero; while the countdown digits are visible the backend must remain
-    /// unauthorized.
+    /// unauthorized. The parent recording supplies its already-consumed
+    /// proof; this interface has no proof-less authorization entry.
     /// </summary>
-    void StartCapture();
+    void StartCapture(CaptureAuthorizationProof authorizationProof);
 }

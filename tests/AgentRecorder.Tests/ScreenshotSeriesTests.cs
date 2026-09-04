@@ -159,7 +159,8 @@ public sealed class ScreenshotSeriesTests : IDisposable
             ScreenshotSeries = new ScreenshotSeriesConfig { IntervalMs = 1000, MaxCount = 1, PlannedFrameCount = 1 }
         };
         var path = Path.Combine(_dataDir, "runner-no-start.png");
-        var result = await new FfmpegScreenshotFrameRunner().CaptureAsync(
+        var result = await CaptureAuthorizationTestHelper.CaptureFrameWithSyntheticConsumedProof(
+            new FfmpegScreenshotFrameRunner(),
             new ScreenshotFrameRequest(cfg, path, TimeSpan.FromSeconds(1), 1,
                 "wgc-continuous", "window_surface", "window", "window_test"),
             CancellationToken.None);
@@ -1031,7 +1032,7 @@ public sealed class ScreenshotSeriesTests : IDisposable
             _delayMs = delayMs;
         }
 
-        public async Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken)
+        public async Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CaptureAuthorizationProof authorizationProof, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Calls);
             var inFlight = Interlocked.Increment(ref _inFlight);
@@ -1130,7 +1131,7 @@ public sealed class ScreenshotSeriesTests : IDisposable
         private readonly string _behavior;
         public ScriptedRunner(string behavior) => _behavior = behavior;
 
-        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken)
+        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CaptureAuthorizationProof authorizationProof, CancellationToken cancellationToken)
         {
             var now = DateTime.UtcNow;
             if (_behavior == "timeout")
@@ -1165,7 +1166,7 @@ public sealed class ScreenshotSeriesTests : IDisposable
             _afterCapture = afterCapture;
         }
 
-        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken)
+        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CaptureAuthorizationProof authorizationProof, CancellationToken cancellationToken)
         {
             var index = Interlocked.Increment(ref Calls);
             var inFlight = Interlocked.Increment(ref _inFlight);
@@ -1197,7 +1198,7 @@ public sealed class ScreenshotSeriesTests : IDisposable
         public ManualResetEventSlim Entered { get; } = new(false);
         public bool CancellationObserved { get; private set; }
 
-        public async Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken)
+        public async Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CaptureAuthorizationProof authorizationProof, CancellationToken cancellationToken)
         {
             Entered.Set();
             try
@@ -1215,7 +1216,7 @@ public sealed class ScreenshotSeriesTests : IDisposable
 
     private sealed class IgnoringCancellationPngRunner : IScreenshotFrameRunner
     {
-        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CancellationToken cancellationToken)
+        public Task<ScreenshotFrameResult> CaptureAsync(ScreenshotFrameRequest request, CaptureAuthorizationProof authorizationProof, CancellationToken cancellationToken)
         {
             var now = DateTime.UtcNow;
             var bytes = FakePngRunner.BuildPng(32, 32);

@@ -71,8 +71,12 @@ public sealed class FfmpegScreenshotFrameRunner : IScreenshotFrameRunner
 
     public async Task<ScreenshotFrameResult> CaptureAsync(
         ScreenshotFrameRequest request,
+        CaptureAuthorizationProof authorizationProof,
         CancellationToken cancellationToken)
     {
+        if (authorizationProof == null)
+            throw new ArgumentNullException(nameof(authorizationProof));
+        authorizationProof.RequireConsumed();
         var started = DateTime.UtcNow;
         var cfg = request.Config;
         if (!IsSupportedRequest(request, out var planError))

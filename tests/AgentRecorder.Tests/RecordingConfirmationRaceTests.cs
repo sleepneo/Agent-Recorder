@@ -79,7 +79,7 @@ public class RecordingConfirmationRaceTests : IDisposable
         public int StartCallCount { get; private set; }
         private Action<int, OutputMeta>? _naturalExit;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCallCount++;
             cfg.CommandArgs = "fake";

@@ -352,7 +352,7 @@ AudioSourceKind: microphone
                 SystemLoopbackEndpoint = "{endpoint}"
             };
 
-            var ex = Assert.Throws<ArgumentException>(() => backend.Start(illegalCfg));
+            var ex = Assert.Throws<ArgumentException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, illegalCfg));
             Assert.Contains("Invalid audio source configuration", ex.Message);
 
             Assert.False(Directory.Exists(Path.Combine(dataDir, "temp")),

@@ -416,7 +416,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public int StartVideoCalls { get; private set; }
         public bool IsAudioReady => _audioReady;
         public int ExitCode => 0;
-        public void Start(CaptureConfig cfg) { StartCalls++; Events.Add("start"); cfg.CommandArgs = "controlled-test"; }
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) { StartCalls++; Events.Add("start"); cfg.CommandArgs = "controlled-test"; }
         public void SignalAudioReady() { _audioReady = true; Events.Add("audio-ready"); AudioReady?.Invoke(); }
         public void StartVideo()
         {

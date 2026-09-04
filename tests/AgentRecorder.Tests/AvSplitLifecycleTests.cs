@@ -537,7 +537,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         };
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         Assert.Equal(AudioCaptureSourceKind.SystemLoopback, factory.LastAudioSourceKind);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
@@ -578,7 +578,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         };
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -611,7 +611,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         };
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -642,7 +642,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         };
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -680,7 +680,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             };
             var backend = new AvSplitCaptureBackend(
                 new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
-            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            var ex = Assert.Throws<ArgumentException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
             Assert.Contains("cannot both", ex.Message, StringComparison.OrdinalIgnoreCase);
             Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
         }
@@ -692,7 +692,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             cfg.SystemLoopbackEndpoint = null;
             var backend = new AvSplitCaptureBackend(
                 new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
-            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            var ex = Assert.Throws<ArgumentException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
             Assert.Contains("requires", ex.Message, StringComparison.OrdinalIgnoreCase);
             Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
         }
@@ -703,7 +703,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             cfg.MicDevice = "unexpected-mic";
             var backend = new AvSplitCaptureBackend(
                 new FakeAvWorkerFactory(), new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
-            var ex = Assert.Throws<ArgumentException>(() => backend.Start(cfg));
+            var ex = Assert.Throws<ArgumentException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
             Assert.Contains("MicDevice", ex.Message, StringComparison.OrdinalIgnoreCase);
             Assert.False(Directory.Exists(BackendTempDir()), "temp dir must not be created for illegal config");
         }
@@ -729,7 +729,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         };
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -763,7 +763,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         // The NaturalExit fires synchronously during Start() because the
         // source mismatch is detected immediately. The backend concludes
@@ -795,7 +795,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
 
         var cfg = CreateConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.True(backend.HasExited, "Backend should conclude immediately on source mismatch");
         Assert.True(audio.ProtocolErrorRaised);
@@ -824,7 +824,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
 
         var cfg = CreateSystemLoopbackConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.True(SpinWait.SpinUntil(() => backend.IsAudioReady, TimeSpan.FromSeconds(2)));
         Assert.False(audio.ProtocolErrorRaised);
@@ -847,7 +847,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
 
         var cfg = CreateConfig();
-        backend.Start(cfg);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
         Assert.True(SpinWait.SpinUntil(() => backend.IsAudioReady, TimeSpan.FromSeconds(2)));
         Assert.False(audio.ProtocolErrorRaised);
@@ -875,7 +875,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -908,7 +908,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -941,7 +941,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -971,7 +971,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
 
@@ -1000,7 +1000,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         // The audio worker already copied the valid audio into its output path
         // because holdFileOpenCopyFrom was provided; do not copy again while the
@@ -1030,7 +1030,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -1065,7 +1065,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -1121,7 +1121,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -1151,7 +1151,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
 
         // The fake audio worker raises natural exit asynchronously (even with
         // delay 0), so wait for the backend to conclude before calling StartVideo.
@@ -1175,7 +1175,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         int callbackCount = 0;
         backend.AudioReady += () => Interlocked.Increment(ref callbackCount);
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
 
         Assert.True(backend.IsAudioReady);
         Assert.Equal(1, callbackCount);
@@ -1191,7 +1191,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         int callbackCount = 0;
         backend.AudioReady += () => Interlocked.Increment(ref callbackCount);
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         Assert.False(backend.IsAudioReady);
 
         Assert.True(SpinWait.SpinUntil(() => backend.IsAudioReady, TimeSpan.FromSeconds(2)));
@@ -1209,7 +1209,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         int count = 0;
         ((IFirstFrameObservableCaptureBackend)backend).FirstFrameObserved += _ => Interlocked.Increment(ref count);
 
-        backend.Start(CreateConfig(microphone: false));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig(microphone: false));
         backend.StartVideo();
         video.EmitFirstFrame();
         video.EmitFirstFrame();
@@ -1230,7 +1230,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var tcs = new TaskCompletionSource<OutputMeta>();
         backend.OnNaturalExit((_, meta) => tcs.TrySetResult(meta));
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
 
         // Audio exits while video is still running.
@@ -1262,7 +1262,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         var tcs = new TaskCompletionSource<OutputMeta>();
         backend.OnNaturalExit((_, meta) => tcs.TrySetResult(meta));
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         File.Copy(validAudio, audio.OutputPath!, overwrite: true);
@@ -1288,7 +1288,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir));
 
             var cfg = CreateConfig();
-            backend.Start(cfg);
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
             backend.StartVideo();
             // Point workers at real temp files so the backend finalizes against them.
             File.Copy(validVideo, video.OutputPath!, overwrite: true);
@@ -1310,7 +1310,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir));
 
             var cfg = CreateConfig();
-            backend.Start(cfg);
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
             backend.StartVideo();
             File.WriteAllText(video.OutputPath!, "not a video");
             File.WriteAllText(audio.OutputPath!, "not audio");
@@ -1342,7 +1342,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         video.EmitNaturalExit(0, "");
 
@@ -1366,7 +1366,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         video.EmitNaturalExit(0, "");
 
@@ -1386,7 +1386,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         video.EmitNaturalExit(0, "");
 
@@ -1407,7 +1407,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         // Leave the temp video file empty/invalid so the video stability check fails.
         video.EmitNaturalExit(0, "");
@@ -1432,7 +1432,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             ApplyContinuityCheck = false
         };
 
-        backend.Start(CreateConfig());
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
         backend.StartVideo();
         File.Copy(validVideo, video.OutputPath!, overwrite: true);
         // The audio worker already holds a copy of validAudio open; do not

@@ -44,7 +44,7 @@ public class ApiResponseSerializationTests : IDisposable
         public int ExitCodeValue { get; set; }
         private Action<int, OutputMeta>? _onNaturalExit;
 
-        public void Start(CaptureConfig cfg) => cfg.CommandArgs = "fake args";
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => cfg.CommandArgs = "fake args";
         public OutputMeta Stop() => StopResult;
         public void OnNaturalExit(Action<int, OutputMeta> callback) => _onNaturalExit = callback;
         public int ExitCode => ExitCodeValue;

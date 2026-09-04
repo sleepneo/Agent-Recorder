@@ -127,6 +127,25 @@ public sealed class Recording
     public CapturePlan? ApprovedCapturePlan { get; set; }
 
     /// <summary>
+    /// Main-process-only capture authorization. It is deliberately internal so
+    /// it cannot become an API/JSON field or be supplied by a helper.
+    /// </summary>
+    internal CaptureAuthorizationProof? AuthorizationProof { get; set; }
+
+    /// <summary>
+    /// Marks the direct StartCaptureForTests seam. Production API requests can
+    /// never opt into this synthetic authorization path.
+    /// </summary>
+    internal bool SyntheticAuthorizationForTests { get; set; }
+
+    /// <summary>
+    /// Marks a plan created by the direct test seam rather than supplied by a
+    /// production approval flow. Such a plan has no live topology identity and
+    /// must not start the production display-loss monitor.
+    /// </summary>
+    internal bool SyntheticCapturePlanForTests { get; set; }
+
+    /// <summary>
     /// Why the recording ended. Populated by explicit Stop(...) and natural exit finalize.
     /// Known values: duration_reached, user_requested, floating_button, tray_menu, global_hotkey,
     /// process_exit, application_exit, service_exit, and caller-supplied reasons.
@@ -163,7 +182,10 @@ public sealed class Recording
         // Interlocked.CompareExchange is an acquire/release-equivalent
         // atomic publication and keeps duplicate publication impossible even
         // if an internal caller accidentally invokes this twice.
-        return Interlocked.CompareExchange(ref _isFinalized, 1, 0) == 0;
+        var published = Interlocked.CompareExchange(ref _isFinalized, 1, 0) == 0;
+        if (published)
+            AuthorizationProof?.Revoke();
+        return published;
     }
 
     public string? NestedRole { get; set; }

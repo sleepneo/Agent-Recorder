@@ -94,7 +94,7 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var session = new DeferredFakeSession();
         var backend = CreateBackend(session);
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
 
         Assert.Equal(1, session.StartCallCount);
         Assert.Equal(0, session.AuthorizeCallCount);
@@ -113,8 +113,8 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var notifications = new List<bool>();
         backend.CaptureAuthorizationCompleted += ok => { lock (notifications) notifications.Add(ok); };
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
 
         Assert.False(backend.IsAwaitingCaptureStart);
         await WaitForConditionAsync(() => session.AuthorizeCallCount == 1, TimeSpan.FromSeconds(2));
@@ -134,17 +134,17 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         int notificationCount = 0;
         backend.CaptureAuthorizationCompleted += _ => Interlocked.Increment(ref notificationCount);
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
-        backend.StartCapture();
-        backend.StartCapture();
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
 
         await WaitForConditionAsync(() => session.AuthorizeCallCount == 1, TimeSpan.FromSeconds(2));
         session.AuthorizeTcs.TrySetResult(true);
         await WaitForConditionAsync(() => notificationCount == 1, TimeSpan.FromSeconds(2));
 
         // Later calls are no-ops even after the first authorization completed.
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
         await Task.Delay(100);
         Assert.Equal(1, session.AuthorizeCallCount);
         Assert.Equal(1, notificationCount);
@@ -158,8 +158,8 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var notifications = new List<bool>();
         backend.CaptureAuthorizationCompleted += ok => { lock (notifications) notifications.Add(ok); };
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
         await WaitForConditionAsync(() => session.AuthorizeCallCount == 1, TimeSpan.FromSeconds(2));
         session.AuthorizeTcs.TrySetResult(false);
 
@@ -176,8 +176,8 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var notifications = new List<bool>();
         backend.CaptureAuthorizationCompleted += ok => { lock (notifications) notifications.Add(ok); };
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
 
         await WaitForConditionAsync(() => { lock (notifications) return notifications.Count == 1; },
             TimeSpan.FromSeconds(2));
@@ -192,7 +192,7 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var notifications = new List<bool>();
         backend.CaptureAuthorizationCompleted += ok => { lock (notifications) notifications.Add(ok); };
 
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
 
         Assert.Equal(0, session.AuthorizeCallCount);
         Assert.False(backend.IsAwaitingCaptureStart);
@@ -209,7 +209,7 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var session = new DeferredFakeSession();
         var backend = CreateBackend(session);
 
-        backend.Start(CreateValidConfig(deferCaptureStart: false));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: false));
 
         // The non-deferred path must authorize exactly as before: promptly,
         // without any StartCapture call, and IsAwaitingCaptureStart stays false.
@@ -225,13 +225,13 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         var notifications = new List<bool>();
         backend.CaptureAuthorizationCompleted += ok => { lock (notifications) notifications.Add(ok); };
 
-        backend.Start(CreateValidConfig(deferCaptureStart: true));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateValidConfig(deferCaptureStart: true));
         Assert.True(backend.IsAwaitingCaptureStart);
 
         backend.Dispose();
         Assert.False(backend.IsAwaitingCaptureStart);
 
-        backend.StartCapture();
+        CaptureAuthorizationTestHelper.StartDeferredWithSyntheticConsumedProof(backend);
         await Task.Delay(100);
 
         Assert.Equal(0, session.AuthorizeCallCount);

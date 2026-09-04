@@ -230,7 +230,7 @@ public sealed class CountdownConfigurationTests
         public ObservableBackend(bool autoFirstFrame) => _autoFirstFrame = autoFirstFrame;
         public event Action<FirstFrameObservation>? FirstFrameObserved;
         public int StartCallCount;
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref StartCallCount);
             if (_autoFirstFrame)
@@ -255,7 +255,7 @@ public sealed class CountdownConfigurationTests
         private bool _started;
         public int StartVideoCallCount;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             _started = true;
             AudioReady?.Invoke();
@@ -283,8 +283,8 @@ public sealed class CountdownConfigurationTests
         private bool _started;
         public int StartCaptureCallCount;
 
-        public void Start(CaptureConfig cfg) => _started = true;
-        public void StartCapture()
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => _started = true;
+        public void StartCapture(CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref StartCaptureCallCount);
             FirstFrameObserved?.Invoke(new FirstFrameObservation

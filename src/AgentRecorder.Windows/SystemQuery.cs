@@ -195,6 +195,82 @@ public static class SystemQuery
     }
 
     /// <summary>
+    /// Internal metadata-only reader for the standing-lease execution
+    /// environment. It deliberately returns nullable fields when Windows
+    /// cannot prove a value; the Core validator then fails closed. This is not
+    /// an API/JSON display DTO and contains no pixels or native handles.
+    /// </summary>
+    internal static List<DisplayTopologyMetadataInfo> EnumDisplayTopologyMetadata()
+    {
+        var topologyProvider = _displayTopologyProvider.Value;
+        if (topologyProvider != null)
+        {
+            return NormalizeDisplayTopologyInfos(topologyProvider())
+                .Select(display => new DisplayTopologyMetadataInfo(
+                    display.id,
+                    display.stable_identity,
+                    display.identity_status,
+                    display.bounds,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null))
+                .ToList();
+        }
+
+        var displayProvider = _displayProvider.Value;
+        if (displayProvider != null)
+        {
+            return NormalizeDisplayInfos(displayProvider())
+                .Select(display => new DisplayTopologyMetadataInfo(
+                    display.id,
+                    null,
+                    DisplayIdentityResolutionStatus.Unresolved,
+                    display.bounds,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null))
+                .ToList();
+        }
+
+        var mappingsAvailable = TryReadActiveDisplayConfigMappings(
+            out var mappings,
+            out var deviceInfoFailure);
+        var monitors = ReadDisplayMonitorEntries();
+        var metadata = AlignDisplayMetadata(monitors
+            .Select(m => new DisplayMetadata(m.Id, "", m.WindowsDisplayNumber))
+            .ToArray());
+        var list = new List<DisplayTopologyMetadataInfo>(monitors.Count);
+        for (int i = 0; i < monitors.Count; i++)
+        {
+            var monitor = monitors[i];
+            var identity = !mappingsAvailable
+                ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unresolved)
+                : deviceInfoFailure
+                    ? new DisplayIdentityResolution(null, DisplayIdentityResolutionStatus.Unavailable)
+                    : DisplayIdentityDeriver.Resolve(monitor.DeviceName, mappings);
+            var rotation = TryResolveRotation(monitor.DeviceName, mappings, out var rotationValue)
+                ? (uint?)rotationValue
+                : null;
+            var bounds = monitor.Bounds;
+            list.Add(new DisplayTopologyMetadataInfo(
+                monitor.Id,
+                identity.Fingerprint,
+                identity.Status,
+                bounds,
+                monitor.DpiX > 0 ? monitor.DpiX : null,
+                monitor.DpiY > 0 ? monitor.DpiY : null,
+                bounds.width > 0 ? bounds.width : null,
+                bounds.height > 0 ? bounds.height : null,
+                rotation));
+        }
+        return list;
+    }
+
+    /// <summary>
     /// Internal display enumeration that includes effective DPI and monitor handle.
     /// Tests can inject <see cref="DisplayDetail"/> values via <see cref="SetDisplayDetailProvider"/>.
     /// </summary>
@@ -430,6 +506,17 @@ public static class SystemQuery
         int DpiY,
         IntPtr Handle,
         int? WindowsDisplayNumber);
+
+    internal sealed record DisplayTopologyMetadataInfo(
+        string Id,
+        string? StableIdentity,
+        DisplayIdentityResolutionStatus IdentityStatus,
+        Bounds Bounds,
+        int? DpiX,
+        int? DpiY,
+        int? PhysicalWidth,
+        int? PhysicalHeight,
+        uint? Rotation);
 
     /// <summary>
     /// Returns the union of all display bounds (virtual screen).
@@ -680,7 +767,8 @@ public static class SystemQuery
                         targetAvailable,
                         targetInUse,
                         SourceDeviceInfoAvailable: true,
-                        TargetDeviceInfoAvailable: false));
+                        TargetDeviceInfoAvailable: false,
+                        Rotation: path.targetInfo.rotation));
                     continue;
                 }
 
@@ -689,7 +777,8 @@ public static class SystemQuery
                     targetPath,
                     pathActive,
                     targetAvailable,
-                    targetInUse));
+                    targetInUse,
+                    Rotation: path.targetInfo.rotation));
             }
 
             mappings = resultMappings;
@@ -700,6 +789,35 @@ public static class SystemQuery
             mappings = Array.Empty<DisplayTargetMapping>();
             return false;
         }
+    }
+
+    private static bool TryResolveRotation(
+        string sourceName,
+        IReadOnlyList<DisplayTargetMapping> mappings,
+        out uint rotation)
+    {
+        rotation = 0;
+        if (string.IsNullOrWhiteSpace(sourceName))
+            return false;
+
+        var matching = mappings
+            .Where(mapping => string.Equals(
+                mapping.SourceName?.Trim(),
+                sourceName.Trim(),
+                StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (matching.Length == 0 || matching.Any(mapping => mapping.Rotation is null))
+            return false;
+
+        var distinct = matching
+            .Select(mapping => mapping.Rotation!.Value)
+            .Distinct()
+            .ToArray();
+        if (distinct.Length != 1)
+            return false;
+
+        rotation = distinct[0];
+        return true;
     }
 
     private static bool TryGetSourceName(DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo, out string sourceName)

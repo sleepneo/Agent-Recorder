@@ -1571,7 +1571,7 @@ public class RecordingBundleTests : IDisposable
         public int ExitCodeValue { get; set; }
         private Action<int, OutputMeta>? _onNaturalExit;
 
-        public void Start(CaptureConfig cfg) => cfg.CommandArgs = "fake args";
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => cfg.CommandArgs = "fake args";
         public OutputMeta Stop() => StopResult;
         public void OnNaturalExit(Action<int, OutputMeta> callback) => _onNaturalExit = callback;
         public int ExitCode => ExitCodeValue;
@@ -1773,7 +1773,7 @@ public class RecordingBundleTests : IDisposable
     private sealed class ThrowingCaptureBackend : ICaptureBackend
     {
         public int ExitCodeValue { get; set; }
-        public void Start(CaptureConfig cfg) => throw new InvalidOperationException("backend start failed");
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => throw new InvalidOperationException("backend start failed");
         public OutputMeta Stop() => new();
         public void OnNaturalExit(Action<int, OutputMeta> callback) { }
         public int ExitCode => ExitCodeValue;
@@ -1787,7 +1787,7 @@ public class RecordingBundleTests : IDisposable
         public OutputMeta StopResult { get; set; } = new();
         public Task EnteredStop => _enteredStop.Task;
         public void Release() => _release.TrySetResult();
-        public void Start(CaptureConfig cfg) => cfg.CommandArgs = "fake args";
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => cfg.CommandArgs = "fake args";
         public OutputMeta Stop() { _enteredStop.TrySetResult(); _release.Task.Wait(); return StopResult; }
         public void OnNaturalExit(Action<int, OutputMeta> callback) { }
         public int ExitCode => 0;

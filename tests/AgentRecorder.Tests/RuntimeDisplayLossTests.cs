@@ -500,7 +500,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         public int StopCalls => Volatile.Read(ref _stopCalls);
         public int ExitCode => 0;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(cfg.OutputPath)!);
             File.WriteAllBytes(cfg.OutputPath, Enumerable.Repeat((byte)0x7F, 4096).ToArray());

@@ -2,7 +2,12 @@ namespace AgentRecorder.Capture;
 
 public interface ICaptureBackend : IDisposable
 {
-    void Start(CaptureConfig cfg);
+    /// <summary>
+    /// Proof-bearing production start boundary. RecordingEngine consumes and
+    /// validates the proof before invoking this method. A backend is never
+    /// startable through a proof-less interface contract.
+    /// </summary>
+    void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof);
     OutputMeta Stop();
 
     /// <summary>

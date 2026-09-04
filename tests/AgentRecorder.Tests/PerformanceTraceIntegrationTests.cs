@@ -47,7 +47,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
         public CaptureConfig? LastConfig { get; private set; }
         private Action<int, OutputMeta>? _naturalExit;
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCalled = true;
             LastConfig = cfg;

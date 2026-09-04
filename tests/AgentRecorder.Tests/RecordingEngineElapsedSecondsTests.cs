@@ -425,7 +425,7 @@ public class RecordingEngineElapsedSecondsTests : IDisposable
     {
         private readonly string _message;
         public ThrowingBackend(string message) => _message = message;
-        public void Start(CaptureConfig cfg) => throw new Exception(_message);
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) => throw new Exception(_message);
         public OutputMeta Stop() => new();
         public void OnNaturalExit(Action<int, OutputMeta> callback) { }
         public int ExitCode => -1;

@@ -54,7 +54,7 @@ public class ConsentInvariantTests : IDisposable
         public bool StartCalled { get; private set; }
         public CaptureConfig? LastConfig { get; private set; }
 
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCalled = true;
             LastConfig = cfg;

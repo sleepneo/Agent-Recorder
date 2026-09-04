@@ -179,8 +179,11 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     }
 
     /// <inheritdoc />
-    public void StartCapture()
+    public void StartCapture(CaptureAuthorizationProof authorizationProof)
     {
+        if (authorizationProof == null)
+            throw new ArgumentNullException(nameof(authorizationProof));
+        authorizationProof.RequireConsumed();
         // Exactly-once authorization gate: duplicate countdown completion,
         // stop, natural exit, or shutdown races must never authorize twice.
         if (Interlocked.Exchange(ref _captureStartRequested, 1) != 0)
@@ -245,10 +248,13 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     }
 
     /// <inheritdoc />
-    public void Start(CaptureConfig cfg)
+    public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
     {
         if (cfg == null)
             throw new ArgumentNullException(nameof(cfg));
+        if (authorizationProof == null)
+            throw new ArgumentNullException(nameof(authorizationProof));
+        authorizationProof.RequireConsumed();
 
         // Keep direct backend callers compatible with the historical
         // Microphone=true field while the product path uses AudioSourceKind.

@@ -374,7 +374,7 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
     private sealed class CountingBackend : ICaptureBackend
     {
         public int StartCalls { get; private set; }
-        public void Start(CaptureConfig cfg)
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             StartCalls++;
             cfg.CommandArgs = "fake";

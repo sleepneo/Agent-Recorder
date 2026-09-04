@@ -104,8 +104,11 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
     public bool IsAudioReady => _audioWorker?.IsAudioReady ?? false;
 
-    public void Start(CaptureConfig cfg)
+    public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
     {
+        if (authorizationProof == null)
+            throw new ArgumentNullException(nameof(authorizationProof));
+        authorizationProof.RequireConsumed();
         // Normalize and validate the audio source BEFORE creating the temp
         // directory or computing any output side effects. An illegal audio
         // configuration must fail without creating directories or workers.
