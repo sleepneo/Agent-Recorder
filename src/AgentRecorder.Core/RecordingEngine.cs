@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
+using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Security;
@@ -79,6 +80,8 @@ public sealed class RecordingEngine : IDisposable
     private readonly IMicrophoneStatusProvider _microphoneStatusProvider;
     private readonly ISystemAudioEndpointProvider _systemAudioEndpointProvider;
     private readonly IDisplayTopologyProvider _displayTopologyProvider;
+    private readonly StandingLeaseStartSafetyInterlock? _standingStartSafetyInterlock;
+    private readonly Func<StandingLeaseCaptureExecutionTicket, DateTimeOffset, string?>? _standingStartSafetyValidator;
     private bool _usesDefaultBackendFactory = true;
     private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
         cfg => cfg.IsScreenshotSeries
@@ -185,6 +188,13 @@ public sealed class RecordingEngine : IDisposable
     internal Action<Recording, string>? BeforeStartFailureForTests { get; set; }
 
     /// <summary>
+    /// Deterministic standing-start race seam. It runs after the backend and
+    /// lifecycle session exist, immediately before the shared start/safety
+    /// interlock is entered. Production leaves it null.
+    /// </summary>
+    internal Action<Recording>? BeforeStandingBackendFinalGateForTests { get; set; }
+
+    /// <summary>
     /// Deterministic creation-wait race seams. The snapshot callback runs after
     /// the wait signal returns and immediately before the coherent snapshot is
     /// secured. The blocking callback runs while the engine signal lock is held,
@@ -208,11 +218,24 @@ public sealed class RecordingEngine : IDisposable
     internal TimeSpan FirstFrameTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// Test-only isolation seam for lifecycle-order tests that explicitly stop
+    /// a recording before its duration deadline. Production leaves this false.
+    /// </summary>
+    internal bool DisableDeadlineWatchdogForTests { get; set; }
+
+    /// <summary>
     /// Test seam for the per-recording display topology monitor. Production
     /// polls once per second; tests use a short interval without a sleep or a
     /// global provider.
     /// </summary>
     internal TimeSpan DisplayRuntimeMonitorInterval { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Deterministic standing execution environment seam. Production leaves
+    /// this null so the engine samples the current desktop, topology, output
+    /// filesystem and session binding immediately before backend start.
+    /// </summary>
+    internal Func<AuthorizedFixedRegionScope, StandingLeaseExecutionEnvironment>? StandingExecutionEnvironmentProviderForTests { get; set; }
 
     internal TimeSpan ScreenshotFrameTimeout { get; set; } = TimeSpan.FromSeconds(15);
     internal Func<CaptureConfig, IScreenshotFrameRunner> ScreenshotFrameRunnerFactoryForTests { get; set; } =
@@ -254,6 +277,27 @@ public sealed class RecordingEngine : IDisposable
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
         IDisplayTopologyProvider? displayTopologyProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null)
+        : this(
+            audit,
+            tracer,
+            bundleGenerator,
+            microphoneProvider,
+            microphoneStatusProvider,
+            displayTopologyProvider,
+            systemAudioEndpointProvider,
+            standingStartSafetyInterlock: null,
+            standingStartSafetyValidator: null)
+    {
+    }
+
+    internal RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer,
+        IRecordingBundleGenerator? bundleGenerator,
+        IMicrophoneDeviceProvider? microphoneProvider,
+        IMicrophoneStatusProvider? microphoneStatusProvider,
+        IDisplayTopologyProvider? displayTopologyProvider,
+        ISystemAudioEndpointProvider? systemAudioEndpointProvider,
+        StandingLeaseStartSafetyInterlock? standingStartSafetyInterlock = null,
+        Func<StandingLeaseCaptureExecutionTicket, DateTimeOffset, string?>? standingStartSafetyValidator = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -262,6 +306,8 @@ public sealed class RecordingEngine : IDisposable
         _microphoneStatusProvider = microphoneStatusProvider ?? NullMicrophoneStatusProvider.Instance;
         _systemAudioEndpointProvider = systemAudioEndpointProvider ?? new CoreAudioSystemAudioEndpointProvider();
         _displayTopologyProvider = displayTopologyProvider ?? SystemQueryDisplayTopologyProvider.Instance;
+        _standingStartSafetyInterlock = standingStartSafetyInterlock;
+        _standingStartSafetyValidator = standingStartSafetyValidator;
     }
 
     /// <summary>
@@ -282,6 +328,9 @@ public sealed class RecordingEngine : IDisposable
     public ISystemAudioEndpointProvider SystemAudioEndpointProvider => _systemAudioEndpointProvider;
 
     public void SetTray(ITrayContext tray) => _tray = tray;
+
+    internal bool HasRecording(string recordingId) =>
+        !string.IsNullOrWhiteSpace(recordingId) && _recs.ContainsKey(recordingId);
 
     /// <summary>
     /// Bumps _stateVersion and pulses all waiters on _lock.
@@ -1731,6 +1780,197 @@ public sealed class RecordingEngine : IDisposable
         StartCapture(rec, traceId, tray);
     }
 
+    /// <summary>
+    /// Trusted production entry for one standing fixed-region execution. The
+    /// caller must hold a ticket created by the durable standing start gate;
+    /// no HTTP DTO, path, region or confirmation value is accepted here.
+    /// RecordingEngine creates and owns the backend, registry entry, callbacks,
+    /// UI state and physical stop path.
+    /// </summary>
+    internal StandingLeaseCaptureExecutionResult StartStandingCapture(
+        StandingLeaseCaptureExecutionTicket ticket,
+        ITrayContext tray,
+        Func<ICaptureBackend, IStandingLeaseCaptureLifecycleSession?> lifecycleFactory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ticket);
+        ArgumentNullException.ThrowIfNull(tray);
+        ArgumentNullException.ThrowIfNull(lifecycleFactory);
+
+        if (cancellationToken.IsCancellationRequested)
+            return StandingLeaseCaptureExecutionResult.Cancelled();
+
+        var specification = ticket.Specification;
+        var scope = ticket.Scope;
+        if (!ticket.IsClaimed || !ticket.IsProofConsumed)
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_ticket_invalid");
+        }
+
+        if (specification.CountdownSeconds != 0 || scope.CountdownSeconds != 0)
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_countdown_must_be_zero");
+
+        var proof = ticket.GetConsumedProofForBackendStart() as StandingLeaseUseProof;
+        if (proof is null ||
+            !string.Equals(proof.RunId, specification.RunId, StringComparison.Ordinal) ||
+            !string.Equals(proof.RecordingId, specification.RunId, StringComparison.Ordinal) ||
+            !string.Equals(proof.LeaseId, specification.LeaseId, StringComparison.Ordinal) ||
+            !string.Equals(proof.LeaseUseId, specification.LeaseUseId, StringComparison.Ordinal) ||
+            !string.Equals(proof.ScopeDigest, specification.ScopeDigest, StringComparison.Ordinal) ||
+            !string.Equals(proof.CurrentUserSid, scope.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(proof.SessionBinding, scope.SessionBinding, StringComparison.Ordinal) ||
+            !string.Equals(proof.UserSessionBinding, proof.CurrentUserSid + "|" + proof.SessionBinding, StringComparison.Ordinal))
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_proof_binding_invalid");
+        }
+
+        DateTimeOffset nowUtc;
+        try
+        {
+            nowUtc = new DateTimeOffset(
+                DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+        }
+        catch
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_clock_unavailable");
+        }
+
+        if (nowUtc >= proof.ExpiresAtUtc || nowUtc < proof.IssuedAtUtc)
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_proof_expired");
+
+        StandingLeaseExecutionEnvironment environment;
+        try
+        {
+            environment = StandingExecutionEnvironmentProviderForTests?.Invoke(scope)
+                ?? StandingLeaseExecutionEnvironment.CaptureCurrent(scope);
+        }
+        catch
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected("standing_engine_environment_unavailable");
+        }
+
+        if (!StandingLeaseExecutionEnvironmentValidator.TryValidate(
+                environment,
+                scope,
+                out var environmentFailure) ||
+            environment.NowUtc >= proof.ExpiresAtUtc ||
+            environment.NowUtc < proof.IssuedAtUtc)
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected(
+                string.IsNullOrWhiteSpace(environmentFailure)
+                    ? "standing_engine_environment_invalid"
+                    : environmentFailure);
+        }
+
+        if (!StandingLeaseCaptureExecutionBridge.TryBuildCaptureConfigForEngine(
+                specification,
+                out var config,
+                out var configFailure))
+        {
+            return StandingLeaseCaptureExecutionResult.Rejected(configFailure);
+        }
+
+        var plan = new CapturePlan(
+            StandingLeaseCaptureSpecification.BackendCode,
+            StandingLeaseCaptureSpecification.BackendCode,
+            new CaptureBackendSelectionEvidence(
+                StandingLeaseCaptureSpecification.BackendCode,
+                StandingLeaseCaptureSpecification.BackendCode,
+                "standing_lease_fixed_region",
+                "not_run",
+                null,
+                false),
+            "region_rectangle",
+            "region",
+            null,
+            nint.Zero,
+            new CapturePlanBounds(
+                specification.VirtualScreenRegion.X,
+                specification.VirtualScreenRegion.Y,
+                specification.VirtualScreenRegion.Width,
+                specification.VirtualScreenRegion.Height),
+            specification.StableDisplayFingerprint,
+            new CapturePlanBounds(
+                specification.DisplayBounds.X,
+                specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width,
+                specification.DisplayBounds.Height),
+            targetDisplayId: null,
+            targetDisplayIdentityStatus: DisplayIdentityResolutionStatus.Resolved,
+            audioSourceKind: AudioCaptureSourceKind.None,
+            coordinateSpace: StandingLeaseCaptureSpecification.CoordinateSpaceCode);
+
+        var rec = new Recording(specification.RunId)
+        {
+            State = RecState.created,
+            Agent = "standing_plan",
+            SourceType = "region",
+            SourceTitle = "计划固定区域 / Scheduled fixed region",
+            OutputPath = specification.OutputFilePath,
+            Config = config,
+            DurationSeconds = config.DurationSeconds,
+            CountdownSeconds = specification.CountdownSeconds,
+            ApprovedCapturePlan = plan,
+            AuthorizationProof = proof,
+            IsStandingLeaseExecution = true,
+            StandingLeaseUseId = specification.LeaseUseId,
+            StandingLeaseScope = scope,
+            StandingLeaseSpecification = specification,
+            StandingLeaseExecutionTicket = ticket,
+            StandingLifecycleFactory = backend => lifecycleFactory(backend),
+            BackendType = StandingLeaseCaptureSpecification.BackendCode,
+        };
+
+        lock (_lock)
+        {
+            if (_recs.Values.Any(item => item.State is RecState.preparing or RecState.countdown or
+                RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing))
+            {
+                return StandingLeaseCaptureExecutionResult.Rejected("recording_conflict");
+            }
+
+            if (!_recs.TryAdd(rec.Id, rec))
+                return StandingLeaseCaptureExecutionResult.Rejected("standing_recording_identity_conflict");
+        }
+
+        var traceId = "standing_" + Guid.NewGuid().ToString("N")[..16];
+        try
+        {
+            _tracer.IntentAccepted(traceId, "standing-natural-wake");
+            _tracer.CorrelationSet(traceId, rec.Id, null, rec.SourceType);
+            StartCapture(rec, traceId, tray);
+
+            if (rec.Backend is null || rec.StandingLifecycleSession is null ||
+                rec.IsFinalized || rec.State is RecState.failed or RecState.cancelled or RecState.rejected)
+            {
+                // StartCapture owns the in-memory failure publication, but a
+                // standing lifecycle session remains the durable recovery and
+                // backend-disposal owner until it is explicitly disposed. The
+                // post-start failure path can be reached after the backend has
+                // already crossed Start(), so do not return with an active
+                // Recording/Consumed/RunCreated chain or an undisposed backend.
+                if (rec.IsStandingLeaseExecution && rec.StandingLifecycleSession is IDisposable failedStartSession)
+                {
+                    try { failedStartSession.Dispose(); } catch { }
+                }
+
+                return StandingLeaseCaptureExecutionResult.Failed(
+                    rec.Error ?? "standing_engine_backend_not_started");
+            }
+
+            return StandingLeaseCaptureExecutionResult.Started(
+                rec.Backend,
+                rec.StandingLifecycleSession);
+        }
+        catch (Exception)
+        {
+            if (_recs.TryGetValue(rec.Id, out var registered) && ReferenceEquals(registered, rec))
+                _recs.TryRemove(rec.Id, out _);
+            try { rec.StandingLifecycleSession?.Dispose(); } catch { }
+            return StandingLeaseCaptureExecutionResult.Failed("standing_engine_start_failed");
+        }
+    }
+
     private static CapturePlan BuildSyntheticTestCapturePlan(Recording rec)
     {
         var cfg = rec.Config;
@@ -1777,6 +2017,32 @@ public sealed class RecordingEngine : IDisposable
         lock (rec)
         {
             var proof = rec.AuthorizationProof;
+            if (rec.IsStandingLeaseExecution)
+            {
+                DateTimeOffset nowUtc;
+                try
+                {
+                    nowUtc = new DateTimeOffset(DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                }
+                catch
+                {
+                    throw new CaptureAuthorizationStartException("standing_engine_clock_unavailable");
+                }
+
+                if (!CaptureAuthorizationGate.TryValidateStanding(
+                        proof,
+                        rec,
+                        rec.ApprovedCapturePlan,
+                        rec.StandingLeaseScope!,
+                        nowUtc,
+                        out var standingFailure))
+                {
+                    throw new CaptureAuthorizationStartException(standingFailure);
+                }
+
+                return proof!;
+            }
+
             Confirmation? confirmation = null;
             if (!string.IsNullOrWhiteSpace(rec.ConfirmationId))
                 _confs.TryGetValue(rec.ConfirmationId, out confirmation);
@@ -1796,12 +2062,70 @@ public sealed class RecordingEngine : IDisposable
         }
     }
 
+    private static StandingLeaseCaptureExecutionTicket BuildStandingTicketForBackendBoundary(Recording rec) =>
+        rec.StandingLeaseExecutionTicket ??
+        throw new CaptureAuthorizationStartException("standing_engine_ticket_missing");
+
+    private void ValidateStandingEnvironmentAtBackendBoundary(Recording rec)
+    {
+        var scope = rec.StandingLeaseScope;
+        var specification = rec.StandingLeaseSpecification;
+        if (scope is null || specification is null ||
+            !specification.MatchesScope(scope) ||
+            specification.MaximumDuration != scope.ReservedDuration ||
+            specification.CountdownSeconds != 0 ||
+            scope.CountdownSeconds != 0)
+            throw new CaptureAuthorizationStartException("standing_engine_scope_missing");
+
+        StandingLeaseExecutionEnvironment environment;
+        try
+        {
+            environment = StandingExecutionEnvironmentProviderForTests?.Invoke(scope)
+                ?? StandingLeaseExecutionEnvironment.CaptureCurrent(scope);
+        }
+        catch
+        {
+            throw new CaptureAuthorizationStartException("standing_engine_environment_unavailable");
+        }
+
+        var environmentFailure = "standing_engine_environment_invalid";
+        if (environment.NowUtc.Offset != TimeSpan.Zero ||
+            !StandingLeaseExecutionEnvironmentValidator.TryValidate(
+                environment,
+                scope,
+                out environmentFailure))
+        {
+            throw new CaptureAuthorizationStartException(
+                string.IsNullOrWhiteSpace(environmentFailure)
+                    ? "standing_engine_environment_invalid"
+                    : environmentFailure);
+        }
+    }
+
     private void FailCaptureAuthorizationStart(
         Recording rec,
         string? traceId,
         ITrayContext tray,
         CaptureAuthorizationStartException failure)
     {
+        if (rec.IsStandingLeaseExecution &&
+            rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingDriver)
+        {
+            try
+            {
+                if (rec.BackendStartAttempted)
+                    _ = standingDriver.StopForEngine("standing_lifecycle_start_failure");
+                else
+                    _ = standingDriver.FailBeforeStart("standing_lifecycle_start_failure");
+            }
+            catch
+            {
+                // The persistence coordinator performs restart recovery for
+                // a failed production handoff; Engine still fails closed and
+                // never exposes a recording state from this path.
+            }
+        }
+
         var ownership = TryClaimStartFailure(
             rec,
             error: "Recording authorization is not valid.",
@@ -1846,6 +2170,24 @@ public sealed class RecordingEngine : IDisposable
             return;
         }
 
+        // This pre-factory check closes the cheap failure path before any
+        // backend object is constructed.  A second identical check is made
+        // immediately before Backend.Start() below because the factory itself
+        // can consume time.
+        if (rec.IsStandingLeaseExecution)
+        {
+            try
+            {
+                ValidateStandingEnvironmentAtBackendBoundary(rec);
+                _ = RequireCaptureAuthorization(rec);
+            }
+            catch (CaptureAuthorizationStartException ex)
+            {
+                FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+                return;
+            }
+        }
+
         // Production creates the backend only from the already-approved plan.
         // Legacy test seams may still supply a concrete selection or factory.
         CaptureBackendSelection? selectionEvidence = null;
@@ -1867,6 +2209,37 @@ public sealed class RecordingEngine : IDisposable
         }
         rec.Backend = selection.Backend;
         rec.BackendType = selection.BackendType;
+
+        // A standing execution is already authorized by the claimed durable
+        // ticket. The App host supplies a lifecycle session whose callbacks
+        // are intentionally not attached to the backend; RecordingEngine is
+        // the single callback/UI/stop owner for this backend.
+        if (rec.IsStandingLeaseExecution)
+        {
+            try
+            {
+                var factory = rec.StandingLifecycleFactory;
+                var lifecycle = factory?.Invoke(rec.Backend);
+                var lifecycleFailure = "";
+                var lifecycleAttached = lifecycle is not null && lifecycle.TryAttach(rec.Backend, out lifecycleFailure);
+                if (!lifecycleAttached)
+                {
+                    try { lifecycle?.Dispose(); } catch { }
+                    try { rec.Backend.Dispose(); } catch { }
+                    throw new InvalidOperationException(
+                        string.IsNullOrWhiteSpace(lifecycleFailure)
+                            ? "standing_lifecycle_session_unavailable"
+                            : lifecycleFailure);
+                }
+
+                rec.StandingLifecycleSession = lifecycle;
+            }
+            catch
+            {
+                rec.StandingLifecycleSession = null;
+                throw;
+            }
+        }
         var evidence = selectionEvidence?.Evidence ?? rec.ApprovedCapturePlan?.Evidence ?? new CaptureBackendSelectionEvidence(
             "default",
             rec.BackendType,
@@ -1928,6 +2301,23 @@ public sealed class RecordingEngine : IDisposable
         // which will bump state preparing -> completed/failed.
         rec.Backend.OnNaturalExit((exitCode, meta) =>
         {
+            if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver driver)
+            {
+                var lifecycle = driver.ObserveNaturalExit(exitCode, meta);
+                if (!lifecycle.Succeeded)
+                {
+                    FailStandingLifecycleClosed(rec, driver, lifecycle.Reason, traceId, tray, meta, exitCode);
+                    return;
+                }
+
+                // A synchronous backend may raise natural-exit from inside
+                // Stop(). The durable session deliberately defers that
+                // observation while the stop owner is still in flight; do not
+                // finalize the in-memory Recording from this callback or it
+                // can race the durable Stop transition.
+                if (lifecycle.Reason == "natural_exit_during_stop")
+                    return;
+            }
             FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: null, tray);
         });
 
@@ -1935,14 +2325,57 @@ public sealed class RecordingEngine : IDisposable
         // This catches synchronous observations that happen inside Start().
         if (rec.Backend is IFirstFrameObservableCaptureBackend observable)
         {
-            observable.FirstFrameObserved += obs => OnFirstFrameObserved(rec, obs, traceId, tray);
+            observable.FirstFrameObserved += obs =>
+            {
+                if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver driver)
+                {
+                    var lifecycle = driver.ObserveFirstFrame(obs);
+                    if (!lifecycle.Succeeded)
+                    {
+                        FailStandingLifecycleClosed(
+                            rec,
+                            driver,
+                            lifecycle.Reason,
+                            traceId,
+                            tray,
+                            new OutputMeta { StopReason = "standing_lifecycle_persistence_failure" },
+                            -1);
+                        return;
+                    }
+                }
+                OnFirstFrameObserved(rec, obs, traceId, tray);
+            };
         }
 
         // Subscribe to capture-ended events so the UI can switch to "saving"
         // before muxing/probing/bundle generation complete.
         if (rec.Backend is ICaptureEndedObservableBackend endedObservable)
         {
-            endedObservable.CaptureEnded += obs => OnCaptureEnded(rec, obs, traceId, tray);
+            endedObservable.CaptureEnded += obs =>
+            {
+                if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver driver)
+                {
+                    var lifecycle = driver.ObserveCaptureEnded(obs);
+                    if (!lifecycle.Succeeded)
+                    {
+                        FailStandingLifecycleClosed(
+                            rec,
+                            driver,
+                            lifecycle.Reason,
+                            traceId,
+                            tray,
+                            new OutputMeta { StopReason = "standing_lifecycle_persistence_failure" },
+                            obs.ExitCode);
+                        return;
+                    }
+
+                    // A stop-owned callback is only a backend observation; the
+                    // Stop owner will perform the one finalization transition.
+                    if (lifecycle.Reason == "capture_ended_during_stop")
+                        return;
+                }
+                OnCaptureEnded(rec, obs, traceId, tray);
+            };
         }
 
         // Split A/V backends with a microphone first warm up the audio worker.
@@ -1960,7 +2393,8 @@ public sealed class RecordingEngine : IDisposable
         // The authorization completion is pure audit; failures surface through
         // the normal first-frame timeout / natural-exit paths.
         bool useDeferredCountdown = !rec.Config.AudioRequested && rec.Backend is IDeferredCaptureStartBackend;
-        bool useOrdinaryFfmpegCountdown = !rec.Config.AudioRequested &&
+        bool useOrdinaryFfmpegCountdown = !rec.IsStandingLeaseExecution &&
+            !rec.Config.AudioRequested &&
             !useDeferredCountdown &&
             CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType);
 
@@ -1969,7 +2403,8 @@ public sealed class RecordingEngine : IDisposable
         {
             try
             {
-                authorizationProof = RequireCaptureAuthorization(rec);
+                if (!rec.IsStandingLeaseExecution)
+                    authorizationProof = RequireCaptureAuthorization(rec);
             }
             catch (CaptureAuthorizationStartException ex)
             {
@@ -2014,16 +2449,52 @@ public sealed class RecordingEngine : IDisposable
                 rec.Config.DeferCaptureStart = true;
             }
 
-            lock (rec)
+            void StartBackendAtFinalBoundary()
             {
-                if (rec.IsFinalized)
-                    return;
+                lock (rec)
+                {
+                    if (rec.IsFinalized)
+                        return;
 
-                rec.BackendStartAtUtc = DateTime.UtcNow;
-                _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
-                rec.Backend.Start(rec.Config, authorizationProof!);
-                _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                    // Standing MVP has no ordinary countdown task. Revalidate
+                    // the proof, exact duration window, immutable scope/spec
+                    // binding, current desktop topology and output environment
+                    // in this same lock immediately before the physical Start
+                    // call. The durable safety snapshot is read while the
+                    // shared interlock is held; there is no await between it,
+                    // validation, and Backend.Start().
+                    if (rec.IsStandingLeaseExecution)
+                    {
+                        var standingTicket = BuildStandingTicketForBackendBoundary(rec);
+                        var durableFailure = _standingStartSafetyInterlock is null
+                            ? null
+                            : _standingStartSafetyValidator is null
+                                ? "standing_safety_service_unavailable"
+                                : _standingStartSafetyValidator(
+                                    standingTicket,
+                                    new DateTimeOffset(DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc)));
+                        if (!string.IsNullOrWhiteSpace(durableFailure))
+                            throw new CaptureAuthorizationStartException(durableFailure);
+
+                        ValidateStandingEnvironmentAtBackendBoundary(rec);
+                        authorizationProof = RequireCaptureAuthorization(rec);
+                    }
+
+                    rec.BackendStartAtUtc = DateTime.UtcNow;
+                    rec.BackendStartAttempted = true;
+                    _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                    rec.Backend.Start(rec.Config, authorizationProof!);
+                    _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                }
             }
+
+            if (rec.IsStandingLeaseExecution)
+                BeforeStandingBackendFinalGateForTests?.Invoke(rec);
+
+            if (rec.IsStandingLeaseExecution && _standingStartSafetyInterlock is not null)
+                _standingStartSafetyInterlock.Execute("standing_backend_start", StartBackendAtFinalBoundary);
+            else
+                StartBackendAtFinalBoundary();
 
             _audit.Log("recording.started", new
             {
@@ -2086,8 +2557,27 @@ public sealed class RecordingEngine : IDisposable
                 TransitionToRecording(rec, traceId, tray, firstFrameEvidence: null);
             }
         }
+        catch (CaptureAuthorizationStartException ex)
+        {
+            FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+        }
         catch (Exception ex)
         {
+            if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver driver)
+            {
+                try
+                {
+                    if (rec.BackendStartAttempted)
+                        _ = driver.StopForEngine("standing_lifecycle_start_failure");
+                    else
+                        _ = driver.FailBeforeStart("standing_lifecycle_start_failure");
+                }
+                catch { }
+            }
+            else if (rec.StandingLifecycleSession is not null)
+            {
+                try { rec.StandingLifecycleSession.StartFailed(); } catch { }
+            }
             BeforeStartFailureForTests?.Invoke(rec, "preparation.backend.start");
             var ownership = TryClaimStartFailure(
                 rec,
@@ -2817,7 +3307,7 @@ public sealed class RecordingEngine : IDisposable
     private void StartDeadlineWatchdog(Recording rec, string? traceId, ITrayContext tray)
     {
         var duration = rec.DurationSeconds;
-        if (duration == null || duration <= 0)
+        if (DisableDeadlineWatchdogForTests || duration == null || duration <= 0)
             return;
 
         _ = Task.Run(async () =>
@@ -3556,6 +4046,35 @@ public sealed class RecordingEngine : IDisposable
         TryRecordCaptureEnded(rec, obs.EndedAtUtc, obs.ExitCode, obs.Reason, traceId, tray);
     }
 
+    private void FailStandingLifecycleClosed(
+        Recording rec,
+        IStandingLeaseCaptureLifecycleDriver driver,
+        string reason,
+        string? traceId,
+        ITrayContext tray,
+        OutputMeta fallbackMeta,
+        int fallbackExitCode)
+    {
+        const string stopReason = "standing_lifecycle_persistence_failure";
+        OutputMeta meta = fallbackMeta;
+        int exitCode = fallbackExitCode;
+        try
+        {
+            var stop = driver.StopForEngine(stopReason);
+            meta = stop.Meta ?? meta;
+            exitCode = stop.ExitCode;
+        }
+        catch
+        {
+            // The durable session has already failed closed or is being
+            // reconciled.  Engine still publishes a failed terminal snapshot
+            // and never interprets the output as a successful standing run.
+        }
+
+        meta.StopReason = stopReason;
+        FinalizeRecording(rec, meta, exitCode, natural: false, stopReason, tray);
+    }
+
     private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
         CancelCountdown(rec.Id);
@@ -3636,6 +4155,10 @@ public sealed class RecordingEngine : IDisposable
             bool wgcContinuousOutputValidationFailed =
                 IsWgcContinuousBackend(rec.BackendType) &&
                 IsWgcContinuousOutputValidationFailure(meta.StopReason);
+            bool standingInterrupted = rec.IsStandingLeaseExecution &&
+                stopReason is "standing_lease_safety_control" or "session_interrupted" or
+                    "sleep_interrupted" or "application_exit" or "process_exit" or
+                    "standing_lifecycle_persistence_failure" or "standing_lifecycle_start_failure";
 
             // A stable helper-declared audio failure can never be a successful
             // recording, even when the probed temp files look healthy and the
@@ -3646,7 +4169,8 @@ public sealed class RecordingEngine : IDisposable
 
             bool success = fileOk && durationOk && exitOk && rangeOk && audioOk &&
                            trustedLifecycleAbortCode == null &&
-                           !wgcContinuousOutputValidationFailed;
+                           !wgcContinuousOutputValidationFailed &&
+                           !standingInterrupted;
             if (!success)
             {
                 if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
@@ -3735,17 +4259,19 @@ public sealed class RecordingEngine : IDisposable
                             ? meta.StopReason
                             : "unexpected_exit");
                 }
-                var stableErrorCode = ResolveTerminalErrorCode(
-                    rec.BackendType,
-                    rec.AudioSourceKind,
-                    meta,
-                    exitCode,
-                    fileOk,
-                    durationOk,
-                    rangeOk,
-                    exitOk,
-                    natural,
-                    trustedLifecycleAbortCode);
+                var stableErrorCode = standingInterrupted
+                    ? rec.StopReason ?? "standing_execution_interrupted"
+                    : ResolveTerminalErrorCode(
+                        rec.BackendType,
+                        rec.AudioSourceKind,
+                        meta,
+                        exitCode,
+                        fileOk,
+                        durationOk,
+                        rangeOk,
+                        exitOk,
+                        natural,
+                        trustedLifecycleAbortCode);
                 rec.Error = stableErrorCode;
                 rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
                 rec.State = RecState.failed;
@@ -3795,6 +4321,16 @@ public sealed class RecordingEngine : IDisposable
             }
 
             rec.PublishFinalized();
+        }
+
+        // The durable standing lifecycle session is the single terminal
+        // owner.  Durable callbacks normally dispose themselves, but an
+        // Engine-owned failure path can arrive after recovery has already
+        // claimed the terminal state.  Re-entering Dispose is intentionally
+        // idempotent and closes that gap without introducing a second Stop.
+        if (rec.IsStandingLeaseExecution && rec.StandingLifecycleSession is IDisposable standingLifecycleSession)
+        {
+            try { standingLifecycleSession.Dispose(); } catch { }
         }
 
         _tracer.FinalizationCompleted(GetTraceIdForRecording(rec.Id), rec.Id, finalizationSuccess);
@@ -4064,6 +4600,7 @@ public sealed class RecordingEngine : IDisposable
             return StopScreenshotSeries(rec, reason);
 
         bool enteredStopping = false;
+        bool standingCancelledBeforeFirstFrame = false;
 
         lock (rec)
         {
@@ -4088,12 +4625,28 @@ public sealed class RecordingEngine : IDisposable
             // for a recording that never really began.
             if (rec.State is RecState.preparing or RecState.countdown)
             {
-                rec.State = RecState.cancelled;
+                if (rec.IsStandingLeaseExecution)
+                {
+                    // Durable standing termination owns this branch. Keep the
+                    // in-memory run non-terminal until StopForEngine has
+                    // committed the safe durable result.
+                    rec.State = RecState.stopping;
+                    standingCancelledBeforeFirstFrame = true;
+                    enteredStopping = true;
+                }
+                else
+                {
+                    rec.State = RecState.cancelled;
+                }
                 rec.StopReason = NormalizeStopReason(reason);
-                rec.CompletedAtUtc = DateTime.UtcNow;
-                MarkBundleNotApplicable(rec);
+                if (!standingCancelledBeforeFirstFrame)
+                {
+                    rec.CompletedAtUtc = DateTime.UtcNow;
+                    MarkBundleNotApplicable(rec);
+                }
                 BumpStateVersion();
-                rec.PublishFinalized();
+                if (!standingCancelledBeforeFirstFrame)
+                    rec.PublishFinalized();
             }
             else
             {
@@ -4109,13 +4662,83 @@ public sealed class RecordingEngine : IDisposable
 
         CancelCountdown(rec.Id);
 
+        if (standingCancelledBeforeFirstFrame)
+        {
+            StandingLeaseCaptureStopResult standingStop;
+            try
+            {
+                standingStop = rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingDriver
+                    ? rec.BackendStartAttempted
+                        ? standingDriver.StopForEngine(rec.StopReason)
+                        : new StandingLeaseCaptureStopResult(
+                            standingDriver.FailBeforeStart(rec.StopReason),
+                            null,
+                            -1)
+                    : new StandingLeaseCaptureStopResult(
+                        StandingLeaseLifecycleActionResult.Rejected("standing_lifecycle_session_missing"),
+                        null,
+                        -1);
+            }
+            catch
+            {
+                standingStop = new StandingLeaseCaptureStopResult(
+                    StandingLeaseLifecycleActionResult.Rejected("standing_lifecycle_persistence_failure"),
+                    null,
+                    -1);
+            }
+            if (!standingStop.Lifecycle.Succeeded)
+            {
+                rec.StopReason = "standing_lifecycle_persistence_failure";
+                var failedMeta = standingStop.Meta ?? new OutputMeta
+                {
+                    StopReason = rec.StopReason,
+                };
+                failedMeta.StopReason = rec.StopReason;
+                FinalizeRecording(
+                    rec,
+                    failedMeta,
+                    standingStop.ExitCode,
+                    natural: false,
+                    stopReason: rec.StopReason,
+                    _tray!);
+                return BuildStopResponse(rec, failedMeta);
+            }
+
+            lock (rec)
+            {
+                if (!rec.IsFinalized)
+                {
+                    rec.State = RecState.cancelled;
+                    rec.CompletedAtUtc = DateTime.UtcNow;
+                    MarkBundleNotApplicable(rec);
+                    rec.PublishFinalized();
+                    BumpStateVersion();
+                }
+            }
+            _audit.Log("recording.cancelled", new { recording_id = rec.Id, reason = rec.StopReason });
+            _tracer.RecordingTerminal(
+                GetTraceIdForRecording(rec.Id),
+                rec.Id,
+                status: "cancelled",
+                stopReason: rec.StopReason);
+            _tray!.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+            return BuildStopResponse(rec, standingStop.Meta);
+        }
+
         if (rec.State == RecState.cancelled)
         {
             _audit.Log("recording.cancelled", new { recording_id = rec.Id, reason = rec.StopReason });
             // Cancel the backend first so any synchronous first-frame observation
             // emitted during teardown can still be traced before the terminal tombstone
             // is recorded.
-            try { rec.Backend?.Cancel(); } catch { }
+            try
+            {
+                if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingDriver)
+                    _ = standingDriver.StopForEngine(rec.StopReason);
+                else
+                    rec.Backend?.Cancel();
+            }
+            catch { }
             _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
             _tray!.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
             return BuildStopResponse(rec);
@@ -4123,8 +4746,21 @@ public sealed class RecordingEngine : IDisposable
 
         _audit.Log("recording.stopping", new { recording_id = rec.Id, reason = rec.StopReason });
 
-        var meta = rec.Backend?.Stop() ?? new OutputMeta();
-        int exitCode = rec.Backend?.ExitCode ?? -1;
+        OutputMeta meta;
+        int exitCode;
+            if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingLifecycleDriver)
+            {
+            var stopResult = standingLifecycleDriver.StopForEngine(rec.StopReason);
+            meta = stopResult.Meta ?? new OutputMeta();
+            exitCode = stopResult.ExitCode;
+            if (!stopResult.Lifecycle.Succeeded)
+                rec.StopReason = "standing_lifecycle_persistence_failure";
+        }
+        else
+        {
+            meta = rec.Backend?.Stop() ?? new OutputMeta();
+            exitCode = rec.Backend?.ExitCode ?? -1;
+        }
 
         FinalizeRecording(rec, meta, exitCode, natural: false, stopReason: rec.StopReason, _tray!);
         return BuildStopResponse(rec, meta);
@@ -4784,8 +5420,35 @@ public sealed class RecordingEngine : IDisposable
 
     public void StopAllSync(string reason)
     {
-        foreach (var r in _recs.Values.Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording))
-            try { Stop(r.Id, reason); } catch { }
+        Recording[] activeRecordings;
+        lock (_lock)
+        {
+            activeRecordings = _recs.Values
+                .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording)
+                .ToArray();
+        }
+
+        foreach (var recording in activeRecordings)
+        {
+            try
+            {
+                Stop(recording.Id, reason);
+            }
+            catch
+            {
+                // Continue stopping the remaining recordings. The finally
+                // block below still closes a standing lifecycle owner even
+                // when the Engine stop path throws after physical teardown.
+            }
+            finally
+            {
+                if (recording.IsStandingLeaseExecution &&
+                    recording.StandingLifecycleSession is IDisposable lifecycleSession)
+                {
+                    try { lifecycleSession.Dispose(); } catch { }
+                }
+            }
+        }
     }
 
     public void Dispose()

@@ -85,6 +85,31 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     internal bool EnableAutomaticHfpPairDiscovery { get; set; } = true;
     internal bool SkipMicrophoneStatusMonitor { get; set; }
 
+    // Test diagnostics only. These read-only snapshots let failure-path tests
+    // report the helper process and protocol evidence without changing the
+    // production worker contract.
+    internal int? HelperProcessIdForTests
+    {
+        get
+        {
+            try { return _proc?.Id; }
+            catch { return null; }
+        }
+    }
+
+    internal IReadOnlyList<string> ProtocolEventsForTests
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _events
+                    .Select(evt => $"{evt.Result}:stage={evt.Stage ?? ""};recording={evt.RecordingId ?? ""};error={evt.ErrorCode ?? ""};reason={evt.Reason ?? ""}")
+                    .ToArray();
+            }
+        }
+    }
+
     public event Action? AudioReady;
     public event Action<int, string>? NaturalExit;
 

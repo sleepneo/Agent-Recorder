@@ -81,7 +81,7 @@ public sealed class RecordingTerminalPublicationTests
         var source = File.ReadAllText(sourcePath);
 
         Assert.DoesNotContain("rec.IsFinalized = true", source, StringComparison.Ordinal);
-        Assert.Equal(6, source.Split("PublishFinalized()", StringSplitOptions.None).Length - 1);
+        Assert.Equal(7, source.Split("PublishFinalized()", StringSplitOptions.None).Length - 1);
     }
 
     private static string FindRepositoryFile(params string[] parts)

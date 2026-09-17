@@ -1021,6 +1021,68 @@ POST /recordings/quick?wait_for=recording&wait_ms=25000
 }
 ```
 
+## 5.1 一次性有限无人值守计划
+
+该能力默认关闭，只适用于一次固定区域、无音频、自然唤醒且需要交互桌面的录制。AI agent 只能提交 setup 并查询状态，不能通过 HTTP 选择区域、批准 Lease 或扩大授权范围。使用前先读取：
+
+```text
+GET /capabilities -> unattended_lease
+```
+
+只有 `supported=true`、`current_enabled=true`、`execution_supported=true` 时才应发起请求；否则向用户说明需要在本地托盘安全控制中启用或当前宿主不支持执行。
+
+创建或恢复幂等 setup：
+
+```http
+POST /plans
+X-Agent-Recorder-Key: <api-key>
+Idempotency-Key: <本次规范请求的稳定键>
+Content-Type: application/json
+```
+
+```json
+{
+  "recording_spec": {
+    "source": { "type": "fixed_region" },
+    "audio": { "mode": "none" },
+    "duration_seconds": 30,
+    "countdown_seconds": 0,
+    "backend": "ffmpeg-region",
+    "output": {
+      "directory": "D:\\Videos",
+      "filename": "scheduled-recording.mp4"
+    }
+  },
+  "schedule": {
+    "kind": "once",
+    "start_at": "2026-09-17T10:00:00Z",
+    "latest_start_at": "2026-09-17T10:02:00Z",
+    "planned_end_at": "2026-09-17T10:02:30Z"
+  },
+  "requested_authorization": {
+    "mode": "standing_lease",
+    "expires_at": "2026-09-17T10:03:00Z",
+    "max_runs": 1,
+    "max_duration_seconds": 30
+  }
+}
+```
+
+约束：`duration_seconds` 为 `1..600`；Lease 最长 1 小时；最晚启动宽限期最长 5 分钟；完整录制必须能在 `planned_end_at` 前结束；`expires_at` 必须晚于计划结束；输出目录必须是绝对路径，文件名不得含路径分隔符。
+
+成功返回 HTTP `202`，包含 `setup_intent_id`、`status_url`、`status_version_cursor`、`requires_local_action` 和 `next_action`。同一个 `Idempotency-Key` 配合同一规范请求返回原 setup；绑定不同请求时返回 `409 IDEMPOTENCY_KEY_REUSED`。
+
+查询或长轮询：
+
+```http
+GET /plan-setups/{setup_intent_id}
+GET /plan-setups/{setup_intent_id}?since_status_version=<opaque-cursor>&wait_ms=25000
+```
+
+cursor 必须原样回传。`wait_ms` 最大 25000。响应可能包含 `run_id`、`recording_status_url`、`started_at` 和 `completed_at`；出现 `recording_status_url` 后，再按普通录制状态接口查询最终媒体和输出路径。不要把 `scheduled` 当作已经开始，只有返回的录制状态达到可信 `recording` 才能向用户报告已开始。
+
+本地 UI 会要求用户重新选区并批准有界 Lease。到点时应用再次验证显示器身份、物理区域、用户会话、输出文件、执行窗口、Lease、安全开关和一次性 proof。撤销、Stop All、锁屏/会话断开、睡眠、目标或输出变化、文件已存在及错过窗口都 fail closed，不会自动换目标、换路径、重试或回退成普通录制。
+
 ## 6. 创建录制（原始 API）
 
 ```http

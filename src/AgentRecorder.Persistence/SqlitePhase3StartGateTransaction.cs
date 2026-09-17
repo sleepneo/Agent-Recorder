@@ -110,6 +110,11 @@ public sealed class SqlitePhase3StartGateTransaction : SqliteRepositoryBase, IPh
                 return existingResult;
             }
 
+            SqliteStandingLeaseSafetyControlTransaction.EnsureExecutionAllowed(
+                connection,
+                transaction,
+                lease);
+
             ValidateScopeBinding(input, scope);
             ValidateStartGatePreconditions(input, plan, occurrence, lease);
 

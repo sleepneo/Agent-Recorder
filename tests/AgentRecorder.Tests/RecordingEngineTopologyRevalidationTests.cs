@@ -16,6 +16,7 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-AgentRecorderEnvVar")]
 public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
 {
+    private readonly string _task199bRoot;
     private readonly RecordingPreflightChecker.TryGetFreeSpace _oldFreeSpace;
     private readonly RecordingPreflightChecker.TryGetEncoderPaths _oldEncoder;
     private readonly string? _oldTestMode;
@@ -23,6 +24,9 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
 
     public RecordingEngineTopologyRevalidationTests()
     {
+        _task199bRoot = Path.Combine(Path.GetTempPath(), "agent-recorder-task-199b", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_task199bRoot);
+
         _oldFreeSpace = RecordingPreflightChecker.FreeSpaceProvider;
         _oldEncoder = RecordingPreflightChecker.EncoderProvider;
         _oldTestMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
@@ -51,6 +55,9 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
         RecordingPreflightChecker.EncoderProvider = _oldEncoder;
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", _oldTestMode);
         Environment.SetEnvironmentVariable(CaptureBackendSelector.RegionBackendEnvVar, _oldRegionBackend);
+        TestDirectoryCleanup.DeleteOwnedDirectoryAndEmptyParent(
+            _task199bRoot,
+            Directory.GetParent(_task199bRoot)!.FullName);
     }
 
     [Fact]
@@ -280,7 +287,7 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
         var tray = new TopologyTray();
         var engine = NewEngine(audit, topology, backend);
 
-        var outputPath = Path.Combine(Path.GetTempPath(), "agent-recorder-task-199b", Guid.NewGuid().ToString("N"), "clip.mp4");
+        var outputPath = Path.Combine(_task199bRoot, "clip.mp4");
         engine.CreateRecording(RegionJson(outputPath), "test-agent", tray);
         var rec = engine._recs.Values.Single();
         tray.Approve();
@@ -314,7 +321,7 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
         return engine;
     }
 
-    private static JsonNode RegionJson(string? outputPath = null) =>
+    private JsonNode RegionJson(string? outputPath = null) =>
         new JsonObject
         {
             ["source"] = new JsonObject
@@ -334,7 +341,7 @@ public sealed class RecordingEngineTopologyRevalidationTests : IDisposable
             ["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 5 },
             ["output"] = new JsonObject
             {
-                ["filename"] = outputPath ?? Path.Combine(Path.GetTempPath(), "agent-recorder-task-199b", Guid.NewGuid().ToString("N"), "clip.mp4")
+                ["filename"] = outputPath ?? Path.Combine(_task199bRoot, "clip.mp4")
             }
         };
 

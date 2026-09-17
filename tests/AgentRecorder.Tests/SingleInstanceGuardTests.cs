@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using AgentRecorder.App;
 using AgentRecorder.Infrastructure;
 using Xunit;
 
@@ -147,5 +148,30 @@ public class SingleInstanceGuardTests : IDisposable
 
         // The ready file should still exist (second instance must not delete it)
         Assert.True(File.Exists(readyPath), "Second instance must NOT delete existing ready.json");
+    }
+
+    [Fact]
+    public void SecondInstance_DoesNotCreateOrInitializeOperationalStore()
+    {
+        using var first = SingleInstanceGuard.TryAcquire(_testMutexName);
+        Assert.True(first.IsAcquired);
+
+        using var second = SingleInstanceGuard.TryAcquire(_testMutexName);
+        Assert.False(second.IsAcquired);
+
+        var factoryCalls = 0;
+        var auditCalls = 0;
+        var store = Program.InitializeOperationalStoreIfOwner(
+            second.IsAcquired,
+            (_, _) => auditCalls++,
+            () =>
+            {
+                factoryCalls++;
+                throw new InvalidOperationException("The non-owner must not construct the store.");
+            });
+
+        Assert.Null(store);
+        Assert.Equal(0, factoryCalls);
+        Assert.Equal(0, auditCalls);
     }
 }

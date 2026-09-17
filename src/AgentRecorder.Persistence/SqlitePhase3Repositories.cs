@@ -37,6 +37,9 @@ public abstract class SqliteRepositoryBase
     private protected static SqliteTransaction BeginWriteTransaction(SqliteConnection connection) =>
         connection.BeginTransaction(IsolationLevel.Serializable, deferred: false);
 
+    private protected static SqliteTransaction BeginReadTransaction(SqliteConnection connection) =>
+        connection.BeginTransaction(IsolationLevel.Serializable, deferred: true);
+
     private protected static void ExecuteWrite(
         SqliteConnection connection,
         Action<SqliteTransaction> operation,
@@ -217,6 +220,16 @@ public abstract class SqliteRepositoryBase
         }
 
         return new DateTimeOffset(new DateTime(ticks, DateTimeKind.Utc));
+    }
+
+    private protected static DateTimeOffset? ReadNullableUtcDateTimeOffset(SqliteDataReader reader, int ordinal)
+    {
+        if (reader.IsDBNull(ordinal))
+        {
+            return null;
+        }
+
+        return ReadUtcDateTimeOffset(reader, ordinal);
     }
 
     private protected static TimeSpan ReadDurationMilliseconds(SqliteDataReader reader, int ordinal)
@@ -400,6 +413,24 @@ public sealed class SqlitePlanDefinitionRepository : SqliteRepositoryBase, IPlan
         }, duplicateIsAlreadyExists: true);
     }
 
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PlanDefinition snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO plans ({SelectColumns}) VALUES ($id, $is_one_time, $status_code, $created_at_utc, $updated_at_utc, $version);";
+        Add(command, "$id", RequiredInput(snapshot.Id));
+        Add(command, "$is_one_time", snapshot.IsOneTime ? 1L : 0L);
+        Add(command, "$status_code", snapshot.StatusCode);
+        Add(command, "$created_at_utc", UtcTicksInput(snapshot.CreatedAtUtc));
+        Add(command, "$updated_at_utc", UtcTicksInput(snapshot.UpdatedAtUtc));
+        Add(command, "$version", snapshot.Version);
+        EnsureRowsAffected(command.ExecuteNonQuery());
+    }
+
     public PlanDefinition Get(string id)
     {
         id = RequiredInput(id);
@@ -510,6 +541,28 @@ public sealed class SqlitePlanOccurrenceRepository : SqliteRepositoryBase, IPlan
             Add(command, "$version", snapshot.Version);
             EnsureRowsAffected(command.ExecuteNonQuery());
         }, duplicateIsAlreadyExists: true);
+    }
+
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PlanOccurrence snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO plan_occurrences ({SelectColumns}) VALUES ($id, $plan_id, $status_code, $window_start_utc, $window_end_utc, $run_id, $terminal_reason_code, $created_at_utc, $updated_at_utc, $version);";
+        Add(command, "$id", RequiredInput(snapshot.Id));
+        Add(command, "$plan_id", RequiredInput(snapshot.PlanId));
+        Add(command, "$status_code", snapshot.StatusCode);
+        Add(command, "$window_start_utc", UtcTicksInput(snapshot.WindowStartUtc));
+        Add(command, "$window_end_utc", UtcTicksInput(snapshot.WindowEndUtc));
+        Add(command, "$run_id", NullableInput(snapshot.RunId));
+        Add(command, "$terminal_reason_code", NullableInput(snapshot.TerminalReasonCode));
+        Add(command, "$created_at_utc", UtcTicksInput(snapshot.CreatedAtUtc));
+        Add(command, "$updated_at_utc", UtcTicksInput(snapshot.UpdatedAtUtc));
+        Add(command, "$version", snapshot.Version);
+        EnsureRowsAffected(command.ExecuteNonQuery());
     }
 
     public PlanOccurrence Get(string id)
@@ -759,6 +812,28 @@ public sealed class SqliteConsentLeaseRepository : SqliteRepositoryBase, IConsen
             Add(command, "$version", snapshot.Version);
             EnsureRowsAffected(command.ExecuteNonQuery());
         }, duplicateIsAlreadyExists: true);
+    }
+
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ConsentLease snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO consent_leases ({SelectColumns}) VALUES ($id, $plan_id, $occurrence_id, $status_code, $valid_from_utc, $valid_until_utc, $max_uses, $max_duration_ms, $updated_at_utc, $version);";
+        Add(command, "$id", RequiredInput(snapshot.Id));
+        Add(command, "$plan_id", RequiredInput(snapshot.PlanId));
+        Add(command, "$occurrence_id", RequiredInput(snapshot.OccurrenceId));
+        Add(command, "$status_code", snapshot.StatusCode);
+        Add(command, "$valid_from_utc", UtcTicksInput(snapshot.ValidFromUtc));
+        Add(command, "$valid_until_utc", UtcTicksInput(snapshot.ValidUntilUtc));
+        Add(command, "$max_uses", snapshot.MaxUses);
+        Add(command, "$max_duration_ms", DurationMillisecondsInput(snapshot.MaxDuration));
+        Add(command, "$updated_at_utc", UtcTicksInput(snapshot.UpdatedAtUtc));
+        Add(command, "$version", snapshot.Version);
+        EnsureRowsAffected(command.ExecuteNonQuery());
     }
 
     public ConsentLease Get(string id)

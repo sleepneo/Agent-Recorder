@@ -1,5 +1,6 @@
 using System;
 using AgentRecorder.Capture;
+using AgentRecorder.Core.Automation;
 
 namespace AgentRecorder.Core;
 
@@ -112,5 +113,117 @@ internal static class CaptureAuthorizationGate
         }
 
         return proof.TryConsume(nowUtc.ToUniversalTime(), out failureReason);
+    }
+
+    /// <summary>
+    /// Validates the already-consumed standing proof at the final engine
+    /// boundary. A standing proof is consumed by the durable start-gate path;
+    /// this method deliberately never consumes it a second time and never
+    /// consults an interactive confirmation.
+    /// </summary>
+    internal static bool TryValidateStanding(
+        CaptureAuthorizationProof? proof,
+        Recording recording,
+        CapturePlan? currentPlan,
+        AuthorizedFixedRegionScope scope,
+        DateTimeOffset nowUtc,
+        out string failureReason)
+    {
+        failureReason = "standing_proof_missing";
+        if (proof is not StandingLeaseUseProof standing ||
+            recording is null ||
+            currentPlan is null ||
+            scope is null)
+            return false;
+
+        if (nowUtc.Offset != TimeSpan.Zero ||
+            standing.IssuedAtUtc.Offset != TimeSpan.Zero ||
+            standing.ExpiresAtUtc.Offset != TimeSpan.Zero ||
+            standing.ExpiresAtUtc <= standing.IssuedAtUtc)
+        {
+            failureReason = "standing_proof_time_invalid";
+            return false;
+        }
+
+        if (nowUtc < standing.IssuedAtUtc || nowUtc >= standing.ExpiresAtUtc)
+        {
+            failureReason = "standing_proof_expired";
+            return false;
+        }
+
+        if (!standing.IsConsumed)
+        {
+            failureReason = "standing_proof_not_consumed";
+            return false;
+        }
+
+        if (!recording.IsStandingLeaseExecution ||
+            standing.Kind != CaptureAuthorizationProofKind.StandingLeaseUse ||
+            !string.Equals(standing.RecordingId, recording.Id, StringComparison.Ordinal) ||
+            !string.Equals(standing.RunId, recording.Id, StringComparison.Ordinal))
+        {
+            failureReason = "standing_proof_run_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(standing.LeaseId, scope.LeaseId, StringComparison.Ordinal) ||
+            !string.Equals(standing.LeaseUseId, recording.StandingLeaseUseId, StringComparison.Ordinal))
+        {
+            // The use id is checked against the ticket/specification by the
+            // standing host. Keep this gate strict without accepting a caller
+            // supplied use id as a substitute for the process-local ticket.
+            failureReason = "standing_proof_scope_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(standing.ScopeDigest, scope.ScopeDigest, StringComparison.Ordinal))
+        {
+            failureReason = "standing_proof_scope_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(
+                standing.UserSessionBinding,
+                standing.CurrentUserSid + "|" + standing.SessionBinding,
+                StringComparison.Ordinal))
+        {
+            failureReason = "standing_proof_session_binding_invalid";
+            return false;
+        }
+
+        if (!string.Equals(standing.SessionBinding, CaptureAuthorizationSessionBinding.Current, StringComparison.Ordinal))
+        {
+            failureReason = "standing_proof_session_binding_invalid";
+            return false;
+        }
+
+        var durationSeconds = recording.DurationSeconds ?? recording.Config.DurationSeconds ?? 0;
+        if (durationSeconds <= 0 ||
+            recording.CountdownSeconds != 0 ||
+            scope.CountdownSeconds != 0 ||
+            standing.MaxDuration != scope.ReservedDuration ||
+            standing.MaxDuration != TimeSpan.FromSeconds(durationSeconds))
+        {
+            failureReason = "standing_authorization_limits_mismatch";
+            return false;
+        }
+
+        try
+        {
+            var endTicks = checked(nowUtc.UtcDateTime.Ticks + standing.MaxDuration.Ticks);
+            if (endTicks > standing.ExpiresAtUtc.UtcDateTime.Ticks)
+            {
+                failureReason = "standing_proof_duration_exceeds_window";
+                return false;
+            }
+        }
+        catch (OverflowException)
+        {
+            failureReason = "standing_proof_duration_exceeds_window";
+            return false;
+        }
+
+        failureReason = "";
+        return true;
     }
 }

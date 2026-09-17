@@ -19,6 +19,8 @@ internal static class CaptureAuthorizationProofIssuer
     private const string CapturePlanDigestSchema = "capture-plan/v1";
     private const string CaptureScopeDigestSchema = "capture-scope/v1";
     private const string StandingLeaseUsePlanDigestSchema = "standing-lease-use-plan/v1";
+    private const string RecurringLeaseUsePlanDigestSchema = "recurring-lease-use-plan/v1";
+    private const string RecurringLeaseUseScopeDigestSchema = "recurring-lease-use-scope/v1";
 
     internal static StandingLeaseUseProof IssueStandingLeaseUse(
         StandingLeaseUseProofIssuanceReceipt receipt)
@@ -140,6 +142,342 @@ internal static class CaptureAuthorizationProofIssuer
         {
             throw new InvalidOperationException("The standing proof receipt has no positive validity window.");
         }
+    }
+
+    /// <summary>
+    /// Issues the only process-local proof for a recurring first
+    /// start-commit. The receipt is the post-commit hand-off; all of its
+    /// durable and immutable bindings are revalidated before any random
+    /// nonce is requested.
+    /// </summary>
+    internal static RecurringLeaseUseProof IssueRecurringLeaseUse(
+        RecurringStartCommitReceipt receipt)
+    {
+        if (receipt == null) throw new ArgumentNullException(nameof(receipt));
+
+        ValidateRecurringStartCommitReceipt(receipt);
+
+        var issuedAt = receipt.CommittedAtUtc;
+        var expiry = receipt.Specification.PlannedEndUtc <= receipt.Lease.ValidUntilUtc
+            ? receipt.Specification.PlannedEndUtc
+            : receipt.Lease.ValidUntilUtc;
+        if (expiry <= issuedAt)
+            throw new InvalidOperationException("The recurring proof has no positive validity window.");
+
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        return new RecurringLeaseUseProof(
+            proofId: "recurring_" + Guid.NewGuid().ToString("N"),
+            runId: receipt.Run.Id,
+            leaseId: receipt.Lease.Id,
+            leaseUseId: receipt.Use.Id,
+            occurrenceIdentity: receipt.Specification.OccurrenceIdentity,
+            specificationDigest: receipt.Specification.SpecificationDigest,
+            authorizationSourceId: RecurringAuthorizationSourceId(receipt.Lease.Id, receipt.Use.Id),
+            capturePlanDigest: ComputeRecurringLeaseUsePlanDigest(
+                receipt.Plan, receipt.Occurrence, receipt.Specification),
+            scopeDigest: ComputeRecurringLeaseUseScopeDigest(
+                receipt.Specification, receipt.Lease, receipt.Approval),
+            issuedAtUtc: issuedAt,
+            expiresAtUtc: expiry,
+            currentUserSid: receipt.Approval.CurrentUserSid,
+            sessionBinding: receipt.Approval.SessionBinding,
+            oneTimeNonce: nonce,
+            maxDuration: receipt.Specification.Duration);
+    }
+
+    /// <summary>
+    /// Revalidates every identity, digest, lifecycle, quota and time binding
+    /// before recurring proof issuance. This method intentionally accepts only
+    /// the Core receipt and never a public result or caller-supplied IDs.
+    /// </summary>
+    internal static void ValidateRecurringStartCommitReceipt(
+        RecurringStartCommitReceipt receipt,
+        bool allowRevokedLease = false)
+    {
+        if (receipt == null) throw new ArgumentNullException(nameof(receipt));
+
+        var plan = receipt.Plan;
+        var occurrence = receipt.Occurrence;
+        var lease = receipt.Lease;
+        var specification = receipt.Specification;
+        var run = receipt.Run;
+        var use = receipt.Use;
+        var approval = receipt.Approval;
+        var quota = receipt.Quota;
+
+        var recomputedQuota = RecomputeRecurringQuota(receipt);
+        Require(
+            QuotaMatchesExactly(recomputedQuota, quota),
+            "The recurring proof receipt quota is not the exact calculation for all lease accounting entries.");
+
+        var currentUseEntries = receipt.LeaseEntries
+            .Where(entry => string.Equals(entry.UseId, use.Id, StringComparison.Ordinal))
+            .ToArray();
+        Require(
+            currentUseEntries.Length == 1,
+            "The recurring proof receipt current use is not represented exactly once in lease accounting evidence.");
+        var currentUseEntry = currentUseEntries[0];
+        Require(
+            string.Equals(currentUseEntry.LeaseId, lease.Id, StringComparison.Ordinal) &&
+            string.Equals(currentUseEntry.RunId, run.Id, StringComparison.Ordinal) &&
+            string.Equals(currentUseEntry.OccurrenceIdentity, specification.OccurrenceIdentity, StringComparison.Ordinal) &&
+            currentUseEntry.Status == use.Status &&
+            currentUseEntry.ReservedUseCount == use.ReservedUseCount &&
+            currentUseEntry.ReservedDuration == use.ReservedDuration &&
+            currentUseEntry.ActualSettledDuration == use.ActualSettledDuration,
+            "The recurring proof receipt current use evidence does not match the committed use.");
+
+        Require(
+            plan.IsPeriodic && plan.Status == PlanDefinitionStatus.Enabled &&
+            IsFiniteVersion(plan.Version) &&
+            string.Equals(plan.Id, specification.PlanId, StringComparison.Ordinal) &&
+            string.Equals(occurrence.PlanId, plan.Id, StringComparison.Ordinal) &&
+            string.Equals(occurrence.Id, specification.OccurrenceId, StringComparison.Ordinal) &&
+            string.Equals(lease.PlanId, plan.Id, StringComparison.Ordinal) &&
+            string.Equals(lease.ConfigurationRef.PlanId, plan.Id, StringComparison.Ordinal) &&
+            string.Equals(lease.Id, specification.LeaseId, StringComparison.Ordinal),
+            "The recurring proof receipt is not bound to an enabled periodic plan.");
+
+        Require(
+            occurrence.Status == PlanOccurrenceStatus.RunCreated &&
+            occurrence.TerminalReasonCode is null &&
+            occurrence.RunId is not null &&
+            string.Equals(occurrence.RunId, run.Id, StringComparison.Ordinal) &&
+            IsFiniteVersion(occurrence.Version),
+            "The recurring proof receipt occurrence is not an exact run-created state.");
+        Require(
+            occurrence.Version is 4 or 5,
+            "The recurring proof receipt occurrence version is not a committed reservation version.");
+
+        Require(
+            string.Equals(run.OccurrenceId, occurrence.Id, StringComparison.Ordinal) &&
+            string.Equals(use.LeaseId, lease.Id, StringComparison.Ordinal) &&
+            string.Equals(use.OccurrenceId, occurrence.Id, StringComparison.Ordinal) &&
+            string.Equals(use.RunId, run.Id, StringComparison.Ordinal),
+            "The recurring proof receipt run/use relations are not exact.");
+
+        Require(
+            run.Status == RecordingRunStatus.StartCommitted &&
+            run.HasCrossedStartCommit &&
+            run.TerminalReasonCode is null &&
+            run.MediaArtifactId is null &&
+            run.BundleId is null &&
+            run.Version == 2 &&
+            use.Status == LeaseUseStatus.StartCommitted &&
+            use.ReservedUseCount == 1 &&
+            use.ReservedDuration == specification.Duration &&
+            use.ReservedDuration == lease.PerRunDuration &&
+            use.ActualSettledDuration is null &&
+            use.Version == 1 &&
+            IsFiniteVersion(run.Version) &&
+            IsFiniteVersion(use.Version),
+            "The recurring proof receipt does not prove the exact first committed use.");
+
+        Require(
+            (lease.Status is ConsentLeaseStatus.Active or ConsentLeaseStatus.Exhausted ||
+                allowRevokedLease && lease.Status == ConsentLeaseStatus.Revoked) &&
+            IsFiniteVersion(lease.Version) &&
+            (allowRevokedLease && lease.Status == ConsentLeaseStatus.Revoked ||
+                recomputedQuota.IsTerminallyExhausted == (lease.Status == ConsentLeaseStatus.Exhausted) &&
+                (lease.Status == ConsentLeaseStatus.Exhausted
+                    ? recomputedQuota.IsTerminallyExhausted &&
+                      !recomputedQuota.IsTemporarilyUnavailable &&
+                      recomputedQuota.ReasonCode == RecurringLeaseQuotaReasonCodes.QuotaExhausted
+                    : !recomputedQuota.IsTerminallyExhausted &&
+                      recomputedQuota.IsTemporarilyUnavailable &&
+                      recomputedQuota.InFlightUseCount >= 1 &&
+                      recomputedQuota.ReasonCode == RecurringLeaseQuotaReasonCodes.RunInFlight)),
+            "The recurring proof receipt quota and lease status are not exact.");
+
+        Require(
+            string.Equals(
+                RecurringPlanConfigurationDigest.Compute(
+                    plan.Id,
+                    lease.ConfigurationRef.ScheduleRevision,
+                    lease.ConfigurationRef.ScheduleDigest,
+                    lease.ConfigurationRef.TimeZoneRulesDigest,
+                    lease.ConfigurationRef.ProfileRef),
+                lease.ConfigurationRef.ConfigurationDigest,
+                StringComparison.Ordinal) &&
+            string.Equals(specification.ConfigurationDigest, lease.ConfigurationRef.ConfigurationDigest, StringComparison.Ordinal) &&
+            specification.ScheduleRevision == lease.ConfigurationRef.ScheduleRevision &&
+            string.Equals(specification.ScheduleDigest, lease.ConfigurationRef.ScheduleDigest, StringComparison.Ordinal) &&
+            string.Equals(specification.TimeZoneRulesDigest, lease.ConfigurationRef.TimeZoneRulesDigest, StringComparison.Ordinal) &&
+            string.Equals(specification.ProfileId, lease.ConfigurationRef.ProfileRef.ProfileId, StringComparison.Ordinal) &&
+            specification.ProfileVersion == lease.ConfigurationRef.ProfileRef.ProfileVersion &&
+            string.Equals(specification.ProfileDigest, lease.ConfigurationRef.ProfileRef.ProfileDigest, StringComparison.Ordinal) &&
+            string.Equals(specification.LeaseAuthorizationDigest, lease.AuthorizationDigest, StringComparison.Ordinal) &&
+            string.Equals(
+                RecurringConsentLeaseAuthorizationDigest.Compute(lease.Authorization),
+                lease.AuthorizationDigest,
+                StringComparison.Ordinal) &&
+            string.Equals(
+                RecurringOccurrenceExecutionSpecificationDigest.Compute(specification),
+                specification.SpecificationDigest,
+                StringComparison.Ordinal),
+            "The recurring proof receipt specification or authorization digest is not canonical.");
+
+        Require(
+            string.Equals(approval.ApprovalId, specification.LocalApprovalId, StringComparison.Ordinal) &&
+            string.Equals(approval.LeaseId, lease.Id, StringComparison.Ordinal) &&
+            string.Equals(approval.PlanId, plan.Id, StringComparison.Ordinal) &&
+            string.Equals(approval.ConfigurationDigest, lease.ConfigurationRef.ConfigurationDigest, StringComparison.Ordinal) &&
+            string.Equals(approval.AuthorizationDigest, lease.AuthorizationDigest, StringComparison.Ordinal) &&
+            string.Equals(approval.CurrentUserSid, specification.ApprovedCurrentUserSid, StringComparison.Ordinal) &&
+            string.Equals(approval.SessionBinding, specification.ApprovedSessionBinding, StringComparison.Ordinal) &&
+            approval.ApprovalKind == RecurringLeaseLocalApprovalReceipt.CurrentApprovalKind &&
+            approval.ApprovalVersion == RecurringLeaseLocalApprovalReceipt.CurrentApprovalVersion &&
+            string.Equals(approval.ApprovalDigest, specification.LocalApprovalDigest, StringComparison.Ordinal) &&
+            string.Equals(
+                RecurringLeaseLocalApprovalDigest.Compute(
+                    approval.ApprovalId,
+                    approval.LeaseId,
+                    approval.PlanId,
+                    approval.ConfigurationDigest,
+                    approval.AuthorizationDigest,
+                    approval.CurrentUserSid,
+                    approval.SessionBinding,
+                    approval.ApprovedAtUtc,
+                    approval.ApprovalKind,
+                    approval.ApprovalVersion),
+                approval.ApprovalDigest,
+                StringComparison.Ordinal),
+            "The recurring proof receipt approval evidence is not exact.");
+
+        Require(
+            receipt.CommittedAtUtc.Offset == TimeSpan.Zero &&
+            specification.ScheduledStartUtc.Offset == TimeSpan.Zero &&
+            specification.LatestStartUtc.Offset == TimeSpan.Zero &&
+            specification.PlannedEndUtc.Offset == TimeSpan.Zero &&
+            specification.EvaluatedAtUtc.Offset == TimeSpan.Zero &&
+            run.CreatedAtUtc.Offset == TimeSpan.Zero &&
+            run.UpdatedAtUtc.Offset == TimeSpan.Zero &&
+            use.CreatedAtUtc.Offset == TimeSpan.Zero &&
+            use.UpdatedAtUtc.Offset == TimeSpan.Zero &&
+            occurrence.CreatedAtUtc.Offset == TimeSpan.Zero &&
+            occurrence.UpdatedAtUtc.Offset == TimeSpan.Zero &&
+            receipt.CommittedAtUtc == run.UpdatedAtUtc &&
+            receipt.CommittedAtUtc == use.UpdatedAtUtc &&
+            run.CreatedAtUtc == use.CreatedAtUtc &&
+            run.CreatedAtUtc == occurrence.UpdatedAtUtc &&
+            occurrence.CreatedAtUtc <= occurrence.UpdatedAtUtc &&
+            run.CreatedAtUtc <= run.UpdatedAtUtc &&
+            use.CreatedAtUtc <= use.UpdatedAtUtc &&
+            approval.ApprovedAtUtc <= receipt.CommittedAtUtc &&
+            receipt.CommittedAtUtc >= specification.EvaluatedAtUtc &&
+            receipt.CommittedAtUtc >= specification.ScheduledStartUtc &&
+            receipt.CommittedAtUtc <= specification.LatestStartUtc &&
+            receipt.CommittedAtUtc >= lease.ValidFromUtc &&
+            receipt.CommittedAtUtc < lease.ValidUntilUtc,
+            "The recurring proof receipt timeline is not an exact UTC commit chain.");
+
+        long endTicks;
+        try
+        {
+            endTicks = checked(receipt.CommittedAtUtc.UtcDateTime.Ticks + specification.Duration.Ticks);
+        }
+        catch (OverflowException exception)
+        {
+            throw new InvalidOperationException("The recurring proof receipt duration overflowed.", exception);
+        }
+
+        Require(
+            specification.Duration > TimeSpan.Zero &&
+            specification.Duration.Ticks % TimeSpan.TicksPerMillisecond == 0 &&
+            specification.Duration <= lease.PerRunDuration &&
+            endTicks <= specification.PlannedEndUtc.UtcDateTime.Ticks &&
+            endTicks <= lease.ValidUntilUtc.UtcDateTime.Ticks,
+            "The recurring proof receipt duration exceeds its authorization window.");
+    }
+
+    private static RecurringLeaseQuotaSnapshot RecomputeRecurringQuota(
+        RecurringStartCommitReceipt receipt)
+    {
+        try
+        {
+            return RecurringLeaseQuotaCalculator.Calculate(receipt.Lease, receipt.LeaseEntries);
+        }
+        catch (Phase3DomainException exception)
+        {
+            throw new InvalidOperationException(
+                "The recurring proof receipt accounting evidence is not a valid exact quota projection.",
+                exception);
+        }
+    }
+
+    private static bool QuotaMatchesExactly(
+        RecurringLeaseQuotaSnapshot recomputed,
+        RecurringLeaseQuotaSnapshot supplied) =>
+        string.Equals(recomputed.LeaseId, supplied.LeaseId, StringComparison.Ordinal) &&
+        string.Equals(recomputed.LeaseAuthorizationDigest, supplied.LeaseAuthorizationDigest, StringComparison.Ordinal) &&
+        recomputed.LeaseVersion == supplied.LeaseVersion &&
+        recomputed.AdmissionUsedUses == supplied.AdmissionUsedUses &&
+        recomputed.AdmissionUsedDuration == supplied.AdmissionUsedDuration &&
+        recomputed.PermanentlyConsumedUses == supplied.PermanentlyConsumedUses &&
+        recomputed.ConservativelyChargedDuration == supplied.ConservativelyChargedDuration &&
+        recomputed.RemainingReservableUses == supplied.RemainingReservableUses &&
+        recomputed.RemainingReservableDuration == supplied.RemainingReservableDuration &&
+        recomputed.InFlightUseCount == supplied.InFlightUseCount &&
+        recomputed.IsTemporarilyUnavailable == supplied.IsTemporarilyUnavailable &&
+        recomputed.IsTerminallyExhausted == supplied.IsTerminallyExhausted &&
+        string.Equals(recomputed.ReasonCode, supplied.ReasonCode, StringComparison.Ordinal);
+
+    internal static string ComputeRecurringLeaseUsePlanDigest(
+        PlanDefinition plan,
+        PlanOccurrence occurrence,
+        RecurringOccurrenceExecutionSpecification specification)
+    {
+        if (plan == null) throw new ArgumentNullException(nameof(plan));
+        if (occurrence == null) throw new ArgumentNullException(nameof(occurrence));
+        if (specification == null) throw new ArgumentNullException(nameof(specification));
+
+        return Digest(builder =>
+        {
+            Field(builder, "schema", RecurringLeaseUsePlanDigestSchema);
+            Field(builder, "plan_id", plan.Id);
+            Field(builder, "occurrence_id", occurrence.Id);
+            Field(builder, "occurrence_identity", specification.OccurrenceIdentity);
+            Field(builder, "specification_version", StableInt32(RecurringOccurrenceExecutionSpecification.CanonicalVersion));
+            Field(builder, "specification_digest", specification.SpecificationDigest);
+        });
+    }
+
+    internal static string ComputeRecurringLeaseUseScopeDigest(
+        RecurringOccurrenceExecutionSpecification specification,
+        RecurringConsentLease lease,
+        RecurringLeaseLocalApprovalEvidence approval)
+    {
+        if (specification == null) throw new ArgumentNullException(nameof(specification));
+        if (lease == null) throw new ArgumentNullException(nameof(lease));
+        if (approval == null) throw new ArgumentNullException(nameof(approval));
+
+        return Digest(builder =>
+        {
+            Field(builder, "schema", RecurringLeaseUseScopeDigestSchema);
+            Field(builder, "specification_version", StableInt32(RecurringOccurrenceExecutionSpecification.CanonicalVersion));
+            Field(builder, "specification_digest", specification.SpecificationDigest);
+            Field(builder, "lease_id", lease.Id);
+            Field(builder, "lease_authorization_digest", lease.AuthorizationDigest);
+            Field(builder, "approval_id", approval.ApprovalId);
+            Field(builder, "approval_digest", approval.ApprovalDigest);
+            Field(builder, "approved_current_user_sid", approval.CurrentUserSid);
+            Field(builder, "approved_session_binding", approval.SessionBinding);
+        });
+    }
+
+    internal static string RecurringAuthorizationSourceId(string leaseId, string leaseUseId)
+    {
+        if (string.IsNullOrWhiteSpace(leaseId)) throw new ArgumentException("Lease ID is required.", nameof(leaseId));
+        if (string.IsNullOrWhiteSpace(leaseUseId)) throw new ArgumentException("Lease use ID is required.", nameof(leaseUseId));
+        return "recurring-lease-use:" + leaseId + ":" + leaseUseId;
+    }
+
+    private static bool IsFiniteVersion(long version) => version >= 0 && version != long.MaxValue;
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition)
+            throw new InvalidOperationException(message);
     }
 
     internal static CaptureAuthorizationProof IssueInteractiveConfirmation(

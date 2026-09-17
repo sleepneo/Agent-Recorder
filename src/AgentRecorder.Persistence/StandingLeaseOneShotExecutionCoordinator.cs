@@ -13,11 +13,14 @@ namespace AgentRecorder.Persistence;
 /// </summary>
 internal sealed class StandingLeaseOneShotExecutionCoordinator
 {
+    private readonly SqliteOperationalStore _store;
     private readonly SqliteAuthorizedCaptureScopeRepository _scopeRepository;
     private readonly SqlitePhase3StartGateTransaction _startGate;
     private readonly SqliteStandingLeaseExecutionSnapshotLoader _snapshotLoader;
+    private readonly StandingLeaseRestartRecoveryService _recovery;
     private readonly StandingLeaseCaptureExecutionBridge _executionBridge;
     private readonly Func<DateTimeOffset?> _utcNow;
+    private DateTimeOffset? _lastTrustedUtcNow;
 
     internal StandingLeaseOneShotExecutionCoordinator(SqliteOperationalStore store)
         : this(
@@ -25,22 +28,25 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             environmentProviderForTest: null,
             backendFactoryForTest: null,
             delayForTest: null,
-            utcNowForTest: null)
+            utcNowForTest: null,
+            executionStarterForProduction: null)
     {
     }
 
     // The optional seams are internal and deterministic-test-only. Production
-    // uses the real UTC clock, system environment provider, and the bridge's
-    // approved FFmpeg-region factory.
+    // supplies the RecordingEngine starter from the App composition root;
+    // without that host the bridge fails closed before backend construction.
     internal StandingLeaseOneShotExecutionCoordinator(
         SqliteOperationalStore store,
         IStandingLeaseExecutionEnvironmentProvider? environmentProviderForTest,
         Func<StandingLeaseCaptureSpecification, ICaptureBackend?>? backendFactoryForTest,
         Func<TimeSpan, CancellationToken, Task>? delayForTest = null,
-        Func<DateTimeOffset?>? utcNowForTest = null)
+        Func<DateTimeOffset?>? utcNowForTest = null,
+        Func<StandingLeaseCaptureExecutionTicket, CancellationToken, Task<StandingLeaseCaptureExecutionResult>>? executionStarterForProduction = null)
     {
         ArgumentNullException.ThrowIfNull(store);
 
+        _store = store;
         _scopeRepository = new SqliteAuthorizedCaptureScopeRepository(store);
         _startGate = new SqlitePhase3StartGateTransaction(store);
         _snapshotLoader = new SqliteStandingLeaseExecutionSnapshotLoader(
@@ -49,11 +55,20 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             beforeCommitForTest: null,
             environmentProviderForTest);
         _utcNow = utcNowForTest ?? (() => DateTimeOffset.UtcNow);
+        _recovery = new StandingLeaseRestartRecoveryService(
+            store,
+            () => _lastTrustedUtcNow ?? DateTimeOffset.UtcNow);
         _executionBridge = new StandingLeaseCaptureExecutionBridge(
             environmentProviderForTest,
             backendFactoryForTest,
             delayForTest,
-            _utcNow);
+            _utcNow,
+            (specification, backend) => new StandingLeaseOneShotExecutionSession(
+                _store,
+                specification,
+                backend,
+                _utcNow),
+            executionStarterForProduction);
     }
 
     internal async Task<StandingLeaseOneShotExecutionResult> ExecuteAsync(
@@ -87,7 +102,9 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
 
         if (!string.Equals(scope.PlanId, validRequest.PlanId, StringComparison.Ordinal) ||
             !string.Equals(scope.OccurrenceId, validRequest.OccurrenceId, StringComparison.Ordinal) ||
-            !string.Equals(scope.LeaseId, validRequest.LeaseId, StringComparison.Ordinal))
+            !string.Equals(scope.LeaseId, validRequest.LeaseId, StringComparison.Ordinal) ||
+            (validRequest.ScopeId is not null && !string.Equals(scope.ScopeId, validRequest.ScopeId, StringComparison.Ordinal)) ||
+            (validRequest.ScopeDigest is not null && !string.Equals(scope.ScopeDigest, validRequest.ScopeDigest, StringComparison.Ordinal)))
         {
             return StandingLeaseOneShotExecutionResult.Rejected("start_gate_conflict");
         }
@@ -147,7 +164,16 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             authorization is null)
         {
             return StandingLeaseOneShotExecutionResult.CommittedNotStarted(
-                authorizationFailure,
+                RecoverDurableHandoff(
+                    new StandingLeaseRecoveryRequest(
+                        scope.PlanId,
+                        scope.OccurrenceId,
+                        scope.LeaseId,
+                        commitResult.RunId,
+                        commitResult.LeaseUseId,
+                        scope.ScopeId,
+                        scope.ScopeDigest),
+                    authorizationFailure),
                 commitResult.RunId,
                 commitResult.LeaseUseId);
         }
@@ -159,7 +185,9 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             specification is null)
         {
             return StandingLeaseOneShotExecutionResult.CommittedNotStarted(
-                specificationFailure,
+                RecoverDurableHandoff(
+                    CreateRecoveryRequest(scope, commitResult.RunId, commitResult.LeaseUseId),
+                    specificationFailure),
                 commitResult.RunId,
                 commitResult.LeaseUseId);
         }
@@ -172,7 +200,9 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             ticket is null)
         {
             return StandingLeaseOneShotExecutionResult.CommittedNotStarted(
-                ticketFailure,
+                RecoverDurableHandoff(
+                    CreateRecoveryRequest(scope, commitResult.RunId, commitResult.LeaseUseId),
+                    ticketFailure),
                 commitResult.RunId,
                 commitResult.LeaseUseId);
         }
@@ -181,18 +211,62 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             .ExecuteAsync(ticket, cancellationToken)
             .ConfigureAwait(false);
         if (bridgeResult.Status == StandingLeaseCaptureExecutionStatus.Started &&
-            bridgeResult.Backend is not null)
+            bridgeResult.LifecycleSession is not null)
         {
             return StandingLeaseOneShotExecutionResult.Started(
-                bridgeResult.Backend,
                 commitResult.RunId,
-                commitResult.LeaseUseId);
+                commitResult.LeaseUseId,
+                bridgeResult.LifecycleSession);
         }
 
         return StandingLeaseOneShotExecutionResult.CommittedNotStarted(
-            bridgeResult.Reason,
+            RecoverDurableHandoff(
+                CreateRecoveryRequest(specification),
+                bridgeResult.Reason),
             commitResult.RunId,
             commitResult.LeaseUseId);
+    }
+
+    private static StandingLeaseRecoveryRequest CreateRecoveryRequest(
+        AuthorizedFixedRegionScope scope,
+        string runId,
+        string leaseUseId) =>
+        new(
+            scope.PlanId,
+            scope.OccurrenceId,
+            scope.LeaseId,
+            runId,
+            leaseUseId,
+            scope.ScopeId,
+            scope.ScopeDigest);
+
+    private static StandingLeaseRecoveryRequest CreateRecoveryRequest(
+        StandingLeaseCaptureSpecification specification) =>
+        new(
+            specification.PlanId,
+            specification.OccurrenceId,
+            specification.LeaseId,
+            specification.RunId,
+            specification.LeaseUseId,
+            specification.ScopeId,
+            specification.ScopeDigest);
+
+    private string RecoverDurableHandoff(
+        StandingLeaseRecoveryRequest request,
+        string reason)
+    {
+        try
+        {
+            var recovery = _recovery.Recover(request);
+            if (recovery.Status == StandingLeaseRecoveryStatus.Rejected)
+                return reason + ":recovery_failed:" + recovery.Reason;
+        }
+        catch
+        {
+            return reason + ":recovery_failed";
+        }
+
+        return reason;
     }
 
     private bool TryReadUtcNow(out DateTimeOffset nowUtc, out string failureReason)
@@ -220,6 +294,7 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             return false;
         }
 
+        _lastTrustedUtcNow = nowUtc;
         failureReason = "";
         return true;
     }
@@ -241,12 +316,20 @@ internal sealed class StandingLeaseOneShotExecutionCoordinator
             IsCanonicalId(request.OccurrenceId) &&
             IsCanonicalId(request.LeaseId) &&
             IsCanonicalId(request.RunId) &&
-            IsCanonicalId(request.LeaseUseId);
+            IsCanonicalId(request.LeaseUseId) &&
+            (request.ScopeId is null || IsCanonicalId(request.ScopeId)) &&
+            (request.ScopeDigest is null || IsCanonicalSha256(request.ScopeDigest));
     }
 
     private static bool IsCanonicalId(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         string.Equals(value, value.Trim(), StringComparison.Ordinal);
+
+    private static bool IsCanonicalSha256(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        string.Equals(value, value.Trim(), StringComparison.Ordinal) &&
+        value.Length == 64 &&
+        value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
 /// <summary>
@@ -262,7 +345,9 @@ internal sealed record StandingLeaseOneShotExecutionRequest(
     string LeaseUseId,
     long ExpectedPlanVersion,
     long ExpectedOccurrenceVersion,
-    long ExpectedLeaseVersion);
+    long ExpectedLeaseVersion,
+    string? ScopeId = null,
+    string? ScopeDigest = null);
 
 internal enum StandingLeaseOneShotExecutionStatus
 {
@@ -274,8 +359,9 @@ internal enum StandingLeaseOneShotExecutionStatus
 
 /// <summary>
 /// Internal coordinator result. It contains only stable status/reason/IDs and
-/// an internal backend handle for a later lifecycle bridge; no proof, ticket,
-/// scope, environment snapshot, config, nonce, or native handle is public.
+/// the lifecycle session as the sole backend ownership boundary; no proof,
+/// ticket, scope, environment snapshot, config, nonce, or native handle is
+/// exposed.
 /// </summary>
 internal sealed class StandingLeaseOneShotExecutionResult
 {
@@ -284,13 +370,13 @@ internal sealed class StandingLeaseOneShotExecutionResult
         string reason,
         string? runId,
         string? leaseUseId,
-        ICaptureBackend? backend)
+        IStandingLeaseCaptureLifecycleSession? lifecycleSession)
     {
         Status = status;
         Reason = reason;
         RunId = runId;
         LeaseUseId = leaseUseId;
-        Backend = backend;
+        LifecycleSession = lifecycleSession;
     }
 
     internal StandingLeaseOneShotExecutionStatus Status { get; }
@@ -301,13 +387,13 @@ internal sealed class StandingLeaseOneShotExecutionResult
 
     internal string? LeaseUseId { get; }
 
-    internal ICaptureBackend? Backend { get; }
+    internal IStandingLeaseCaptureLifecycleSession? LifecycleSession { get; }
 
     internal static StandingLeaseOneShotExecutionResult Started(
-        ICaptureBackend backend,
         string runId,
-        string leaseUseId) =>
-        new(StandingLeaseOneShotExecutionStatus.Started, "", runId, leaseUseId, backend);
+        string leaseUseId,
+        IStandingLeaseCaptureLifecycleSession? lifecycleSession = null) =>
+        new(StandingLeaseOneShotExecutionStatus.Started, "", runId, leaseUseId, lifecycleSession);
 
     internal static StandingLeaseOneShotExecutionResult AlreadyCommitted(
         string runId,

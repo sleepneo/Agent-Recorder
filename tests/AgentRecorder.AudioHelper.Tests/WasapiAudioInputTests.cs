@@ -942,6 +942,248 @@ public class WasapiAudioInputTests
     }
 
     [Fact]
+    public async Task Dispose_BeforeCaptureThreadPublication_CompletesDeferredCleanupExactlyOnce()
+    {
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            var client = new FakeAudioClient { BufferSize = 10 };
+            var capture = new FakeAudioCaptureClient();
+            var device = new FakeDevice();
+            var input = new AudioClientAudioInput(device, client, capture, new WaveFormat(16000, 16, 1), 100, TimeSpan.FromMilliseconds(50));
+            using var publicationEntered = new ManualResetEventSlim(false);
+            using var releasePublication = new ManualResetEventSlim(false);
+            using var disposeStatePublished = new ManualResetEventSlim(false);
+            input.TestHookBeforeCaptureThreadPublication = () =>
+            {
+                publicationEntered.Set();
+                releasePublication.Wait();
+            };
+            input.TestHookAfterDisposeStatePublished = disposeStatePublished.Set;
+
+            var startTask = Task.Run(() => input.StartRecording());
+            Assert.True(publicationEntered.Wait(TimeSpan.FromSeconds(2)), "Start must reach the pre-publication gate");
+            var disposeTask = Task.Run(input.Dispose);
+            Assert.True(disposeStatePublished.Wait(TimeSpan.FromSeconds(2)), "Dispose must publish Disposed before the gate is released");
+            Assert.InRange(device.DisposeCount, 0, 1);
+            Assert.InRange(client.DisposeCount, 0, 1);
+            Assert.InRange(capture.DisposeCount, 0, 1);
+
+            releasePublication.Set();
+            await Task.WhenAll(startTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(2));
+            AssertCleanupCompleted(input, device, client, capture, "before publication");
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
+    public async Task Dispose_AfterThreadPublicationBeforeThreadStart_CompletesDeferredCleanupExactlyOnce()
+    {
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            var client = new FakeAudioClient { BufferSize = 10 };
+            var capture = new FakeAudioCaptureClient();
+            var device = new FakeDevice();
+            var input = new AudioClientAudioInput(device, client, capture, new WaveFormat(16000, 16, 1), 100, TimeSpan.FromMilliseconds(50));
+            using var threadPublished = new ManualResetEventSlim(false);
+            using var releaseThreadStart = new ManualResetEventSlim(false);
+            using var disposeStatePublished = new ManualResetEventSlim(false);
+            input.TestHookBeforeCaptureThreadStart = () =>
+            {
+                threadPublished.Set();
+                releaseThreadStart.Wait();
+            };
+            input.TestHookAfterDisposeStatePublished = disposeStatePublished.Set;
+
+            var startTask = Task.Run(() => input.StartRecording());
+            Assert.True(threadPublished.Wait(TimeSpan.FromSeconds(2)), "Start must publish the capture thread before the start gate");
+            var disposeTask = Task.Run(input.Dispose);
+            Assert.True(disposeStatePublished.Wait(TimeSpan.FromSeconds(2)), "Dispose must publish Disposed while Start is gated");
+            Assert.InRange(device.DisposeCount, 0, 1);
+            Assert.InRange(client.DisposeCount, 0, 1);
+            Assert.InRange(capture.DisposeCount, 0, 1);
+
+            releaseThreadStart.Set();
+            await Task.WhenAll(startTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(2));
+            AssertCleanupCompleted(input, device, client, capture, "after publication before start");
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
+    public async Task Dispose_AfterThreadStartBeforeStartedPublication_CompletesDeferredCleanupExactlyOnce()
+    {
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            var client = new FakeAudioClient { BufferSize = 10 };
+            var capture = new GatedCaptureClient();
+            var device = new FakeDevice();
+            var input = new AudioClientAudioInput(device, client, capture, new WaveFormat(16000, 16, 1), 100, TimeSpan.FromMilliseconds(50));
+            using var threadStarted = new ManualResetEventSlim(false);
+            using var releaseStartedPublication = new ManualResetEventSlim(false);
+            using var disposeStatePublished = new ManualResetEventSlim(false);
+            input.TestHookAfterCaptureThreadStartBeforePublished = () =>
+            {
+                threadStarted.Set();
+                releaseStartedPublication.Wait();
+            };
+            input.TestHookAfterDisposeStatePublished = disposeStatePublished.Set;
+
+            var startTask = Task.Run(() => input.StartRecording());
+            Assert.True(threadStarted.Wait(TimeSpan.FromSeconds(2)), "Start must call Thread.Start before the started flag gate");
+            Assert.True(capture.EnteredGate.Wait(TimeSpan.FromSeconds(2)), "Capture thread must enter its gated callback");
+            var disposeTask = Task.Run(input.Dispose);
+            Assert.True(disposeStatePublished.Wait(TimeSpan.FromSeconds(2)), "Dispose must publish Disposed while the started flag is gated");
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.InRange(device.DisposeCount, 0, 1);
+            Assert.InRange(client.DisposeCount, 0, 1);
+            Assert.InRange(capture.DisposeCount, 0, 1);
+
+            capture.ReleaseGate.Set();
+            releaseStartedPublication.Set();
+            await startTask.WaitAsync(TimeSpan.FromSeconds(2));
+            AssertCleanupCompleted(input, device, client, capture, "after thread start before publication");
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
+    public async Task CompletionCannotRegress_WhenStartWaitTimeoutRacesCompleted()
+    {
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        using var deferredPublicationEntered = new ManualResetEventSlim(false);
+        using var releaseDeferredPublication = new ManualResetEventSlim(false);
+        GatedStartAudioClient? client = null;
+        AudioClientAudioInput? input = null;
+        Task<StartRecordingResult>? startTask = null;
+        Task? disposeTask = null;
+        try
+        {
+            client = new GatedStartAudioClient();
+            var capture = new FakeAudioCaptureClient();
+            var device = new FakeDevice();
+            input = new AudioClientAudioInput(device, client, capture, new WaveFormat(16000, 16, 1), 100, TimeSpan.FromMilliseconds(20));
+            input.TestHookBeforeDisposeDeferredPublication = () =>
+            {
+                deferredPublicationEntered.Set();
+                releaseDeferredPublication.Wait();
+            };
+
+            startTask = Task.Run(() => input.StartRecording());
+            Assert.True(client.EnteredStartGate.Wait(TimeSpan.FromSeconds(2)), CleanupDiagnostics(input, device, client, capture, "start timeout gate"));
+
+            disposeTask = Task.Run(input.Dispose);
+            Assert.True(deferredPublicationEntered.Wait(TimeSpan.FromSeconds(2)), CleanupDiagnostics(input, device, client, capture, "start deferred publication gate"));
+            Assert.False(disposeTask.IsCompleted, CleanupDiagnostics(input, device, client, capture, "Dispose must remain gated before deferred publication"));
+
+            // Dispose has already transferred ownership, but has not published
+            // -1 yet. Let Start finish physical cleanup and publish 1 first.
+            client.ReleaseStartGate.Set();
+            var startResult = await startTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(StartRecordingResult.Disposed, startResult);
+            Assert.True(
+                SpinWait.SpinUntil(() => input.DisposeCompletedSuccessfully, TimeSpan.FromSeconds(2)),
+                CleanupDiagnostics(input, device, client, capture, "Start completion before deferred publication"));
+            Assert.Equal(1, device.DisposeCount);
+            Assert.Equal(1, client.DisposeCount);
+            Assert.Equal(1, capture.DisposeCount);
+
+            // This is the reverse-overwrite point. The deferred CAS must be a
+            // no-op because completion is already terminal.
+            releaseDeferredPublication.Set();
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(input.DisposeCompletedSuccessfully, CleanupDiagnostics(input, device, client, capture, "start completion regressed"));
+            Assert.Equal(1, device.DisposeCount);
+            Assert.Equal(1, client.DisposeCount);
+            Assert.Equal(1, capture.DisposeCount);
+        }
+        finally
+        {
+            client?.ReleaseStartGate.Set();
+            releaseDeferredPublication.Set();
+            try { if (startTask != null) await startTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            try { if (disposeTask != null) await disposeTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            try { input?.Dispose(); } catch { }
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
+    public async Task CompletionCannotRegress_WhenCaptureJoinTimeoutRacesCompleted()
+    {
+        var previousContext = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(null);
+        using var deferredPublicationEntered = new ManualResetEventSlim(false);
+        using var releaseDeferredPublication = new ManualResetEventSlim(false);
+        GatedCaptureClient? capture = null;
+        AudioClientAudioInput? input = null;
+        Task<StartRecordingResult>? startTask = null;
+        Task? disposeTask = null;
+        try
+        {
+            var client = new FakeAudioClient { BufferSize = 10 };
+            capture = new GatedCaptureClient();
+            var device = new FakeDevice();
+            input = new AudioClientAudioInput(device, client, capture, new WaveFormat(16000, 16, 1), 100, TimeSpan.FromMilliseconds(20));
+            input.TestHookBeforeDisposeDeferredPublication = () =>
+            {
+                deferredPublicationEntered.Set();
+                releaseDeferredPublication.Wait();
+            };
+
+            startTask = Task.Run(() => input.StartRecording());
+            Assert.True(capture.EnteredGate.Wait(TimeSpan.FromSeconds(2)), CleanupDiagnostics(input, device, client, capture, "capture join gate"));
+
+            disposeTask = Task.Run(input.Dispose);
+            Assert.True(deferredPublicationEntered.Wait(TimeSpan.FromSeconds(2)), CleanupDiagnostics(input, device, client, capture, "capture deferred publication gate"));
+            Assert.False(disposeTask.IsCompleted, CleanupDiagnostics(input, device, client, capture, "Dispose must remain gated before deferred publication"));
+
+            // The join timeout has transferred ownership. Let the capture
+            // thread finish and publish 1 while Dispose is still gated before
+            // its deferred CAS.
+            capture.ReleaseGate.Set();
+            await startTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(
+                SpinWait.SpinUntil(() => input.DisposeCompletedSuccessfully, TimeSpan.FromSeconds(2)),
+                CleanupDiagnostics(input, device, client, capture, "capture completion before deferred publication"));
+            Assert.Equal(1, device.DisposeCount);
+            Assert.Equal(1, client.DisposeCount);
+            Assert.Equal(1, capture.DisposeCount);
+
+            releaseDeferredPublication.Set();
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(input.DisposeCompletedSuccessfully, CleanupDiagnostics(input, device, client, capture, "capture completion regressed"));
+            Assert.Equal(1, device.DisposeCount);
+            Assert.Equal(1, client.DisposeCount);
+            Assert.Equal(1, capture.DisposeCount);
+        }
+        finally
+        {
+            capture?.ReleaseGate.Set();
+            releaseDeferredPublication.Set();
+            try { if (startTask != null) await startTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            try { if (disposeTask != null) await disposeTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            try { input?.Dispose(); } catch { }
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+    }
+
+    [Fact]
     public async Task Dispose_DuringStarting_TimeoutThenStartReleasesExactlyOnce()
     {
         var previousContext = SynchronizationContext.Current;
@@ -1223,16 +1465,51 @@ public class WasapiAudioInputTests
                 // thread object is created but before Capturing is published.
                 var disposeTask = Task.Run(() => input.Dispose());
 
-                await Task.WhenAll(startTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(2));
+                try
+                {
+                    await Task.WhenAll(startTask, disposeTask).WaitAsync(TimeSpan.FromSeconds(2));
 
-                Assert.True(device.DisposeCount == 1, $"Iteration {i}: device must be disposed exactly once");
-                Assert.True(client.DisposeCount == 1, $"Iteration {i}: client must be disposed exactly once");
-                Assert.True(capture.DisposeCount == 1, $"Iteration {i}: capture client must be disposed exactly once");
+                    Assert.InRange(device.DisposeCount, 0, 1);
+                    Assert.InRange(client.DisposeCount, 0, 1);
+                    Assert.InRange(capture.DisposeCount, 0, 1);
+                    AssertCleanupCompleted(input, device, client, capture, $"probabilistic iteration {i}");
+                }
+                finally
+                {
+                    input.Dispose();
+                }
             }
         }
         finally
         {
             SynchronizationContext.SetSynchronizationContext(previousContext);
         }
+    }
+
+    private static void AssertCleanupCompleted(
+        AudioClientAudioInput input,
+        FakeDevice device,
+        FakeAudioClient client,
+        FakeAudioCaptureClient capture,
+        string context)
+    {
+        Assert.True(
+            SpinWait.SpinUntil(() => input.DisposeCompletedSuccessfully, TimeSpan.FromSeconds(2)),
+            CleanupDiagnostics(input, device, client, capture, context));
+        Assert.Equal(1, device.DisposeCount);
+        Assert.Equal(1, client.DisposeCount);
+        Assert.Equal(1, capture.DisposeCount);
+        Assert.True(input.DisposeCompletedSuccessfully);
+    }
+
+    private static string CleanupDiagnostics(
+        AudioClientAudioInput input,
+        FakeDevice device,
+        FakeAudioClient client,
+        FakeAudioCaptureClient capture,
+        string context)
+    {
+        return $"Cleanup completion={input.DisposeCompletionStateForTests}; owner={input.CleanupOwnerForTests}; " +
+            $"device={device.DisposeCount}; client={client.DisposeCount}; capture={capture.DisposeCount}; context={context}";
     }
 }

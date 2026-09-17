@@ -10,6 +10,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Logging;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Persistence;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
@@ -82,6 +83,11 @@ internal static class Program
             mutex_name = SingleInstanceGuard.MutexName
         });
 
+        // Operational SQLite belongs only to the process which owns the
+        // single-instance guard. The second-instance path above must not even
+        // construct the store, because construction can resolve/create paths.
+        var operationalStore = InitializeOperationalStoreIfOwner(instanceGuard.IsAcquired, audit.Log)!;
+
         // Now safe to clean up stale ready.json (we own the instance).
         readiness.CleanupOldReadyFile();
 
@@ -141,15 +147,53 @@ internal static class Program
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
 
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
+        var standingStartSafetyInterlock = new StandingLeaseStartSafetyInterlock();
+        StandingLeaseSafetyControlService? unattendedSafetyService = null;
         var engine = new RecordingEngine(
             audit,
             perfTracer,
             bundleGenerator,
             micProvider,
             micStatusProvider,
-            systemAudioEndpointProvider: systemAudioEndpointProvider);
-        var tray = new TrayContext(engine, audit, perfTracer);
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: systemAudioEndpointProvider,
+            standingStartSafetyInterlock: standingStartSafetyInterlock,
+            standingStartSafetyValidator: (ticket, nowUtc) => unattendedSafetyService is null
+                ? "standing_safety_service_unavailable"
+                : unattendedSafetyService.ValidateStandingStart(ticket, nowUtc));
+        unattendedSafetyService = new StandingLeaseSafetyControlService(
+            operationalStore,
+            utcNowForTest: null,
+            activeRunStopper: new RecordingEngineStandingLeaseActiveRunStopper(engine),
+            startSafetyInterlock: standingStartSafetyInterlock);
+        var tray = new TrayContext(
+            engine,
+            audit,
+            hotkeyFactory: null,
+            tracer: perfTracer,
+            unattendedSafetyService: unattendedSafetyService);
         engine.SetTray(tray);
+        StandingLeaseNaturalWakeRuntime? standingNaturalWakeRuntime = null;
+        var standingPlanSetupCoordinator = new StandingPlanSetupCoordinator(
+            operationalStore,
+            audit,
+            tray,
+            unattendedSafetyService,
+            () => standingNaturalWakeRuntime?.ExecutionSupported == true,
+            engine.HasRecording);
+        standingNaturalWakeRuntime = new StandingLeaseNaturalWakeRuntime(
+            operationalStore,
+            engine,
+            tray,
+            audit);
+        if (!standingNaturalWakeRuntime.Start())
+        {
+            audit.Log("standing_lease.runtime_blocked", new
+            {
+                reason_code = "startup_recovery_or_scheduler_failed",
+                execution_supported = false,
+            });
+        }
 
         var appExePath = Application.ExecutablePath;
         var autoStart = new WindowsAutoStartManager(appExePath);
@@ -157,7 +201,17 @@ internal static class Program
 
         var ensureContextStore = new EnsureContextStore(dataDir);
         var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(dataDir);
-        var server = new ApiServer(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider);
+        var server = new ApiServer(
+            engine,
+            audit,
+            tray,
+            readiness,
+            autoStart,
+            ffmpegPrewarmer,
+            perfTracer,
+            ensureContextStore,
+            perfSummaryProvider,
+            standingPlanSetupCoordinator);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -206,6 +260,7 @@ internal static class Program
             try
             {
                 StopWgcWarmup();
+                standingNaturalWakeRuntime?.Dispose();
                 engine.StopAllSync("process_exit");
                 audit.Log("service.stopped", new { mode = "tray", reason = "process_exit", pid = Environment.ProcessId });
                 server.Stop();
@@ -213,6 +268,7 @@ internal static class Program
                 audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
                 instanceGuard.Dispose();
                 perfTracer.Dispose();
+                standingPlanSetupCoordinator.Dispose();
             }
             catch { }
         };
@@ -220,6 +276,7 @@ internal static class Program
         Application.ApplicationExit += (_, _) =>
         {
             StopWgcWarmup();
+            standingNaturalWakeRuntime?.Dispose();
             engine.StopAllSync("application_exit");
             audit.Log("service.stopped", new { mode = "tray", reason = "application_exit", pid = Environment.ProcessId });
             server.Stop();
@@ -227,8 +284,41 @@ internal static class Program
             audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
             instanceGuard.Dispose();
             perfTracer.Dispose();
+            standingPlanSetupCoordinator.Dispose();
         };
         Application.Run(tray);
+    }
+
+    internal static SqliteOperationalStore? InitializeOperationalStoreIfOwner(
+        bool instanceAcquired,
+        Action<string, object> audit,
+        Func<SqliteOperationalStore>? storeFactoryForTest = null)
+    {
+        ArgumentNullException.ThrowIfNull(audit);
+        if (!instanceAcquired)
+            return null;
+
+        var operationalStore = storeFactoryForTest?.Invoke() ?? new SqliteOperationalStore();
+        try
+        {
+            operationalStore.Initialize();
+            audit("service.operational_store_ready", new
+            {
+                database_path = operationalStore.DatabasePath,
+                schema_version = SqliteOperationalStore.CurrentSchemaVersion,
+            });
+            return operationalStore;
+        }
+        catch (Exception ex)
+        {
+            audit("service.operational_store_init_failed", new
+            {
+                database_path = operationalStore.DatabasePath,
+                error = ex.Message,
+                type = ex.GetType().FullName,
+            });
+            throw;
+        }
     }
 
     private static void CleanupReadiness(RuntimeReadiness readiness, AuditLogger audit)

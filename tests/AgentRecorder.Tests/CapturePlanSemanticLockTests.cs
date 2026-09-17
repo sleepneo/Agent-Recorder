@@ -19,6 +19,8 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-SystemQueryProviders")]
 public sealed class CapturePlanSemanticLockTests : IDisposable
 {
+    private readonly string _task197Root;
+    private readonly string _task197bRoot;
     private readonly RecordingPreflightChecker.TryGetFreeSpace _oldFreeSpace;
     private readonly RecordingPreflightChecker.TryGetEncoderPaths _oldEncoder;
     private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? _oldWindows;
@@ -27,6 +29,11 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
 
     public CapturePlanSemanticLockTests()
     {
+        _task197Root = Path.Combine(Path.GetTempPath(), "agent-recorder-task-197", Guid.NewGuid().ToString("N"));
+        _task197bRoot = Path.Combine(Path.GetTempPath(), "agent-recorder-task-197b-drift", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_task197Root);
+        Directory.CreateDirectory(_task197bRoot);
+
         _oldFreeSpace = RecordingPreflightChecker.FreeSpaceProvider;
         _oldEncoder = RecordingPreflightChecker.EncoderProvider;
         _oldWindows = GetWindowProvider();
@@ -53,6 +60,12 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         SystemQuery.SetWindowProvider(_oldWindows);
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", _oldTestMode);
         Environment.SetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar, _oldWindowBackend);
+        TestDirectoryCleanup.DeleteOwnedDirectoryAndEmptyParent(
+            _task197Root,
+            Directory.GetParent(_task197Root)!.FullName);
+        TestDirectoryCleanup.DeleteOwnedDirectoryAndEmptyParent(
+            _task197bRoot,
+            Directory.GetParent(_task197bRoot)!.FullName);
     }
 
     [Fact]
@@ -409,7 +422,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         };
         engine.BackendFactory = _ => (backend, "fake");
 
-        var outputDirectory = Path.Combine(Path.GetTempPath(), "agent-recorder-task-197", Guid.NewGuid().ToString("N"));
+        var outputDirectory = Path.Combine(_task197Root, "drift-output");
         var outputPath = Path.Combine(outputDirectory, "drift.mp4");
         var cfg = WindowJson("window_12345", 5, outputPath);
         engine.CreateRecording(cfg, "test-agent", tray);
@@ -561,7 +574,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         Assert.True(RecordingFailureNotificationManager.IsSupportedReason("capture_semantics_changed"));
     }
 
-    private static JsonNode WindowJson(string windowId, int duration, string? outputPath = null) =>
+    private JsonNode WindowJson(string windowId, int duration, string? outputPath = null) =>
         new JsonObject
         {
             ["source"] = new JsonObject
@@ -573,7 +586,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             ["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = duration },
             ["output"] = new JsonObject
             {
-                ["filename"] = outputPath ?? Path.Combine(Path.GetTempPath(), "agent-recorder-task-197.mp4")
+                ["filename"] = outputPath ?? Path.Combine(_task197Root, "default.mp4")
             }
         };
 
@@ -675,7 +688,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
                 new SystemQuery.Bounds(0, 0, 1280, 720))
         });
 
-    private static void AssertRevalidationFailsBeforeStart(CapturePlan approved, CapturePlan changed)
+    private void AssertRevalidationFailsBeforeStart(CapturePlan approved, CapturePlan changed)
     {
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
         InstallWindowProvider();
@@ -700,8 +713,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             BackendFactory = _ => (backend, "fake")
         };
 
-        var outputPath = Path.Combine(Path.GetTempPath(), "agent-recorder-task-197b-drift",
-            Guid.NewGuid().ToString("N"), "drift.mp4");
+        var outputPath = Path.Combine(_task197bRoot, "drift.mp4");
         engine.CreateRecording(WindowJson("window_12345", 5, outputPath), "test-agent", tray);
         var rec = engine._recs.Values.Single();
         if (approved.SourceKind == "region")

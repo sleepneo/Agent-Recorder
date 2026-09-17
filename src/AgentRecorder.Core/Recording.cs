@@ -2,10 +2,24 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using AgentRecorder.Capture;
+using AgentRecorder.Core.Automation;
 namespace AgentRecorder.Core;
 public sealed class Recording
 {
-    public string Id { get; } = "rec_" + Guid.NewGuid().ToString("N")[..12];
+    public string Id { get; }
+
+    public Recording()
+        : this("rec_" + Guid.NewGuid().ToString("N")[..12])
+    {
+    }
+
+    internal Recording(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            throw new ArgumentException("Recording identity is required.", nameof(id));
+        Id = id;
+    }
+
     public RecState State { get; set; } = RecState.created;
     public string? ConfirmationId { get; set; }
     public string Agent { get; set; } = "unknown";
@@ -30,6 +44,14 @@ public sealed class Recording
     /// to the first-frame / credible-recording time and is what APIs expose.
     /// </summary>
     public DateTime BackendStartAtUtc { get; set; }
+
+    /// <summary>
+    /// Set immediately before the physical backend Start call. It lets the
+    /// standing lifecycle owner distinguish a durable pre-start rejection
+    /// (which must not call backend Stop) from a backend that was actually
+    /// asked to start and then failed.
+    /// </summary>
+    internal bool BackendStartAttempted { get; set; }
 
     /// <summary>
     /// Timestamp when the countdown phase began. Used to anchor the transition
@@ -159,6 +181,28 @@ public sealed class Recording
     /// backend is being terminated.
     /// </summary>
     internal CaptureAbortReason? TrustedLifecycleAbortReason { get; set; }
+
+    /// <summary>
+    /// True only for the process-local standing execution entry. This flag is
+    /// never populated from an API request or a serialized recording payload.
+    /// </summary>
+    internal bool IsStandingLeaseExecution { get; set; }
+
+    internal string? StandingLeaseUseId { get; set; }
+
+    internal AuthorizedFixedRegionScope? StandingLeaseScope { get; set; }
+
+    internal StandingLeaseCaptureSpecification? StandingLeaseSpecification { get; set; }
+
+    internal StandingLeaseCaptureExecutionTicket? StandingLeaseExecutionTicket { get; set; }
+
+    /// <summary>
+    /// Standing lifecycle ownership is injected by the trusted App host after
+    /// the start gate has produced a claimed execution ticket.
+    /// </summary>
+    internal Func<ICaptureBackend, IStandingLeaseCaptureLifecycleSession?>? StandingLifecycleFactory { get; set; }
+
+    internal IStandingLeaseCaptureLifecycleSession? StandingLifecycleSession { get; set; }
 
     /// <summary>
     /// Published only after the complete terminal snapshot has been written.

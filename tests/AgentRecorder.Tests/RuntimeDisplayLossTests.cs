@@ -42,8 +42,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
             Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null);
         else
             Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _originalDataDir);
-        try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); }
-        catch { }
+        TestDirectoryCleanup.DeleteOwnedDirectory(_dataDir);
     }
 
     [Theory]
@@ -57,7 +56,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
             new[] { TargetDisplay() },
             Array.Empty<DisplayTopologySnapshot>());
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         var audit = new CapturingAuditLogger();
         using var engine = CreateEngine(provider, audit, tray, backend, backendType, sourceKind);
@@ -142,7 +141,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         var provider = new SequenceDisplayTopologyProvider();
         provider.SetSequence(new[] { target, other }, new[] { target });
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -170,7 +169,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
                 "display_9", TargetIdentity, DisplayIdentityResolutionStatus.Resolved,
                 new CapturePlanBounds(-2560, 100, 2560, 1440)));
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -196,7 +195,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
                 "display_1", "stable-replaced-panel", DisplayIdentityResolutionStatus.Resolved,
                 new CapturePlanBounds(0, 0, 1920, 1080)));
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -220,7 +219,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         };
         provider.SetSequence(TargetDisplay());
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -247,7 +246,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         var provider = new SequenceDisplayTopologyProvider();
         provider.SetSequence(TargetDisplay(), ambiguous);
 
-        var backend = new RuntimeFfmpegBackend();
+        var backend = CreateRuntimeFfmpegBackend();
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -266,7 +265,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
     {
         var provider = new SequenceDisplayTopologyProvider();
         provider.SetSequence(TargetDisplay(), TargetDisplay(), TargetDisplay());
-        var backend = new RuntimeFfmpegBackend(naturalExitDelayMs: 100);
+        var backend = CreateRuntimeFfmpegBackend(naturalExitDelayMs: 100);
         var tray = new RecordingTestTray();
         var audit = new CapturingAuditLogger();
         using var engine = CreateEngine(provider, audit, tray, backend, "ffmpeg", "display");
@@ -287,7 +286,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
     {
         var provider = new SequenceDisplayTopologyProvider();
         provider.SetSequence(TargetDisplay());
-        var backend = new RuntimeFfmpegBackend(naturalExitDelayMs: 60);
+        var backend = CreateRuntimeFfmpegBackend(naturalExitDelayMs: 60);
         var tray = new RecordingTestTray();
         using var engine = CreateEngine(provider, new CapturingAuditLogger(), tray, backend, "ffmpeg", "display");
         var rec = CreateRecording("display", "ffmpeg", backend.OutputPath);
@@ -310,7 +309,7 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         {
             var provider = new SequenceDisplayTopologyProvider();
             provider.SetSequence(new[] { TargetDisplay() }, Array.Empty<DisplayTopologySnapshot>());
-            var backend = new RuntimeFfmpegBackend();
+            var backend = CreateRuntimeFfmpegBackend();
             var tray = new RecordingTestTray();
             var audit = new CapturingAuditLogger();
             using var engine = CreateEngine(provider, audit, tray, backend, "ffmpeg", "display");
@@ -400,6 +399,9 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         };
     }
 
+    private RuntimeFfmpegBackend CreateRuntimeFfmpegBackend(int naturalExitDelayMs = -1)
+        => new(_dataDir, naturalExitDelayMs);
+
     private static DisplayTopologySnapshot TargetDisplay() => new(
         "display_1", TargetIdentity, DisplayIdentityResolutionStatus.Resolved,
         new CapturePlanBounds(0, 0, 1920, 1080));
@@ -488,10 +490,10 @@ public sealed class RuntimeDisplayLossTests : IDisposable
         private int _abortCalls;
         private int _stopCalls;
 
-        public RuntimeFfmpegBackend(int naturalExitDelayMs = -1)
+        public RuntimeFfmpegBackend(string outputDirectory, int naturalExitDelayMs = -1)
         {
             _naturalExitDelayMs = naturalExitDelayMs;
-            OutputPath = Path.Combine(Path.GetTempPath(), $"runtime-display-output-{Guid.NewGuid():N}.mp4");
+            OutputPath = Path.Combine(outputDirectory, $"runtime-display-output-{Guid.NewGuid():N}.mp4");
         }
 
         public event Action<FirstFrameObservation>? FirstFrameObserved;

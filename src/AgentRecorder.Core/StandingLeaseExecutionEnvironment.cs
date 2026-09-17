@@ -167,6 +167,110 @@ internal interface IStandingLeaseExecutionEnvironmentProvider
     StandingLeaseExecutionEnvironment Capture(AuthorizedFixedRegionScope scope);
 }
 
+/// <summary>
+/// The recurring recheck provider receives only immutable requirements derived
+/// from the transaction's exact profile and the single trusted service clock
+/// sample. It cannot replace either with caller-supplied public data.
+/// </summary>
+internal sealed class RecurringOccurrenceEnvironmentCaptureRequest
+{
+    internal RecurringOccurrenceEnvironmentCaptureRequest(
+        FixedRegionExecutionEnvironmentRequirements requirements,
+        DateTimeOffset trustedNowUtc)
+    {
+        Requirements = requirements ?? throw new ArgumentNullException(nameof(requirements));
+        if (trustedNowUtc.Offset != TimeSpan.Zero)
+            throw new Phase3DomainException("execution_environment_time_not_utc", "The trusted environment time must be UTC.");
+
+        TrustedNowUtc = trustedNowUtc;
+    }
+
+    internal FixedRegionExecutionEnvironmentRequirements Requirements { get; }
+
+    internal DateTimeOffset TrustedNowUtc { get; }
+}
+
+internal interface IRecurringOccurrenceEnvironmentProvider
+{
+    StandingLeaseExecutionEnvironment Capture(RecurringOccurrenceEnvironmentCaptureRequest request);
+}
+
+internal sealed class SystemQueryRecurringOccurrenceEnvironmentProvider : IRecurringOccurrenceEnvironmentProvider
+{
+    internal static readonly SystemQueryRecurringOccurrenceEnvironmentProvider Instance = new();
+
+    private SystemQueryRecurringOccurrenceEnvironmentProvider()
+    {
+    }
+
+    public StandingLeaseExecutionEnvironment Capture(RecurringOccurrenceEnvironmentCaptureRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var requirements = request.Requirements;
+        var displays = SystemQueryDisplayTopologyProvider.Instance.GetCurrentExecutionMetadata();
+        var topologyDigest = StandingLeaseDisplayTopologyDigest.TryCompute(displays, out var digest)
+            ? digest
+            : null;
+        var output = SystemQueryStandingLeaseOutputReadinessProvider.Instance.Check(
+            requirements.NormalizedOutputDirectory,
+            Path.GetFileName(requirements.FrozenOutputFilePath),
+            requirements.ReservedDuration).Snapshot;
+
+        return new StandingLeaseExecutionEnvironment(
+            request.TrustedNowUtc,
+            ReadCurrentUserSid(),
+            CaptureAuthorizationSessionBinding.Current,
+            IsCurrentProcessOnInteractiveDesktop(),
+            displays,
+            topologyDigest,
+            output);
+    }
+
+    private static string ReadCurrentUserSid()
+    {
+        try
+        {
+            return WindowsIdentity.GetCurrent().User?.Value ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static bool IsCurrentProcessOnInteractiveDesktop()
+    {
+        nint desktop = 0;
+        try
+        {
+            desktop = OpenInputDesktop(0, inherit: false, DesktopReadObjects);
+            return desktop != 0;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (desktop != 0)
+                _ = CloseDesktop(desktop);
+        }
+    }
+
+    private const uint DesktopReadObjects = 0x0001;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern nint OpenInputDesktop(
+        uint flags,
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] bool inherit,
+        uint desiredAccess);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CloseDesktop(nint desktop);
+}
+
 internal sealed class SystemQueryStandingLeaseExecutionEnvironmentProvider : IStandingLeaseExecutionEnvironmentProvider
 {
     internal static readonly SystemQueryStandingLeaseExecutionEnvironmentProvider Instance = new();

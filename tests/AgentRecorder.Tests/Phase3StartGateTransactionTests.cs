@@ -3,9 +3,11 @@ using AgentRecorder.Core;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Persistence;
+using AgentRecorder.Logging;
 using AgentRecorder.Windows;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
+using System.Threading;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -664,7 +666,11 @@ public sealed class Phase3StartGateTransactionTests
 
         Assert.True(database.ExecutionSnapshots.TryAuthorizeAndConsumeStandingLeaseUse(
             proof,
-            EnvironmentAt(database.Scope, At(2)),
+            EnvironmentAt(
+                database.Scope,
+                At(2),
+                currentUserSid: database.Scope.CurrentUserSid,
+                sessionBinding: database.Scope.SessionBinding),
             out var authorization,
             out var authorizationReason), authorizationReason);
         Assert.NotNull(authorization);
@@ -1300,7 +1306,7 @@ public sealed class Phase3StartGateTransactionTests
 
         Assert.Equal(StandingLeaseOneShotExecutionStatus.Started, result.Status);
         Assert.Equal("", result.Reason);
-        Assert.Same(backend, result.Backend);
+        Assert.NotNull(result.LifecycleSession);
         Assert.Equal(1, factoryCalls);
         Assert.Equal(1, backend.StartCalls);
         Assert.Equal(2, environmentCalls);
@@ -1313,6 +1319,247 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(1, database.Uses.Get("use-1").ReservedUseCount);
         Assert.Equal(database.Scope.ReservedDuration, database.Uses.Get("use-1").ReservedDuration);
         Assert.Equal(ConsentLeaseStatus.Exhausted, database.Leases.Get("lease-1").Status);
+    }
+
+    [Fact]
+    public void RecordingEngineProductionStandingEntryUsesDurableFirstFrameBeforeRecordingUi()
+    {
+        using var database = new TemporaryDatabase(
+            scopeDuration: TimeSpan.FromSeconds(20),
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+        var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
+        Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
+
+        var backend = new LifecycleCaptureBackend
+        {
+            EmitFirstFrameOnStart = true,
+            StopResult = ValidOutputMeta(1),
+        };
+        var tray = new StandingEngineTestTray();
+        using var engine = new RecordingEngine(
+            new TestAuditLogger(),
+            displayTopologyProvider: new StandingDisplayTopologyProvider(database.Scope));
+        engine.SetTray(tray);
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.UtcNowForTests = () => At(2).UtcDateTime;
+        engine.StandingExecutionEnvironmentProviderForTests = scope =>
+            CompleteEnvironment(
+                scope,
+                EnvironmentAt(
+                    scope,
+                    At(2),
+                    currentUserSid: scope.CurrentUserSid,
+                    sessionBinding: scope.SessionBinding));
+        engine.BackendSelectionFactoryForTests = _ => new CaptureBackendSelection(
+            backend,
+            StandingLeaseCaptureSpecification.BackendCode,
+            new CaptureBackendSelectionEvidence(
+                StandingLeaseCaptureSpecification.BackendCode,
+                StandingLeaseCaptureSpecification.BackendCode,
+                "standing_test",
+                "test",
+                null,
+                false));
+
+        var started = engine.StartStandingCapture(
+            ticket,
+            tray,
+            candidate => new StandingLeaseOneShotExecutionSession(
+                database.Store,
+                specification,
+                candidate,
+                () => At(2),
+                attachBackendCallbacks: false));
+
+        Assert.True(started.Status == StandingLeaseCaptureExecutionStatus.Started, started.Reason);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(0, backend.StopCalls);
+        Assert.Equal(RecordingRunStatus.Recording, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Consumed, database.Uses.Get("use-1").Status);
+        Assert.Equal(1, tray.RecordingCalls);
+
+        _ = engine.Stop("run-1", "user_requested");
+
+        Assert.Equal(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Settled, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public void RecordingEngineBackendStartFailureAfterFirstFrameCannotSettleValidStopMedia()
+    {
+        using var database = new TemporaryDatabase(
+            scopeDuration: TimeSpan.FromSeconds(20),
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+        var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
+        Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
+
+        var backend = new LifecycleCaptureBackend
+        {
+            EmitFirstFrameOnStart = true,
+            ThrowAfterFirstFrameOnStart = true,
+            StopResult = ValidOutputMeta(1),
+        };
+        var tray = new StandingEngineTestTray();
+        using var engine = new RecordingEngine(
+            new TestAuditLogger(),
+            displayTopologyProvider: new StandingDisplayTopologyProvider(database.Scope));
+        engine.SetTray(tray);
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.UtcNowForTests = () => At(2).UtcDateTime;
+        engine.StandingExecutionEnvironmentProviderForTests = scope =>
+            CompleteEnvironment(
+                scope,
+                EnvironmentAt(scope, At(2), scope.CurrentUserSid, scope.SessionBinding));
+        engine.BackendSelectionFactoryForTests = _ => new CaptureBackendSelection(
+            backend,
+            StandingLeaseCaptureSpecification.BackendCode,
+            new CaptureBackendSelectionEvidence(
+                StandingLeaseCaptureSpecification.BackendCode,
+                StandingLeaseCaptureSpecification.BackendCode,
+                "standing_test",
+                "test",
+                null,
+                false));
+
+        var result = engine.StartStandingCapture(
+            ticket,
+            tray,
+            candidate => new StandingLeaseOneShotExecutionSession(
+                database.Store,
+                specification,
+                candidate,
+                () => At(2),
+                attachBackendCallbacks: false));
+
+        Assert.Equal(StandingLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal("backend_start_failed_after_first_frame", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(RecState.completed, engine._recs["run-1"].State);
+        Assert.Equal(RecState.failed, engine._recs["run-1"].State);
+    }
+
+    [Fact]
+    public void RecordingEngineFirstFramePersistenceFailureStopsOnceAndPublishesNoRecording()
+    {
+        using var database = new TemporaryDatabase(
+            scopeDuration: TimeSpan.FromSeconds(20),
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+        var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
+        Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
+
+        var backend = new LifecycleCaptureBackend { EmitFirstFrameOnStart = true };
+        var commits = 0;
+        var tray = new StandingEngineTestTray();
+        using var engine = new RecordingEngine(
+            new TestAuditLogger(),
+            displayTopologyProvider: new StandingDisplayTopologyProvider(database.Scope));
+        engine.SetTray(tray);
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.UtcNowForTests = () => At(2).UtcDateTime;
+        engine.StandingExecutionEnvironmentProviderForTests = scope =>
+            CompleteEnvironment(scope, EnvironmentAt(scope, At(2), scope.CurrentUserSid, scope.SessionBinding));
+        engine.BackendSelectionFactoryForTests = _ => new CaptureBackendSelection(
+            backend,
+            StandingLeaseCaptureSpecification.BackendCode,
+            new CaptureBackendSelectionEvidence(
+                StandingLeaseCaptureSpecification.BackendCode,
+                StandingLeaseCaptureSpecification.BackendCode,
+                "standing_test",
+                "test",
+                null,
+                false));
+
+        var result = engine.StartStandingCapture(
+            ticket,
+            tray,
+            candidate => new StandingLeaseOneShotExecutionSession(
+                database.Store,
+                specification,
+                candidate,
+                () => At(2),
+                (_, _) =>
+                {
+                    if (Interlocked.Increment(ref commits) >= 1)
+                        throw new InvalidOperationException("first-frame durable commit failure");
+                },
+                attachBackendCallbacks: false));
+
+        Assert.Equal(StandingLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(RecState.recording, engine._recs["run-1"].State);
+        Assert.NotEqual(RecState.completed, engine._recs["run-1"].State);
+    }
+
+    [Fact]
+    public void RecordingEngineNaturalExitPersistenceFailureUsesOnePhysicalStopAndFailsClosed()
+    {
+        using var database = new TemporaryDatabase(
+            scopeDuration: TimeSpan.FromSeconds(20),
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+        var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
+        Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
+
+        var backend = new LifecycleCaptureBackend { EmitFirstFrameOnStart = true };
+        var commits = 0;
+        var tray = new StandingEngineTestTray();
+        using var engine = new RecordingEngine(
+            new TestAuditLogger(),
+            displayTopologyProvider: new StandingDisplayTopologyProvider(database.Scope));
+        engine.SetTray(tray);
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.UtcNowForTests = () => At(2).UtcDateTime;
+        engine.StandingExecutionEnvironmentProviderForTests = scope =>
+            CompleteEnvironment(scope, EnvironmentAt(scope, At(2), scope.CurrentUserSid, scope.SessionBinding));
+        engine.BackendSelectionFactoryForTests = _ => new CaptureBackendSelection(
+            backend,
+            StandingLeaseCaptureSpecification.BackendCode,
+            new CaptureBackendSelectionEvidence(
+                StandingLeaseCaptureSpecification.BackendCode,
+                StandingLeaseCaptureSpecification.BackendCode,
+                "standing_test",
+                "test",
+                null,
+                false));
+
+        var result = engine.StartStandingCapture(
+            ticket,
+            tray,
+            candidate => new StandingLeaseOneShotExecutionSession(
+                database.Store,
+                specification,
+                candidate,
+                () => At(2),
+                (_, _) =>
+                {
+                    if (Interlocked.Increment(ref commits) >= 2)
+                        throw new InvalidOperationException("natural settlement durable commit failure");
+                },
+                attachBackendCallbacks: false));
+
+        Assert.Equal(StandingLeaseCaptureExecutionStatus.Started, result.Status);
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1));
+
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.NotEqual(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(RecState.completed, engine._recs["run-1"].State);
     }
 
     [Fact]
@@ -1424,8 +1671,9 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(StandingLeaseOneShotExecutionStatus.AlreadyCommitted, retry.Status);
         Assert.Equal(0, factoryCalls);
         Assert.Equal(1, providerCalls);
-        Assert.Equal(RecordingRunStatus.StartCommitted, database.Runs.Get("run-1").Status);
-        Assert.Equal(LeaseUseStatus.StartCommitted, database.Uses.Get("use-1").Status);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
     }
 
     [Fact]
@@ -1535,6 +1783,9 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal("standing_execution_cancelled", cancelled.Reason);
         Assert.Equal(0, cancellationBackend.StartCalls);
         Assert.Equal(StandingLeaseOneShotExecutionStatus.AlreadyCommitted, cancelledRetry.Status);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, cancellationDatabase.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, cancellationDatabase.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, cancellationDatabase.Occurrences.Get("occ-1").Status);
 
         using var failedDatabase = new TemporaryDatabase();
         var failedBackend = new CountingCaptureBackend { ThrowOnStart = true };
@@ -1553,7 +1804,9 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(1, failedBackend.StartCalls);
         Assert.Equal(1, failedBackend.DisposeCalls);
         Assert.Equal(StandingLeaseOneShotExecutionStatus.AlreadyCommitted, failedRetry.Status);
-        Assert.Equal(RecordingRunStatus.StartCommitted, failedDatabase.Runs.Get("run-1").Status);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, failedDatabase.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, failedDatabase.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, failedDatabase.Occurrences.Get("occ-1").Status);
     }
 
     [Fact]
@@ -1610,7 +1863,7 @@ public sealed class Phase3StartGateTransactionTests
         var requestProperties = typeof(StandingLeaseOneShotExecutionRequest)
             .GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
         Assert.Equal(
-            new[] { "PlanId", "OccurrenceId", "LeaseId", "RunId", "LeaseUseId", "ExpectedPlanVersion", "ExpectedOccurrenceVersion", "ExpectedLeaseVersion" }
+            new[] { "PlanId", "OccurrenceId", "LeaseId", "RunId", "LeaseUseId", "ExpectedPlanVersion", "ExpectedOccurrenceVersion", "ExpectedLeaseVersion", "ScopeId", "ScopeDigest" }
                 .OrderBy(name => name, StringComparer.Ordinal),
             requestProperties
                 .Where(property => property.Name != "EqualityContract")
@@ -1626,6 +1879,7 @@ public sealed class Phase3StartGateTransactionTests
             typeof(StandingLeaseOneShotExecutionResult).GetProperties(
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic),
             property => property.PropertyType == typeof(CaptureConfig) ||
+                typeof(ICaptureBackend).IsAssignableFrom(property.PropertyType) ||
                 property.Name.Contains("Proof", StringComparison.OrdinalIgnoreCase) ||
                 property.Name.Contains("Nonce", StringComparison.OrdinalIgnoreCase) ||
                 property.Name.Contains("Environment", StringComparison.OrdinalIgnoreCase));
@@ -1648,6 +1902,7 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(StandingLeaseOneShotExecutionStatus.Started, result.Status);
         Assert.Equal(1, factoryCalls);
         Assert.Equal(1, backend.StartCalls);
+        Assert.NotNull(result.LifecycleSession);
     }
 
     [Fact]
@@ -2473,6 +2728,1553 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
     }
 
+    [Fact]
+    public async Task StandingLeaseLifecycleCapturesSynchronousFirstFrameBeforeStartReturns()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend { EmitFirstFrameOnStart = true };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+
+        Assert.Equal(StandingLeaseOneShotExecutionStatus.Started, result.Status);
+        Assert.NotNull(result.LifecycleSession);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(RecordingRunStatus.Recording, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Consumed, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.RunCreated, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(3L, database.Runs.Get("run-1").Version);
+        Assert.Equal(3L, database.Uses.Get("use-1").Version);
+        Assert.Equal(1L, database.Occurrences.Get("occ-1").Version);
+
+        result.LifecycleSession!.Dispose();
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleCapturesSynchronousExitWithoutFirstFrameAsUnknown()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend { EmitNaturalExitOnStart = true };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+
+        Assert.Equal(StandingLeaseOneShotExecutionStatus.Started, result.Status);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal("natural_exit_before_first_frame", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Null(database.Uses.Get("use-1").ActualSettledDuration);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal("natural_exit_before_first_frame", database.Occurrences.Get("occ-1").TerminalReasonCode);
+        Assert.NotEqual(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleStartFailureAfterAFrameCannotLeaveRecording()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend
+        {
+            EmitFirstFrameOnStart = true,
+            ThrowAfterFirstFrameOnStart = true,
+        };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+
+        Assert.Equal(StandingLeaseOneShotExecutionStatus.CommittedNotStarted, result.Status);
+        Assert.Equal("standing_execution_backend_start_failed", result.Reason);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal("backend_start_failed_after_first_frame", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleSettlesAnAsynchronousFirstFrameAndNaturalExitExactlyOnce()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+        backend.RaiseCaptureEnded();
+        Assert.Equal(RecordingRunStatus.Finalizing, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Consumed, database.Uses.Get("use-1").Status);
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5));
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5));
+        backend.RaiseFirstFrame();
+
+        var run = database.Runs.Get("run-1");
+        var use = database.Uses.Get("use-1");
+        var occurrence = database.Occurrences.Get("occ-1");
+        Assert.Equal(RecordingRunStatus.Settled, run.Status);
+        Assert.Equal(LeaseUseStatus.Settled, use.Status);
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), use.ActualSettledDuration);
+        Assert.Equal(PlanOccurrenceStatus.Completed, occurrence.Status);
+        Assert.Null(run.TerminalReasonCode);
+        Assert.Equal(6L, run.Version);
+        Assert.Equal(4L, use.Version);
+        Assert.Equal(2L, occurrence.Version);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(0, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.NotNull(result.LifecycleSession);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleConcurrentSessionsUseDatabaseVersionsForAtMostOnceSettlement()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        var firstBackend = new LifecycleCaptureBackend();
+        var secondBackend = new LifecycleCaptureBackend();
+        using var first = new StandingLeaseOneShotExecutionSession(database.Store, specification, firstBackend, () => At(2));
+        using var second = new StandingLeaseOneShotExecutionSession(database.Store, specification, secondBackend, () => At(2));
+        var firstSession = (IStandingLeaseCaptureLifecycleSession)first;
+        var secondSession = (IStandingLeaseCaptureLifecycleSession)second;
+        Assert.True(firstSession.TryAttach(firstBackend, out var firstAttachFailure), firstAttachFailure);
+        Assert.True(secondSession.TryAttach(secondBackend, out var secondAttachFailure), secondAttachFailure);
+
+        await Task.WhenAll(
+            Task.Run(firstBackend.RaiseFirstFrame),
+            Task.Run(secondBackend.RaiseFirstFrame));
+        await Task.WhenAll(
+            Task.Run(() => firstBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25))),
+            Task.Run(() => secondBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25))));
+
+        Assert.Equal(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Settled, database.Uses.Get("use-1").Status);
+        Assert.Equal(TimeSpan.FromMilliseconds(1250), database.Uses.Get("use-1").ActualSettledDuration);
+        Assert.Equal(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(6L, database.Runs.Get("run-1").Version);
+        Assert.Equal(4L, database.Uses.Get("use-1").Version);
+        Assert.Equal(2L, database.Occurrences.Get("occ-1").Version);
+        Assert.Equal(1, firstBackend.DisposeCalls);
+        Assert.Equal(1, secondBackend.DisposeCalls);
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(6.0)]
+    public async Task StandingLeaseLifecycleRejectsInvalidOrOverlongOutputDuration(double durationSeconds)
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+        backend.RaiseNaturalExit(0, ValidOutputMeta(durationSeconds));
+
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Null(database.Uses.Get("use-1").ActualSettledDuration);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleRejectsNonzeroExitAndKeepsOccurrenceBlocked()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+        backend.RaiseNaturalExit(7, ValidOutputMeta(1));
+
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal("capture_exit_nonzero", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal("capture_exit_nonzero", database.Occurrences.Get("occ-1").TerminalReasonCode);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleRejectsMissingFinalArtifactAfterCaptureEnded()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+        backend.RaiseCaptureEnded();
+        backend.RaiseNaturalExit(0, new OutputMeta
+        {
+            OutputPath = Path.Combine(database.RootPath, "output", "capture.mp4"),
+            OutputFileExists = false,
+            SizeBytes = 4096,
+            DurationSeconds = 1,
+        });
+
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.NotEqual(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleUserStopUsesOneStopAndTheSameSettlementPath()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(2) };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+
+        var firstStop = result.LifecycleSession!.Stop();
+        var secondStop = result.LifecycleSession.Stop();
+
+        Assert.True(firstStop.Succeeded);
+        Assert.True(firstStop.Terminal);
+        Assert.False(secondStop.Changed);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.Settled, database.Uses.Get("use-1").Status);
+        Assert.Equal(TimeSpan.FromSeconds(2), database.Uses.Get("use-1").ActualSettledDuration);
+        Assert.Equal(PlanOccurrenceStatus.Completed, database.Occurrences.Get("occ-1").Status);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleInvalidUserStopBecomesSessionInterrupted()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend { StopResult = new OutputMeta() };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+
+        var stop = result.LifecycleSession!.Stop();
+
+        Assert.True(stop.Succeeded);
+        Assert.Equal(RecordingRunStatus.SessionInterrupted, database.Runs.Get("run-1").Status);
+        Assert.Equal("user_stop_output_invalid", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task StandingLeaseLifecycleStopBeforeFirstFrameIsConservativeAndIdempotent()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(1) };
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+        var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+
+        var firstStop = result.LifecycleSession!.Stop();
+        var secondStop = result.LifecycleSession.Stop();
+
+        Assert.True(firstStop.Succeeded);
+        Assert.False(secondStop.Changed);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+    }
+
+    [Fact]
+    public void StandingLeaseLifecycleFailsClosedWhenCallbackClockIsUnavailableOrNonUtc()
+    {
+        foreach (Func<DateTimeOffset?> clock in new Func<DateTimeOffset?>[]
+        {
+            () => null,
+            () => new DateTimeOffset(2035, 1, 1, 0, 0, 2, TimeSpan.FromHours(8)),
+        })
+        {
+            using var database = new TemporaryDatabase();
+            var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+            var backend = new LifecycleCaptureBackend();
+            using var session = new StandingLeaseOneShotExecutionSession(database.Store, specification, backend, clock);
+            var lifecycleSession = (IStandingLeaseCaptureLifecycleSession)session;
+            Assert.True(lifecycleSession.TryAttach(backend, out var attachFailure), attachFailure);
+
+            backend.RaiseFirstFrame();
+
+            Assert.Equal(RecordingRunStatus.StartCommitted, database.Runs.Get("run-1").Status);
+            Assert.Equal(LeaseUseStatus.StartCommitted, database.Uses.Get("use-1").Status);
+            Assert.Equal(PlanOccurrenceStatus.RunCreated, database.Occurrences.Get("occ-1").Status);
+        }
+    }
+
+    [Fact]
+    public void StandingLeaseLifecycleFailsClosedAndReconcilesWhenCommitFails()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        var backend = new LifecycleCaptureBackend();
+        using var session = new StandingLeaseOneShotExecutionSession(
+            database.Store,
+            specification,
+            backend,
+            () => At(2),
+            (_, _) => throw new InvalidOperationException("injected lifecycle commit failure"));
+        var lifecycleSession = (IStandingLeaseCaptureLifecycleSession)session;
+        Assert.True(lifecycleSession.TryAttach(backend, out var attachFailure), attachFailure);
+
+        backend.RaiseFirstFrame();
+
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(3L, database.Runs.Get("run-1").Version);
+        Assert.Equal(3L, database.Uses.Get("use-1").Version);
+        Assert.Equal(2L, database.Occurrences.Get("occ-1").Version);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityReturnsBeforeWindowWithoutWriting()
+    {
+        using var database = new TemporaryDatabase();
+        RawExecute(
+            database.Store.DatabasePath,
+            "UPDATE plan_occurrences SET window_start_utc = $window_start_utc WHERE id = $id;",
+            ("$window_start_utc", At(10).UtcDateTime.Ticks),
+            ("$id", "occ-1"));
+        var before = ReadWindowState(database);
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(5))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.BeforeWindow, result.Status);
+        Assert.Equal("before_occurrence_window", result.Reason);
+        Assert.False(result.Changed);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10)]
+    [InlineData(55)]
+    public void StandingLeaseWindowEligibilityReturnsEligibleAtStartAndExactCompletionBoundary(int nowSeconds)
+    {
+        using var database = new TemporaryDatabase();
+        var before = ReadWindowState(database);
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(nowSeconds))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Eligible, result.Status);
+        Assert.Equal("execution_window_eligible", result.Reason);
+        Assert.False(result.Changed);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityExpiresAtOccurrenceEndWithNoExecutionClaims()
+    {
+        using var database = new TemporaryDatabase();
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(60))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Expired, result.Status);
+        Assert.Equal("occurrence_window_expired", result.Reason);
+        Assert.True(result.Changed);
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "occurrence_window_expired",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityExpiresWhenDurationNoLongerFitsOccurrence()
+    {
+        using var database = new TemporaryDatabase(occurrenceEndSeconds: 4);
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Expired, result.Status);
+        Assert.Equal("capture_duration_no_longer_fits", result.Reason);
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "capture_duration_no_longer_fits",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityExpiresWhenLeaseEndNoLongerFits()
+    {
+        using var database = new TemporaryDatabase();
+        RawExecute(
+            database.Store.DatabasePath,
+            "UPDATE consent_leases SET valid_until_utc = $valid_until_utc WHERE id = $id;",
+            ("$valid_until_utc", At(4).UtcDateTime.Ticks),
+            ("$id", "lease-1"));
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Expired, result.Status);
+        Assert.Equal("lease_window_expired", result.Reason);
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "lease_window_expired",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityFailsClosedForDurableStateBoundariesWithoutWriting()
+    {
+        using var disabledPlanDatabase = new TemporaryDatabase(planStatus: PlanDefinitionStatus.Paused);
+        var disabledPlanBefore = ReadWindowState(disabledPlanDatabase);
+        var disabledPlanResult = new StandingLeaseWindowEligibilityService(disabledPlanDatabase.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(disabledPlanDatabase));
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, disabledPlanResult.Status);
+        Assert.Equal("plan_not_enabled", disabledPlanResult.Reason);
+        Assert.Equal(disabledPlanBefore, ReadWindowState(disabledPlanDatabase));
+
+        using var unauthorizedOccurrenceDatabase = new TemporaryDatabase(occurrenceStatus: PlanOccurrenceStatus.Due);
+        var unauthorizedOccurrenceBefore = ReadWindowState(unauthorizedOccurrenceDatabase);
+        var unauthorizedOccurrenceResult = new StandingLeaseWindowEligibilityService(unauthorizedOccurrenceDatabase.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(unauthorizedOccurrenceDatabase));
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, unauthorizedOccurrenceResult.Status);
+        Assert.Equal("occurrence_not_authorized", unauthorizedOccurrenceResult.Reason);
+        Assert.Equal(unauthorizedOccurrenceBefore, ReadWindowState(unauthorizedOccurrenceDatabase));
+
+        using var inactiveLeaseDatabase = new TemporaryDatabase(leaseStatus: ConsentLeaseStatus.Revoked);
+        var inactiveLeaseBefore = ReadWindowState(inactiveLeaseDatabase);
+        var inactiveLeaseResult = new StandingLeaseWindowEligibilityService(inactiveLeaseDatabase.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(inactiveLeaseDatabase));
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, inactiveLeaseResult.Status);
+        Assert.Equal("lease_not_active", inactiveLeaseResult.Reason);
+        Assert.Equal(inactiveLeaseBefore, ReadWindowState(inactiveLeaseDatabase));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityReturnsAlreadyClaimedForCommittedStartEvidence()
+    {
+        using var database = new TemporaryDatabase();
+        database.Gate.Commit(database.CreateRequest(commitAt: At(1)));
+        var before = ReadWindowState(database);
+
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(2))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.AlreadyClaimed, result.Status);
+        Assert.Equal("occurrence_already_claimed", result.Reason);
+        Assert.False(result.Changed);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityReturnsAlreadyTerminalWithoutRewritingExpiredOccurrence()
+    {
+        using var database = new TemporaryDatabase();
+        var request = CreateWindowEligibilityRequest(database);
+        var first = new StandingLeaseWindowEligibilityService(database.Store, () => At(60)).Evaluate(request);
+        var before = ReadWindowState(database);
+
+        var second = new StandingLeaseWindowEligibilityService(database.Store, () => At(61)).Evaluate(request);
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Expired, first.Status);
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.AlreadyTerminal, second.Status);
+        Assert.Equal("occurrence_already_terminal", second.Reason);
+        Assert.False(second.Changed);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityRejectsInvalidClockSamplesWithoutWriting()
+    {
+        foreach (var clock in new Func<DateTimeOffset?>[]
+        {
+            () => null,
+            () => throw new InvalidOperationException("clock unavailable"),
+            () => new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.FromHours(8)),
+        })
+        {
+            using var database = new TemporaryDatabase();
+            var before = ReadWindowState(database);
+
+            var result = new StandingLeaseWindowEligibilityService(database.Store, clock)
+                .Evaluate(CreateWindowEligibilityRequest(database));
+
+            Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, result.Status);
+            Assert.Contains(result.Reason, new[]
+            {
+                "eligibility_clock_unavailable",
+                "eligibility_time_not_utc",
+            });
+            Assert.Equal(before, ReadWindowState(database));
+        }
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityRejectsClockRewindWithoutWriting()
+    {
+        using var database = new TemporaryDatabase();
+        var before = ReadWindowState(database);
+        var service = new StandingLeaseWindowEligibilityService(
+            database.Store,
+            SequenceClock(At(0), At(-1)));
+        var request = CreateWindowEligibilityRequest(database);
+
+        var eligible = service.Evaluate(request);
+        var rewound = service.Evaluate(request);
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Eligible, eligible.Status);
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, rewound.Status);
+        Assert.Equal("eligibility_time_non_monotonic", rewound.Reason);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityUsesCheckedTimeArithmeticAndRejectsNonOneTimePlan()
+    {
+        using var database = new TemporaryDatabase();
+        var nearMax = DateTimeOffset.MaxValue.AddSeconds(-30);
+        var overflowPlan = PlanDefinition.Rehydrate("plan-1", true, PlanDefinitionStatus.Enabled, nearMax, nearMax, 0);
+        var overflowOccurrence = PlanOccurrence.Rehydrate(
+            "occ-1", "plan-1", nearMax.AddSeconds(10), nearMax.AddSeconds(29), nearMax, PlanOccurrenceStatus.Authorized,
+            null, null, nearMax, 0);
+        var overflowLease = ConsentLease.Rehydrate(
+            "lease-1", "plan-1", "occ-1", nearMax, DateTimeOffset.MaxValue, 1, TimeSpan.FromSeconds(30),
+            ConsentLeaseStatus.Active, nearMax, 0);
+        var overflowDecision = StandingLeaseWindowEligibilityPolicy.Evaluate(
+            overflowPlan, overflowOccurrence, overflowLease, database.Scope, nearMax.AddSeconds(28));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, overflowDecision.Status);
+        Assert.Equal("eligibility_time_overflow", overflowDecision.Reason);
+
+        var nonOneTimePlan = PlanDefinition.Rehydrate("plan-1", false, PlanDefinitionStatus.Enabled, At(0), At(0), 0);
+        var nonOneTimeDecision = StandingLeaseWindowEligibilityPolicy.Evaluate(
+            nonOneTimePlan,
+            database.Occurrences.Get("occ-1"),
+            database.Leases.Get("lease-1"),
+            database.Scope,
+            At(0));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, nonOneTimeDecision.Status);
+        Assert.Equal("plan_not_one_time", nonOneTimeDecision.Reason);
+        Assert.Equal(
+            (PlanOccurrenceStatus.Authorized, (string?)null, (string?)null, 0L, 0L, 0L),
+            ReadWindowState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityRejectsMissingDigestAndUnknownStatusWithoutWriting()
+    {
+        using var digestDatabase = new TemporaryDatabase();
+        var digestBefore = ReadWindowState(digestDatabase);
+        var digestResult = new StandingLeaseWindowEligibilityService(digestDatabase.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(digestDatabase) with { ScopeDigest = new string('f', 64) });
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, digestResult.Status);
+        Assert.Equal("eligibility_scope_identity_mismatch", digestResult.Reason);
+        Assert.Equal(digestBefore, ReadWindowState(digestDatabase));
+
+        using var unknownStatusDatabase = new TemporaryDatabase();
+        var unknownBefore = ReadWindowState(unknownStatusDatabase);
+        RawExecute(
+            unknownStatusDatabase.Store.DatabasePath,
+            "PRAGMA ignore_check_constraints = ON; UPDATE plan_occurrences SET status_code = 'not_a_status' WHERE id = $id;",
+            ("$id", "occ-1"));
+        var unknownResult = new StandingLeaseWindowEligibilityService(unknownStatusDatabase.Store, () => At(0))
+            .Evaluate(CreateWindowEligibilityRequest(unknownStatusDatabase));
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, unknownResult.Status);
+        Assert.Equal("eligibility_snapshot_invalid", unknownResult.Reason);
+        Assert.Equal("not_a_status", RawText(unknownStatusDatabase.Store.DatabasePath, "SELECT status_code FROM plan_occurrences WHERE id = 'occ-1';"));
+        Assert.Equal(unknownBefore.Version, RawScalar(unknownStatusDatabase.Store.DatabasePath, "SELECT version FROM plan_occurrences WHERE id = 'occ-1';"));
+        Assert.Equal(0L, RawScalar(unknownStatusDatabase.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(0L, RawScalar(unknownStatusDatabase.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityRollsBackAuthorizedToExpiredWhenCommitFails()
+    {
+        using var database = new TemporaryDatabase();
+        var before = ReadWindowState(database);
+
+        var result = new StandingLeaseWindowEligibilityService(
+                database.Store,
+                () => At(60),
+                (_, _) => throw new InvalidOperationException("injected eligibility commit failure"))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Rejected, result.Status);
+        Assert.Equal("eligibility_sqlite_failure", result.Reason);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public async Task StandingLeaseWindowEligibilityConcurrentCallsExpireOnlyOnce()
+    {
+        using var database = new TemporaryDatabase();
+        var request = CreateWindowEligibilityRequest(database);
+        var first = new StandingLeaseWindowEligibilityService(database.Store, () => At(60));
+        var second = new StandingLeaseWindowEligibilityService(database.Store, () => At(60));
+
+        var results = await Task.WhenAll(
+            Task.Run(() => first.Evaluate(request)),
+            Task.Run(() => second.Evaluate(request)));
+
+        Assert.Equal(1, results.Count(item => item.Status == StandingLeaseWindowEligibilityStatus.Expired));
+        Assert.Equal(1, results.Count(item =>
+            item.Status == StandingLeaseWindowEligibilityStatus.AlreadyTerminal ||
+            (item.Status == StandingLeaseWindowEligibilityStatus.Rejected && item.Reason == "eligibility_concurrency_conflict")));
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "occurrence_window_expired",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityHasNoCaptureSurfaceAndExpiredStateCannotPassStartGate()
+    {
+        using var database = new TemporaryDatabase();
+        var result = new StandingLeaseWindowEligibilityService(database.Store, () => At(60))
+            .Evaluate(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseWindowEligibilityStatus.Expired, result.Status);
+        Assert.DoesNotContain(
+            typeof(StandingLeaseWindowEligibilityService).GetFields(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            field => typeof(ICaptureBackend).IsAssignableFrom(field.FieldType));
+        Assert.DoesNotContain(
+            typeof(StandingLeaseWindowEligibilityService).GetMethods(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            method => method.GetParameters().Any(parameter => typeof(ICaptureBackend).IsAssignableFrom(parameter.ParameterType)));
+
+        var startGateCode = CaptureGateCode(() => database.Gate.Commit(database.CreateRequest(commitAt: At(60))));
+        Assert.NotEqual("committed", startGateCode);
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "occurrence_window_expired",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public void StandingLeaseWindowEligibilityRequestContainsOnlyDurableIdentity()
+    {
+        var propertyNames = typeof(StandingLeaseWindowEligibilityRequest)
+            .GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .Where(name => name != "EqualityContract")
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            new[] { "LeaseId", "OccurrenceId", "PlanId", "ScopeDigest", "ScopeId" },
+            propertyNames);
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeBeforeWindowDoesNotCallCoordinatorOrWrite()
+    {
+        using var database = new TemporaryDatabase();
+        RawExecute(
+            database.Store.DatabasePath,
+            "UPDATE plan_occurrences SET window_start_utc = $window_start_utc WHERE id = $id;",
+            ("$window_start_utc", At(10).UtcDateTime.Ticks),
+            ("$id", "occ-1"));
+        var before = ReadWindowState(database);
+        var coordinatorCalls = 0;
+
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(5)),
+            (_, _) =>
+            {
+                coordinatorCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.BeforeWindow, result.Status);
+        Assert.Equal("before_occurrence_window", result.Reason);
+        Assert.Equal(0, coordinatorCalls);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeExpiredDoesNotCallCoordinatorOrCreateClaims()
+    {
+        using var database = new TemporaryDatabase();
+        var coordinatorCalls = 0;
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(60)),
+            (_, _) =>
+            {
+                coordinatorCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Expired, result.Status);
+        Assert.Equal("occurrence_window_expired", result.Reason);
+        Assert.Equal(0, coordinatorCalls);
+        AssertWindowState(
+            database,
+            PlanOccurrenceStatus.Expired,
+            "occurrence_window_expired",
+            runId: null,
+            occurrenceVersion: 1,
+            runCount: 0,
+            useCount: 0);
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeRejectedClaimedTerminalAndInvalidIdentityDoNotCallCoordinator()
+    {
+        using var claimedDatabase = new TemporaryDatabase();
+        claimedDatabase.Gate.Commit(claimedDatabase.CreateRequest(commitAt: At(1)));
+        var claimedCalls = 0;
+        var claimedDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(claimedDatabase.Store, () => At(2)),
+            (_, _) =>
+            {
+                claimedCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var claimedResult = await claimedDispatcher.DispatchAsync(CreateWindowEligibilityRequest(claimedDatabase));
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.AlreadyClaimed, claimedResult.Status);
+        Assert.Equal(0, claimedCalls);
+
+        using var terminalDatabase = new TemporaryDatabase();
+        var terminalService = new StandingLeaseWindowEligibilityService(terminalDatabase.Store, () => At(60));
+        var terminalDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            terminalService,
+            (_, _) => Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start")),
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        _ = await terminalDispatcher.DispatchAsync(CreateWindowEligibilityRequest(terminalDatabase));
+        var terminalCalls = 0;
+        var terminalRetryDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(terminalDatabase.Store, () => At(61)),
+            (_, _) =>
+            {
+                terminalCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var terminalResult = await terminalRetryDispatcher.DispatchAsync(CreateWindowEligibilityRequest(terminalDatabase));
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.AlreadyTerminal, terminalResult.Status);
+        Assert.Equal(0, terminalCalls);
+
+        using var invalidDatabase = new TemporaryDatabase();
+        var invalidBefore = ReadWindowState(invalidDatabase);
+        var invalidCalls = 0;
+        var invalidDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(invalidDatabase.Store, () => At(0)),
+            (_, _) =>
+            {
+                invalidCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var invalidResult = await invalidDispatcher.DispatchAsync(
+            CreateWindowEligibilityRequest(invalidDatabase) with { ScopeDigest = new string('f', 64) });
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, invalidResult.Status);
+        Assert.Equal("eligibility_scope_identity_mismatch", invalidResult.Reason);
+        Assert.Equal(0, invalidCalls);
+        Assert.Equal(invalidBefore, ReadWindowState(invalidDatabase));
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeClockSnapshotAndIdFailuresDoNotStartOrRetry()
+    {
+        using var clockDatabase = new TemporaryDatabase();
+        var clockCalls = 0;
+        var clockDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(clockDatabase.Store, () => null),
+            (_, _) =>
+            {
+                clockCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var clockResult = await clockDispatcher.DispatchAsync(CreateWindowEligibilityRequest(clockDatabase));
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, clockResult.Status);
+        Assert.Equal("eligibility_clock_unavailable", clockResult.Reason);
+        Assert.Equal(0, clockCalls);
+
+        using var snapshotDatabase = new TemporaryDatabase();
+        var snapshotCalls = 0;
+        var snapshotDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(snapshotDatabase.Store, () => At(0)),
+            (_, _) =>
+            {
+                snapshotCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var snapshotResult = await snapshotDispatcher.DispatchAsync(
+            CreateWindowEligibilityRequest(snapshotDatabase) with { ScopeId = "scope_missing" });
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, snapshotResult.Status);
+        Assert.Equal("eligibility_snapshot_invalid", snapshotResult.Reason);
+        Assert.Equal(0, snapshotCalls);
+
+        using var idDatabase = new TemporaryDatabase();
+        var idBefore = ReadWindowState(idDatabase);
+        var idCalls = 0;
+        var idDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(idDatabase.Store, () => At(0)),
+            (_, _) =>
+            {
+                idCalls++;
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.Rejected("must_not_start"));
+            },
+            () => throw new InvalidOperationException("id generator failed"));
+        var idResult = await idDispatcher.DispatchAsync(CreateWindowEligibilityRequest(idDatabase));
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, idResult.Status);
+        Assert.Equal("natural_wake_id_generation_failed", idResult.Reason);
+        Assert.Equal(0, idCalls);
+        Assert.Equal(idBefore, ReadWindowState(idDatabase));
+
+        using var coordinatorDatabase = new TemporaryDatabase();
+        var coordinatorBefore = ReadWindowState(coordinatorDatabase);
+        var coordinatorCallCount = 0;
+        var coordinatorDispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(coordinatorDatabase.Store, () => At(0)),
+            (_, _) =>
+            {
+                coordinatorCallCount++;
+                throw new InvalidOperationException("coordinator failed");
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+        var coordinatorResult = await coordinatorDispatcher.DispatchAsync(CreateWindowEligibilityRequest(coordinatorDatabase));
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, coordinatorResult.Status);
+        Assert.Equal("natural_wake_coordinator_failed", coordinatorResult.Reason);
+        Assert.Equal(1, coordinatorCallCount);
+        Assert.Equal(coordinatorBefore, ReadWindowState(coordinatorDatabase));
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeEligibleGeneratesIdsAndPassesEligibilityVersionsOnce()
+    {
+        using var database = new TemporaryDatabase();
+        var before = ReadWindowState(database);
+        StandingLeaseOneShotExecutionRequest? capturedRequest = null;
+        var coordinatorCalls = 0;
+        var generatorCalls = 0;
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            (request, _) =>
+            {
+                coordinatorCalls++;
+                capturedRequest = request;
+                Assert.Equal(before, ReadWindowState(database));
+                return Task.FromResult(StandingLeaseOneShotExecutionResult.AlreadyCommitted(
+                    request.RunId,
+                    request.LeaseUseId));
+            },
+            () =>
+            {
+                generatorCalls++;
+                return new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated");
+            });
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.AlreadyCommitted, result.Status);
+        Assert.Equal("already_committed", result.Reason);
+        Assert.Equal(1, coordinatorCalls);
+        Assert.Equal(1, generatorCalls);
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("run_generated", capturedRequest!.RunId);
+        Assert.Equal("use_generated", capturedRequest.LeaseUseId);
+        Assert.Equal(0L, capturedRequest.ExpectedPlanVersion);
+        Assert.Equal(0L, capturedRequest.ExpectedOccurrenceVersion);
+        Assert.Equal(0L, capturedRequest.ExpectedLeaseVersion);
+        Assert.Equal(before, ReadWindowState(database));
+    }
+
+    [Theory]
+    [InlineData("already-committed")]
+    [InlineData("committed-not-started")]
+    public async Task StandingLeaseNaturalWakeForwardsCoordinatorTerminalBoundaryWithoutRetry(string coordinatorOutcome)
+    {
+        using var database = new TemporaryDatabase();
+        var coordinatorCalls = 0;
+        var generatorCalls = 0;
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            (request, _) =>
+            {
+                coordinatorCalls++;
+                var coordinatorResult = coordinatorOutcome == "already-committed"
+                    ? StandingLeaseOneShotExecutionResult.AlreadyCommitted(request.RunId, request.LeaseUseId)
+                    : StandingLeaseOneShotExecutionResult.CommittedNotStarted(
+                        "fake_committed_not_started", request.RunId, request.LeaseUseId);
+                return Task.FromResult(coordinatorResult);
+            },
+            () =>
+            {
+                generatorCalls++;
+                return new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated");
+            });
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(
+            coordinatorOutcome == "already-committed"
+                ? StandingLeaseNaturalWakeDispatchStatus.AlreadyCommitted
+                : StandingLeaseNaturalWakeDispatchStatus.CommittedNotStarted,
+            result.Status);
+        Assert.Equal(1, coordinatorCalls);
+        Assert.Equal(1, generatorCalls);
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeStartedUsesExistingCoordinatorLifecycleBoundaryWithoutBackendSurface()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            coordinator.ExecuteAsync,
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Started, result.Status);
+        Assert.Equal("started", result.Reason);
+        Assert.NotNull(result.LifecycleSession);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+        Assert.Equal(RecordingRunStatus.StartCommitted, database.Runs.Get("run_generated").Status);
+        Assert.Equal(LeaseUseStatus.StartCommitted, database.Uses.Get("use_generated").Status);
+        Assert.Equal(PlanOccurrenceStatus.RunCreated, database.Occurrences.Get("occ-1").Status);
+
+        result.LifecycleSession!.Dispose();
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeStartGateRevalidationRejectsVersionChangeWithoutRetry()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+        var coordinatorCalls = 0;
+        var dispatcher = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            (request, cancellationToken) =>
+            {
+                coordinatorCalls++;
+                RawExecute(
+                    database.Store.DatabasePath,
+                    "UPDATE plans SET version = 1 WHERE id = $id;",
+                    ("$id", "plan-1"));
+                return coordinator.ExecuteAsync(request, cancellationToken);
+            },
+            () => new StandingLeaseGeneratedExecutionIds("run_generated", "use_generated"));
+
+        var result = await dispatcher.DispatchAsync(CreateWindowEligibilityRequest(database));
+
+        Assert.Equal(StandingLeaseNaturalWakeDispatchStatus.Rejected, result.Status);
+        Assert.Equal(1, coordinatorCalls);
+        Assert.Equal(0, backend.StartCalls);
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+        Assert.Equal(PlanOccurrenceStatus.Authorized, database.Occurrences.Get("occ-1").Status);
+    }
+
+    [Fact]
+    public async Task StandingLeaseNaturalWakeConcurrentCallsProduceOneRunOneUseAndOneStart()
+    {
+        using var database = new TemporaryDatabase();
+        var firstBackend = new LifecycleCaptureBackend();
+        var secondBackend = new LifecycleCaptureBackend();
+        var firstCoordinator = CreateLifecycleCoordinator(database, firstBackend);
+        var secondCoordinator = CreateLifecycleCoordinator(database, secondBackend);
+        var first = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            firstCoordinator.ExecuteAsync,
+            () => new StandingLeaseGeneratedExecutionIds("run_first", "use_first"));
+        var second = new StandingLeaseNaturalWakeDispatcher(
+            new StandingLeaseWindowEligibilityService(database.Store, () => At(0)),
+            secondCoordinator.ExecuteAsync,
+            () => new StandingLeaseGeneratedExecutionIds("run_second", "use_second"));
+        var request = CreateWindowEligibilityRequest(database);
+
+        var results = await Task.WhenAll(
+            Task.Run(() => first.DispatchAsync(request)),
+            Task.Run(() => second.DispatchAsync(request)));
+
+        Assert.Equal(1, results.Count(item => item.Status == StandingLeaseNaturalWakeDispatchStatus.Started));
+        var competingResultCount = results.Count(item =>
+            item.Status == StandingLeaseNaturalWakeDispatchStatus.AlreadyClaimed ||
+            item.Status == StandingLeaseNaturalWakeDispatchStatus.AlreadyCommitted ||
+            item.Status == StandingLeaseNaturalWakeDispatchStatus.Rejected);
+        Assert.True(
+            competingResultCount == 1,
+            string.Join(" | ", results.Select(item => $"{item.Status}:{item.Reason}")));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+        Assert.Equal(1, firstBackend.StartCalls + secondBackend.StartCalls);
+        foreach (var result in results.Where(item => item.LifecycleSession is not null))
+        {
+            result.LifecycleSession!.Dispose();
+        }
+    }
+
+    [Fact]
+    public void StandingLeaseNaturalWakeRequestAndResultDoNotExposeCallerExecutionOrCaptureFields()
+    {
+        var requestNames = typeof(StandingLeaseWindowEligibilityRequest)
+            .GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .Where(name => name != "EqualityContract")
+            .ToArray();
+        var resultNames = typeof(StandingLeaseNaturalWakeDispatchResult)
+            .GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .ToArray();
+        var forbiddenNames = new[]
+        {
+            "RunId", "LeaseUseId", "Duration", "CaptureConfig", "Target", "Bounds", "OutputPath",
+            "Backend", "Proof", "Nonce", "Environment", "NativeHandle",
+        };
+
+        Assert.DoesNotContain(requestNames, name => forbiddenNames.Contains(name, StringComparer.OrdinalIgnoreCase));
+        Assert.DoesNotContain(resultNames, name => forbiddenNames.Contains(name, StringComparer.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            typeof(StandingLeaseNaturalWakeDispatcher).GetMethods(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            method => method.GetParameters().Any(parameter => typeof(ICaptureBackend).IsAssignableFrom(parameter.ParameterType)));
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryReconcilesCommittedStartConservatively()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var before = ReadRecoveryState(database);
+
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Recovered, result.Status);
+        Assert.Equal("recovery_after_start_commit", result.Reason);
+        AssertRecoveryState(
+            database,
+            RecordingRunStatus.StartedUnknown,
+            LeaseUseStatus.StartedUnknown,
+            PlanOccurrenceStatus.Blocked,
+            "recovery_after_start_commit",
+            expectedActualDuration: null,
+            expectedRunVersion: before.RunVersion + 1,
+            expectedUseVersion: before.UseVersion + 1,
+            expectedOccurrenceVersion: before.OccurrenceVersion + 1);
+        Assert.Equal(ConsentLeaseStatus.Exhausted, database.Leases.Get("lease-1").Status);
+        Assert.Equal(before.LeaseVersion, database.Leases.Get("lease-1").Version);
+    }
+
+    [Theory]
+    [InlineData(RecordingRunStatus.Recording, "recovery_after_recording_interrupted")]
+    [InlineData(RecordingRunStatus.Finalizing, "recovery_during_finalization")]
+    [InlineData(RecordingRunStatus.MediaReady, "recovery_before_settlement")]
+    public void StandingLeaseRecoveryReconcilesActiveDurableTailWithoutMediaInference(
+        RecordingRunStatus runStatus,
+        string expectedReason)
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        PrepareRecoveryActiveState(database, specification, runStatus);
+        var before = ReadRecoveryState(database);
+
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(6))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Recovered, result.Status);
+        Assert.Equal(expectedReason, result.Reason);
+        AssertRecoveryState(
+            database,
+            RecordingRunStatus.SessionInterrupted,
+            LeaseUseStatus.StartedUnknown,
+            PlanOccurrenceStatus.Blocked,
+            expectedReason,
+            expectedActualDuration: null,
+            expectedRunVersion: before.RunVersion + 1,
+            expectedUseVersion: before.UseVersion + 1,
+            expectedOccurrenceVersion: before.OccurrenceVersion + 1);
+    }
+
+    [Theory]
+    [InlineData("settled")]
+    [InlineData("started_unknown")]
+    [InlineData("session_interrupted")]
+    [InlineData("failed")]
+    public void StandingLeaseRecoveryIsIdempotentForEveryConsistentTerminalChain(string terminalKind)
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        PrepareRecoveryTerminalState(database, specification, terminalKind);
+        var before = ReadRecoveryState(database);
+
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(6))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.AlreadyReconciled, result.Status);
+        Assert.Equal("recovery_idempotent_noop", result.Reason);
+        var after = ReadRecoveryState(database);
+        Assert.Equal(before, after);
+        Assert.Equal(before.RunReason, after.RunReason);
+        Assert.Equal(before.OccurrenceReason, after.OccurrenceReason);
+        Assert.Equal(before.ActualDuration, after.ActualDuration);
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryRejectsMissingRowsAndRelationMismatchWithoutWrites()
+    {
+        using var missingRunDatabase = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(missingRunDatabase);
+        var missingBefore = ReadRecoveryState(missingRunDatabase);
+        RawExecute(
+            missingRunDatabase.Store.DatabasePath,
+            "PRAGMA foreign_keys = OFF; DELETE FROM recording_runs WHERE id = $id;",
+            ("$id", "run-1"));
+
+        var missingResult = new StandingLeaseRestartRecoveryService(missingRunDatabase.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(missingRunDatabase));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, missingResult.Status);
+        Assert.Equal("recovery_snapshot_invalid", missingResult.Reason);
+        Assert.Equal(missingBefore.OccurrenceVersion, RawScalar(missingRunDatabase.Store.DatabasePath, "SELECT version FROM plan_occurrences WHERE id = 'occ-1';"));
+        Assert.Equal(missingBefore.LeaseVersion, missingRunDatabase.Leases.Get("lease-1").Version);
+        Assert.Equal(0L, RawScalar(missingRunDatabase.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+
+        using var mismatchDatabase = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(mismatchDatabase);
+        var mismatchBefore = ReadRecoveryState(mismatchDatabase);
+        RawExecute(
+            mismatchDatabase.Store.DatabasePath,
+            "PRAGMA foreign_keys = OFF; UPDATE lease_uses SET occurrence_id = $occurrence_id WHERE id = $id;",
+            ("$occurrence_id", "other-occurrence"),
+            ("$id", "use-1"));
+
+        var mismatchResult = new StandingLeaseRestartRecoveryService(mismatchDatabase.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(mismatchDatabase));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, mismatchResult.Status);
+        Assert.Equal("recovery_snapshot_invalid", mismatchResult.Reason);
+        Assert.Equal(mismatchBefore.RunVersion, mismatchDatabase.Runs.Get("run-1").Version);
+        Assert.Equal(mismatchBefore.OccurrenceVersion, mismatchDatabase.Occurrences.Get("occ-1").Version);
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryRejectsScopeDigestUnknownStatusAndIllegalReasonWithoutWrites()
+    {
+        using var digestDatabase = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(digestDatabase);
+        var digestBefore = ReadRecoveryState(digestDatabase);
+        var digestResult = new StandingLeaseRestartRecoveryService(digestDatabase.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(digestDatabase) with { ScopeDigest = new string('f', 64) });
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, digestResult.Status);
+        Assert.Equal(digestBefore, ReadRecoveryState(digestDatabase));
+
+        using var unknownStatusDatabase = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(unknownStatusDatabase);
+        var unknownBefore = ReadRecoveryState(unknownStatusDatabase);
+        RawExecute(
+            unknownStatusDatabase.Store.DatabasePath,
+            "PRAGMA ignore_check_constraints = ON; UPDATE recording_runs SET status_code = 'not_a_status' WHERE id = $id;",
+            ("$id", "run-1"));
+        var unknownResult = new StandingLeaseRestartRecoveryService(unknownStatusDatabase.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(unknownStatusDatabase));
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, unknownResult.Status);
+        Assert.Equal("recovery_snapshot_invalid", unknownResult.Reason);
+        Assert.Equal(unknownBefore.OccurrenceVersion, unknownStatusDatabase.Occurrences.Get("occ-1").Version);
+        Assert.Equal(unknownBefore.LeaseVersion, unknownStatusDatabase.Leases.Get("lease-1").Version);
+
+        using var reasonDatabase = new TemporaryDatabase();
+        var (_, _, reasonSpecification, _) = CreateStandingAuthorizationAndSpecification(reasonDatabase);
+        PrepareRecoveryTerminalState(reasonDatabase, reasonSpecification, "started_unknown");
+        var reasonBefore = ReadRecoveryState(reasonDatabase);
+        RawExecute(
+            reasonDatabase.Store.DatabasePath,
+            "UPDATE plan_occurrences SET terminal_reason_code = $reason WHERE id = $id;",
+            ("$reason", "not_a_recovery_reason"),
+            ("$id", "occ-1"));
+        var reasonResult = new StandingLeaseRestartRecoveryService(reasonDatabase.Store, () => At(6))
+            .Recover(CreateRecoveryRequest(reasonDatabase));
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, reasonResult.Status);
+        Assert.Equal("recovery_snapshot_invalid", reasonResult.Reason);
+        Assert.Equal(reasonBefore.RunVersion, reasonDatabase.Runs.Get("run-1").Version);
+        Assert.Equal(reasonBefore.UseVersion, reasonDatabase.Uses.Get("use-1").Version);
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryRejectsAnUnadvanceablePersistedVersionWithoutWrites()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        RawExecute(
+            database.Store.DatabasePath,
+            "PRAGMA ignore_check_constraints = ON; UPDATE recording_runs SET version = $version WHERE id = $id;",
+            ("$version", long.MaxValue),
+            ("$id", "run-1"));
+
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, result.Status);
+        Assert.Equal("recovery_snapshot_invalid", result.Reason);
+        Assert.Equal(long.MaxValue, RawScalar(database.Store.DatabasePath, "SELECT version FROM recording_runs WHERE id = 'run-1';"));
+        Assert.Equal(2L, database.Uses.Get("use-1").Version);
+        Assert.Equal(1L, database.Occurrences.Get("occ-1").Version);
+    }
+
+    [Theory]
+    [InlineData("clock-null")]
+    [InlineData("clock-non-utc")]
+    [InlineData("clock-rewound")]
+    public void StandingLeaseRecoveryFailsClosedForUnavailableNonUtcOrRewoundClock(string clockKind)
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var before = ReadRecoveryState(database);
+        Func<DateTimeOffset?> clock = clockKind switch
+        {
+            "clock-null" => () => null,
+            "clock-non-utc" => () => new DateTimeOffset(2035, 1, 1, 0, 0, 3, TimeSpan.FromHours(8)),
+            _ => () => At(0),
+        };
+
+        var result = new StandingLeaseRestartRecoveryService(database.Store, clock)
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, result.Status);
+        Assert.Contains(result.Reason, new[] { "recovery_clock_unavailable", "recovery_time_not_utc", "recovery_time_non_monotonic" });
+        Assert.Equal(before, ReadRecoveryState(database));
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryRollsBackAllAggregateWritesWhenCommitFails()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var before = ReadRecoveryState(database);
+        var result = new StandingLeaseRestartRecoveryService(
+                database.Store,
+                () => At(3),
+                (_, _) => throw new InvalidOperationException("injected recovery commit failure"))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Rejected, result.Status);
+        Assert.Equal("recovery_sqlite_failure", result.Reason);
+        Assert.Equal(before, ReadRecoveryState(database));
+    }
+
+    [Fact]
+    public async Task StandingLeaseRecoveryConcurrentCallsAdvanceTheChainOnlyOnce()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var request = CreateRecoveryRequest(database);
+        var first = new StandingLeaseRestartRecoveryService(database.Store, () => At(3));
+        var second = new StandingLeaseRestartRecoveryService(database.Store, () => At(3));
+
+        var results = await Task.WhenAll(
+            Task.Run(() => first.Recover(request)),
+            Task.Run(() => second.Recover(request)));
+
+        Assert.Equal(1, results.Count(item => item.Status == StandingLeaseRecoveryStatus.Recovered));
+        Assert.Equal(1, results.Count(item => item.Status == StandingLeaseRecoveryStatus.AlreadyReconciled));
+        AssertRecoveryState(
+            database,
+            RecordingRunStatus.StartedUnknown,
+            LeaseUseStatus.StartedUnknown,
+            PlanOccurrenceStatus.Blocked,
+            "recovery_after_start_commit",
+            expectedActualDuration: null,
+            expectedRunVersion: 3,
+            expectedUseVersion: 3,
+            expectedOccurrenceVersion: 2);
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryHasNoBackendSurfaceAndDoesNotCreateExecutionClaims()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(database));
+
+        Assert.Equal(StandingLeaseRecoveryStatus.Recovered, result.Status);
+        Assert.DoesNotContain(
+            typeof(StandingLeaseRestartRecoveryService).GetFields(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            field => typeof(ICaptureBackend).IsAssignableFrom(field.FieldType));
+        Assert.DoesNotContain(
+            typeof(StandingLeaseRestartRecoveryService).GetMethods(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic),
+            method => method.GetParameters().Any(parameter => typeof(ICaptureBackend).IsAssignableFrom(parameter.ParameterType)));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+        Assert.Equal(ConsentLeaseStatus.Exhausted, database.Leases.Get("lease-1").Status);
+    }
+
+    [Fact]
+    public void StandingLeaseRecoveryLeavesTheExistingStartGateNonExecutable()
+    {
+        using var database = new TemporaryDatabase();
+        _ = CreateStandingAuthorizationAndSpecification(database);
+        var result = new StandingLeaseRestartRecoveryService(database.Store, () => At(3))
+            .Recover(CreateRecoveryRequest(database));
+        Assert.Equal(StandingLeaseRecoveryStatus.Recovered, result.Status);
+
+        var retry = database.Gate.Commit(database.CreateRequest());
+
+        Assert.Equal(Phase3StartGateCommitStatus.AlreadyCommitted, retry.Status);
+        Assert.Equal("already_committed", retry.Code);
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"));
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+    }
+
+    [Fact]
+    public void ActiveStandingSessionDisposeUsesConservativeRecoveryBeforeReleasingBackend()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        var backend = new LifecycleCaptureBackend();
+        var session = new StandingLeaseOneShotExecutionSession(database.Store, specification, backend, () => At(3));
+        var lifecycleSession = (IStandingLeaseCaptureLifecycleSession)session;
+        Assert.True(lifecycleSession.TryAttach(backend, out var attachFailure), attachFailure);
+
+        ((IDisposable)session).Dispose();
+
+        Assert.Equal(RecordingRunStatus.StartedUnknown, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal("recovery_after_start_commit", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public void ActiveRecordingSessionDisposeUsesSessionInterruptedRecoveryBeforeReleasingBackend()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, _, specification, _) = CreateStandingAuthorizationAndSpecification(database);
+        var backend = new LifecycleCaptureBackend();
+        var session = new StandingLeaseOneShotExecutionSession(database.Store, specification, backend, () => At(3));
+        var lifecycleSession = (IStandingLeaseCaptureLifecycleSession)session;
+        Assert.True(lifecycleSession.TryAttach(backend, out var attachFailure), attachFailure);
+        backend.RaiseFirstFrame();
+
+        ((IDisposable)session).Dispose();
+
+        Assert.Equal(RecordingRunStatus.SessionInterrupted, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal("recovery_after_recording_interrupted", database.Runs.Get("run-1").TerminalReasonCode);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    private static StandingLeaseRecoveryRequest CreateRecoveryRequest(TemporaryDatabase database) =>
+        new(
+            database.Scope.PlanId,
+            database.Scope.OccurrenceId,
+            database.Scope.LeaseId,
+            "run-1",
+            "use-1",
+            database.Scope.ScopeId,
+            database.Scope.ScopeDigest);
+
+    private static StandingLeaseWindowEligibilityRequest CreateWindowEligibilityRequest(TemporaryDatabase database) =>
+        new(
+            database.Scope.PlanId,
+            database.Scope.OccurrenceId,
+            database.Scope.LeaseId,
+            database.Scope.ScopeId,
+            database.Scope.ScopeDigest);
+
+    private static (PlanOccurrenceStatus Status, string? TerminalReason, string? RunId, long Version, long RunCount, long UseCount) ReadWindowState(TemporaryDatabase database)
+    {
+        var occurrence = database.Occurrences.Get("occ-1");
+        return (
+            occurrence.Status,
+            occurrence.TerminalReasonCode,
+            occurrence.RunId,
+            occurrence.Version,
+            RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_runs;"),
+            RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM lease_uses;"));
+    }
+
+    private static void AssertWindowState(
+        TemporaryDatabase database,
+        PlanOccurrenceStatus status,
+        string? terminalReason,
+        string? runId,
+        long occurrenceVersion,
+        long runCount,
+        long useCount)
+    {
+        Assert.Equal(
+            (status, terminalReason, runId, occurrenceVersion, runCount, useCount),
+            ReadWindowState(database));
+    }
+
+    private static void PrepareRecoveryActiveState(
+        TemporaryDatabase database,
+        StandingLeaseCaptureSpecification specification,
+        RecordingRunStatus desiredStatus)
+    {
+        var lifecycle = new SqliteStandingLeaseLifecycleTransaction(database.Store, specification);
+        Assert.True(lifecycle.ObserveFirstFrame(new FirstFrameObservation
+        {
+            EvidenceKind = "test_first_frame",
+            FrameNumber = 1,
+            TotalSizeBytes = 4096,
+        }, At(2)).Succeeded);
+
+        if (desiredStatus is RecordingRunStatus.Finalizing or RecordingRunStatus.MediaReady)
+        {
+            Assert.True(lifecycle.ObserveCaptureEnded(At(3)).Succeeded);
+        }
+
+        if (desiredStatus == RecordingRunStatus.MediaReady)
+        {
+            var run = database.Runs.Get("run-1");
+            var expectedVersion = run.Version;
+            Assert.True(run.TryTransition(RecordingRunStatus.MediaReady, At(4)).Succeeded);
+            database.Runs.Update(run, expectedVersion);
+        }
+    }
+
+    private static void PrepareRecoveryTerminalState(
+        TemporaryDatabase database,
+        StandingLeaseCaptureSpecification specification,
+        string terminalKind)
+    {
+        var lifecycle = new SqliteStandingLeaseLifecycleTransaction(database.Store, specification);
+        if (terminalKind == "settled")
+        {
+            Assert.True(lifecycle.ObserveFirstFrame(new FirstFrameObservation
+            {
+                EvidenceKind = "test_first_frame",
+                FrameNumber = 1,
+                TotalSizeBytes = 4096,
+            }, At(2)).Succeeded);
+            Assert.True(lifecycle.CompleteTermination(
+                StandingLeaseLifecycleTerminationKind.NaturalExit,
+                0,
+                ValidOutputMeta(1),
+                At(4)).Succeeded);
+            return;
+        }
+
+        if (terminalKind == "started_unknown")
+        {
+            Assert.True(lifecycle.CompleteTermination(
+                StandingLeaseLifecycleTerminationKind.NaturalExit,
+                0,
+                null,
+                At(4)).Succeeded);
+            return;
+        }
+
+        Assert.True(lifecycle.ObserveFirstFrame(new FirstFrameObservation
+        {
+            EvidenceKind = "test_first_frame",
+            FrameNumber = 1,
+            TotalSizeBytes = 4096,
+        }, At(2)).Succeeded);
+        Assert.True(lifecycle.CompleteTermination(
+            terminalKind == "session_interrupted"
+                ? StandingLeaseLifecycleTerminationKind.UserStop
+                : StandingLeaseLifecycleTerminationKind.NaturalExit,
+            terminalKind == "failed" ? 7 : -1,
+            terminalKind == "failed" ? ValidOutputMeta(1) : null,
+            At(4)).Succeeded);
+    }
+
+    private static (long LeaseVersion, long OccurrenceVersion, long RunVersion, long UseVersion, string? RunReason, string? OccurrenceReason, TimeSpan? ActualDuration) ReadRecoveryState(TemporaryDatabase database) =>
+        (database.Leases.Get("lease-1").Version,
+         database.Occurrences.Get("occ-1").Version,
+         database.Runs.Get("run-1").Version,
+         database.Uses.Get("use-1").Version,
+         database.Runs.Get("run-1").TerminalReasonCode,
+         database.Occurrences.Get("occ-1").TerminalReasonCode,
+         database.Uses.Get("use-1").ActualSettledDuration);
+
+    private static void AssertRecoveryState(
+        TemporaryDatabase database,
+        RecordingRunStatus runStatus,
+        LeaseUseStatus useStatus,
+        PlanOccurrenceStatus occurrenceStatus,
+        string reason,
+        TimeSpan? expectedActualDuration,
+        long expectedRunVersion,
+        long expectedUseVersion,
+        long expectedOccurrenceVersion)
+    {
+        var run = database.Runs.Get("run-1");
+        var use = database.Uses.Get("use-1");
+        var occurrence = database.Occurrences.Get("occ-1");
+        Assert.Equal(runStatus, run.Status);
+        Assert.Equal(useStatus, use.Status);
+        Assert.Equal(occurrenceStatus, occurrence.Status);
+        Assert.Equal(reason, run.TerminalReasonCode);
+        Assert.Equal(reason, occurrence.TerminalReasonCode);
+        Assert.Equal(expectedActualDuration, use.ActualSettledDuration);
+        Assert.Equal(expectedRunVersion, run.Version);
+        Assert.Equal(expectedUseVersion, use.Version);
+        Assert.Equal(expectedOccurrenceVersion, occurrence.Version);
+    }
+
+    private static StandingLeaseOneShotExecutionCoordinator CreateLifecycleCoordinator(
+        TemporaryDatabase database,
+        LifecycleCaptureBackend backend) =>
+        new(
+            database.Store,
+            new FixedExecutionEnvironmentProvider(scope => EnvironmentAt(scope, At(2))),
+            _ => backend,
+            (_, _) => Task.CompletedTask,
+            () => At(2));
+
+    private static OutputMeta ValidOutputMeta(double durationSeconds) => new()
+    {
+        OutputFileExists = true,
+        SizeBytes = 4096,
+        DurationSeconds = durationSeconds,
+    };
+
     private static string CaptureGateCode(Func<Phase3StartGateCommitResult> operation)
     {
         try
@@ -2572,7 +4374,11 @@ public sealed class Phase3StartGateTransactionTests
         Assert.NotNull(proof);
         Assert.True(database.ExecutionSnapshots.TryAuthorizeAndConsumeStandingLeaseUse(
             proof,
-            EnvironmentAt(database.Scope, At(2)),
+            EnvironmentAt(
+                database.Scope,
+                At(2),
+                currentUserSid: database.Scope.CurrentUserSid,
+                sessionBinding: database.Scope.SessionBinding),
             out var authorization,
             out var authorizationReason), authorizationReason);
         Assert.NotNull(authorization);
@@ -2693,6 +4499,72 @@ public sealed class Phase3StartGateTransactionTests
         public void Dispose() => Interlocked.Increment(ref disposeCalls);
     }
 
+    private sealed class LifecycleCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, ICaptureEndedObservableBackend
+    {
+        private int startCalls;
+        private int stopCalls;
+        private int disposeCalls;
+        private Action<int, OutputMeta>? naturalExit;
+
+        public event Action<FirstFrameObservation>? FirstFrameObserved;
+
+        public event Action<CaptureEndedObservation>? CaptureEnded;
+
+        public int StartCalls => Volatile.Read(ref startCalls);
+
+        public int StopCalls => Volatile.Read(ref stopCalls);
+
+        public int DisposeCalls => Volatile.Read(ref disposeCalls);
+
+        public bool EmitFirstFrameOnStart { get; init; }
+
+        public bool EmitNaturalExitOnStart { get; init; }
+
+        public bool ThrowAfterFirstFrameOnStart { get; init; }
+
+        public int ExitCode { get; init; }
+
+        public OutputMeta StopResult { get; init; } = ValidOutputMeta(1);
+
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
+        {
+            Interlocked.Increment(ref startCalls);
+            if (EmitFirstFrameOnStart)
+                RaiseFirstFrame();
+            if (EmitNaturalExitOnStart)
+                RaiseNaturalExit(ExitCode, ValidOutputMeta(1));
+            if (ThrowAfterFirstFrameOnStart)
+                throw new InvalidOperationException("fake backend start failure after first frame");
+        }
+
+        public OutputMeta Stop()
+        {
+            Interlocked.Increment(ref stopCalls);
+            naturalExit?.Invoke(ExitCode, StopResult);
+            return StopResult;
+        }
+
+        public void OnNaturalExit(Action<int, OutputMeta> callback) => naturalExit = callback;
+
+        public void RaiseFirstFrame() => FirstFrameObserved?.Invoke(new FirstFrameObservation
+        {
+            EvidenceKind = "test_first_frame",
+            FrameNumber = 1,
+            TotalSizeBytes = 4096,
+        });
+
+        public void RaiseCaptureEnded() => CaptureEnded?.Invoke(new CaptureEndedObservation
+        {
+            ExitCode = ExitCode,
+            Reason = "natural",
+            EndedAtUtc = At(2).UtcDateTime,
+        });
+
+        public void RaiseNaturalExit(int exitCode, OutputMeta meta) => naturalExit?.Invoke(exitCode, meta);
+
+        public void Dispose() => Interlocked.Increment(ref disposeCalls);
+    }
+
     private static StandingLeaseUseProof CloneStandingProof(
         StandingLeaseUseProof proof,
         string? runId = null,
@@ -2745,6 +4617,19 @@ public sealed class Phase3StartGateTransactionTests
         return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    private static string? RawText(string databasePath, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var connection = OpenRaw(databasePath);
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        return command.ExecuteScalar() as string;
+    }
+
     private static SqliteConnection OpenRaw(string databasePath)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -2756,6 +4641,45 @@ public sealed class Phase3StartGateTransactionTests
         }.ToString());
         connection.Open();
         return connection;
+    }
+
+    private sealed class TestAuditLogger : AuditLogger
+    {
+        public override void Log(string evt, object payload) { }
+    }
+
+    private sealed class StandingEngineTestTray : ITrayContext
+    {
+        public int RecordingCalls { get; private set; }
+
+        public string HostMode => "headless";
+        public bool SupportsRegionSelectionUi => false;
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
+        public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
+        public void SetRecording(RecordingUiPresentation presentation) => RecordingCalls++;
+        public void SetIdle(RecordingUiPresentation presentation) { }
+        public void SetAllIdle() { }
+        public void ShowError(string text) { }
+    }
+
+    private sealed class StandingDisplayTopologyProvider : IDisplayTopologyProvider
+    {
+        private readonly AuthorizedFixedRegionScope scope;
+
+        public StandingDisplayTopologyProvider(AuthorizedFixedRegionScope scope) => this.scope = scope;
+
+        public IReadOnlyList<DisplayTopologySnapshot> GetCurrentDisplays() => new[]
+        {
+            new DisplayTopologySnapshot(
+                "display-1",
+                scope.StableDisplayFingerprint,
+                DisplayIdentityResolutionStatus.Resolved,
+                new CapturePlanBounds(
+                    scope.DisplayBounds.X,
+                    scope.DisplayBounds.Y,
+                    scope.DisplayBounds.Width,
+                    scope.DisplayBounds.Height))
+        };
     }
 
     private sealed class TemporaryDatabase : IDisposable
@@ -2774,12 +4698,18 @@ public sealed class Phase3StartGateTransactionTests
             Action? snapshotLoadedBeforeCoreGateForTest = null,
             Action<SqliteConnection>? beforeCommitForTest = null,
             IStandingLeaseExecutionEnvironmentProvider? environmentProviderForTest = null,
-            int scopeCountdownSeconds = 0)
+            int scopeCountdownSeconds = 0,
+            string scopeSessionBinding = "session-1")
         {
             this.planId = planId;
             Store = new SqliteOperationalStore(Path.Combine(directory.Path, "state", "agent-recorder.db"));
             Directory.CreateDirectory(Path.GetDirectoryName(Store.DatabasePath)!);
             Store.Initialize();
+            // Schema v6 is intentionally default-off. These legacy execution
+            // tests exercise the already-enabled standing-lease path, so make
+            // that fixture choice explicit instead of relying on the default.
+            RawExecute(Store.DatabasePath,
+                "UPDATE unattended_safety_state SET unattended_mode_code = 'enabled' WHERE state_id = 'global';");
             Plans = new SqlitePlanDefinitionRepository(Store);
             Occurrences = new SqlitePlanOccurrenceRepository(Store);
             Runs = new SqliteRecordingRunRepository(Store);
@@ -2794,7 +4724,7 @@ public sealed class Phase3StartGateTransactionTests
             Leases.Insert(lease);
 
             Scopes = new SqliteAuthorizedCaptureScopeRepository(Store);
-            Scope = CreateScope(scopeDuration ?? TimeSpan.FromSeconds(5), scopeCountdownSeconds);
+            Scope = CreateScope(scopeDuration ?? TimeSpan.FromSeconds(5), scopeCountdownSeconds, scopeSessionBinding);
             Scopes.Insert(Scope);
             if (leaseStatus != ConsentLeaseStatus.Active)
             {
@@ -2850,7 +4780,7 @@ public sealed class Phase3StartGateTransactionTests
                 duration ?? TimeSpan.FromSeconds(5),
                 commitAt ?? At(1));
 
-        private AuthorizedFixedRegionScope CreateScope(TimeSpan duration, int countdownSeconds) =>
+        private AuthorizedFixedRegionScope CreateScope(TimeSpan duration, int countdownSeconds, string sessionBinding) =>
             AuthorizedFixedRegionScope.CreateFor(
                 Plans.Get(planId),
                 Occurrences.Get("occ-1"),
@@ -2879,7 +4809,7 @@ public sealed class Phase3StartGateTransactionTests
                 AuthorizedWakePolicy.NaturalWakeOnly,
                 AuthorizedDesktopRequirement.InteractiveDesktopRequired,
                 "S-1-5-21-1",
-                "session-1",
+                sessionBinding,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         public void Dispose() => directory.Dispose();
@@ -2897,13 +4827,26 @@ public sealed class Phase3StartGateTransactionTests
 
         public void Dispose()
         {
-            try
+            IOException? lastIoException = null;
+            for (var attempt = 0; attempt < 40; attempt++)
             {
-                Directory.Delete(Path, recursive: true);
+                try
+                {
+                    Directory.Delete(Path, recursive: true);
+                    return;
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    return;
+                }
+                catch (IOException exception)
+                {
+                    lastIoException = exception;
+                    Thread.Sleep(50);
+                }
             }
-            catch (DirectoryNotFoundException)
-            {
-            }
+
+            throw lastIoException ?? new IOException($"Could not delete temporary directory '{Path}'.");
         }
     }
 }

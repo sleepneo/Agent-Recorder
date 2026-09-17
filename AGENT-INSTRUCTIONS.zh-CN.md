@@ -20,7 +20,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 - 不要在用户确认前声称录制已经开始。
 - 不要尝试调用 HTTP 自批准接口；`POST /confirmations/{id}/approve` 被禁止。
 - 不要静默录制敏感或隐私区域。
-- 每次录制前都要说明即将录制的对象和时长，并等待本地用户确认。
+- 普通录制前要说明即将录制的对象和时长，并等待本地用户逐次确认；一次性无人值守计划必须说明目标、时间、时长和输出，并等待本地用户完成固定区域选择与有界 Lease 批准。
 
 ## 启动与就绪检查（推荐使用 CLI 握手）
 
@@ -493,6 +493,16 @@ Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 
 | "录主屏幕" | `context.displays.primary_display_id != null` | 使用 `quick_recipes.record_primary_display` |
 | "录上次选区" | `context.last_selected_region != null` | 使用 `quick_recipes.record_last_region` |
 | "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用 `selected_region` |
+
+## 一次性有限无人值守计划
+
+仅当用户明确要求稍后自动录制时使用。先读取 `/capabilities.unattended_lease`；只有 `supported`、`current_enabled` 和 `execution_supported` 都为 `true` 才提交 `POST /plans`。该接口只支持一次固定区域、无音频、自然唤醒和交互桌面，单次最长 10 分钟、Lease 最长 1 小时。
+
+提交时必须使用稳定 `Idempotency-Key`，并明确给出 UTC 的 `start_at`、`latest_start_at`、`planned_end_at`、Lease `expires_at`、绝对输出目录和冻结文件名。随后提示用户在本地完成重新选区与 Lease 批准，并通过 `/plan-setups/{id}` 的 `status_version_cursor` 做有界长轮询。
+
+不要声称 API 已经批准录制；不要复用 `last_region`、活动窗口或旧授权；不要请求音频、嵌套、并发或周期计划。出现 `recording_status_url` 后按普通录制状态查询，达到可信 `recording` 才报告已开始。拒绝、撤销、过期、错过窗口、会话不可用、目标/输出变化或重启后的不确定执行都应直接解释其 `reason_code`，不得自行重试或新建替代 Run。
+
+完整字段与示例见 `AGENT-API-REFERENCE.zh-CN.md` 的“一次性有限无人值守计划”。
 
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 

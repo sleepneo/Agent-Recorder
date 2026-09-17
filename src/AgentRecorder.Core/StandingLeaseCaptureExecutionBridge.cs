@@ -17,6 +17,8 @@ internal sealed class StandingLeaseCaptureExecutionBridge
 
     private readonly IStandingLeaseExecutionEnvironmentProvider? _environmentProvider;
     private readonly Func<StandingLeaseCaptureSpecification, ICaptureBackend?> _backendFactory;
+    private readonly Func<StandingLeaseCaptureSpecification, ICaptureBackend, IStandingLeaseCaptureLifecycleSession?>? _lifecycleSessionFactory;
+    private readonly Func<StandingLeaseCaptureExecutionTicket, CancellationToken, Task<StandingLeaseCaptureExecutionResult>>? _engineStarter;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<DateTimeOffset?> _utcNow;
 
@@ -25,20 +27,27 @@ internal sealed class StandingLeaseCaptureExecutionBridge
             environmentProviderForTest: null,
             backendFactoryForTest: null,
             delayForTest: null,
-            utcNowForTest: null)
+            utcNowForTest: null,
+            lifecycleSessionFactoryForTest: null,
+            engineStarterForProduction: null)
     {
     }
 
-    // Internal seams are deterministic test seams. Production uses the
-    // parameterless constructor and the fixed FFmpeg-region factory below.
+    // Internal seams are deterministic test seams. The production App host
+    // supplies an engine starter; this bridge has no production backend
+    // factory fallback.
     internal StandingLeaseCaptureExecutionBridge(
         IStandingLeaseExecutionEnvironmentProvider? environmentProviderForTest,
         Func<StandingLeaseCaptureSpecification, ICaptureBackend?>? backendFactoryForTest,
         Func<TimeSpan, CancellationToken, Task>? delayForTest = null,
-        Func<DateTimeOffset?>? utcNowForTest = null)
+        Func<DateTimeOffset?>? utcNowForTest = null,
+        Func<StandingLeaseCaptureSpecification, ICaptureBackend, IStandingLeaseCaptureLifecycleSession?>? lifecycleSessionFactoryForTest = null,
+        Func<StandingLeaseCaptureExecutionTicket, CancellationToken, Task<StandingLeaseCaptureExecutionResult>>? engineStarterForProduction = null)
     {
         _environmentProvider = environmentProviderForTest;
-        _backendFactory = backendFactoryForTest ?? CreateProductionBackend;
+        _backendFactory = backendFactoryForTest ?? UnsupportedBackendFactory;
+        _lifecycleSessionFactory = lifecycleSessionFactoryForTest;
+        _engineStarter = engineStarterForProduction;
         _delay = delayForTest ?? ((duration, cancellationToken) => Task.Delay(duration, cancellationToken));
         _utcNow = utcNowForTest ?? (() => DateTimeOffset.UtcNow);
     }
@@ -125,19 +134,68 @@ internal sealed class StandingLeaseCaptureExecutionBridge
             return StandingLeaseCaptureExecutionResult.Rejected(timeFailure);
         }
 
+        // Production supplies a trusted RecordingEngine host at this boundary.
+        // The bridge still owns the ticket claim and final proof/time checks,
+        // but the production path never constructs a backend here.
+        if (_engineStarter is not null)
+        {
+            try
+            {
+                return await _engineStarter(ticket, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return StandingLeaseCaptureExecutionResult.Cancelled();
+            }
+            catch
+            {
+                return StandingLeaseCaptureExecutionResult.Failed("standing_execution_engine_start_failed");
+            }
+        }
+
         ICaptureBackend? backend = null;
+        IStandingLeaseCaptureLifecycleSession? lifecycleSession = null;
         try
         {
             backend = _backendFactory(specification);
             if (backend is null)
                 return StandingLeaseCaptureExecutionResult.Failed("standing_execution_backend_unavailable");
 
+            if (_lifecycleSessionFactory is not null)
+            {
+                lifecycleSession = _lifecycleSessionFactory(specification, backend);
+                if (lifecycleSession is null)
+                {
+                    backend.Dispose();
+                    return StandingLeaseCaptureExecutionResult.Failed("standing_execution_lifecycle_session_unavailable");
+                }
+
+                if (!lifecycleSession.TryAttach(backend, out var lifecycleFailure))
+                {
+                    lifecycleSession.Dispose();
+                    return StandingLeaseCaptureExecutionResult.Failed(lifecycleFailure);
+                }
+            }
+
             backend.Start(config, ticket.GetConsumedProofForBackendStart());
-            return StandingLeaseCaptureExecutionResult.Started(backend);
+            return StandingLeaseCaptureExecutionResult.Started(backend, lifecycleSession);
         }
         catch
         {
-            if (backend is not null)
+            if (lifecycleSession is not null)
+            {
+                try
+                {
+                    lifecycleSession.StartFailed();
+                    lifecycleSession.Dispose();
+                }
+                catch
+                {
+                    // The start failure remains the authoritative result and
+                    // the session remains the single disposal owner.
+                }
+            }
+            else if (backend is not null)
             {
                 try
                 {
@@ -289,6 +347,12 @@ internal sealed class StandingLeaseCaptureExecutionBridge
         return true;
     }
 
+    internal static bool TryBuildCaptureConfigForEngine(
+        StandingLeaseCaptureSpecification specification,
+        out CaptureConfig config,
+        out string failureReason) =>
+        TryMapCaptureConfig(specification, out config, out failureReason);
+
     private static bool TryMapCaptureConfig(
         StandingLeaseCaptureSpecification specification,
         out CaptureConfig config,
@@ -359,15 +423,10 @@ internal sealed class StandingLeaseCaptureExecutionBridge
         return true;
     }
 
-    private static ICaptureBackend CreateProductionBackend(
+    private static ICaptureBackend UnsupportedBackendFactory(
         StandingLeaseCaptureSpecification specification)
     {
-        if (specification.Backend != AuthorizedCaptureBackend.FfmpegRegion ||
-            !string.Equals(specification.BackendCodeValue, StandingLeaseCaptureSpecification.BackendCode, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("The standing bridge only supports the approved FFmpeg region backend.");
-        }
-
-        return new FfmpegCaptureBackend();
+        throw new InvalidOperationException(
+            "The standing execution bridge requires a RecordingEngine production host.");
     }
 }

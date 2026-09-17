@@ -1,4 +1,5 @@
 using AgentRecorder.Core.Automation;
+using AgentRecorder.Core;
 
 namespace AgentRecorder.Persistence;
 
@@ -58,4 +59,44 @@ public interface IAuthorizedCaptureScopeRepository
     AuthorizedFixedRegionScope GetByLeaseId(string leaseId);
 
     AuthorizedFixedRegionScope GetByOccurrence(string occurrenceId);
+}
+
+public interface IRecurringPlanProfileBindingRepository
+{
+    RecurringPlanProfileBinding Bind(string planId, ProfileRef profileRef, DateTimeOffset boundAtUtc);
+
+    RecurringPlanProfileBinding Get(string planId);
+
+    RecurringPlanProfileBinding? TryGet(string planId);
+
+    IReadOnlyList<string> ListReferencingPlanIds(
+        ProfileRef profileRef,
+        string? beforePlanIdExclusive = null,
+        int limit = 100);
+}
+
+public interface IRecurringConsentLeaseRepository
+{
+    void InsertPending(RecurringConsentLease lease);
+
+    RecurringConsentLease Get(string leaseId);
+
+    RecurringConsentLease? TryGet(string leaseId);
+
+    IReadOnlyList<RecurringConsentLease> ListByPlan(
+        string planId,
+        string? afterLeaseIdExclusive = null,
+        int limit = 100);
+}
+
+public interface IRecurringLeaseLocalApprovalEvidenceReader
+{
+    RecurringLeaseLocalApprovalEvidence? TryGetByLease(string leaseId);
+}
+
+public interface IRecurringLeaseUseAccountingReader
+{
+    IReadOnlyList<RecurringLeaseUseAccountingEntry> ListByLease(string leaseId);
+
+    RecurringLeaseUseAccountingEntry? TryGetByOccurrence(string occurrenceIdentity);
 }

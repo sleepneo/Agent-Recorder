@@ -126,6 +126,7 @@ public sealed class Phase3DomainStateContractsTests
             (RecordingRunStatus.Finalizing, RecordingRunStatus.SessionInterrupted),
             (RecordingRunStatus.Finalizing, RecordingRunStatus.Failed),
             (RecordingRunStatus.MediaReady, RecordingRunStatus.Settled),
+            (RecordingRunStatus.MediaReady, RecordingRunStatus.SessionInterrupted),
         });
         AssertLegal(Phase3TransitionGuards.IsConsentLeaseEdge, new[]
         {
@@ -145,6 +146,7 @@ public sealed class Phase3DomainStateContractsTests
             (LeaseUseStatus.StartCommitted, LeaseUseStatus.Consumed),
             (LeaseUseStatus.StartCommitted, LeaseUseStatus.StartedUnknown),
             (LeaseUseStatus.Consumed, LeaseUseStatus.Settled),
+            (LeaseUseStatus.Consumed, LeaseUseStatus.StartedUnknown),
         });
     }
 

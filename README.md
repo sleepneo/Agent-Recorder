@@ -17,8 +17,10 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
   "record a selected region for 30 seconds."
 - AI agents use a small localhost API instead of controlling a traditional
   screen recorder UI.
-- Agent Recorder keeps the safety boundary local: every recording requires
-  visible user selection and/or confirmation.
+- Agent Recorder keeps the safety boundary local: ordinary recordings require
+  visible user selection and/or confirmation. The optional one-shot unattended
+  mode requires a separate local fixed-region selection and bounded lease
+  approval before anything can run later.
 
 ## Recommended Agent Path
 
@@ -104,6 +106,10 @@ Agents should use the paths returned by `ensure-running` or
 - A DPI-aware region selector with corner accents and a live
   `W x H @ display` label.
 - HTTP self-approval blocked with `405 METHOD_NOT_ALLOWED`.
+- Optional one-shot unattended fixed-region plans. This mode is disabled by
+  default and limited to one silent run, a lease of at most one hour, a run of
+  at most ten minutes, natural wake only, and an interactive desktop. The agent
+  cannot approve or widen the lease over HTTP.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.
 - On the validated default FFmpeg path, role-aware capture visibility keeps

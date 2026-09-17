@@ -31,6 +31,8 @@ internal sealed class StandingLeaseCaptureExecutionTicket
 
     internal bool IsProofConsumed => _consumedProof.IsConsumed;
 
+    internal bool IsClaimed => Volatile.Read(ref _claimState) == 1;
+
     internal CaptureAuthorizationProof GetConsumedProofForBackendStart() => _consumedProof;
 
     internal static bool TryCreate(
@@ -115,11 +117,13 @@ internal sealed class StandingLeaseCaptureExecutionResult
     private StandingLeaseCaptureExecutionResult(
         StandingLeaseCaptureExecutionStatus status,
         string reason,
-        ICaptureBackend? backend)
+        ICaptureBackend? backend,
+        IStandingLeaseCaptureLifecycleSession? lifecycleSession)
     {
         Status = status;
         Reason = reason;
         Backend = backend;
+        LifecycleSession = lifecycleSession;
     }
 
     internal StandingLeaseCaptureExecutionStatus Status { get; }
@@ -128,15 +132,23 @@ internal sealed class StandingLeaseCaptureExecutionResult
 
     internal ICaptureBackend? Backend { get; }
 
-    internal static StandingLeaseCaptureExecutionResult Started(ICaptureBackend backend) =>
-        new(StandingLeaseCaptureExecutionStatus.Started, "", backend);
+    internal IStandingLeaseCaptureLifecycleSession? LifecycleSession { get; }
+
+    internal static StandingLeaseCaptureExecutionResult Started(
+        ICaptureBackend backend,
+        IStandingLeaseCaptureLifecycleSession? lifecycleSession = null) =>
+        new(
+            StandingLeaseCaptureExecutionStatus.Started,
+            "",
+            lifecycleSession is null ? backend : null,
+            lifecycleSession);
 
     internal static StandingLeaseCaptureExecutionResult Rejected(string reason) =>
-        new(StandingLeaseCaptureExecutionStatus.Rejected, reason, null);
+        new(StandingLeaseCaptureExecutionStatus.Rejected, reason, null, null);
 
     internal static StandingLeaseCaptureExecutionResult Failed(string reason) =>
-        new(StandingLeaseCaptureExecutionStatus.Failed, reason, null);
+        new(StandingLeaseCaptureExecutionStatus.Failed, reason, null, null);
 
     internal static StandingLeaseCaptureExecutionResult Cancelled() =>
-        new(StandingLeaseCaptureExecutionStatus.Cancelled, "standing_execution_cancelled", null);
+        new(StandingLeaseCaptureExecutionStatus.Cancelled, "standing_execution_cancelled", null, null);
 }

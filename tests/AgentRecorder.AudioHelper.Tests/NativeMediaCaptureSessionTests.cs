@@ -1,12 +1,50 @@
+using System;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading;
 using AgentRecorder.Capture;
 using Xunit;
+using Xunit.Sdk;
 
 namespace AgentRecorder.AudioHelper.Tests;
 
 public sealed class NativeMediaCaptureSessionTests
 {
+    private static void DeleteOwnedDirectory(string path)
+    {
+        Exception? last = null;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            if (!Directory.Exists(path))
+                return;
+
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                if (!Directory.Exists(path))
+                    return;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return;
+            }
+            catch (IOException ex)
+            {
+                last = ex;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                last = ex;
+            }
+
+            Thread.Sleep(50 * (attempt + 1));
+        }
+
+        throw new XunitException(
+            $"Failed to clean owned native-session directory '{path}' after bounded retries. Last error: {last}");
+    }
+
     [Fact]
     public async Task RunAsync_WhenStopped_HoldsExactEndpointAndFinalizesOnce()
     {
@@ -281,7 +319,16 @@ public sealed class NativeMediaCaptureSessionTests
         {
             try { Watcher.Dispose(); } catch { }
             try { Cancellation.Dispose(); } catch { }
-            try { Directory.Delete(Root, recursive: true); } catch { }
+            DeleteOwnedDirectory(Root);
+
+            var parent = Directory.GetParent(Root)?.FullName;
+            if (parent != null && Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any())
+            {
+                try { Directory.Delete(parent); }
+                catch (DirectoryNotFoundException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
     }
 

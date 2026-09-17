@@ -127,6 +127,55 @@ public sealed class SqliteAuthorizedCaptureScopeRepository : SqliteRepositoryBas
         }
     }
 
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        AuthorizedFixedRegionScope snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO authorized_capture_scopes ({SelectColumns}) VALUES ($scope_id, $plan_id, $occurrence_id, $lease_id, $authorization_version, $created_at_utc, $scope_digest, $target_type_code, $capture_semantics_code, $coordinate_space_code, $display_identity_status_code, $stable_display_fingerprint, $display_bounds_x, $display_bounds_y, $display_bounds_width, $display_bounds_height, $region_x, $region_y, $region_width, $region_height, $dpi_x, $dpi_y, $physical_width, $physical_height, $orientation_code, $backend_code, $audio_mode_code, $reserved_duration_ms, $countdown_seconds, $output_directory, $frozen_file_name, $output_conflict_policy_code, $wake_policy_code, $desktop_requirement_code, $current_user_sid, $session_binding, $topology_digest);";
+        Add(command, "$scope_id", RequiredInput(snapshot.ScopeId));
+        Add(command, "$plan_id", RequiredInput(snapshot.PlanId));
+        Add(command, "$occurrence_id", RequiredInput(snapshot.OccurrenceId));
+        Add(command, "$lease_id", RequiredInput(snapshot.LeaseId));
+        Add(command, "$authorization_version", snapshot.AuthorizationVersion);
+        Add(command, "$created_at_utc", UtcTicksInput(snapshot.CreatedAtUtc));
+        Add(command, "$scope_digest", RequiredInput(snapshot.ScopeDigest));
+        Add(command, "$target_type_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.TargetType));
+        Add(command, "$capture_semantics_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.CaptureSemantics));
+        Add(command, "$coordinate_space_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.CoordinateSpace));
+        Add(command, "$display_identity_status_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.DisplayIdentityStatus));
+        Add(command, "$stable_display_fingerprint", RequiredInput(snapshot.StableDisplayFingerprint));
+        Add(command, "$display_bounds_x", snapshot.DisplayBounds.X);
+        Add(command, "$display_bounds_y", snapshot.DisplayBounds.Y);
+        Add(command, "$display_bounds_width", snapshot.DisplayBounds.Width);
+        Add(command, "$display_bounds_height", snapshot.DisplayBounds.Height);
+        Add(command, "$region_x", snapshot.RegionWithinDisplay.X);
+        Add(command, "$region_y", snapshot.RegionWithinDisplay.Y);
+        Add(command, "$region_width", snapshot.RegionWithinDisplay.Width);
+        Add(command, "$region_height", snapshot.RegionWithinDisplay.Height);
+        Add(command, "$dpi_x", snapshot.DpiX);
+        Add(command, "$dpi_y", snapshot.DpiY);
+        Add(command, "$physical_width", snapshot.PhysicalWidth);
+        Add(command, "$physical_height", snapshot.PhysicalHeight);
+        Add(command, "$orientation_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.Orientation));
+        Add(command, "$backend_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.Backend));
+        Add(command, "$audio_mode_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.AudioMode));
+        Add(command, "$reserved_duration_ms", DurationMillisecondsInput(snapshot.ReservedDuration));
+        Add(command, "$countdown_seconds", snapshot.CountdownSeconds);
+        Add(command, "$output_directory", RequiredInput(snapshot.OutputDirectory));
+        Add(command, "$frozen_file_name", RequiredInput(snapshot.FrozenFileName));
+        Add(command, "$output_conflict_policy_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.OutputConflictPolicy));
+        Add(command, "$wake_policy_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.WakePolicy));
+        Add(command, "$desktop_requirement_code", AuthorizedFixedRegionScopeCodes.ToCode(snapshot.DesktopRequirement));
+        Add(command, "$current_user_sid", RequiredInput(snapshot.CurrentUserSid));
+        Add(command, "$session_binding", RequiredInput(snapshot.SessionBinding));
+        Add(command, "$topology_digest", RequiredInput(snapshot.TopologyDigest));
+        EnsureRowsAffected(command.ExecuteNonQuery());
+    }
+
     public AuthorizedFixedRegionScope GetById(string id) =>
         GetByQuery("SELECT " + SelectColumns + " FROM authorized_capture_scopes WHERE scope_id = $lookup;", id);
 

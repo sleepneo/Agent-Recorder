@@ -11,6 +11,7 @@ using System.Windows.Forms;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
+using AgentRecorder.Persistence;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
@@ -29,6 +30,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     public bool IsChapterMarksHotkeyRegistered => _chapterMarksHotkey?.Registered ?? false;
     public string? ChapterMarksHotkeyGesture => "Ctrl+Shift+F11";
     public string ChapterMarksHotkeyRegistrationPolicy => "while_recording";
+    internal IUiTextProvider CurrentUiTextProvider => _uiText;
 
     private readonly NotifyIcon _icon;
     private readonly RecordingEngine _engine;
@@ -44,6 +46,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private bool _chapterMarkHadExactRecording;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _stopItem;
+    private readonly ToolStripMenuItem? _unattendedSafetyControlItem;
     private readonly ToolStripMenuItem _approveItem;
     private readonly ToolStripMenuItem _rejectItem;
     private readonly ToolStripSeparator _confirmSep;
@@ -61,6 +64,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly IChapterMarkFeedbackPresenter _chapterMarkFeedbackPresenter;
     private readonly RecordingFailureNotificationManager _failureNotificationManager;
     private IUiTextProvider _uiText;
+    private readonly StandingLeaseSafetyControlService? _unattendedSafetyService;
+    private UnattendedSafetyControlForm? _unattendedSafetyForm;
 
     // Confirmation queue
     private readonly ConfirmationQueue _confirmationQueue = new();
@@ -72,9 +77,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     {
     }
 
-    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null, IRecordingFailureNotificationPresenter? failureNotificationPresenter = null, Func<Action, IGlobalStopHotkey>? chapterMarksHotkeyFactory = null, IChapterMarkFeedbackPresenter? chapterMarkFeedbackPresenter = null)
+    internal TrayContext(RecordingEngine engine, AuditLogger audit, Func<Action, IGlobalStopHotkey>? hotkeyFactory, IWindowActivator? confirmationWindowActivator = null, IUiTextProvider? uiTextProvider = null, IPerformanceTracer? tracer = null, ITrayBubblePolicy? bubblePolicy = null, ITrayBalloonTip? balloonTip = null, IIndicatorPresenter? indicatorPresenter = null, IRecordingFailureNotificationPresenter? failureNotificationPresenter = null, Func<Action, IGlobalStopHotkey>? chapterMarksHotkeyFactory = null, IChapterMarkFeedbackPresenter? chapterMarkFeedbackPresenter = null, StandingLeaseSafetyControlService? unattendedSafetyService = null)
     {
         _engine = engine; _audit = audit;
+        _unattendedSafetyService = unattendedSafetyService;
         _chapterMarksHotkeyFactory = chapterMarksHotkeyFactory ?? hotkeyFactory;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _confirmationWindowActivator = confirmationWindowActivator ?? DefaultWindowActivator.Instance;
@@ -113,6 +119,9 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
         _statusItem = new ToolStripMenuItem(_uiText.Get("Tray_Status_Idle")) { Enabled = false };
         _stopItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Stop"), null, (_, _) => StopAll("tray_menu")) { Enabled = false };
+        _unattendedSafetyControlItem = _unattendedSafetyService is null
+            ? null
+            : new ToolStripMenuItem(_uiText.Get("Tray_Menu_UnattendedSafety"), null, (_, _) => OpenUnattendedSafetyControl());
 
         _languageZhCnItem = new ToolStripMenuItem(_uiText.Get("Tray_Language_ZhCn"), null, (_, _) => SetLanguage(UiLanguage.ZhCn));
         _languageEnUsItem = new ToolStripMenuItem(_uiText.Get("Tray_Language_EnUs"), null, (_, _) => SetLanguage(UiLanguage.EnUs));
@@ -130,6 +139,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         menu.Items.Add(_statusItem);
         menu.Items.Add(_openOutputFolderItem);
         menu.Items.Add(_stopItem);
+        if (_unattendedSafetyControlItem is not null)
+            menu.Items.Add(_unattendedSafetyControlItem);
         menu.Items.Add(_languageItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_exitItem);
@@ -225,6 +236,9 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _languageEnUsItem.Text = _uiText.Get("Tray_Language_EnUs");
         _openOutputFolderItem.Text = _uiText.Get("Tray_Menu_OpenOutputDir");
         _exitItem.Text = _uiText.Get("Tray_Menu_Exit");
+        if (_unattendedSafetyControlItem is not null)
+            _unattendedSafetyControlItem.Text = _uiText.Get("Tray_Menu_UnattendedSafety");
+        _unattendedSafetyForm?.UpdateLanguage(_uiText);
 
         UpdateConfirmationMenu();
 
@@ -1063,6 +1077,36 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _confirmSep.Visible = false;
     }
 
+    private void OpenUnattendedSafetyControl()
+    {
+        if (_unattendedSafetyService is null)
+            return;
+
+        var reused = _unattendedSafetyForm is not null && !_unattendedSafetyForm.IsDisposed;
+        if (_unattendedSafetyForm is null || _unattendedSafetyForm.IsDisposed)
+        {
+            _unattendedSafetyForm = new UnattendedSafetyControlForm(
+                new StandingLeaseSafetyControlGateway(_unattendedSafetyService),
+                _uiText);
+            _unattendedSafetyForm.FormClosed += (_, _) => _unattendedSafetyForm = null;
+        }
+        else
+        {
+            _unattendedSafetyForm.RefreshFromTray();
+        }
+
+        if (_unattendedSafetyForm.WindowState == FormWindowState.Minimized)
+            _unattendedSafetyForm.WindowState = FormWindowState.Normal;
+        _unattendedSafetyForm.Show();
+        _unattendedSafetyForm.BringToFront();
+        _unattendedSafetyForm.Activate();
+        _audit.Log("tray.unattended_safety_control_opened", new
+        {
+            reused,
+            language = _uiText.Language.ToCultureName(),
+        });
+    }
+
     private void ShowBalloonTipIfAllowed(BubbleType type, int timeout, string title, string body, ToolTipIcon icon)
     {
         if (_bubblePolicy.AllowShowBubble(type, _activeRecordings.Count))
@@ -1273,6 +1317,133 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     }
 
     /// <summary>
+    /// One-shot standing plans deliberately use a fresh blank selection.  This
+    /// path does not read or write the ordinary last-region state.
+    /// </summary>
+    internal void RequestStandingRegionSelection(
+        int timeoutSeconds,
+        Action<string, int, int, int, int, string, string> callback)
+        => RequestStandingRegionSelection(timeoutSeconds, callback, CancellationToken.None);
+
+    internal void RequestStandingRegionSelection(
+        int timeoutSeconds,
+        Action<string, int, int, int, int, string, string> callback,
+        CancellationToken cancellationToken)
+    {
+        var callbackState = new CallbackState();
+        Action<string, int, int, int, int, string, string> guardedCallback =
+            (status, x, y, w, h, did, cs) =>
+            {
+                if (Interlocked.Exchange(ref callbackState.AlreadyCalled, 1) == 1)
+                    return;
+                callback(status, x, y, w, h, did, cs);
+            };
+
+        var uiThreadCompleted = new ManualResetEventSlim(false);
+        Thread? uiThread = null;
+        void CloseUiFromTimeout()
+        {
+            callbackState.CloseRequestedFromTimeout = true;
+            if (callbackState.FormHandle != IntPtr.Zero)
+                Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            uiThreadCompleted.Wait(2000);
+        }
+
+        void CloseUiFromCancellation()
+        {
+            callbackState.CloseRequestedFromCancellation = true;
+            if (callbackState.FormHandle != IntPtr.Zero)
+                Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            uiThreadCompleted.Wait(2000);
+        }
+
+        CancellationTokenRegistration cancellationRegistration = default;
+        cancellationRegistration = cancellationToken.Register(() =>
+        {
+            try
+            {
+                CloseUiFromCancellation();
+                guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
+            }
+            catch
+            {
+                guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
+            }
+        });
+
+        uiThread = new Thread(() =>
+        {
+            try
+            {
+                using var form = CreateRegionSelectionForm(
+                    initialBounds: null,
+                    e => _audit.Log("standing_setup." + e.EventName, e.Payload),
+                    _uiText);
+                callbackState.FormHandle = form.Handle;
+                if (callbackState.CloseRequestedFromTimeout || callbackState.CloseRequestedFromCancellation)
+                {
+                    guardedCallback(
+                        callbackState.CloseRequestedFromCancellation ? "host_shutdown" : "selection_timeout",
+                        0, 0, 0, 0, "", "virtual_screen");
+                    return;
+                }
+
+                var result = form.ShowDialog();
+                if (callbackState.CloseRequestedFromTimeout || callbackState.CloseRequestedFromCancellation)
+                {
+                    guardedCallback(
+                        callbackState.CloseRequestedFromCancellation ? "host_shutdown" : "selection_timeout",
+                        0, 0, 0, 0, "", "virtual_screen");
+                }
+                else if (result == DialogResult.OK)
+                {
+                    var bounds = form.SelectedBounds;
+                    guardedCallback("selected", bounds.X, bounds.Y, bounds.Width, bounds.Height,
+                        form.DisplayId, form.CoordinateSpace);
+                }
+                else
+                {
+                    guardedCallback("selection_cancelled", 0, 0, 0, 0, "", "virtual_screen");
+                }
+            }
+            catch (Exception exception)
+            {
+                _audit.Log("standing_setup.region_selection_failed", new { reason_code = "region_selection_error", exception_type = exception.GetType().Name });
+                guardedCallback("error", 0, 0, 0, 0, "", "virtual_screen");
+            }
+            finally
+            {
+                uiThreadCompleted.Set();
+            }
+        });
+        uiThread.SetApartmentState(ApartmentState.STA);
+        uiThread.IsBackground = true;
+        uiThread.Start();
+
+        var timeoutThread = new Thread(() =>
+        {
+            try
+            {
+                if (!uiThreadCompleted.Wait(timeoutSeconds * 1000))
+                {
+                    CloseUiFromTimeout();
+                    guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
+                }
+            }
+            catch
+            {
+                guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
+            }
+            finally
+            {
+                cancellationRegistration.Dispose();
+            }
+        });
+        timeoutThread.IsBackground = true;
+        timeoutThread.Start();
+    }
+
+    /// <summary>
     /// Centralizes the production wiring that ensures the audit callback is attached
     /// before the form constructor emits <c>region_selection.ui_created</c>.
     /// This is the only supported way for production code to create a region selection form.
@@ -1289,6 +1460,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     {
         public int AlreadyCalled = 0;
         public bool CloseRequestedFromTimeout = false;
+        public bool CloseRequestedFromCancellation = false;
         public IntPtr FormHandle = IntPtr.Zero;
     }
 
@@ -1330,6 +1502,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _indicatorManager.CloseAll("recording.app_exit");
         _confirmationQueue.Clear(invokeCallbacks: false);
         HideConfirmationForm("app_exit");
+        var safetyForm = _unattendedSafetyForm;
+        _unattendedSafetyForm = null;
+        try { safetyForm?.CloseForOwner(); } catch { }
+        try { safetyForm?.Dispose(); } catch { }
 
         // Hide the icon before disposing the NotifyIcon and the icons it may reference.
         try { _icon.Visible = false; } catch { }

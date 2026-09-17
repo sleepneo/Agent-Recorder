@@ -19,6 +19,7 @@ namespace AgentRecorder.Tests;
 public class RecordingPreflightCheckerTests : IDisposable
 {
     private readonly TempDirectory _tmp = new();
+    private readonly FakeAudioHelperDeployment _fakeHelper;
     private readonly RecordingPreflightChecker.TryGetFreeSpace _originalFreeSpace;
     private readonly RecordingPreflightChecker.TryGetEncoderPaths _originalEncoder;
     private readonly RecordingPreflightChecker.TryResolveAudioHelper _originalAudioHelperPathResolver;
@@ -29,6 +30,7 @@ public class RecordingPreflightCheckerTests : IDisposable
 
     public RecordingPreflightCheckerTests()
     {
+        _fakeHelper = new FakeAudioHelperDeployment(_tmp.Path);
         _originalFreeSpace = RecordingPreflightChecker.FreeSpaceProvider;
         _originalEncoder = RecordingPreflightChecker.EncoderProvider;
         _originalAudioHelperPathResolver = RecordingPreflightChecker.AudioHelperPathResolver;
@@ -67,6 +69,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         RecordingPreflightChecker.ShouldUseWasapiBackend = _originalShouldUseWasapiBackend;
         SystemQuery.SetWindowProvider(_originalWindowProvider);
         SystemQuery.SetDisplayProvider(_originalDisplayProvider);
+        _fakeHelper.Dispose();
         _tmp.Dispose();
     }
 
@@ -575,22 +578,8 @@ public class RecordingPreflightCheckerTests : IDisposable
     [Fact]
     public void AudioHelperProbeLauncher_HangingFakeHelper_ReturnsTimeoutAndKillsProcess()
     {
-        var baseDir = Path.Combine(
-            AppContext.BaseDirectory,
-            "..", "..", "..", "..", "..",
-            "tests", "AgentRecorder.AudioHelper.Fake", "bin");
-        string? fakeHelperPath = null;
-        foreach (var config in new[] { "Release", "Debug" })
-        {
-            var candidate = Path.GetFullPath(Path.Combine(baseDir, config, "net8.0-windows10.0.19041.0", "AgentRecorder.AudioHelper.Fake.exe"));
-            if (File.Exists(candidate))
-            {
-                fakeHelperPath = candidate;
-                break;
-            }
-        }
-        Assert.NotNull(fakeHelperPath);
-        Assert.True(File.Exists(fakeHelperPath), $"Fake helper not found under {baseDir}");
+        var fakeHelperPath = _fakeHelper.ExecutablePath;
+        Assert.True(File.Exists(fakeHelperPath), $"Private fake helper not found under {_fakeHelper.Root}");
 
         var previous = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG");
         try

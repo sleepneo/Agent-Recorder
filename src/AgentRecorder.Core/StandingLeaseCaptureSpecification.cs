@@ -38,6 +38,9 @@ internal sealed class StandingLeaseCaptureSpecification
         RunId = runId;
         LeaseId = leaseId;
         LeaseUseId = leaseUseId;
+        PlanId = scope.PlanId;
+        OccurrenceId = scope.OccurrenceId;
+        ScopeId = scope.ScopeId;
         ScopeDigest = scope.ScopeDigest;
         TargetType = scope.TargetType;
         CaptureSemantics = scope.CaptureSemantics;
@@ -76,6 +79,12 @@ internal sealed class StandingLeaseCaptureSpecification
     internal string LeaseId { get; }
 
     internal string LeaseUseId { get; }
+
+    internal string PlanId { get; }
+
+    internal string OccurrenceId { get; }
+
+    internal string ScopeId { get; }
 
     internal string ScopeDigest { get; }
 
@@ -143,6 +152,9 @@ internal sealed class StandingLeaseCaptureSpecification
             string.Equals(RunId, authorization.RunId, StringComparison.Ordinal) &&
             string.Equals(LeaseId, authorization.LeaseId, StringComparison.Ordinal) &&
             string.Equals(LeaseUseId, authorization.LeaseUseId, StringComparison.Ordinal) &&
+            string.Equals(PlanId, scope.PlanId, StringComparison.Ordinal) &&
+            string.Equals(OccurrenceId, scope.OccurrenceId, StringComparison.Ordinal) &&
+            string.Equals(ScopeId, scope.ScopeId, StringComparison.Ordinal) &&
             string.Equals(ScopeDigest, scope.ScopeDigest, StringComparison.Ordinal) &&
             TargetType == scope.TargetType &&
             CaptureSemantics == scope.CaptureSemantics &&
@@ -167,6 +179,36 @@ internal sealed class StandingLeaseCaptureSpecification
             WakePolicy == scope.WakePolicy &&
             DesktopRequirement == scope.DesktopRequirement;
     }
+
+    internal bool MatchesScope(AuthorizedFixedRegionScope scope) =>
+        scope is not null &&
+        string.Equals(LeaseId, scope.LeaseId, StringComparison.Ordinal) &&
+        string.Equals(PlanId, scope.PlanId, StringComparison.Ordinal) &&
+        string.Equals(OccurrenceId, scope.OccurrenceId, StringComparison.Ordinal) &&
+        string.Equals(ScopeId, scope.ScopeId, StringComparison.Ordinal) &&
+        string.Equals(ScopeDigest, scope.ScopeDigest, StringComparison.Ordinal) &&
+        TargetType == scope.TargetType &&
+        CaptureSemantics == scope.CaptureSemantics &&
+        CoordinateSpace == scope.CoordinateSpace &&
+        VirtualScreenRegion == scope.VirtualScreenRegion &&
+        string.Equals(StableDisplayFingerprint, scope.StableDisplayFingerprint, StringComparison.Ordinal) &&
+        DisplayBounds == scope.DisplayBounds &&
+        DpiX == scope.DpiX &&
+        DpiY == scope.DpiY &&
+        PhysicalWidth == scope.PhysicalWidth &&
+        PhysicalHeight == scope.PhysicalHeight &&
+        Orientation == scope.Orientation &&
+        string.Equals(TopologyDigest, scope.TopologyDigest, StringComparison.Ordinal) &&
+        Backend == scope.Backend &&
+        AudioMode == scope.AudioMode &&
+        MaximumDuration == scope.ReservedDuration &&
+        CountdownSeconds == scope.CountdownSeconds &&
+        string.Equals(OutputDirectory, scope.OutputDirectory, StringComparison.Ordinal) &&
+        string.Equals(FrozenFileName, scope.FrozenFileName, StringComparison.Ordinal) &&
+        string.Equals(OutputFilePath, scope.OutputFilePath, StringComparison.Ordinal) &&
+        OutputConflictPolicy == scope.OutputConflictPolicy &&
+        WakePolicy == scope.WakePolicy &&
+        DesktopRequirement == scope.DesktopRequirement;
 
     /// <summary>
     /// Projects only an already-consumed and already-committed authorization.

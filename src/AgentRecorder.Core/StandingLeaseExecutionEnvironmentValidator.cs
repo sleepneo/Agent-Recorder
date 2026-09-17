@@ -20,16 +20,30 @@ internal static class StandingLeaseExecutionEnvironmentValidator
         if (environment is null || scope is null)
             return false;
 
-        if (!string.Equals(environment.CurrentUserSid, scope.CurrentUserSid, StringComparison.Ordinal) ||
-            !string.Equals(environment.SessionBinding, scope.SessionBinding, StringComparison.Ordinal) ||
+        return TryValidate(
+            environment,
+            FixedRegionExecutionEnvironmentRequirements.FromScope(scope),
+            out failureReason);
+    }
+
+    internal static bool TryValidate(
+        StandingLeaseExecutionEnvironment? environment,
+        FixedRegionExecutionEnvironmentRequirements? requirements,
+        out string failureReason)
+    {
+        failureReason = "execution_environment_missing";
+        if (environment is null || requirements is null)
+            return false;
+
+        if (!string.Equals(environment.CurrentUserSid, requirements.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(environment.SessionBinding, requirements.SessionBinding, StringComparison.Ordinal) ||
             !environment.IsInteractiveDesktop)
         {
             failureReason = "execution_environment_mismatch";
             return false;
         }
 
-        if (scope.DisplayIdentityStatus != AuthorizedDisplayIdentityStatus.Resolved ||
-            string.IsNullOrWhiteSpace(scope.StableDisplayFingerprint))
+        if (string.IsNullOrWhiteSpace(requirements.StableDisplayFingerprint))
         {
             failureReason = "execution_display_identity_unavailable";
             return false;
@@ -47,7 +61,7 @@ internal static class StandingLeaseExecutionEnvironmentValidator
         var matchingDisplays = environment.Displays
             .Where(display => string.Equals(
                 display.StableDisplayFingerprint,
-                scope.StableDisplayFingerprint,
+                requirements.StableDisplayFingerprint,
                 StringComparison.Ordinal))
             .ToArray();
         if (matchingDisplays.Length == 0)
@@ -74,12 +88,12 @@ internal static class StandingLeaseExecutionEnvironmentValidator
             return false;
         }
 
-        if (display.PhysicalBounds.Value != scope.DisplayBounds ||
-            display.DpiX.Value != scope.DpiX ||
-            display.DpiY.Value != scope.DpiY ||
-            display.PhysicalWidth.Value != scope.PhysicalWidth ||
-            display.PhysicalHeight.Value != scope.PhysicalHeight ||
-            display.Orientation.Value != scope.Orientation)
+        if (display.PhysicalBounds.Value != requirements.DisplayBounds ||
+            display.DpiX.Value != requirements.DpiX ||
+            display.DpiY.Value != requirements.DpiY ||
+            display.PhysicalWidth.Value != requirements.PhysicalWidth ||
+            display.PhysicalHeight.Value != requirements.PhysicalHeight ||
+            display.Orientation.Value != requirements.Orientation)
         {
             failureReason = "execution_display_metadata_mismatch";
             return false;
@@ -91,16 +105,16 @@ internal static class StandingLeaseExecutionEnvironmentValidator
             return false;
         }
 
-        if (!string.Equals(environment.TopologyDigest, scope.TopologyDigest, StringComparison.Ordinal))
+        if (!string.Equals(environment.TopologyDigest, requirements.TopologyDigest, StringComparison.Ordinal))
         {
             failureReason = "execution_topology_mismatch";
             return false;
         }
 
-        if (!TryValidateRegionProjection(scope, display.PhysicalBounds.Value, out failureReason))
+        if (!TryValidateRegionProjection(requirements, display.PhysicalBounds.Value, out failureReason))
             return false;
 
-        if (!TryValidateOutput(scope, environment.OutputFileSystem, out failureReason))
+        if (!TryValidateOutput(requirements, environment.OutputFileSystem, out failureReason))
             return false;
 
         failureReason = "";
@@ -108,15 +122,15 @@ internal static class StandingLeaseExecutionEnvironmentValidator
     }
 
     private static bool TryValidateRegionProjection(
-        AuthorizedFixedRegionScope scope,
+        FixedRegionExecutionEnvironmentRequirements requirements,
         AuthorizedPhysicalRectangle currentDisplayBounds,
         out string failureReason)
     {
         failureReason = "execution_region_invalid";
         try
         {
-            var region = scope.RegionWithinDisplay;
-            var projected = scope.VirtualScreenRegion;
+            var region = requirements.RegionWithinDisplay;
+            var projected = requirements.VirtualScreenRegion;
             var expected = new AuthorizedPhysicalRectangle(
                 checked(currentDisplayBounds.X + region.X),
                 checked(currentDisplayBounds.Y + region.Y),
@@ -141,7 +155,7 @@ internal static class StandingLeaseExecutionEnvironmentValidator
     }
 
     private static bool TryValidateOutput(
-        AuthorizedFixedRegionScope scope,
+        FixedRegionExecutionEnvironmentRequirements requirements,
         StandingLeaseOutputFileSystemSnapshot? output,
         out string failureReason)
     {
@@ -149,18 +163,8 @@ internal static class StandingLeaseExecutionEnvironmentValidator
         if (output is null)
             return false;
 
-        string expectedDirectory;
-        string expectedFile;
-        try
-        {
-            expectedDirectory = StandingLeaseOutputPath.NormalizeDirectory(scope.OutputDirectory);
-            expectedFile = Path.GetFullPath(scope.OutputFilePath);
-        }
-        catch
-        {
-            failureReason = "execution_output_directory_invalid";
-            return false;
-        }
+        var expectedDirectory = requirements.NormalizedOutputDirectory;
+        var expectedFile = requirements.FrozenOutputFilePath;
 
         if (!string.Equals(output.NormalizedOutputDirectory, expectedDirectory, StringComparison.Ordinal))
         {
@@ -174,7 +178,7 @@ internal static class StandingLeaseExecutionEnvironmentValidator
             return false;
         }
 
-        if (scope.OutputConflictPolicy != AuthorizedOutputConflictPolicy.FailIfExists)
+        if (requirements.OutputConflictPolicy != AuthorizedOutputConflictPolicy.FailIfExists)
         {
             failureReason = "execution_output_conflict_policy_mismatch";
             return false;
@@ -198,7 +202,7 @@ internal static class StandingLeaseExecutionEnvironmentValidator
             return false;
         }
 
-        var required = RecordingPreflightChecker.RequiredFreeSpaceBytes(scope.ReservedDuration);
+        var required = RecordingPreflightChecker.RequiredFreeSpaceBytes(requirements.ReservedDuration);
         if (!output.FreeSpaceAvailable ||
             output.AvailableFreeBytes < 0 ||
             output.RequiredFreeBytes != required)

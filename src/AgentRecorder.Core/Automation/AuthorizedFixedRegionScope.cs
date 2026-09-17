@@ -604,6 +604,12 @@ public sealed class AuthorizedFixedRegionScope
         return canonical;
     }
 
+    internal static string NormalizeOutputDirectoryForAuthorization(string? value) =>
+        NormalizeOutputDirectory(value);
+
+    internal static string NormalizeFrozenFileNameForAuthorization(string? value) =>
+        NormalizeFileName(value);
+
     private static string NormalizeOutputDirectory(string? value)
     {
         var canonical = RequiredCanonicalText(value, nameof(OutputDirectory), allowSeparators: true);

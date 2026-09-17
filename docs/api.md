@@ -59,6 +59,8 @@ path.
 | `POST /recordings/quick` | Yes |
 | `POST /region-selections` | Yes |
 | `POST /recordings` | Yes |
+| `POST /plans` | Yes |
+| `GET /plan-setups/{id}` | Yes |
 | `GET /recordings` | Yes |
 | `GET /recordings/{id}` | Yes |
 | `POST /recordings/{id}/marks` | Yes |
@@ -165,6 +167,7 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 - chapter-mark API and local-hotkey state (`chapter_marks`)
+- bounded one-shot unattended support and its live safety state (`unattended_lease`)
 
 A native `wgc-native-helper.exe`, managed continuous session, and
 capture-backend adapter are present in the repository. Guarded selectors can
@@ -778,6 +781,85 @@ reaches a terminal state before the observer runs returns `terminal: true`, not
 IDs, never request bodies or output paths. `/capabilities.interaction.creation_wait`
 publishes the endpoints, supported value, default/max wait, and
 `trusted_first_frame_or_terminal` milestone.
+
+## One-Shot Unattended Fixed-Region Plan
+
+This optional mode is disabled by default. A local user must first enable
+unattended mode in the tray safety controls. Every accepted setup then opens a
+local region selector and a separate lease-approval dialog. HTTP can request a
+setup and observe its state, but it cannot select the region, approve the lease,
+or widen an approved scope.
+
+Current limits are deliberately narrow: one run, fixed region, no audio, no
+nested recording, FFmpeg region capture, natural wake only, an interactive
+desktop, a lease of at most one hour, and a recording of at most ten minutes.
+
+Create or recover an idempotent setup:
+
+```http
+POST /plans
+X-Agent-Recorder-Key: <api-key>
+Idempotency-Key: <stable-key-for-this-request>
+Content-Type: application/json
+```
+
+```json
+{
+  "recording_spec": {
+    "source": { "type": "fixed_region" },
+    "audio": { "mode": "none" },
+    "duration_seconds": 30,
+    "countdown_seconds": 0,
+    "backend": "ffmpeg-region",
+    "output": {
+      "directory": "D:\\Videos",
+      "filename": "scheduled-recording.mp4"
+    }
+  },
+  "schedule": {
+    "kind": "once",
+    "start_at": "2026-09-17T10:00:00Z",
+    "latest_start_at": "2026-09-17T10:02:00Z",
+    "planned_end_at": "2026-09-17T10:02:30Z"
+  },
+  "requested_authorization": {
+    "mode": "standing_lease",
+    "expires_at": "2026-09-17T10:03:00Z",
+    "max_runs": 1,
+    "max_duration_seconds": 30
+  }
+}
+```
+
+The request must use an absolute output directory and a file name without path
+separators. `start_at < latest_start_at <= planned_end_at`; the latest-start
+grace is at most five minutes, the full recording must fit after the latest
+start, and lease expiry must be after the planned end and within one hour of
+request time.
+
+The server returns `202 Accepted` with a durable `setup_intent_id`, status URL,
+version cursor, and the next required local action. Reusing the same
+`Idempotency-Key` with the same canonical request returns the existing setup;
+reusing it for different content returns `409 IDEMPOTENCY_KEY_REUSED`.
+
+Observe setup and execution state:
+
+```http
+GET /plan-setups/{setup_intent_id}
+GET /plan-setups/{setup_intent_id}?since_status_version=<cursor>&wait_ms=25000
+```
+
+The cursor is opaque and should be returned unchanged. `wait_ms` is bounded to
+25 seconds. Responses may include `requires_local_action`, `next_action`,
+`reason_code`, `run_id`, `recording_status_url`, `started_at`, and
+`completed_at`. Once a `recording_status_url` is present, use the normal
+recording status endpoint for media completion and output details.
+
+Before physical capture, the app revalidates the approved display identity,
+physical region, session, output target, execution window, lease state, global
+safety state, and one-time proof. A mismatch, revocation, Stop All, session
+loss, sleep, existing output file, or missed window fails closed and never
+falls back to an interactive or differently scoped recording.
 
 ## Lower-Level Endpoints
 

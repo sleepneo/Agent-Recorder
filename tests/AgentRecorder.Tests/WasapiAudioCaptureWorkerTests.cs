@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using AgentRecorder.Capture;
@@ -7,19 +8,23 @@ using Xunit;
 
 namespace AgentRecorder.Tests;
 
+[Collection("NonParallel-SystemQueryProviders")]
 public class WasapiAudioCaptureWorkerTests : IDisposable
 {
     private readonly string _tmpDir;
+    private readonly FakeAudioHelperDeployment _fakeHelper;
 
     public WasapiAudioCaptureWorkerTests()
     {
         _tmpDir = Path.Combine(Path.GetTempPath(), $"wasapi-worker-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tmpDir);
+        _fakeHelper = new FakeAudioHelperDeployment(_tmpDir);
     }
 
     public void Dispose()
     {
-        try { Directory.Delete(_tmpDir, true); } catch { }
+        _fakeHelper.Dispose();
+        TestDirectoryCleanup.DeleteOwnedDirectory(_tmpDir);
     }
 
     [Fact]
@@ -42,7 +47,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_EmitsAudioReadyAndSetsAnchor()
     {
         var outputPath = Path.Combine(_tmpDir, "audio.wav");
-        var worker = new WasapiAudioCaptureWorker
+        using var worker = new WasapiAudioCaptureWorker
         {
             HelperExePathOverride = FakeHelperExePath(),
             SkipMicrophoneStatusMonitor = true
@@ -66,7 +71,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_Stop_ConvergesToSuccess()
     {
         var outputPath = Path.Combine(_tmpDir, "audio.wav");
-        var worker = new WasapiAudioCaptureWorker
+        using var worker = new WasapiAudioCaptureWorker
         {
             HelperExePathOverride = FakeHelperExePath(),
             SkipMicrophoneStatusMonitor = true
@@ -91,7 +96,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_CurrentEstimatedGapDecrease_IsAcceptedAndKeepsHistoricalMax()
     {
         var outputPath = Path.Combine(_tmpDir, "current-gap-decrease.wav");
-        var worker = CreateWorker("--estimated-gap-decrease");
+        using var worker = CreateWorker("--estimated-gap-decrease");
 
         worker.Start(CaptureConfigWithMic(), outputPath);
         Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(5)), "Worker did not exit");
@@ -111,7 +116,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_FailEvent_DoesNotFallbackAndReportsFailure()
     {
         var outputPath = Path.Combine(_tmpDir, "audio.wav");
-        var worker = new WasapiAudioCaptureWorker
+        using var worker = new WasapiAudioCaptureWorker
         {
             HelperExePathOverride = FakeHelperExePath(),
             HelperArgumentsOverride = "--emit-fail audio_endpoint_not_found \"simulated helper failure\"",
@@ -155,7 +160,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     [Fact]
     public void Start_MissingHelper_ThrowsApiException()
     {
-        var worker = new WasapiAudioCaptureWorker
+        using var worker = new WasapiAudioCaptureWorker
         {
             HelperExePathOverride = Path.Combine(_tmpDir, "nonexistent.exe"),
             SkipMicrophoneStatusMonitor = true
@@ -170,7 +175,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_EmitsTerminalSummaryWithFirstSampleAnchor()
     {
         var outputPath = Path.Combine(_tmpDir, "audio.wav");
-        var worker = new WasapiAudioCaptureWorker
+        using var worker = new WasapiAudioCaptureWorker
         {
             HelperExePathOverride = FakeHelperExePath(),
             SkipMicrophoneStatusMonitor = true
@@ -203,7 +208,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_ProtocolAnomalyBeforeReady_RaisesProtocolErrorAndNoAudioReady(string helperArgs)
     {
         var outputPath = Path.Combine(_tmpDir, $"anomaly-{helperArgs.Replace(" ", "_")}.wav");
-        var worker = CreateWorker(helperArgs);
+        using var worker = CreateWorker(helperArgs);
         int audioReadyCount = 0;
         worker.AudioReady += () => Interlocked.Increment(ref audioReadyCount);
 
@@ -231,7 +236,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_ProtocolAnomalyAfterReady_RaisesProtocolError(string helperArgs)
     {
         var outputPath = Path.Combine(_tmpDir, $"anomaly-{helperArgs.Replace(" ", "_")}.wav");
-        var worker = CreateWorker(helperArgs);
+        using var worker = CreateWorker(helperArgs);
         int audioReadyCount = 0;
         worker.AudioReady += () => Interlocked.Increment(ref audioReadyCount);
 
@@ -250,7 +255,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_LargeEventBlock_RaisesProtocolError()
     {
         var outputPath = Path.Combine(_tmpDir, "large-block.wav");
-        var worker = CreateWorker("--large-block");
+        using var worker = CreateWorker("--large-block");
         int audioReadyCount = 0;
         worker.AudioReady += () => Interlocked.Increment(ref audioReadyCount);
 
@@ -267,30 +272,48 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     }
 
     [Fact]
-    public void Start_FakeHelper_NoTerminalEvent_ReturnsNoTerminalErrorCode()
+    public async Task Start_FakeHelper_NoTerminalEvent_ReturnsNoTerminalErrorCode()
     {
         var outputPath = Path.Combine(_tmpDir, "no-terminal.wav");
-        var worker = CreateWorker("--no-terminal");
+        var baselinePids = FakeHelperProcessIds();
+        using var worker = CreateWorker("--no-terminal");
+        var audioReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.AudioReady += () => audioReady.TrySetResult(true);
 
-        worker.Start(CaptureConfigWithMic(), outputPath);
-        Assert.True(SpinWait.SpinUntil(() => worker.IsAudioReady, TimeSpan.FromSeconds(5)), "AudioReady was not raised");
+        try
+        {
+            worker.Start(CaptureConfigWithMic(), outputPath);
+            try
+            {
+                await audioReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            catch (TimeoutException)
+            {
+                Assert.Fail(WorkerDiagnostics(worker, "no-terminal AudioReady timeout"));
+            }
 
-        worker.Stop();
-        Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(15)), "Worker did not exit after stop");
+            worker.Stop();
+            Assert.True(worker.WaitForExit(TimeSpan.FromSeconds(15)), WorkerDiagnostics(worker, "no-terminal exit timeout after Stop"));
 
-        var summary = worker.GetTerminalSummary();
-        Assert.NotNull(summary);
-        Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
-        Assert.Equal("audio_helper_no_terminal_event", summary.ErrorCode);
+            var summary = worker.GetTerminalSummary();
+            Assert.NotNull(summary);
+            Assert.Equal(AudioHelperSessionState.MalformedSequence, summary.State);
+            Assert.Equal("audio_helper_no_terminal_event", summary.ErrorCode);
+        }
+        finally
+        {
+            try { worker.Stop(); } catch { }
+            try { worker.Dispose(); } catch { }
+            AssertNoNewFakeHelperProcesses(baselinePids, "no-terminal cleanup");
+        }
 
-        worker.Dispose();
     }
 
     [Fact]
     public void Start_FakeHelper_OkThenNonZeroExit_ReturnsExitProtocolMismatch()
     {
         var outputPath = Path.Combine(_tmpDir, "ok-exit-7.wav");
-        var worker = CreateWorker("--ok-then-exit 7");
+        using var worker = CreateWorker("--ok-then-exit 7");
 
         worker.Start(CaptureConfigWithMic(), outputPath);
         Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(5)), "Worker did not exit");
@@ -307,7 +330,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Start_FakeHelper_FailThenZeroExit_ReturnsExitProtocolMismatch()
     {
         var outputPath = Path.Combine(_tmpDir, "fail-exit-0.wav");
-        var worker = CreateWorker("--fail-then-exit-0 --emit-fail audio_endpoint_not_found \"simulated failure\"");
+        using var worker = CreateWorker("--fail-then-exit-0 --emit-fail audio_endpoint_not_found \"simulated failure\"");
 
         worker.Start(CaptureConfigWithMic(), outputPath);
         Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(5)), "Worker did not exit");
@@ -324,7 +347,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     public void Dispose_WithoutStop_CleansUpHelperAndSignal()
     {
         var outputPath = Path.Combine(_tmpDir, "dispose.wav");
-        var worker = CreateWorker("");
+        using var worker = CreateWorker("");
         var stopSignal = Path.Combine(_tmpDir, "dispose_stop.signal");
         worker.StopSignalPathOverride = stopSignal;
 
@@ -432,18 +455,20 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
             $"Expected success/stopped terminal state, got {summary.State}. ValidationErrors: {string.Join("; ", summary.ValidationErrors)}");
     }
 
-    private static AudioHelperSessionSummary RunRealWorkerSourceKindScenario(
+    private AudioHelperSessionSummary RunRealWorkerSourceKindScenario(
         CaptureConfig cfg,
         string? reportedSourceKind,
         out int audioReadyCount)
     {
-        var outputPath = Path.Combine(Path.GetTempPath(), $"wasapi-src-kind-{Guid.NewGuid():N}.wav");
+        var outputPath = Path.Combine(_tmpDir, $"wasapi-src-kind-{Guid.NewGuid():N}.wav");
         var original = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND");
+        WasapiAudioCaptureWorker? worker = null;
+        audioReadyCount = 0;
         try
         {
             Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", reportedSourceKind);
 
-            var worker = new WasapiAudioCaptureWorker
+            worker = new WasapiAudioCaptureWorker
             {
                 HelperExePathOverride = FakeHelperExePath(),
                 SkipMicrophoneStatusMonitor = true
@@ -454,11 +479,9 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
 
             worker.Start(cfg, outputPath);
             Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(10)),
-                "Worker did not exit for source-kind scenario");
+                WorkerDiagnostics(worker, "source-kind worker exit timeout"));
 
             audioReadyCount = Volatile.Read(ref ready);
-
-            try { worker.Dispose(); } catch { }
 
             var summary = worker.GetTerminalSummary();
             Assert.NotNull(summary);
@@ -466,6 +489,8 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         }
         finally
         {
+            try { worker?.Stop(); } catch { }
+            try { worker?.Dispose(); } catch { }
             Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", original);
             try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
         }
@@ -481,7 +506,7 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         };
     }
 
-    private static WasapiAudioCaptureWorker CreateWorker(string helperArgs)
+    private WasapiAudioCaptureWorker CreateWorker(string helperArgs)
     {
         return new WasapiAudioCaptureWorker
         {
@@ -502,20 +527,42 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         };
     }
 
-    private static string FakeHelperExePath()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(TestHelper.ProjectRoot, "tests", "AgentRecorder.AudioHelper.Fake", "bin", "Release", "net8.0-windows10.0.19041.0", "AgentRecorder.AudioHelper.Fake.exe"),
-            Path.Combine(TestHelper.ProjectRoot, "tests", "AgentRecorder.AudioHelper.Fake", "bin", "Debug", "net8.0-windows10.0.19041.0", "AgentRecorder.AudioHelper.Fake.exe"),
-        };
+    private string FakeHelperExePath() => _fakeHelper.ExecutablePath;
 
-        foreach (var candidate in candidates)
+    private static HashSet<int> FakeHelperProcessIds()
+    {
+        var ids = new HashSet<int>();
+        foreach (var process in Process.GetProcessesByName("AgentRecorder.AudioHelper.Fake"))
         {
-            if (File.Exists(candidate))
-                return candidate;
+            try { ids.Add(process.Id); }
+            catch { }
+            finally { process.Dispose(); }
         }
 
-        throw new FileNotFoundException("Fake audio helper executable not found. Build tests/AgentRecorder.AudioHelper.Fake first.");
+        return ids;
+    }
+
+    private static void AssertNoNewFakeHelperProcesses(HashSet<int> baselinePids, string context)
+    {
+        HashSet<int> remaining = new();
+        var converged = SpinWait.SpinUntil(() =>
+        {
+            remaining = FakeHelperProcessIds();
+            remaining.ExceptWith(baselinePids);
+            return remaining.Count == 0;
+        }, TimeSpan.FromSeconds(5));
+
+        Assert.True(converged, $"{context}: new FakeHelper PIDs remain: {string.Join(", ", remaining)}");
+    }
+
+    private static string WorkerDiagnostics(WasapiAudioCaptureWorker worker, string context)
+    {
+        var summary = worker.GetTerminalSummary();
+        var summaryText = summary == null
+            ? "<null>"
+            : $"state={summary.State};error={summary.ErrorCode};reason={summary.Reason};validation={string.Join(" | ", summary.ValidationErrors)}";
+        var events = string.Join(" | ", worker.ProtocolEventsForTests);
+        var stderr = worker.GetStderrLog();
+        return $"{context}; ready={worker.IsAudioReady}; exited={worker.HasExited}; pid={worker.HelperProcessIdForTests?.ToString() ?? "<none>"}; exitCode={worker.ExitCode}; summary={summaryText}; events={events}; stderr={stderr}";
     }
 }

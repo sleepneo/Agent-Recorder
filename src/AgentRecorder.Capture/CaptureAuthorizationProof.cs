@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Text;
 
 namespace AgentRecorder.Capture;
 
@@ -11,7 +12,8 @@ namespace AgentRecorder.Capture;
 public enum CaptureAuthorizationProofKind
 {
     InteractiveConfirmation = 0,
-    StandingLeaseUse = 1
+    StandingLeaseUse = 1,
+    RecurringLeaseUse = 2
 }
 
 /// <summary>
@@ -327,6 +329,102 @@ public sealed class StandingLeaseUseProof : CaptureAuthorizationProof
 }
 
 /// <summary>
+/// One-time authorization issued only from a trusted recurring
+/// start-commit receipt. This is deliberately a different proof type and
+/// kind from <see cref="StandingLeaseUseProof"/> so one-shot and recurring
+/// execution gates cannot accept each other's evidence by convention alone.
+/// The constructor is internal: public requests, JSON, environment variables
+/// and helper command lines cannot manufacture a recurring proof.
+/// </summary>
+public sealed class RecurringLeaseUseProof : CaptureAuthorizationProof
+{
+    internal RecurringLeaseUseProof(
+        string proofId,
+        string runId,
+        string leaseId,
+        string leaseUseId,
+        string occurrenceIdentity,
+        string specificationDigest,
+        string authorizationSourceId,
+        string capturePlanDigest,
+        string scopeDigest,
+        DateTimeOffset issuedAtUtc,
+        DateTimeOffset expiresAtUtc,
+        string currentUserSid,
+        string sessionBinding,
+        string oneTimeNonce,
+        TimeSpan maxDuration)
+        : base(
+            proofId,
+            recordingId: runId,
+            runId,
+            CaptureAuthorizationProofKind.RecurringLeaseUse,
+            authorizationSourceId,
+            capturePlanDigest,
+            scopeDigest,
+            issuedAtUtc,
+            expiresAtUtc,
+            userSessionBinding: currentUserSid + "|" + sessionBinding,
+            maxDurationSeconds: null,
+            maxFrameCount: null)
+    {
+        LeaseId = RequireField(leaseId, nameof(leaseId));
+        LeaseUseId = RequireField(leaseUseId, nameof(leaseUseId));
+        OccurrenceIdentity = RequireField(occurrenceIdentity, nameof(occurrenceIdentity));
+        SpecificationDigest = RequireField(specificationDigest, nameof(specificationDigest));
+        CurrentUserSid = RequireField(currentUserSid, nameof(currentUserSid));
+        SessionBinding = RequireField(sessionBinding, nameof(sessionBinding));
+        OneTimeNonce = RequireNonce(oneTimeNonce);
+        if (maxDuration <= TimeSpan.Zero || maxDuration.Ticks % TimeSpan.TicksPerMillisecond != 0)
+            throw new ArgumentOutOfRangeException(nameof(maxDuration));
+
+        MaxDuration = maxDuration;
+        MaxDurationMilliseconds = maxDuration.Ticks / TimeSpan.TicksPerMillisecond;
+    }
+
+    public string LeaseId { get; }
+
+    public string LeaseUseId { get; }
+
+    public string OccurrenceIdentity { get; }
+
+    public string SpecificationDigest { get; }
+
+    public string CurrentUserSid { get; }
+
+    public string SessionBinding { get; }
+
+    /// <summary>
+    /// Lowercase hexadecimal encoding of 128 bits from a cryptographic random
+    /// source. It is not derived from a run ID, use ID, timestamp, or digest.
+    /// </summary>
+    public string OneTimeNonce { get; }
+
+    public TimeSpan MaxDuration { get; }
+
+    public long MaxDurationMilliseconds { get; }
+
+    private static string RequireField(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException("Recurring proof fields cannot be empty.", parameterName);
+
+        return value;
+    }
+
+    private static string RequireNonce(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length != 32 || value.Any(character =>
+                character < '0' || (character > '9' && character < 'a') || character > 'f'))
+        {
+            throw new ArgumentException("The recurring proof nonce must be 128-bit lowercase hexadecimal.", nameof(value));
+        }
+
+        return value;
+    }
+}
+
+/// <summary>
 /// The minimum process-local user/session identity used to bind a proof.
 /// </summary>
 internal static class CaptureAuthorizationSessionBinding
@@ -351,7 +449,11 @@ internal static class CaptureAuthorizationSessionBinding
                 sessionId = -1;
             }
 
-            return $"{domain}\\{user}|session:{sessionId}";
+            var rawBinding = $"{domain}\\{user}|session:{sessionId}";
+            return Convert.ToBase64String(Encoding.UTF8.GetBytes(rawBinding))
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
         }
     }
 }

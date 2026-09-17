@@ -896,7 +896,7 @@ public class PerformanceTraceIntegrationTests : IDisposable
     [Fact]
     public void TraceJson_DoesNotContainApiKeyOrFullPath()
     {
-        var tmp = _tmpDir();
+        using var tmp = _tmpDir();
         ApiKeyAuth.InitializeForTesting(tmp.Path);
         try
         {

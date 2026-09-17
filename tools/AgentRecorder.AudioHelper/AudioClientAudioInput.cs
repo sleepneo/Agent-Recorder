@@ -44,6 +44,15 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
     private int _resourcesReleased;
     private long _discontinuityCount;
 
+    // Test-only gates. They are null in the production helper and exist solely
+    // to make the thread-publication/start publication ownership windows
+    // deterministic without weakening the runtime state machine.
+    internal Action? TestHookBeforeCaptureThreadPublication { get; set; }
+    internal Action? TestHookBeforeCaptureThreadStart { get; set; }
+    internal Action? TestHookAfterCaptureThreadStartBeforePublished { get; set; }
+    internal Action? TestHookAfterDisposeStatePublished { get; set; }
+    internal Action? TestHookBeforeDisposeDeferredPublication { get; set; }
+
     public WaveFormat? Format => _waveFormat;
 
     public AudioSourceKind SourceKind => _sourceKind;
@@ -59,7 +68,10 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
     /// disposal sequence is fully complete. Exposed for deterministic
     /// concurrency tests.
     /// </summary>
-    public bool DisposeCompletedSuccessfully => _disposeCompleted == 1;
+    public bool DisposeCompletedSuccessfully => Volatile.Read(ref _disposeCompleted) == 1;
+
+    internal int DisposeCompletionStateForTests => Volatile.Read(ref _disposeCompleted);
+    internal int CleanupOwnerForTests => Volatile.Read(ref _cleanupOwner);
 
     public event EventHandler<WaveInEventArgs>? DataAvailable;
     public event EventHandler<AudioPacketEventArgs>? PacketPositionAvailable;
@@ -167,6 +179,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 Name = "AudioClientCapture"
             };
 
+            TestHookBeforeCaptureThreadPublication?.Invoke();
+
             if (Interlocked.CompareExchange(ref _captureThread, thread, null) != null)
             {
                 // Should never happen because of the state guard, but be defensive.
@@ -193,7 +207,10 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 return StartRecordingResult.Cancelled;
             }
 
+            TestHookBeforeCaptureThreadStart?.Invoke();
+
             thread.Start();
+            TestHookAfterCaptureThreadStartBeforePublished?.Invoke();
             Interlocked.Exchange(ref _captureThreadStarted, 1);
             return StartRecordingResult.Started;
         }
@@ -246,9 +263,12 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                     {
                         ReleaseComObjects();
                     }
-                    // If Dispose timed out and delegated cleanup to us, mark it
-                    // as completed now that resources are released.
-                    Interlocked.CompareExchange(ref _disposeCompleted, 1, -1);
+                    // Publish completion after physical release regardless of
+                    // whether Dispose returned before it transferred ownership.
+                    // The old -1-only CAS left a race where Start's finally
+                    // released resources before Dispose observed the timeout,
+                    // leaving the observable completion signal at zero.
+                    PublishDisposeCompleted();
                 }
             }
         }
@@ -326,6 +346,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
             }
         }
 
+        TestHookAfterDisposeStatePublished?.Invoke();
+
         bool startCompleted = true;
 
         // If StartRecording is in progress, wait for it to finish deciding the
@@ -341,7 +363,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 // after. Transfer cleanup ownership to Start's finally and exit
                 // without disposing the events (Start will Set them).
                 Interlocked.CompareExchange(ref _cleanupOwner, 2, 0);
-                _disposeCompleted = -1;
+                TestHookBeforeDisposeDeferredPublication?.Invoke();
+                PublishDisposeDeferred();
                 return;
             }
         }
@@ -384,12 +407,13 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
             {
                 ReleaseComObjects();
             }
-            _disposeCompleted = 1;
+            PublishDisposeCompleted();
         }
         else if (!threadExited)
         {
             Interlocked.CompareExchange(ref _cleanupOwner, 2, 0);
-            _disposeCompleted = -1;
+            TestHookBeforeDisposeDeferredPublication?.Invoke();
+            PublishDisposeDeferred();
         }
 
         try { _startCompleted.Dispose(); } catch { }
@@ -504,7 +528,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 if (owner == 0 || owner == 2)
                 {
                     ReleaseComObjects();
-                    Interlocked.Exchange(ref _disposeCompleted, 1);
+                    PublishDisposeCompleted();
                 }
             }
 
@@ -684,6 +708,16 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         try { _device.Dispose(); } catch { }
         try { _captureEvent?.Dispose(); } catch { }
     }
+
+    // Completion is monotonic: deferred publication may only move the state
+    // from 0 to -1, while completed publication may move 0/-1 to 1. In
+    // particular, a timeout that races with already-finished cleanup cannot
+    // downgrade the externally observable terminal state from 1 back to -1.
+    private void PublishDisposeDeferred() =>
+        Interlocked.CompareExchange(ref _disposeCompleted, -1, 0);
+
+    private void PublishDisposeCompleted() =>
+        Interlocked.Exchange(ref _disposeCompleted, 1);
 
     private static int HresultFrom(Exception ex)
     {

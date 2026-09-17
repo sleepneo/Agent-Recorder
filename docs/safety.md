@@ -1,8 +1,8 @@
 # Agent Recorder Safety Model
 
 Agent Recorder is designed for local AI-agent use. The agent may request a
-recording, but the local user remains in control of what is selected and whether
-recording starts.
+recording, but the local user remains in control of what is selected and which
+bounded authorization permits recording to start.
 
 ## Safety Boundaries
 
@@ -10,7 +10,7 @@ recording starts.
 | --- | --- |
 | Local-only API | Server binds to `127.0.0.1:37891` |
 | API key | State-changing and sensitive endpoints require `X-Agent-Recorder-Key` |
-| Local confirmation | Every recording request enters a local confirmation flow |
+| Local authorization | Ordinary recordings require per-run confirmation; one-shot unattended plans require local fixed-region selection and bounded lease approval |
 | HTTP self-approval blocked | `POST /confirmations/{id}/approve` returns `405 METHOD_NOT_ALLOWED` |
 | Region selection | Selected-region recording uses local UI controlled by the user |
 | Audit log | Recording and confirmation events are written to local JSONL logs |
@@ -29,6 +29,27 @@ recording starts.
 
 The agent must not say "recording has started" while the state is still
 `pending_confirmation`.
+
+## Bounded Unattended Authorization
+
+The optional one-shot unattended mode does not reuse or bypass an interactive
+confirmation. It uses a separate local standing-lease authorization:
+
+1. The mode is disabled by default and must be enabled in the local tray safety controls.
+2. An authenticated agent may submit an idempotent one-shot setup request.
+3. The local user reselects the fixed physical region; `last_region` and active-window reuse are not accepted.
+4. A local lease dialog shows the target, output, schedule, duration, and privacy risk.
+5. Approval freezes the region, display identity, user/session binding, output file, execution window, and single-use quota.
+6. At execution time the app revalidates durable state and current environment under the same start/revoke interlock, then issues a one-time consumed proof for the exact Run.
+7. The capture backend starts only after that final gate. HTTP cannot construct, approve, consume, or extend the proof.
+
+The first product slice is limited to one silent fixed-region run, a lease of
+at most one hour, a run of at most ten minutes, natural wake only, and an
+interactive desktop. It does not support unattended audio, windows, WGC,
+screenshot series, nesting, concurrency, active wake, or recurring public
+plans. Revocation, Stop All, session loss, sleep, target drift, output drift,
+expiry, and missed windows fail closed. A start-committed execution is never
+automatically retried after an uncertain crash.
 
 ## API Key Storage
 

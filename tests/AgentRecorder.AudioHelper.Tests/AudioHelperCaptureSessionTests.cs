@@ -522,10 +522,11 @@ public class AudioHelperCaptureSessionTests
             // synthetic QPC conflict.
             ForceCallbackStarvation(session, 960);
 
-            Assert.True(SpinWait.SpinUntil(() => recoveredInput.Started, TimeSpan.FromSeconds(5)));
-            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
-                TimeSpan.FromSeconds(5)));
-            recoveredInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x44, 960).ToArray(), 0, 100_000_000);
+            WaitForCommittedRecovery(session, recoveredInput, expectedRecoveries: 1, "callback starvation");
+            var recoveredPacket = Enumerable.Repeat((byte)0x44, 960).ToArray();
+            var bytesBeforeRecoveredPacket = GetPrivateLong(session, "_bytesWritten");
+            recoveredInput.InjectPositionedPacket(recoveredPacket, 0, 100_000_000);
+            AssertPacketWasWritten(session, bytesBeforeRecoveredPacket, recoveredPacket.Length, "callback starvation");
             session.RequestStop();
 
             var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
@@ -598,10 +599,11 @@ public class AudioHelperCaptureSessionTests
             // hysteresis for media_wall_gap_divergence without a long sleep.
             ForceMediaWallGapDivergence(session, 960);
 
-            Assert.True(SpinWait.SpinUntil(() => recoveredInput.Started, TimeSpan.FromSeconds(5)));
-            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
-                TimeSpan.FromSeconds(5)));
-            recoveredInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x55, 960).ToArray(), 0, 120_000_000);
+            WaitForCommittedRecovery(session, recoveredInput, expectedRecoveries: 1, "media wall gap divergence");
+            var recoveredPacket = Enumerable.Repeat((byte)0x55, 960).ToArray();
+            var bytesBeforeRecoveredPacket = GetPrivateLong(session, "_bytesWritten");
+            recoveredInput.InjectPositionedPacket(recoveredPacket, 0, 120_000_000);
+            AssertPacketWasWritten(session, bytesBeforeRecoveredPacket, recoveredPacket.Length, "media wall gap divergence");
             session.RequestStop();
 
             var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
@@ -678,10 +680,11 @@ public class AudioHelperCaptureSessionTests
             firstInput.InjectPositionedPacket(Enumerable.Repeat((byte)0x11, 960).ToArray(), 0, anchor);
             ForceCallbackStarvation(session, 960);
 
-            Assert.True(SpinWait.SpinUntil(() => successfulCandidate.Started, TimeSpan.FromSeconds(5)));
-            Assert.True(SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= 1,
-                TimeSpan.FromSeconds(5)));
-            successfulCandidate.InjectPositionedPacket(Enumerable.Repeat((byte)0x44, 960).ToArray(), 0, 220_000_000);
+            WaitForCommittedRecovery(session, successfulCandidate, expectedRecoveries: 1, "second recovery candidate");
+            var recoveredPacket = Enumerable.Repeat((byte)0x44, 960).ToArray();
+            var bytesBeforeRecoveredPacket = GetPrivateLong(session, "_bytesWritten");
+            successfulCandidate.InjectPositionedPacket(recoveredPacket, 0, 220_000_000);
+            AssertPacketWasWritten(session, bytesBeforeRecoveredPacket, recoveredPacket.Length, "second recovery candidate");
             session.RequestStop();
 
             var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(8));
@@ -772,6 +775,43 @@ public class AudioHelperCaptureSessionTests
         SetPrivateLong(session, "_bytesWritten", bytesWritten);
         InvokeCheckStall(session);
         InvokeCheckStall(session);
+    }
+
+    private static void WaitForCommittedRecovery(
+        CaptureSession session,
+        FakeAudioInput recoveredInput,
+        int expectedRecoveries,
+        string scenario)
+    {
+        var timeout = TimeSpan.FromSeconds(5);
+        Assert.True(
+            SpinWait.SpinUntil(() => recoveredInput.Started, timeout),
+            $"{scenario}: recovered input did not start within {timeout}");
+        Assert.True(
+            SpinWait.SpinUntil(() => GetPrivateLong(session, "_successfulRecoveries") >= expectedRecoveries, timeout),
+            $"{scenario}: successful recovery count did not reach {expectedRecoveries} within {timeout}; " +
+            $"actual={GetPrivateLong(session, "_successfulRecoveries")}");
+        Assert.True(
+            SpinWait.SpinUntil(() => GetPrivateLong(session, "_runtimeRecoveryInProgress") == 0, timeout),
+            $"{scenario}: recovery owner did not finish generation commit within {timeout}; " +
+            $"successfulRecoveries={GetPrivateLong(session, "_successfulRecoveries")}, " +
+            $"runtimeRecoveryInProgress={GetPrivateLong(session, "_runtimeRecoveryInProgress")}, " +
+            $"bytesWritten={GetPrivateLong(session, "_bytesWritten")}");
+    }
+
+    private static void AssertPacketWasWritten(
+        CaptureSession session,
+        long bytesBeforePacket,
+        int packetBytes,
+        string scenario)
+    {
+        var expectedBytes = bytesBeforePacket + packetBytes;
+        Assert.True(
+            SpinWait.SpinUntil(() => GetPrivateLong(session, "_bytesWritten") >= expectedBytes,
+                TimeSpan.FromSeconds(2)),
+            $"{scenario}: committed recovery packet was not written before stop; " +
+            $"before={bytesBeforePacket}, expectedAtLeast={expectedBytes}, " +
+            $"actual={GetPrivateLong(session, "_bytesWritten")}");
     }
 
     [Fact]

@@ -159,7 +159,7 @@ recording-control windows.
 
 ## Public System Audio
 
-System audio is public and still requires the same local confirmation as every
+System audio is public and still requires the same per-run local confirmation as every ordinary
 recording. A quick request can use the current Windows multimedia output:
 
 ```json

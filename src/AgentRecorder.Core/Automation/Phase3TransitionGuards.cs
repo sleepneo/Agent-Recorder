@@ -108,7 +108,7 @@ public static class Phase3TransitionGuards
 
     public static bool IsPlanOccurrenceEdge(PlanOccurrenceStatus current, PlanOccurrenceStatus next) => (current, next) switch
     {
-        (PlanOccurrenceStatus.Scheduled, PlanOccurrenceStatus.Due or PlanOccurrenceStatus.Missed or PlanOccurrenceStatus.Cancelled or PlanOccurrenceStatus.Expired) => true,
+        (PlanOccurrenceStatus.Scheduled, PlanOccurrenceStatus.Due or PlanOccurrenceStatus.Missed or PlanOccurrenceStatus.Blocked or PlanOccurrenceStatus.Cancelled or PlanOccurrenceStatus.Expired) => true,
         (PlanOccurrenceStatus.Due, PlanOccurrenceStatus.Rechecking or PlanOccurrenceStatus.Missed or PlanOccurrenceStatus.Blocked or PlanOccurrenceStatus.Cancelled or PlanOccurrenceStatus.Expired) => true,
         (PlanOccurrenceStatus.Rechecking, PlanOccurrenceStatus.PendingLeaseApproval or PlanOccurrenceStatus.Authorized or PlanOccurrenceStatus.PendingConfirmation or PlanOccurrenceStatus.Missed or PlanOccurrenceStatus.Blocked or PlanOccurrenceStatus.Cancelled or PlanOccurrenceStatus.Expired) => true,
         (PlanOccurrenceStatus.PendingLeaseApproval, PlanOccurrenceStatus.Authorized or PlanOccurrenceStatus.Blocked or PlanOccurrenceStatus.Cancelled or PlanOccurrenceStatus.Expired) => true,
@@ -125,7 +125,7 @@ public static class Phase3TransitionGuards
         (RecordingRunStatus.StartCommitted, RecordingRunStatus.Recording or RecordingRunStatus.StartedUnknown or RecordingRunStatus.Failed) => true,
         (RecordingRunStatus.Recording, RecordingRunStatus.Finalizing or RecordingRunStatus.StartedUnknown or RecordingRunStatus.SessionInterrupted or RecordingRunStatus.Failed) => true,
         (RecordingRunStatus.Finalizing, RecordingRunStatus.MediaReady or RecordingRunStatus.SessionInterrupted or RecordingRunStatus.Failed) => true,
-        (RecordingRunStatus.MediaReady, RecordingRunStatus.Settled) => true,
+        (RecordingRunStatus.MediaReady, RecordingRunStatus.Settled or RecordingRunStatus.SessionInterrupted) => true,
         _ => false,
     };
 
@@ -133,6 +133,11 @@ public static class Phase3TransitionGuards
     {
         (ConsentLeaseStatus.Pending, ConsentLeaseStatus.Active or ConsentLeaseStatus.Rejected or ConsentLeaseStatus.Revoked or ConsentLeaseStatus.Expired) => true,
         (ConsentLeaseStatus.Active, ConsentLeaseStatus.Revoked or ConsentLeaseStatus.Expired or ConsentLeaseStatus.Exhausted) => true,
+        // A one-use lease becomes exhausted at the durable start commit. A
+        // later safety revoke is still a valid terminal transition while its
+        // committed run is in flight; the persistence boundary supplies that
+        // additional in-flight predicate.
+        (ConsentLeaseStatus.Exhausted, ConsentLeaseStatus.Revoked) => true,
         _ => false,
     };
 
@@ -141,7 +146,7 @@ public static class Phase3TransitionGuards
         (LeaseUseStatus.Available, LeaseUseStatus.Reserved) => true,
         (LeaseUseStatus.Reserved, LeaseUseStatus.Available or LeaseUseStatus.StartCommitted) => true,
         (LeaseUseStatus.StartCommitted, LeaseUseStatus.Consumed or LeaseUseStatus.StartedUnknown) => true,
-        (LeaseUseStatus.Consumed, LeaseUseStatus.Settled) => true,
+        (LeaseUseStatus.Consumed, LeaseUseStatus.Settled or LeaseUseStatus.StartedUnknown) => true,
         _ => false,
     };
 

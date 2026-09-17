@@ -18,6 +18,7 @@
     <ProjectReference Include="..\AgentRecorder.UI.Geometry\AgentRecorder.UI.Geometry.csproj" />
     <ProjectReference Include="..\AgentRecorder.Api\AgentRecorder.Api.csproj" />
     <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Persistence\AgentRecorder.Persistence.csproj" />
     <ProjectReference Include="..\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />
   </ItemGroup>
 

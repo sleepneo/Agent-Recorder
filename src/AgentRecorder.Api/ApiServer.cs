@@ -36,6 +36,7 @@ public sealed class ApiServer
     private readonly WindowsAutoStartManager? _autoStart;
     private readonly FfmpegPrewarmer? _ffmpegPrewarmer;
     private readonly IPerformanceSummaryProvider _performanceSummaryProvider;
+    private readonly IStandingPlanSetupGateway? _standingPlanSetupGateway;
     private CancellationTokenSource _cts = new();
 
     private SelectedRegionState? _lastSelectedRegion;
@@ -49,7 +50,8 @@ public sealed class ApiServer
         FfmpegPrewarmer? ffmpegPrewarmer = null,
         IPerformanceTracer? tracer = null,
         IEnsureContextStore? ensureContextStore = null,
-        IPerformanceSummaryProvider? performanceSummaryProvider = null)
+        IPerformanceSummaryProvider? performanceSummaryProvider = null,
+        IStandingPlanSetupGateway? standingPlanSetupGateway = null)
     {
         _engine = engine; _audit = audit; _tray = tray;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -58,6 +60,7 @@ public sealed class ApiServer
         _autoStart = autoStart;
         _ffmpegPrewarmer = ffmpegPrewarmer;
         _performanceSummaryProvider = performanceSummaryProvider ?? NoDataPerformanceSummaryProvider.Instance;
+        _standingPlanSetupGateway = standingPlanSetupGateway;
         _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
 
@@ -164,6 +167,7 @@ public sealed class ApiServer
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        202 => "Accepted",
         500 => "Internal Server Error",
         _ => "Unknown"
     };
@@ -261,7 +265,7 @@ public sealed class ApiServer
         if (method == "POST" || method == "PUT" || method == "DELETE")
             return true;
 
-        var sensitivePaths = new[] { "/api/v1/recordings", "/api/v1/confirmations" };
+        var sensitivePaths = new[] { "/api/v1/recordings", "/api/v1/confirmations", "/api/v1/plan-setups", "/api/v1/plans" };
         return sensitivePaths.Any(p => path.StartsWith(p));
     }
 
@@ -304,11 +308,17 @@ public sealed class ApiServer
             case ("POST", "/region-selections"):
                 return CreateRegionSelection(req, reqBody, reqId);
 
+            case ("POST", "/plans"):
+                return CreateStandingPlan(req, reqBody, reqId, ref status);
+
             case ("GET", "/recordings"):
                 return ApiResponse.Ok(new { recordings = _engine.List() }, reqId);
         }
 
         var seg = sub.Trim('/').Split('/');
+
+        if (seg.Length == 2 && seg[0] == "plan-setups" && method == "GET")
+            return GetStandingPlanSetup(seg[1], req, reqId);
 
         if (seg.Length >= 2 && seg[0] == "confirmations" && method == "GET")
         {
@@ -352,6 +362,194 @@ public sealed class ApiServer
 
         throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint: " + sub);
     }
+
+    private string CreateStandingPlan(HttpRequest req, string reqBody, string reqId, ref int status)
+    {
+        var idempotencyKey = StandingPlanApiRequestParser.NormalizeIdempotencyKey(
+            req.Headers.GetValueOrDefault("Idempotency-Key"));
+
+        if (_standingPlanSetupGateway is null || !_standingPlanSetupGateway.IsInteractiveDesktopAvailable)
+        {
+            throw new ApiException(409, "INTERACTIVE_DESKTOP_REQUIRED",
+                "A local interactive desktop is required before a standing setup intent can be persisted.",
+                new { suggested_action = "run_tray_host" });
+        }
+
+        if (!_standingPlanSetupGateway.IsUnattendedEnabled)
+        {
+            throw new ApiException(409, "UNATTENDED_DISABLED",
+                "Unattended lease mode is disabled by the local safety control.",
+                new { suggested_action = "enable_unattended_mode_locally" });
+        }
+
+        var request = StandingPlanApiRequestParser.Parse(reqBody, idempotencyKey);
+        StandingPlanSetupCreateResult result;
+        try
+        {
+            result = _standingPlanSetupGateway.CreateOrGet(request);
+        }
+        catch (Exception exception)
+        {
+            _audit.Log("standing_setup.api_create_failed", new
+            {
+                reason_code = "setup_persistence_failed",
+                exception_type = exception.GetType().Name,
+            });
+            throw new ApiException(500, "SETUP_PERSISTENCE_FAILED",
+                "The standing setup intent could not be persisted.");
+        }
+
+        if (result.Status == StandingPlanSetupCreateStatus.Conflict)
+        {
+            throw new ApiException(409, "IDEMPOTENCY_KEY_REUSED",
+                "The Idempotency-Key is already bound to a different request.",
+                new { setup_intent_id = result.SetupIntentId, reason_code = result.ReasonCode ?? "setup_conflict" });
+        }
+
+        if (result.Status is StandingPlanSetupCreateStatus.Rejected or StandingPlanSetupCreateStatus.Expired)
+        {
+            var code = result.ReasonCode switch
+            {
+                "unattended_disabled" => "UNATTENDED_DISABLED",
+                "interactive_desktop_required" => "INTERACTIVE_DESKTOP_REQUIRED",
+                _ => "SETUP_CONFLICT",
+            };
+            throw new ApiException(409, code,
+                "The standing setup request was not accepted.",
+                new { reason_code = result.ReasonCode ?? "setup_conflict" });
+        }
+
+        status = 202;
+        return ApiResponse.Ok(
+            StandingPlanResponse(
+                result.SetupIntentId,
+                result.StatusCode,
+                result.StatusVersion,
+                result.PlanId,
+                result.OccurrenceId,
+                result.LeaseId,
+                result.StatusCode is "setup_pending" or "pending_lease_approval",
+                NextActionFor(result.StatusCode),
+                result.ReasonCode,
+                $"{Prefix}/plan-setups/{Uri.EscapeDataString(result.SetupIntentId!)}",
+                result.StatusVersionCursor,
+                runId: null,
+                recordingStatusUrl: null,
+                startedAtUtc: null,
+                completedAtUtc: null),
+            reqId);
+    }
+
+    private string GetStandingPlanSetup(string setupIntentId, HttpRequest req, string reqId)
+    {
+        if (_standingPlanSetupGateway is null || !_standingPlanSetupGateway.IsInteractiveDesktopAvailable)
+        {
+            throw new ApiException(409, "INTERACTIVE_DESKTOP_REQUIRED",
+                "Standing setup status is available only from the interactive tray host.");
+        }
+
+        if (string.IsNullOrWhiteSpace(setupIntentId) || setupIntentId.Contains('/') || setupIntentId.Contains('\\') ||
+            setupIntentId.Any(char.IsControl))
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "setup_intent_id is invalid.");
+        }
+
+        var waitMs = ParsePlanSetupWaitMs(req.Query.GetValueOrDefault("wait_ms"));
+        var sinceStatus = req.Query.GetValueOrDefault("since_status");
+        var sinceVersionText = req.Query.GetValueOrDefault("since_status_version") ??
+                               req.Query.GetValueOrDefault("since_version");
+        var sinceVersion = ParsePlanSetupSinceVersion(sinceVersionText);
+
+        var state = _standingPlanSetupGateway.Get(setupIntentId);
+        if (state is null)
+            throw new ApiException(404, "PLAN_SETUP_NOT_FOUND", "Unknown setup intent.");
+
+        if (waitMs > 0 && (sinceStatus is not null || sinceVersion is not null) &&
+            IsSameState(state, sinceStatus, sinceVersion))
+        {
+            var deadline = Environment.TickCount64 + waitMs;
+            while (Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(Math.Min(100, Math.Max(1, (int)(deadline - Environment.TickCount64))));
+                var next = _standingPlanSetupGateway.Get(setupIntentId);
+                if (next is null)
+                    throw new ApiException(404, "PLAN_SETUP_NOT_FOUND", "Unknown setup intent.");
+                state = next;
+                if (!IsSameState(state, sinceStatus, sinceVersion))
+                    break;
+            }
+        }
+
+        return ApiResponse.Ok(
+            StandingPlanResponse(
+                state.SetupIntentId,
+                state.StatusCode,
+                state.StatusVersion,
+                state.PlanId,
+                state.OccurrenceId,
+                state.LeaseId,
+                state.RequiresLocalAction,
+                state.NextAction,
+                state.ReasonCode,
+                $"{Prefix}/plan-setups/{Uri.EscapeDataString(state.SetupIntentId)}",
+                state.StatusVersionCursor,
+                state.RunId,
+                state.RecordingStatusUrl,
+                state.StartedAtUtc,
+                state.CompletedAtUtc),
+            reqId);
+    }
+
+    private static bool IsSameState(StandingPlanSetupState state, string? sinceStatus, string? sinceVersion) =>
+        (sinceStatus is null || string.Equals(state.StatusCode, sinceStatus, StringComparison.Ordinal)) &&
+        (sinceVersion is null ||
+         (state.StatusVersionCursor is not null &&
+          StandingPlanStatusVersionCursor.TryParse(sinceVersion, out _) &&
+          StandingPlanStatusVersionCursor.Compare(state.StatusVersionCursor, sinceVersion) <= 0) ||
+         (long.TryParse(sinceVersion, NumberStyles.None, CultureInfo.InvariantCulture, out var numericVersion) &&
+          state.StatusVersion <= numericVersion));
+
+    private static string? NextActionFor(string statusCode) => statusCode switch
+    {
+        "setup_pending" => "local_region_selection",
+        "pending_lease_approval" => "local_lease_approval",
+        "scheduled" => "natural_wake",
+        _ => null,
+    };
+
+    private static object StandingPlanResponse(
+        string? setupIntentId,
+        string statusCode,
+        long statusVersion,
+        string? planId,
+        string? occurrenceId,
+        string? leaseId,
+        bool requiresLocalAction,
+        string? nextAction,
+        string? reasonCode,
+        string statusUrl,
+        string? statusVersionCursor = null,
+        string? runId = null,
+        string? recordingStatusUrl = null,
+        DateTimeOffset? startedAtUtc = null,
+        DateTimeOffset? completedAtUtc = null) => new
+        {
+            setup_intent_id = setupIntentId,
+            status = statusCode,
+            status_version = statusVersion,
+            status_version_cursor = statusVersionCursor,
+            status_url = statusUrl,
+            plan_id = planId,
+            occurrence_id = occurrenceId,
+            lease_id = leaseId,
+            requires_local_action = requiresLocalAction,
+            next_action = nextAction,
+            reason_code = reasonCode,
+            run_id = runId,
+            recording_status_url = recordingStatusUrl,
+            started_at = startedAtUtc?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+            completed_at = completedAtUtc?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+        };
 
     private string AddMark(string recordingId, string reqBody, string reqId)
     {
@@ -1182,6 +1380,24 @@ public sealed class ApiServer
         return 0;
     }
 
+    private static int ParsePlanSetupWaitMs(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return 0;
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var ms) || ms < 0)
+            throw new ApiException(400, "INVALID_ARGUMENT", "wait_ms must be a non-negative integer.");
+        return Math.Min(ms, 25000);
+    }
+
+    private static string? ParsePlanSetupSinceVersion(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return null;
+        if (long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var version) && version >= 0)
+            return version.ToString(CultureInfo.InvariantCulture);
+        if (StandingPlanStatusVersionCursor.TryParse(value, out _))
+            return value;
+        throw new ApiException(400, "INVALID_ARGUMENT", "since_status_version must be a non-negative integer or a valid durable cursor.");
+    }
+
     private static string PrewarmStatusToString(PrewarmStatus status) => status switch
     {
         PrewarmStatus.NotStarted => "not_started",
@@ -1355,6 +1571,24 @@ public sealed class ApiServer
                 quick_recipes = quickRecipes
             },
             safety = new { requires_confirmation = true, recording_indicator = true, audit_log = true },
+            unattended_lease = new
+            {
+                supported = _standingPlanSetupGateway is not null && _standingPlanSetupGateway.IsInteractiveDesktopAvailable,
+                current_enabled = _standingPlanSetupGateway?.IsUnattendedEnabled ?? false,
+                default_enabled = false,
+                supported_targets = new[] { "fixed_region" },
+                audio_allowed = false,
+                max_lease_seconds = 3600,
+                max_run_seconds = 600,
+                max_latest_start_grace_seconds = 300,
+                wake_policy = "natural_wake_only",
+                requires_interactive_desktop = true,
+                revocation_supported = true,
+                profile_crud_supported = false,
+                create_endpoint = "/api/v1/plans",
+                status_endpoint = "/api/v1/plan-setups/{setup_intent_id}",
+                execution_supported = _standingPlanSetupGateway?.IsExecutionSupported ?? false
+            },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
             readiness = _readiness?.ToCapabilitiesObject(),
             context = new
