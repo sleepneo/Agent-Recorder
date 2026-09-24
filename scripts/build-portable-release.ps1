@@ -1475,6 +1475,7 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
+$publishArgs += "-p:BaseOutputPath=.local-data/release-publish/bin/"
 $publishAttempt = Invoke-DotNetPublishWithRetry -Arguments $publishArgs -DisplayName "AgentRecorder.App publish"
 if ($publishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish failed:" -ForegroundColor Red
@@ -1509,6 +1510,7 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
+$headlessPublishArgs += "-p:BaseOutputPath=.local-data/release-publish/bin/"
 $headlessPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $headlessPublishArgs -DisplayName "AgentRecorder.Headless publish"
 if ($headlessPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (Headless) failed:" -ForegroundColor Red
@@ -1543,6 +1545,7 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
+$cliPublishArgs += "-p:BaseOutputPath=.local-data/release-publish/bin/"
 $cliPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $cliPublishArgs -DisplayName "AgentRecorder.Cli publish"
 if ($cliPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (Cli) failed:" -ForegroundColor Red
@@ -1577,6 +1580,7 @@ if ($PublishMode -eq "self-contained") {
     )
 }
 
+$audioHelperPublishArgs += "-p:BaseOutputPath=.local-data/release-publish/bin/"
 $audioHelperPublishAttempt = Invoke-DotNetPublishWithRetry -Arguments $audioHelperPublishArgs -DisplayName "AgentRecorder.AudioHelper publish"
 if ($audioHelperPublishAttempt.ExitCode -ne 0) {
     Write-Host "[ERROR] dotnet publish (AudioHelper) failed:" -ForegroundColor Red
