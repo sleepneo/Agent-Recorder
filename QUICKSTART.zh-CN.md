@@ -63,6 +63,10 @@ JSON integer，例如 `2`，不是 API `display_id` 的数字后缀；成功后�
 返回 `timed_out=true` 时，使用返回的 `recording_id` 继续
 `GET /recordings/{id}` 长轮询；省略 `wait_for` 时保持原有的立即创建响应。
 
+需要稍后自动开始时，可让 agent 创建一次性或有界每日/每周计划。先在本地托盘安全控制中
+启用无人值守，再为该计划重新选择固定区域并批准 Lease。agent 可以查询设置状态，
+但不能通过 HTTP 代替本地授权；请求字段和限制见 `AGENT-API-REFERENCE.zh-CN.md`。
+
 `countdown_seconds` 对 raw API 和 quick API 都可选，省略时为 `3`，只接受 `0..10`
 的整数。设为 `0` 可关闭可见倒计时，但仍保留本地确认、准备、预检和可信首帧门槛。
 该值会在本地确认摘要及录制响应/状态的 `config` 中展示。
@@ -82,7 +86,7 @@ JSON integer，例如 `2`，不是 API `display_id` 的数字后缀；成功后�
 - API 默认只监听 `127.0.0.1`。
 - 状态变更接口需要 `X-Agent-Recorder-Key`。
 - AI agent 可以请求录制，但不能静默录制。
-- 普通录制必须由本地用户逐次确认；一次性无人值守计划必须先完成本地固定区域选择和有界 Lease 批准。
+- 普通录制必须由本地用户逐次确认；一次性及每日/每周无人值守计划必须先完成本地固定区域选择和有界 Lease 批准。
 - HTTP 自批准接口被阻止，返回 405。
 
 ## 停止录制

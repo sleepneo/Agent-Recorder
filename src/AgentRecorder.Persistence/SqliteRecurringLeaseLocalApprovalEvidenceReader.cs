@@ -111,6 +111,18 @@ public sealed class SqliteRecurringLeaseLocalApprovalEvidenceReader : SqliteRepo
         return reader.Read() ? ReadEvidence(reader) : null;
     }
 
+    internal static long CountWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string leaseId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM recurring_lease_local_approvals WHERE lease_id = $lease_id;";
+        Add(command, "$lease_id", leaseId);
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
     private static RecurringLeaseLocalApprovalEvidence ReadEvidence(SqliteDataReader reader)
     {
         var approvalId = ReadRequiredText(reader, 0);

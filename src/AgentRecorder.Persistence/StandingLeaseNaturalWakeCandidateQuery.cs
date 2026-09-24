@@ -44,7 +44,8 @@ internal sealed class StandingLeaseNaturalWakeCandidateQuery : SqliteRepositoryB
              AND s.plan_id = i.plan_id
              AND s.occurrence_id = i.occurrence_id
              AND s.lease_id = i.lease_id
-            WHERE i.status_code = 'activated'
+            WHERE i.intent_kind_code = 'standing_once_fixed_region'
+              AND i.status_code = 'activated'
               AND i.current_user_sid = $current_user_sid
               AND i.session_binding = $session_binding
               AND s.current_user_sid = $current_user_sid
@@ -120,7 +121,8 @@ internal sealed class StandingLeaseNaturalWakeCandidateQuery : SqliteRepositoryB
               ON u.occurrence_id = o.id
              AND u.run_id = r.id
              AND u.lease_id = l.id
-            WHERE i.status_code = 'activated'
+            WHERE i.intent_kind_code = 'standing_once_fixed_region'
+              AND i.status_code = 'activated'
               AND i.current_user_sid = $current_user_sid
               AND i.session_binding = $session_binding
               AND s.current_user_sid = $current_user_sid

@@ -148,6 +148,7 @@ internal static class Program
 
         var bundleGenerator = new FfmpegRecordingBundleGenerator();
         var standingStartSafetyInterlock = new StandingLeaseStartSafetyInterlock();
+        var recurringCurrentSafetyValidator = new SqliteRecurringLeaseCurrentSafetyValidator(operationalStore);
         StandingLeaseSafetyControlService? unattendedSafetyService = null;
         var engine = new RecordingEngine(
             audit,
@@ -160,7 +161,10 @@ internal static class Program
             standingStartSafetyInterlock: standingStartSafetyInterlock,
             standingStartSafetyValidator: (ticket, nowUtc) => unattendedSafetyService is null
                 ? "standing_safety_service_unavailable"
-                : unattendedSafetyService.ValidateStandingStart(ticket, nowUtc));
+                : unattendedSafetyService.ValidateStandingStart(ticket, nowUtc),
+            recurringStartSafetyInterlock: standingStartSafetyInterlock,
+            recurringStartSafetyValidator: recurringCurrentSafetyValidator.Validate,
+            recurringEnvironmentProvider: SystemQueryRecurringOccurrenceEnvironmentProvider.Instance);
         unattendedSafetyService = new StandingLeaseSafetyControlService(
             operationalStore,
             utcNowForTest: null,
@@ -174,13 +178,6 @@ internal static class Program
             unattendedSafetyService: unattendedSafetyService);
         engine.SetTray(tray);
         StandingLeaseNaturalWakeRuntime? standingNaturalWakeRuntime = null;
-        var standingPlanSetupCoordinator = new StandingPlanSetupCoordinator(
-            operationalStore,
-            audit,
-            tray,
-            unattendedSafetyService,
-            () => standingNaturalWakeRuntime?.ExecutionSupported == true,
-            engine.HasRecording);
         standingNaturalWakeRuntime = new StandingLeaseNaturalWakeRuntime(
             operationalStore,
             engine,
@@ -194,6 +191,65 @@ internal static class Program
                 execution_supported = false,
             });
         }
+
+        RecurringLeaseNaturalWakeRuntime? recurringNaturalWakeRuntime = null;
+        try
+        {
+            recurringNaturalWakeRuntime = new RecurringLeaseNaturalWakeRuntime(
+                operationalStore,
+                engine,
+                tray,
+                audit,
+                standingStartSafetyInterlock);
+            if (!recurringNaturalWakeRuntime.Start())
+            {
+                audit.Log("recurring_lease.runtime_blocked", new
+                {
+                    reason_code = "startup_recovery_or_scheduler_failed",
+                    execution_supported = false,
+                });
+            }
+        }
+        catch
+        {
+            recurringNaturalWakeRuntime?.Dispose();
+            recurringNaturalWakeRuntime = null;
+            audit.Log("recurring_lease.runtime_blocked", new
+            {
+                reason_code = "recurring_runtime_composition_failed",
+                execution_supported = false,
+            });
+        }
+
+        StandingPlanSetupCoordinator? standingPlanSetupCoordinator = null;
+        RecurringPlanSetupCoordinator? recurringPlanSetupCoordinator = null;
+        try
+        {
+            recurringPlanSetupCoordinator = new RecurringPlanSetupCoordinator(
+                operationalStore,
+                audit,
+                new TrayRecurringPlanSetupUi(tray),
+                executionSupportedProvider: () => recurringNaturalWakeRuntime?.ExecutionSupported == true);
+        }
+        catch (Exception exception)
+        {
+            recurringPlanSetupCoordinator?.Dispose();
+            recurringPlanSetupCoordinator = null;
+            audit.Log("recurring_setup.runtime_blocked", new
+            {
+                reason_code = "recurring_setup_composition_failed",
+                exception_type = exception.GetType().Name,
+                execution_supported = false,
+            });
+        }
+
+        standingPlanSetupCoordinator = new StandingPlanSetupCoordinator(
+            operationalStore,
+            audit,
+            tray,
+            unattendedSafetyService,
+            () => standingNaturalWakeRuntime?.ExecutionSupported == true,
+            engine.HasRecording);
 
         var appExePath = Application.ExecutablePath;
         var autoStart = new WindowsAutoStartManager(appExePath);
@@ -211,7 +267,8 @@ internal static class Program
             perfTracer,
             ensureContextStore,
             perfSummaryProvider,
-            standingPlanSetupCoordinator);
+            standingPlanSetupCoordinator,
+            recurringPlanSetupCoordinator);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -255,37 +312,43 @@ internal static class Program
             wgcWarmupCts.Dispose();
         }
 
-        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        var shutdownStarted = 0;
+        void Shutdown(string reason)
         {
-            try
-            {
-                StopWgcWarmup();
-                standingNaturalWakeRuntime?.Dispose();
-                engine.StopAllSync("process_exit");
-                audit.Log("service.stopped", new { mode = "tray", reason = "process_exit", pid = Environment.ProcessId });
-                server.Stop();
-                CleanupReadiness(readiness, audit);
-                audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
-                instanceGuard.Dispose();
-                perfTracer.Dispose();
-                standingPlanSetupCoordinator.Dispose();
-            }
-            catch { }
-        };
+            if (Interlocked.Exchange(ref shutdownStarted, 1) != 0)
+                return;
 
-        Application.ApplicationExit += (_, _) =>
-        {
-            StopWgcWarmup();
-            standingNaturalWakeRuntime?.Dispose();
-            engine.StopAllSync("application_exit");
-            audit.Log("service.stopped", new { mode = "tray", reason = "application_exit", pid = Environment.ProcessId });
-            server.Stop();
+            void SafeShutdownStep(string name, Action action)
+            {
+                try { action(); }
+                catch (Exception exception)
+                {
+                    try { audit.Log("service.shutdown_step_failed", new { mode = "tray", step = name, exception_type = exception.GetType().Name }); } catch { }
+                }
+            }
+
+            // First quiesce HTTP, then cancel setup flights while their store,
+            // tray and shared UI gate are still alive.
+            SafeShutdownStep("api", server.Stop);
+            SafeShutdownStep("recurring_setup", () => recurringPlanSetupCoordinator?.Dispose());
+            SafeShutdownStep("recurring_setup_wait", () => recurringPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
+            SafeShutdownStep("standing_setup", () => standingPlanSetupCoordinator?.Dispose());
+            SafeShutdownStep("standing_setup_wait", () => standingPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
+            SafeShutdownStep("recurring_runtime", () => recurringNaturalWakeRuntime?.Dispose());
+            SafeShutdownStep("standing_runtime", () => standingNaturalWakeRuntime?.Dispose());
+            SafeShutdownStep("recordings", () => engine.StopAllSync(reason));
+            SafeShutdownStep("wgc_warmup", StopWgcWarmup);
+
+            try { audit.Log("service.stopped", new { mode = "tray", reason, pid = Environment.ProcessId }); } catch { }
             CleanupReadiness(readiness, audit);
-            audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName });
-            instanceGuard.Dispose();
-            perfTracer.Dispose();
-            standingPlanSetupCoordinator.Dispose();
-        };
+            try { audit.Log("service.instance_released", new { mode = "tray", pid = Environment.ProcessId, mutex_name = SingleInstanceGuard.MutexName }); } catch { }
+            SafeShutdownStep("instance_guard", instanceGuard.Dispose);
+            SafeShutdownStep("performance_tracer", perfTracer.Dispose);
+            SafeShutdownStep("tray", tray.Dispose);
+        }
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Shutdown("process_exit");
+        Application.ApplicationExit += (_, _) => Shutdown("application_exit");
         Application.Run(tray);
     }
 

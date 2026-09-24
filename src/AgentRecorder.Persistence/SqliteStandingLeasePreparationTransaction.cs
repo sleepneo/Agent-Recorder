@@ -151,7 +151,7 @@ internal sealed class SqliteStandingLeasePreparationTransaction : SqliteReposito
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = $"SELECT {SetupIntentColumns} FROM setup_intents WHERE intent_id = $intent_id;";
+        command.CommandText = $"SELECT {SetupIntentColumns} FROM setup_intents WHERE intent_id = $intent_id AND intent_kind_code = 'standing_once_fixed_region';";
         Add(command, "$intent_id", intentId);
         using var reader = command.ExecuteReader();
         return reader.Read() ? ReadPersistedSetupIntent(reader) : null;

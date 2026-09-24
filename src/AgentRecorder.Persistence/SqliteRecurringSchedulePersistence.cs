@@ -1245,6 +1245,40 @@ public sealed class SqliteRecurringAdvancementTransaction : SqliteRepositoryBase
         DateTimeOffset initialAfterUtc,
         DateTimeOffset advancedAtUtc)
     {
+        return AdvanceOneCore(
+            planId, scheduleRevision, operationId, expectedCursorVersion,
+            initialAfterUtc, advancedAtUtc, runtimeCandidate: null, out _)!;
+    }
+
+    internal RecurringAdvancementOperationSnapshot? AdvanceOneForRuntime(
+        RecurringAdvancementCandidate candidate,
+        string operationId,
+        DateTimeOffset advancedAtUtc,
+        out bool wasReplay)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return AdvanceOneCore(
+            candidate.PlanId,
+            candidate.ScheduleRevision,
+            operationId,
+            candidate.ExpectedCursorVersion,
+            candidate.InitialAfterUtc,
+            advancedAtUtc,
+            candidate,
+            out wasReplay);
+    }
+
+    private RecurringAdvancementOperationSnapshot? AdvanceOneCore(
+        string planId,
+        long scheduleRevision,
+        string operationId,
+        long expectedCursorVersion,
+        DateTimeOffset initialAfterUtc,
+        DateTimeOffset advancedAtUtc,
+        RecurringAdvancementCandidate? runtimeCandidate,
+        out bool wasReplay)
+    {
+        wasReplay = false;
         var canonicalPlanId = RequiredInput(planId);
         var canonicalOperationId = RequiredInput(operationId);
         if (scheduleRevision <= 0)
@@ -1292,7 +1326,16 @@ public sealed class SqliteRecurringAdvancementTransaction : SqliteRepositoryBase
                 ValidateCursor(connection, transaction, replayCursor, replaySchedule);
                 ValidateOperation(connection, transaction, existingOperation, replayCursor, replaySchedule);
                 transaction.Commit();
+                wasReplay = true;
                 return existingOperation;
+            }
+
+            if (runtimeCandidate is not null &&
+                !RecurringAdvancementCandidateQuery.IsStillEligibleWithinTransaction(
+                    connection, transaction, runtimeCandidate, advancedAtUtc))
+            {
+                transaction.Commit();
+                return null;
             }
 
             EnsureEnabledPeriodicPlan(connection, transaction, canonicalPlanId);
@@ -1529,6 +1572,19 @@ public sealed class SqliteRecurringAdvancementTransaction : SqliteRepositoryBase
         {
             throw new Phase3PersistenceException(RecurringPersistenceReasonCodes.PlanNotEnabled, "The recurring plan must be enabled before advancement.");
         }
+    }
+
+    internal static RecurringScheduleCursorSnapshot? ReadValidatedCursorWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string planId,
+        long scheduleRevision,
+        RecurringScheduleVersionSnapshot schedule)
+    {
+        var cursor = ReadCursor(connection, transaction, planId, scheduleRevision);
+        if (cursor is not null)
+            ValidateCursor(connection, transaction, cursor, schedule);
+        return cursor;
     }
 
     private static RecurringScheduleCursorSnapshot? ReadCursor(

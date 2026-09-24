@@ -11,7 +11,7 @@
     .local-data/release-candidates/.
 
 .PARAMETER Version
-    Version string for the zip name. Default: v0.1.11
+    Version string for the zip name. Default: v0.1.12
 
 .PARAMETER PublishMode
     "self-contained" (default) or "framework-dependent".
@@ -27,7 +27,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.11",
+    [string]$Version = "v0.1.12",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
@@ -1667,6 +1667,16 @@ foreach ($packageDoc in @("QUICKSTART.md", "QUICKSTART.zh-CN.md", "LICENSE", "LI
     if (Test-Path $src) {
         Copy-Item $src -Destination (Join-Path $StagingDir $packageDoc) -Force
     }
+}
+
+$publicDocsDir = Join-Path $StagingDir "docs"
+New-Item -ItemType Directory -Path $publicDocsDir -Force | Out-Null
+foreach ($publicDoc in @("api.md", "safety.md")) {
+    $src = Join-Path $ProjectRoot (Join-Path "docs" $publicDoc)
+    if (-not (Test-Path -LiteralPath $src)) {
+        throw "Required public documentation is missing: $src"
+    }
+    Copy-Item -LiteralPath $src -Destination (Join-Path $publicDocsDir $publicDoc) -Force
 }
 
 Write-Host "[OK] Documentation added" -ForegroundColor Green

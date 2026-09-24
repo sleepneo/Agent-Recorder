@@ -84,7 +84,8 @@ internal sealed class StandingPlanSetupQueryService : SqliteRepositoryBase
         command.CommandText = """
             SELECT intent_id
             FROM setup_intents
-            WHERE current_user_sid = $current_user_sid
+            WHERE intent_kind_code = 'standing_once_fixed_region'
+              AND current_user_sid = $current_user_sid
               AND session_binding = $session_binding
               AND status_code IN ('region_selection_pending', 'lease_approval_pending')
             ORDER BY created_at_utc, intent_id;
@@ -120,6 +121,7 @@ internal sealed class StandingPlanSetupQueryService : SqliteRepositoryBase
                    output_directory, frozen_file_name
             FROM setup_intents
             WHERE intent_id = $intent_id
+              AND intent_kind_code = 'standing_once_fixed_region'
               AND current_user_sid = $current_user_sid
               AND session_binding = $session_binding
             LIMIT 1;
@@ -183,6 +185,7 @@ internal sealed class StandingPlanSetupQueryService : SqliteRepositoryBase
              AND s.occurrence_id = i.occurrence_id
              AND s.lease_id = i.lease_id
             WHERE i.intent_id = $intent_id
+              AND i.intent_kind_code = 'standing_once_fixed_region'
               AND i.current_user_sid = $current_user_sid
               AND i.session_binding = $session_binding
             LIMIT 1;
@@ -256,6 +259,7 @@ internal sealed class StandingPlanSetupQueryService : SqliteRepositoryBase
              AND u.occurrence_id = o.id
              AND u.lease_id = l.id
             WHERE i.intent_id = $intent_id
+              AND i.intent_kind_code = 'standing_once_fixed_region'
               AND i.current_user_sid = $current_user_sid
               AND i.session_binding = $session_binding
             LIMIT 1;
@@ -330,6 +334,7 @@ internal sealed class StandingPlanSetupTerminalService : SqliteRepositoryBase
                 SELECT status_code, plan_id, occurrence_id, lease_id, version
                 FROM setup_intents
                 WHERE intent_id = $intent_id
+                  AND intent_kind_code = 'standing_once_fixed_region'
                 LIMIT 1;
                 """;
             Add(read, "$intent_id", intentId);
@@ -449,7 +454,7 @@ internal sealed class StandingPlanSetupTerminalService : SqliteRepositoryBase
     {
         using var connection = OpenBusinessConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT status_code FROM setup_intents WHERE intent_id = $intent_id LIMIT 1;";
+        command.CommandText = "SELECT status_code FROM setup_intents WHERE intent_id = $intent_id AND intent_kind_code = 'standing_once_fixed_region' LIMIT 1;";
         Add(command, "$intent_id", intentId);
         var status = Convert.ToString(command.ExecuteScalar());
         return status is "rejected" or "expired";

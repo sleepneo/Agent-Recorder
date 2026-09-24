@@ -18,7 +18,7 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
 {
     private readonly SqliteOperationalStore _store;
     private readonly RecordingEngine _engine;
-    private readonly TrayContext _tray;
+    private readonly ITrayContext _tray;
     private readonly AuditLogger _audit;
     private readonly StandingLeaseNaturalWakeStartupRecovery _recovery;
     private readonly StandingLeaseNaturalWakeScheduler _scheduler;
@@ -30,7 +30,7 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
     internal StandingLeaseNaturalWakeRuntime(
         SqliteOperationalStore store,
         RecordingEngine engine,
-        TrayContext tray,
+        ITrayContext tray,
         AuditLogger audit)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -133,9 +133,12 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
         }
     }
 
-    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e) =>
+        HandleSessionSwitchForTests(e.Reason);
+
+    internal void HandleSessionSwitchForTests(SessionSwitchReason reason)
     {
-        if (e.Reason is SessionSwitchReason.SessionLock or
+        if (reason is SessionSwitchReason.SessionLock or
             SessionSwitchReason.SessionLogoff or
             SessionSwitchReason.ConsoleDisconnect or
             SessionSwitchReason.RemoteDisconnect)
@@ -145,9 +148,12 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
         }
     }
 
-    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e) =>
+        HandlePowerModeChangedForTests(e.Mode);
+
+    internal void HandlePowerModeChangedForTests(PowerModes mode)
     {
-        if (e.Mode == PowerModes.Suspend)
+        if (mode == PowerModes.Suspend)
         {
             try { _engine.StopAllSync("sleep_interrupted"); } catch { }
             _scheduler.Signal();

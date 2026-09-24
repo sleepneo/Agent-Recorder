@@ -205,6 +205,37 @@ public sealed class Recording
     internal IStandingLeaseCaptureLifecycleSession? StandingLifecycleSession { get; set; }
 
     /// <summary>
+    /// True only for the process-local recurring execution entry. The ticket,
+    /// proof and specification remain internal and are never serialized.
+    /// </summary>
+    internal bool IsRecurringLeaseExecution { get; set; }
+
+    internal RecurringLeaseUseProof? RecurringLeaseUseProof { get; set; }
+
+    internal RecurringOccurrenceExecutionSpecification? RecurringLeaseSpecification { get; set; }
+
+    internal RecurringLeaseCaptureExecutionTicket? RecurringLeaseExecutionTicket { get; set; }
+
+    /// <summary>
+    /// The trusted App/Persistence host supplies the durable recurring session
+    /// after the engine has selected the physical backend.
+    /// </summary>
+    internal Func<ICaptureBackend, IRecurringLeaseCaptureLifecycleSession?>? RecurringLifecycleFactory { get; set; }
+
+    internal IRecurringLeaseCaptureLifecycleSession? RecurringLifecycleSession { get; set; }
+
+    // Set only after the lifecycle owner has successfully accepted the exact
+    // backend. It lets the trusted engine cleanup path distinguish a session
+    // that owns the backend from one that was merely constructed before
+    // attachment failed.
+    internal bool RecurringLifecycleAttached { get; set; }
+
+    internal CancellationToken RecurringExecutionCancellationToken { get; set; }
+
+    internal bool IsUnattendedLeaseExecution =>
+        IsStandingLeaseExecution || IsRecurringLeaseExecution;
+
+    /// <summary>
     /// Published only after the complete terminal snapshot has been written.
     /// Lock-free readers use this acquire read as the publication barrier;
     /// lifecycle ownership is still established by the recording-local lock.

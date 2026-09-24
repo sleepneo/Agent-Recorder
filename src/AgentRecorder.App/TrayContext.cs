@@ -1329,6 +1329,19 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         int timeoutSeconds,
         Action<string, int, int, int, int, string, string> callback,
         CancellationToken cancellationToken)
+        => RequestSetupRegionSelection(timeoutSeconds, callback, cancellationToken, recurring: false);
+
+    internal void RequestRecurringRegionSelection(
+        int timeoutSeconds,
+        Action<string, int, int, int, int, string, string> callback,
+        CancellationToken cancellationToken)
+        => RequestSetupRegionSelection(timeoutSeconds, callback, cancellationToken, recurring: true);
+
+    private void RequestSetupRegionSelection(
+        int timeoutSeconds,
+        Action<string, int, int, int, int, string, string> callback,
+        CancellationToken cancellationToken,
+        bool recurring)
     {
         var callbackState = new CallbackState();
         Action<string, int, int, int, int, string, string> guardedCallback =
@@ -1343,18 +1356,24 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         Thread? uiThread = null;
         void CloseUiFromTimeout()
         {
-            callbackState.CloseRequestedFromTimeout = true;
-            if (callbackState.FormHandle != IntPtr.Zero)
-                Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            uiThreadCompleted.Wait(2000);
+            lock (callbackState)
+            {
+                callbackState.CloseRequestedFromTimeout = true;
+                if (callbackState.FormHandle != IntPtr.Zero)
+                    Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            }
+            if (!recurring) uiThreadCompleted.Wait(2000);
         }
 
         void CloseUiFromCancellation()
         {
-            callbackState.CloseRequestedFromCancellation = true;
-            if (callbackState.FormHandle != IntPtr.Zero)
-                Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-            uiThreadCompleted.Wait(2000);
+            lock (callbackState)
+            {
+                callbackState.CloseRequestedFromCancellation = true;
+                if (callbackState.FormHandle != IntPtr.Zero)
+                    Native.PostMessage(callbackState.FormHandle, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            }
+            if (!recurring) uiThreadCompleted.Wait(2000);
         }
 
         CancellationTokenRegistration cancellationRegistration = default;
@@ -1363,11 +1382,14 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             try
             {
                 CloseUiFromCancellation();
-                guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
+                // A recurring flight owns the global UI gate until the modal
+                // loop has actually exited. Only that UI thread may complete
+                // it; a close request alone is not proof of UI quiescence.
+                if (!recurring) guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
             }
             catch
             {
-                guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
+                if (!recurring) guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen");
             }
         });
 
@@ -1377,9 +1399,17 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             {
                 using var form = CreateRegionSelectionForm(
                     initialBounds: null,
-                    e => _audit.Log("standing_setup." + e.EventName, e.Payload),
+                    e =>
+                    {
+                        if (!recurring) _audit.Log("standing_setup." + e.EventName, e.Payload);
+                        // Recurring setup must not record region pixels, window
+                        // titles or the selector's unfiltered event payload.
+                    },
                     _uiText);
-                callbackState.FormHandle = form.Handle;
+                var formHandle = form.Handle;
+                // Publish the handle against a racing close request: either
+                // it receives WM_CLOSE or the flag below prevents ShowDialog.
+                lock (callbackState) callbackState.FormHandle = formHandle;
                 if (callbackState.CloseRequestedFromTimeout || callbackState.CloseRequestedFromCancellation)
                 {
                     guardedCallback(
@@ -1408,7 +1438,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             }
             catch (Exception exception)
             {
-                _audit.Log("standing_setup.region_selection_failed", new { reason_code = "region_selection_error", exception_type = exception.GetType().Name });
+                _audit.Log(recurring ? "recurring_setup.region_selection_failed" : "standing_setup.region_selection_failed",
+                    new { reason_code = recurring ? "interactive_desktop_unavailable" : "region_selection_error", exception_type = exception.GetType().Name });
                 guardedCallback("error", 0, 0, 0, 0, "", "virtual_screen");
             }
             finally
@@ -1427,12 +1458,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
                 if (!uiThreadCompleted.Wait(timeoutSeconds * 1000))
                 {
                     CloseUiFromTimeout();
-                    guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
+                    if (!recurring) guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
                 }
             }
             catch
             {
-                guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
+                if (!recurring) guardedCallback("selection_timeout", 0, 0, 0, 0, "", "virtual_screen");
             }
             finally
             {
@@ -1459,8 +1490,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private class CallbackState
     {
         public int AlreadyCalled = 0;
-        public bool CloseRequestedFromTimeout = false;
-        public bool CloseRequestedFromCancellation = false;
+        public volatile bool CloseRequestedFromTimeout = false;
+        public volatile bool CloseRequestedFromCancellation = false;
         public IntPtr FormHandle = IntPtr.Zero;
     }
 

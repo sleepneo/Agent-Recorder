@@ -271,6 +271,15 @@ public sealed class SqliteRecurringFixedRegionProfileRepository : SqliteReposito
         return profile;
     }
 
+    // Used only by the recurring setup preparation transaction. Keeping the
+    // insert on the caller-owned connection prevents a separate committed
+    // profile row from escaping the preparation boundary.
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RecurringFixedRegionProfileVersion profile) =>
+        Insert(connection, transaction, profile);
+
     public RecurringFixedRegionProfileVersion GetLatest(string profileId)
     {
         ValidateProfileId(profileId);

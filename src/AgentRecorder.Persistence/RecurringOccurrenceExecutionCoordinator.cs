@@ -38,7 +38,8 @@ internal sealed class RecurringOccurrenceExecutionCoordinator
             currentSafetyValidatorForTest: null,
             lifecycleSessionFactoryForTest: null,
             currentUserSidForTest: null,
-            sessionBindingForTest: null)
+            sessionBindingForTest: null,
+            executionStarterForProduction: null)
     {
     }
 
@@ -68,7 +69,8 @@ internal sealed class RecurringOccurrenceExecutionCoordinator
         Action<RecurringLeaseRestartRecoveryFailurePoint>? recoveryFailureHookForTest = null,
         Action<SqliteConnection, SqliteTransaction>? recoveryBeforeCommitForTest = null,
         Action<SqliteConnection, SqliteTransaction>? recoveryAfterExactReadForTest = null,
-        Action<RecurringOccurrenceExecutionStage>? stageHookForTest = null)
+        Action<RecurringOccurrenceExecutionStage>? stageHookForTest = null,
+        Func<RecurringLeaseCaptureExecutionTicket, StandingLeaseStartSafetyInterlock, CancellationToken, Task<RecurringLeaseCaptureExecutionResult>>? executionStarterForProduction = null)
     {
         ArgumentNullException.ThrowIfNull(store);
 
@@ -120,7 +122,8 @@ internal sealed class RecurringOccurrenceExecutionCoordinator
                     _store,
                     ticket,
                     backend,
-                    () => _utcNow())));
+                    () => _utcNow())),
+            executionStarterForProduction);
 
         _immediateRecovery = new RecurringLeaseImmediateRecoveryService(
             store,

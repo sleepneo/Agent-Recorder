@@ -1017,12 +1017,14 @@ public sealed class RecurringOccurrenceReservationTests
             string? approvalUserSid = null,
             string? approvalSessionBinding = null,
             TimeSpan? latestStartGrace = null,
-            int countdownSeconds = 3)
+            int countdownSeconds = 3,
+            TimeSpan? recordingDuration = null)
         {
             var fixture = RecurringLeaseFixture.Create(
                 maxOccurrences: Math.Max(3, slotCount + 1),
                 latestStartGrace: latestStartGrace ?? TimeSpan.Zero,
-                countdownSeconds: countdownSeconds);
+                countdownSeconds: countdownSeconds,
+                recordingDuration: recordingDuration);
             var slots = MaterializeSlots(fixture, slotCount);
             var shouldCreateSpecification = targetStatus == "authorized" &&
                 (validFrom is null || validFrom.Value <= slots[0].ScheduledStartUtc!.Value) &&

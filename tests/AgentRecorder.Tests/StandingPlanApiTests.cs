@@ -104,10 +104,10 @@ public sealed class StandingPlanApiTests : IDisposable
         Assert.Equal(1, gateway.CreateCalls);
 
         using var status = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/setup-test-1?since_status=setup_pending&wait_ms=10");
+            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?since_status=setup_pending&wait_ms=10");
         Assert.Equal(200, (int)status.StatusCode);
         using var statusDocument = JsonDocument.Parse(await status.Content.ReadAsStringAsync());
-        Assert.Equal("setup-test-1", statusDocument.RootElement.GetProperty("data").GetProperty("setup_intent_id").GetString());
+        Assert.Equal("standing-setup-test-1", statusDocument.RootElement.GetProperty("data").GetProperty("setup_intent_id").GetString());
     }
 
     [Fact]
@@ -154,7 +154,7 @@ public sealed class StandingPlanApiTests : IDisposable
         })
         {
             using var response = await client.GetAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/setup-test-1?{query}");
+                $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?{query}");
             Assert.Equal(400, (int)response.StatusCode);
             Assert.Contains("INVALID_ARGUMENT", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         }
@@ -165,7 +165,7 @@ public sealed class StandingPlanApiTests : IDisposable
     {
         var gateway = new FakeGateway();
         gateway.SetState(new StandingPlanSetupState(
-            "setup-test-1",
+            "standing-setup-test-1",
             "recording",
             12,
             "plan-1",
@@ -185,7 +185,7 @@ public sealed class StandingPlanApiTests : IDisposable
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         using var current = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/setup-test-1");
+            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1");
         using var currentDocument = JsonDocument.Parse(await current.Content.ReadAsStringAsync());
         var currentData = currentDocument.RootElement.GetProperty("data");
         Assert.Equal("run-1", currentData.GetProperty("run_id").GetString());
@@ -195,7 +195,7 @@ public sealed class StandingPlanApiTests : IDisposable
         Assert.Equal(JsonValueKind.Number, currentData.GetProperty("status_version").ValueKind);
 
         gateway.SetState(currentData: new StandingPlanSetupState(
-            "setup-test-1",
+            "standing-setup-test-1",
             "session_interrupted",
             17,
             "plan-1",
@@ -211,7 +211,7 @@ public sealed class StandingPlanApiTests : IDisposable
             "v1:2:1:4:5:3"));
 
         using var stale = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/setup-test-1");
+            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1");
         using var staleDocument = JsonDocument.Parse(await stale.Content.ReadAsStringAsync());
         var staleData = staleDocument.RootElement.GetProperty("data");
         Assert.Equal("run-1", staleData.GetProperty("run_id").GetString());
@@ -224,7 +224,7 @@ public sealed class StandingPlanApiTests : IDisposable
     {
         var gateway = new FakeGateway();
         gateway.SetState(new StandingPlanSetupState(
-            "setup-test-1",
+            "standing-setup-test-1",
             "recording",
             10,
             "plan-1",
@@ -245,10 +245,10 @@ public sealed class StandingPlanApiTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         var started = Stopwatch.GetTimestamp();
         var pending = client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/setup-test-1?since_status_version=v1:2:1:3:3:3:1&wait_ms=2000");
+            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?since_status_version=v1:2:1:3:3:3:1&wait_ms=2000");
         await gateway.FirstGet.Task.WaitAsync(TimeSpan.FromSeconds(1));
         gateway.SetState(currentData: new StandingPlanSetupState(
-            "setup-test-1",
+            "standing-setup-test-1",
             "recording",
             11,
             "plan-1",
@@ -424,12 +424,12 @@ public sealed class StandingPlanApiTests : IDisposable
             {
                 return new StandingPlanSetupCreateResult(
                     StandingPlanSetupCreateStatus.Conflict,
-                    "setup-test-1", "setup_pending", 0, null, null, null,
+                    "standing-setup-test-1", "setup_pending", 0, null, null, null,
                     "idempotency_conflict");
             }
             _requests.TryAdd(request.IdempotencyKey, request);
             var state = _states.GetOrAdd(request.IdempotencyKey, _ => new StandingPlanSetupState(
-                "setup-test-1", "setup_pending", 0, null, null, null,
+                "standing-setup-test-1", "setup_pending", 0, null, null, null,
                 true, "local_region_selection", null));
             return new StandingPlanSetupCreateResult(
                 _requests.Count == 1 ? StandingPlanSetupCreateStatus.Created : StandingPlanSetupCreateStatus.Existing,

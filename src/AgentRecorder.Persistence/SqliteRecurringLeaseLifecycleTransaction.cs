@@ -300,6 +300,7 @@ internal sealed class SqliteRecurringLeaseLifecycleTransaction : SqlitePeriodicO
                 meta,
                 snapshot.Specification.FrozenOutputFilePath,
                 snapshot.Use.ReservedDuration,
+                allowQuantizedNaturalTail: kind == RecurringLeaseLifecycleTerminationKind.NaturalExit && exitCode == 0,
                 out var actualDuration,
                 out var mediaReason);
             if (exitCode != 0 || !validOutput)
@@ -615,6 +616,7 @@ internal sealed class SqliteRecurringLeaseLifecycleTransaction : SqlitePeriodicO
         OutputMeta? meta,
         string authorizedOutputPath,
         TimeSpan authorizedDuration,
+        bool allowQuantizedNaturalTail,
         out TimeSpan actualDuration,
         out string failureReason)
     {
@@ -667,34 +669,49 @@ internal sealed class SqliteRecurringLeaseLifecycleTransaction : SqlitePeriodicO
             return false;
         }
 
-        if (meta.DurationSeconds > authorizedDuration.TotalSeconds)
+        var quantizedTail = meta.DurationSeconds > authorizedDuration.TotalSeconds;
+        if (quantizedTail &&
+            (!allowQuantizedNaturalTail ||
+             meta.QuantizedTailEvidence is not { } evidence ||
+             !evidence.Matches(meta, authorizedOutputPath, authorizedDuration)))
         {
             failureReason = "capture_duration_exceeds_authorization";
             return false;
         }
 
-        var ticks = meta.DurationSeconds * TimeSpan.TicksPerSecond;
-        if (!double.IsFinite(ticks) || ticks < 0 || ticks > TimeSpan.MaxValue.Ticks)
+        if (quantizedTail)
         {
-            failureReason = "capture_duration_invalid";
-            return false;
+            // The media container includes the final authorized frame's
+            // presentation interval. Charge the exact authorization, never the
+            // container tail; the evidence proves the frame itself began before
+            // the cutoff and no later frame starts beyond it.
+            actualDuration = authorizedDuration;
         }
+        else
+        {
+            var ticks = meta.DurationSeconds * TimeSpan.TicksPerSecond;
+            if (!double.IsFinite(ticks) || ticks < 0 || ticks > TimeSpan.MaxValue.Ticks)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
 
-        var roundedTicks = Math.Round(ticks, MidpointRounding.ToEven);
-        if (!double.IsFinite(roundedTicks) || roundedTicks < 0 || roundedTicks > TimeSpan.MaxValue.Ticks)
-        {
-            failureReason = "capture_duration_invalid";
-            return false;
-        }
+            var roundedTicks = Math.Round(ticks, MidpointRounding.ToEven);
+            if (!double.IsFinite(roundedTicks) || roundedTicks < 0 || roundedTicks > TimeSpan.MaxValue.Ticks)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
 
-        try
-        {
-            actualDuration = TimeSpan.FromTicks(checked((long)roundedTicks));
-        }
-        catch (OverflowException)
-        {
-            failureReason = "capture_duration_invalid";
-            return false;
+            try
+            {
+                actualDuration = TimeSpan.FromTicks(checked((long)roundedTicks));
+            }
+            catch (OverflowException)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
         }
 
         if (actualDuration < TimeSpan.Zero || actualDuration > authorizedDuration)

@@ -604,7 +604,7 @@ public sealed class AuthorizedFixedRegionScope
         return canonical;
     }
 
-    internal static string NormalizeOutputDirectoryForAuthorization(string? value) =>
+    public static string NormalizeOutputDirectoryForAuthorization(string? value) =>
         NormalizeOutputDirectory(value);
 
     internal static string NormalizeFrozenFileNameForAuthorization(string? value) =>

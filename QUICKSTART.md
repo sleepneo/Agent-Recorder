@@ -67,6 +67,12 @@ returns `timed_out=true`, use the returned `recording_id` to continue with
 `GET /recordings/{id}` long-polling. Omitting `wait_for` preserves the immediate
 creation response.
 
+For a recording that should start later without another prompt at start time,
+ask the agent for a one-shot or bounded daily/weekly plan. Enable unattended
+mode in the local tray safety controls, then select a fixed region and approve
+that plan's lease locally. The agent can observe setup status but cannot grant
+the lease over HTTP. See `docs/api.md` for the plan request and limits.
+
 `countdown_seconds` is optional for both raw and quick recording requests. It
 defaults to `3` and accepts only integer values `0` through `10`. Use `0` to
 skip the visible countdown while keeping local confirmation, preparation,
@@ -93,7 +99,9 @@ without `AGENT_RECORDER_DATA_DIR`, the default data directory is
 - API binds to `127.0.0.1`.
 - State-changing calls require `X-Agent-Recorder-Key`.
 - AI agents can request recording but cannot silently approve it.
-- Local user confirmation is mandatory. The confirmation window also lets the user choose the save directory for that recording.
+- Ordinary recordings need local confirmation; unattended plans need separate
+  local fixed-region selection and lease approval. The ordinary confirmation
+  window also lets the user choose the save directory for that recording.
 - HTTP self-approval is blocked with `405 METHOD_NOT_ALLOWED`.
 
 Before showing confirmation and again before capture starts, Agent Recorder

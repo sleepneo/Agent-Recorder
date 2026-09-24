@@ -397,22 +397,25 @@ internal sealed class RecurringLeaseFixture : IDisposable
     public static RecurringLeaseFixture Create(
         int maxOccurrences = 10,
         TimeSpan latestStartGrace = default,
-        int countdownSeconds = 3)
+        int countdownSeconds = 3,
+        TimeSpan? recordingDuration = null)
     {
+        var exactRecordingDuration = recordingDuration ?? TimeSpan.FromMinutes(2);
         var root = Path.Combine(Path.GetTempPath(), "agent-recorder-task259-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var store = new SqliteOperationalStore(Path.Combine(root, "state.db"));
         store.Initialize();
         var createdAt = new DateTimeOffset(2026, 9, 10, 10, 0, 0, TimeSpan.Zero);
         var profiles = new SqliteRecurringFixedRegionProfileRepository(store);
-        var profile = profiles.CreateVersion1(CreateProfile("task259-profile", createdAt, root, countdownSeconds));
+        var profile = profiles.CreateVersion1(CreateProfile(
+            "task259-profile", createdAt, root, countdownSeconds, exactRecordingDuration));
         var schedule = RecurringPlanSchedule.CreateDaily(
             TimeZoneInfo.Utc.Id,
             new DateOnly(2026, 9, 10),
             new DateOnly(2026, 9, 10).AddDays(maxOccurrences + 1),
             new TimeOnly(10, 0),
             maxOccurrences,
-            TimeSpan.FromMinutes(2),
+            exactRecordingDuration,
             latestStartGrace);
         var setup = new SqliteRecurringPlanDraftSetupTransaction(store).CreateOrGet("task259-plan", schedule, profile.Reference, createdAt);
         return new RecurringLeaseFixture(root, store, setup, schedule, createdAt);
@@ -632,7 +635,8 @@ internal sealed class RecurringLeaseFixture : IDisposable
         string id,
         DateTimeOffset createdAt,
         string root,
-        int countdownSeconds = 3) =>
+        int countdownSeconds = 3,
+        TimeSpan? recordingDuration = null) =>
         RecurringFixedRegionProfileVersion.CreateVersion1(
             id,
             createdAt,
@@ -653,7 +657,7 @@ internal sealed class RecurringLeaseFixture : IDisposable
                 TopologyDigest,
                 AuthorizedCaptureBackend.FfmpegRegion,
                 AuthorizedAudioMode.None,
-                TimeSpan.FromMinutes(2),
+                recordingDuration ?? TimeSpan.FromMinutes(2),
                 countdownSeconds,
                 Path.Combine(root, "output"),
                 "demo",

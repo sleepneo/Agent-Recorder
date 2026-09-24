@@ -175,6 +175,16 @@ public sealed class OutputMeta
     /// rather than relying on pre-mux WAV duration estimates.
     /// </summary>
     public ProbeStreamInfo[] ProbeStreams = Array.Empty<ProbeStreamInfo>();
+
+    /// <summary>
+    /// Process-local evidence that an authorized, silent FFmpeg fixed-rate
+    /// capture ended with only its final frame's display interval crossing
+    /// the duration boundary. It is not part of any serialized contract.
+    /// </summary>
+    internal FfmpegQuantizedTailEvidence? QuantizedTailEvidence { get; set; }
+
+    /// <summary>The file last-write timestamp captured by the media probe.</summary>
+    internal long? ProbeFileLastWriteUtcTicks { get; set; }
 }
 
 /// <summary>
@@ -196,4 +206,16 @@ public sealed class ProbeStreamInfo
 
     /// <summary>Stream duration in seconds, or null when absent/unparseable.</summary>
     public double? DurationSeconds;
+
+    /// <summary>Stream time base in seconds per tick, or null when unavailable.</summary>
+    public double? TimeBaseSeconds;
+
+    /// <summary>Average frame rate parsed from ffprobe's rational value.</summary>
+    public double? AverageFrameRate;
+
+    /// <summary>Nominal frame rate parsed from ffprobe's rational value.</summary>
+    public double? NominalFrameRate;
+
+    /// <summary>Frame count declared by ffprobe, or null when unavailable.</summary>
+    public long? FrameCount;
 }

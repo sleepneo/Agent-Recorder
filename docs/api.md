@@ -861,6 +861,57 @@ safety state, and one-time proof. A mismatch, revocation, Stop All, session
 loss, sleep, existing output file, or missed window fails closed and never
 falls back to an interactive or differently scoped recording.
 
+## Bounded Daily/Weekly Fixed-Region Plan
+
+The same authenticated `POST /plans` endpoint also accepts a `daily` or
+`weekly` recurring schedule when `/capabilities.unattended_lease.recurring`
+reports setup and execution support and unattended mode is locally enabled.
+Each plan requires a new local region selection and separate recurring lease
+approval. The output directory must already exist; it is frozen at approval.
+
+```json
+{
+  "recording_spec": {
+    "source": { "type": "fixed_region" },
+    "audio": { "mode": "none" },
+    "duration_seconds": 10,
+    "countdown_seconds": 0,
+    "backend": "ffmpeg-region",
+    "output": { "directory": "D:\\Videos", "filename_prefix": "daily-notes" }
+  },
+  "schedule": {
+    "kind": "daily",
+    "time_zone_id": "China Standard Time",
+    "local_start_date": "2026-10-01",
+    "local_end_date": "2026-10-03",
+    "local_time": "09:00:00",
+    "weekdays": null,
+    "maximum_occurrences": 3,
+    "latest_start_grace_seconds": 120
+  },
+  "requested_authorization": {
+    "mode": "recurring_lease",
+    "valid_until": "2026-10-03T02:00:00Z",
+    "max_runs": 3,
+    "max_total_duration_seconds": 30
+  }
+}
+```
+
+`weekly` uses a nonempty, unique array of lowercase weekday names instead of
+`null`. The local date span is at most 366 days, occurrence count at most 366,
+run duration 1-600 seconds, and latest-start grace at most 300 seconds.
+`max_runs` must equal `maximum_occurrences`, total duration must cover all
+runs, and `valid_until` must be strictly after the latest planned end. Each
+due occurrence is revalidated and executed at most once; a missed window or
+uncertain start is not retried.
+
+The recurring `GET /plan-setups/{id}` response reports setup progress and
+`scheduled` activation only. It does not yet expose per-occurrence execution
+status. Do not interpret `scheduled` as recording started or completed; the
+frozen output directory and local audit retain execution evidence until a
+dedicated execution-status API is available.
+
 ## Lower-Level Endpoints
 
 ### Displays

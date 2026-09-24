@@ -6,6 +6,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Logging;
 using AgentRecorder.Persistence;
 using AgentRecorder.Windows;
 using Microsoft.Data.Sqlite;
@@ -2454,6 +2455,788 @@ public sealed class RecurringLeaseExecutionGateTests
             propertyType => propertyType == typeof(string));
     }
 
+    [Fact]
+    public async Task RecurringProductionBridgeTransfersOwnershipToEngineOnceAndUsesOneCountdown()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        var starterCalls = 0;
+        var factoryCalls = 0;
+        var countdownCalls = 0;
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ =>
+        {
+            factoryCalls++;
+            return (backend, "ffmpeg-region");
+        };
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (duration, _) =>
+            {
+                countdownCalls++;
+                Assert.Equal(TimeSpan.FromSeconds(ticket.CountdownSeconds), duration);
+                return Task.CompletedTask;
+            },
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+            {
+                starterCalls++;
+                return Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken));
+            });
+
+        var result = await bridge.ExecuteAsync(ticket);
+
+        Assert.True(
+            result.Status == RecurringLeaseCaptureExecutionStatus.Started,
+            $"reason={result.Reason}; tray_error={tray.LastError}");
+        Assert.Same(backend, result.Backend);
+        Assert.NotNull(result.LifecycleSession);
+        Assert.Equal(1, starterCalls);
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, countdownCalls);
+        Assert.Equal(0, engine.ActiveCountdownOperationCountForTests);
+        Assert.Equal(0, tray.CountdownCalls);
+        Assert.Equal(1, backend.FirstFrameAddCalls);
+        Assert.Equal(1, backend.CaptureEndedAddCalls);
+        Assert.Equal(1, backend.NaturalExitRegistrationCalls);
+        Assert.Same(context.Proof, backend.Proof);
+
+        backend.RaiseFirstFrame();
+        engine.Stop(ticket.RunId, "production_test_stop");
+
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeRoutesEngineCallbacksAndPublishesRegistryViews()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        var displayTopology = new MatchingDisplayTopologyProvider(ticket);
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: displayTopology,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var result = await bridge.ExecuteAsync(ticket);
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Started, result.Status);
+        Assert.Single(engine.List());
+        using (var status = JsonDocument.Parse(JsonSerializer.Serialize(engine.GetStatus(ticket.RunId))))
+        {
+            Assert.Equal(ticket.RunId, status.RootElement.GetProperty("recording_id").GetString());
+            Assert.Equal("ffmpeg-region", status.RootElement.GetProperty("backend").GetString());
+            Assert.Equal(
+                ticket.OutputFilePath,
+                status.RootElement.GetProperty("output").GetProperty("path").GetString());
+        }
+
+        backend.RaiseFirstFrame();
+        backend.RaiseCaptureEnded();
+        backend.RaiseNaturalExit();
+
+        using (var output = JsonDocument.Parse(JsonSerializer.Serialize(engine.GetOutput(ticket.RunId))))
+        {
+            Assert.Equal(ticket.RunId, output.RootElement.GetProperty("recording_id").GetString());
+            Assert.Equal(
+                ticket.OutputFilePath,
+                output.RootElement.GetProperty("output").GetProperty("path").GetString());
+        }
+
+        var run = new SqliteRecordingRunRepository(context.Context.Fixture.Store).Get(ticket.RunId);
+        var use = new SqliteRecurringLeaseUseAccountingReader(context.Context.Fixture.Store)
+            .TryGetByOccurrence(ticket.OccurrenceIdentity);
+        var occurrence = new SqlitePlanOccurrenceRepository(context.Context.Fixture.Store)
+            .Get(ticket.OccurrenceId);
+
+        Assert.Equal(RecordingRunStatus.Settled, run.Status);
+        Assert.Equal(LeaseUseStatus.Settled, use!.Status);
+        Assert.Equal(PlanOccurrenceStatus.Completed, occurrence.Status);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeSettlesFfmpegQuantizedTailFromProbeEvidence()
+    {
+        using var context = CreateCommittedContext(
+            countdownSeconds: 0,
+            recordingDuration: TimeSpan.FromSeconds(10));
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        var displayTopology = new MatchingDisplayTopologyProvider(ticket);
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: displayTopology,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.DisableDeadlineWatchdogForTests = true;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var start = await bridge.ExecuteAsync(ticket);
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Started, start.Status);
+        var configuration = Assert.IsType<CaptureConfig>(backend.Configuration);
+        Assert.Equal(10, configuration.DurationSeconds);
+        Assert.Equal(ticket.Specification.FrozenOutputFilePath, configuration.OutputPath);
+
+        QuantizedTailTestMedia.Generate(configuration.OutputPath, 299, "179/6");
+        var probed = FfmpegCaptureBackend.ProbeAuthorizedFixedRateCapture(configuration.OutputPath, configuration);
+        Assert.True(probed.DurationSeconds > 10, $"probe duration was {probed.DurationSeconds:R}s");
+        Assert.True(probed.ProbeStreams.Single().StartTimeSeconds < 10);
+        Assert.NotNull(probed.QuantizedTailEvidence);
+
+        backend.RaiseFirstFrame();
+        backend.RaiseNaturalExit(probed);
+
+        using (var completed = JsonDocument.Parse(JsonSerializer.Serialize(engine.GetStatus(ticket.RunId))))
+        {
+            Assert.Equal("completed", completed.RootElement.GetProperty("status").GetString());
+            Assert.Equal(10, completed.RootElement.GetProperty("config").GetProperty("duration_seconds").GetInt32());
+            Assert.True(completed.RootElement.GetProperty("output").GetProperty("duration_seconds").GetDouble() > 10);
+        }
+
+        var run = new SqliteRecordingRunRepository(context.Context.Fixture.Store).Get(ticket.RunId);
+        var use = new SqliteRecurringLeaseUseAccountingReader(context.Context.Fixture.Store)
+            .TryGetByOccurrence(ticket.OccurrenceIdentity);
+        var occurrence = new SqlitePlanOccurrenceRepository(context.Context.Fixture.Store)
+            .Get(ticket.OccurrenceId);
+        Assert.Equal(RecordingRunStatus.Settled, run.Status);
+        Assert.Equal(LeaseUseStatus.Settled, use!.Status);
+        Assert.Equal(PlanOccurrenceStatus.Completed, occurrence.Status);
+        Assert.Equal(TimeSpan.FromSeconds(10), use.ActualSettledDuration);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(1L, ReadLong(context, "SELECT COUNT(*) FROM plan_occurrences WHERE id = $id;", ("$id", ticket.OccurrenceId)));
+        Assert.Equal(1L, ReadLong(context, "SELECT COUNT(*) FROM recording_runs WHERE id = $id;", ("$id", ticket.RunId)));
+        Assert.Equal(1L, ReadLong(context, "SELECT COUNT(*) FROM recurring_lease_uses WHERE occurrence_id = $id;", ("$id", ticket.OccurrenceId)));
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeUsesSameInterlockAndFailsClosedOnFinalSafetyRejection()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        var safetyDecision = new RecurringLeaseCurrentSafetyDecision(
+            RecurringLeaseCurrentSafetyStatus.StopAllActive);
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => safetyDecision,
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var result = await bridge.ExecuteAsync(ticket);
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal("recurring_execution_stop_all_active", result.Reason);
+        Assert.Equal(0, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal("recurring_execution_stop_all_active", tray.LastError);
+    }
+
+    [Fact]
+    public void RecurringEngineRejectsDifferentBridgeInterlockBeforeBackendConstruction()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var engineInterlock = new StandingLeaseStartSafetyInterlock();
+        var bridgeInterlock = new StandingLeaseStartSafetyInterlock();
+        var factoryCalls = 0;
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: engineInterlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ =>
+        {
+            factoryCalls++;
+            return (backend, "ffmpeg-region");
+        };
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: bridgeInterlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var result = bridge.ExecuteAsync(ticket).GetAwaiter().GetResult();
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal("recurring_execution_safety_interlock_mismatch", result.Reason);
+        Assert.Equal(0, factoryCalls);
+        Assert.Equal(0, backend.StartCalls);
+        Assert.Equal(0, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public void RecurringEngineLifecycleConstructionFailuresAreStableAndCleanedExactlyOnce()
+    {
+        using var throwingContext = CreateCommittedContext();
+        var throwingProvider = new CountingProvider();
+        var throwingTicket = CreateExecutionTicket(throwingContext, throwingProvider);
+        Assert.True(throwingTicket.TryClaim(out var throwingClaimReason), throwingClaimReason);
+        var throwingBackend = new EngineOwnedRecurringBackend();
+        var throwingInterlock = new StandingLeaseStartSafetyInterlock();
+        var throwingTray = new ProductionBridgeTray();
+        using var throwingAudit = new TemporaryAuditLogger();
+        using var throwingEngine = new RecordingEngine(
+            throwingAudit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: throwingInterlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: throwingProvider);
+        throwingEngine.UtcNowForTests = () => throwingContext.Now.UtcDateTime;
+        throwingEngine.BackendFactory = _ => (throwingBackend, "ffmpeg-region");
+
+        var throwingResult = throwingEngine.StartRecurringCapture(
+            throwingTicket,
+            throwingTray,
+            throwingInterlock,
+            _ => throw new InvalidOperationException("lifecycle detail"));
+
+        Assert.Equal(
+            "recurring_execution_lifecycle_session_unavailable",
+            throwingResult.Reason);
+        Assert.Equal(0, throwingBackend.StartCalls);
+        Assert.Equal(1, throwingBackend.DisposeCalls);
+        Assert.Empty(throwingEngine.List());
+
+        using var attachContext = CreateCommittedContext();
+        var attachProvider = new CountingProvider();
+        var attachTicket = CreateExecutionTicket(attachContext, attachProvider);
+        Assert.True(attachTicket.TryClaim(out var attachClaimReason), attachClaimReason);
+        var attachBackend = new EngineOwnedRecurringBackend();
+        var attachSession = new TestLifecycleSession { ThrowOnAttach = true };
+        var attachInterlock = new StandingLeaseStartSafetyInterlock();
+        var attachTray = new ProductionBridgeTray();
+        using var attachAudit = new TemporaryAuditLogger();
+        using var attachEngine = new RecordingEngine(
+            attachAudit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: attachInterlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: attachProvider);
+        attachEngine.UtcNowForTests = () => attachContext.Now.UtcDateTime;
+        attachEngine.BackendFactory = _ => (attachBackend, "ffmpeg-region");
+
+        var attachResult = attachEngine.StartRecurringCapture(
+            attachTicket,
+            attachTray,
+            attachInterlock,
+            _ => attachSession);
+
+        Assert.Equal(
+            "recurring_execution_lifecycle_session_attach_failed",
+            attachResult.Reason);
+        Assert.Equal(0, attachBackend.StartCalls);
+        Assert.Equal(1, attachBackend.DisposeCalls);
+        Assert.Equal(1, attachSession.DisposeCalls);
+        Assert.Empty(attachEngine.List());
+    }
+
+    [Fact]
+    public void RecurringEngineBackendStartFailureIsStableDurablyConvergedAndCleanedOnce()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        Assert.True(ticket.TryClaim(out var claimReason), claimReason);
+        var backend = new EngineOwnedRecurringBackend { ThrowOnStart = true };
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+        var result = engine.StartRecurringCapture(
+            ticket,
+            tray,
+            interlock,
+            exactBackend => new RecurringLeaseCaptureExecutionSession(
+                context.Context.Fixture.Store,
+                ticket,
+                exactBackend,
+                () => context.Now,
+                attachBackendCallbacks: false));
+
+        var run = new SqliteRecordingRunRepository(context.Context.Fixture.Store).Get(ticket.RunId);
+        var use = new SqliteRecurringLeaseUseAccountingReader(context.Context.Fixture.Store)
+            .TryGetByOccurrence(ticket.OccurrenceIdentity);
+        var occurrence = new SqlitePlanOccurrenceRepository(context.Context.Fixture.Store)
+            .Get(ticket.OccurrenceId);
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal("recurring_execution_backend_start_failed", result.Reason);
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+        Assert.Equal(RecordingRunStatus.StartedUnknown, run.Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, use!.Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, occurrence.Status);
+        Assert.Empty(engine.List());
+    }
+
+    [Fact]
+    public void RecurringEngineFinalOutputCollisionPreservesSentinelAndNeverStartsBackend()
+    {
+        using var context = CreateCommittedContext();
+        var authorizationProvider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, authorizationProvider);
+        var provider = new CountingProvider
+        {
+            FrozenFileExistsForCapture = captureNumber => captureNumber >= 2,
+        };
+        Assert.True(ticket.TryClaim(out var claimReason), claimReason);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+        var outputDirectory = Path.GetDirectoryName(ticket.OutputFilePath)
+            ?? throw new InvalidOperationException("Recurring output directory missing.");
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(ticket.OutputFilePath, "task-278r-sentinel");
+
+        try
+        {
+            using var engine = new RecordingEngine(
+                audit.Logger,
+                tracer: null,
+                bundleGenerator: null,
+                microphoneProvider: null,
+                microphoneStatusProvider: null,
+                displayTopologyProvider: null,
+                systemAudioEndpointProvider: null,
+                recurringStartSafetyInterlock: interlock,
+                recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+                recurringEnvironmentProvider: provider);
+            engine.UtcNowForTests = () => context.Now.UtcDateTime;
+            engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+            var result = engine.StartRecurringCapture(
+                ticket,
+                tray,
+                interlock,
+                exactBackend => new RecurringLeaseCaptureExecutionSession(
+                    context.Context.Fixture.Store,
+                    ticket,
+                    exactBackend,
+                    () => context.Now,
+                    attachBackendCallbacks: false));
+
+            Assert.Equal(RecurringLeaseCaptureExecutionStatus.Failed, result.Status);
+            Assert.Equal("execution_output_file_exists", result.Reason);
+            Assert.Equal(2, provider.CaptureCount);
+            Assert.Equal(0, backend.StartCalls);
+            Assert.Equal(1, backend.DisposeCalls);
+            Assert.Equal("task-278r-sentinel", File.ReadAllText(ticket.OutputFilePath));
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(ticket.OutputFilePath))
+                    File.Delete(ticket.OutputFilePath);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeDoesNotCreateSecondBackendWhenEngineRegistryIsBusy()
+    {
+        using var firstContext = CreateCommittedContext();
+        using var secondContext = CreateCommittedContext();
+        var firstProvider = new CountingProvider();
+        var secondProvider = new CountingProvider();
+        var firstTicket = CreateExecutionTicket(firstContext, firstProvider);
+        var secondTicket = CreateExecutionTicket(secondContext, secondProvider);
+        var firstBackend = new EngineOwnedRecurringBackend();
+        var secondBackend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var factoryCalls = 0;
+        var backends = new Queue<EngineOwnedRecurringBackend>(new[] { firstBackend, secondBackend });
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: firstProvider);
+        engine.UtcNowForTests = () => firstContext.Now.UtcDateTime;
+        engine.BackendFactory = _ =>
+        {
+            factoryCalls++;
+            return (backends.Dequeue(), "ffmpeg-region");
+        };
+
+        Task<RecurringLeaseCaptureExecutionResult> StartWithEngine(
+            RecurringLeaseCaptureExecutionTicket claimedTicket,
+            StandingLeaseStartSafetyInterlock claimedInterlock,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(engine.StartRecurringCapture(
+                claimedTicket,
+                tray,
+                claimedInterlock,
+                exactBackend => new RecurringLeaseCaptureExecutionSession(
+                    firstContext.Context.Fixture.Store,
+                    claimedTicket,
+                    exactBackend,
+                    () => firstContext.Now,
+                    attachBackendCallbacks: false),
+                cancellationToken));
+
+        var firstBridge = new RecurringLeaseCaptureExecutionBridge(
+            firstProvider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => firstContext.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: StartWithEngine);
+        var firstResult = await firstBridge.ExecuteAsync(firstTicket);
+
+        var secondBridge = new RecurringLeaseCaptureExecutionBridge(
+            secondProvider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => secondContext.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: StartWithEngine);
+        var secondResult = await secondBridge.ExecuteAsync(secondTicket);
+
+        Assert.True(
+            firstResult.Status == RecurringLeaseCaptureExecutionStatus.Started,
+            $"reason={firstResult.Reason}; tray_error={tray.LastError}");
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Rejected, secondResult.Status);
+        Assert.Equal("recording_conflict", secondResult.Reason);
+        Assert.Equal(1, factoryCalls);
+        Assert.Equal(1, firstBackend.StartCalls);
+        Assert.Equal(0, secondBackend.StartCalls);
+
+        engine.Stop(firstTicket.RunId, "production_test_stop");
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeCancellationAtFinalGateDoesNotStartBackend()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var cancellation = new CancellationTokenSource();
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+        engine.BeforeRecurringBackendFinalGateForTests = _ => cancellation.Cancel();
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var result = await bridge.ExecuteAsync(ticket, cancellation.Token);
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Cancelled, result.Status);
+        Assert.Equal("recurring_execution_cancelled", result.Reason);
+        Assert.Equal(0, backend.StartCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeStopAllUsesLifecycleOwnerForPhysicalStop()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var backend = new EngineOwnedRecurringBackend();
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var tray = new ProductionBridgeTray();
+        using var audit = new TemporaryAuditLogger();
+
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null,
+            recurringStartSafetyInterlock: interlock,
+            recurringStartSafetyValidator: (_, _) => AllowedSafetyDecision(),
+            recurringEnvironmentProvider: provider);
+        engine.UtcNowForTests = () => context.Now.UtcDateTime;
+        engine.BackendFactory = _ => (backend, "ffmpeg-region");
+
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: interlock,
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision(),
+            executionStarterForProduction: (claimedTicket, claimedInterlock, cancellationToken) =>
+                Task.FromResult(engine.StartRecurringCapture(
+                    claimedTicket,
+                    tray,
+                    claimedInterlock,
+                    exactBackend => new RecurringLeaseCaptureExecutionSession(
+                        context.Context.Fixture.Store,
+                        claimedTicket,
+                        exactBackend,
+                        () => context.Now,
+                        attachBackendCallbacks: false),
+                    cancellationToken)));
+
+        var result = await bridge.ExecuteAsync(ticket);
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Started, result.Status);
+
+        engine.StopAllSync("recurring_lease_safety_control");
+
+        Assert.Equal(1, backend.StartCalls);
+        Assert.Equal(1, backend.StopCalls);
+        Assert.Equal(1, backend.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task RecurringProductionBridgeWithoutStarterRemainsFailClosed()
+    {
+        using var context = CreateCommittedContext();
+        var provider = new CountingProvider();
+        var ticket = CreateExecutionTicket(context, provider);
+        var bridge = new RecurringLeaseCaptureExecutionBridge(
+            provider,
+            backendFactoryForTest: null,
+            delayForTest: (_, _) => Task.CompletedTask,
+            utcNowForTest: () => context.Now,
+            startSafetyInterlockForTest: new StandingLeaseStartSafetyInterlock(),
+            currentSafetyValidatorForTest: (_, _) => AllowedSafetyDecision());
+
+        var result = await bridge.ExecuteAsync(ticket);
+
+        Assert.Equal(RecurringLeaseCaptureExecutionStatus.Failed, result.Status);
+        Assert.Equal("recurring_execution_backend_unavailable", result.Reason);
+        Assert.Null(result.Backend);
+    }
+
     private static RecurringLeaseCurrentSafetyDecision AllowedSafetyDecision() =>
         new(RecurringLeaseCurrentSafetyStatus.Allowed);
 
@@ -2507,7 +3290,8 @@ public sealed class RecurringLeaseExecutionGateTests
     private static CommittedContext CreateCommittedContext(
         int maxUses = 10,
         TimeSpan? startCommitOffset = null,
-        int countdownSeconds = 3)
+        int countdownSeconds = 3,
+        TimeSpan? recordingDuration = null)
     {
         var commitOffset = startCommitOffset ?? TimeSpan.Zero;
         var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
@@ -2515,7 +3299,8 @@ public sealed class RecurringLeaseExecutionGateTests
             approvalUserSid: "S-1-5-21-task267",
             approvalSessionBinding: CaptureAuthorizationSessionBinding.Current,
             latestStartGrace: commitOffset > TimeSpan.Zero ? TimeSpan.FromSeconds(10) : null,
-            countdownSeconds: countdownSeconds);
+            countdownSeconds: countdownSeconds,
+            recordingDuration: recordingDuration);
         var startCommitAt = context.Fixture.CreatedAt + commitOffset;
         var reservation = new RecurringOccurrenceReservationService(
                 context.Fixture.Store,
@@ -2643,11 +3428,13 @@ public sealed class RecurringLeaseExecutionGateTests
 
         internal int CaptureCount => _captureCount;
 
+        internal Func<int, bool>? FrozenFileExistsForCapture { get; set; }
+
         internal RecurringOccurrenceEnvironmentCaptureRequest? LastRequest { get; private set; }
 
         public StandingLeaseExecutionEnvironment Capture(RecurringOccurrenceEnvironmentCaptureRequest request)
         {
-            Interlocked.Increment(ref _captureCount);
+            var captureNumber = Interlocked.Increment(ref _captureCount);
             LastRequest = request;
             var requirements = request.Requirements;
             var requiredFreeBytes = RecordingPreflightChecker.RequiredFreeSpaceBytes(requirements.ReservedDuration);
@@ -2674,7 +3461,7 @@ public sealed class RecurringLeaseExecutionGateTests
                     requirements.NormalizedOutputDirectory,
                     requirements.FrozenOutputFilePath,
                     directoryExists: true,
-                    frozenFileExists: false,
+                    frozenFileExists: FrozenFileExistsForCapture?.Invoke(captureNumber) ?? false,
                     directoryWritable: true,
                     freeSpaceAvailable: true,
                     availableFreeBytes: requiredFreeBytes,
@@ -2839,6 +3626,158 @@ public sealed class RecurringLeaseExecutionGateTests
         internal void RaiseNaturalExit(int exitCode, OutputMeta meta) => _naturalExit?.Invoke(exitCode, meta);
 
         public void Dispose() => DisposeCalls++;
+    }
+
+    private sealed class EngineOwnedRecurringBackend :
+        ICaptureBackend,
+        IFirstFrameObservableCaptureBackend,
+        ICaptureEndedObservableBackend
+    {
+        private Action<FirstFrameObservation>? _firstFrameObserved;
+        private Action<CaptureEndedObservation>? _captureEnded;
+        private Action<int, OutputMeta>? _naturalExit;
+
+        internal CaptureConfig? Configuration { get; private set; }
+        internal CaptureAuthorizationProof? Proof { get; private set; }
+        internal bool ThrowOnStart { get; set; }
+        internal int StartCalls { get; private set; }
+        internal int StopCalls { get; private set; }
+        internal int DisposeCalls { get; private set; }
+        internal int FirstFrameAddCalls { get; private set; }
+        internal int CaptureEndedAddCalls { get; private set; }
+        internal int NaturalExitRegistrationCalls { get; private set; }
+
+        public event Action<FirstFrameObservation>? FirstFrameObserved
+        {
+            add
+            {
+                FirstFrameAddCalls++;
+                _firstFrameObserved += value;
+            }
+            remove => _firstFrameObserved -= value;
+        }
+
+        public event Action<CaptureEndedObservation>? CaptureEnded
+        {
+            add
+            {
+                CaptureEndedAddCalls++;
+                _captureEnded += value;
+            }
+            remove => _captureEnded -= value;
+        }
+
+        public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
+        {
+            StartCalls++;
+            Configuration = cfg;
+            Proof = authorizationProof;
+            authorizationProof.RequireConsumed();
+            if (ThrowOnStart)
+                throw new InvalidOperationException("backend start detail");
+        }
+
+        public OutputMeta Stop()
+        {
+            StopCalls++;
+            return ValidMetaForBridge(Configuration?.OutputPath);
+        }
+
+        public void OnNaturalExit(Action<int, OutputMeta> callback)
+        {
+            NaturalExitRegistrationCalls++;
+            _naturalExit += callback;
+        }
+
+        public void Dispose() => DisposeCalls++;
+
+        internal void RaiseFirstFrame() => _firstFrameObserved?.Invoke(new FirstFrameObservation
+        {
+            FrameNumber = 1,
+            TotalSizeBytes = 1024,
+            OutTimeUs = 1,
+        });
+
+        internal void RaiseCaptureEnded() => _captureEnded?.Invoke(new CaptureEndedObservation
+        {
+            ExitCode = 0,
+            Reason = "manual",
+        });
+
+        internal void RaiseNaturalExit() => RaiseNaturalExit(ValidMetaForBridge(Configuration?.OutputPath));
+
+        internal void RaiseNaturalExit(OutputMeta meta) => _naturalExit?.Invoke(0, meta);
+    }
+
+    private sealed class ProductionBridgeTray : ITrayContext
+    {
+        internal int CountdownCalls { get; private set; }
+        internal string? LastError { get; private set; }
+
+        public string HostMode => "test";
+        public bool SupportsRegionSelectionUi => false;
+
+        public void RequestConfirmation(
+            RecordingConfirmationPresentation presentation,
+            Action<ConfirmationDecision> callback) =>
+            throw new InvalidOperationException("Recurring production bridge must not request confirmation.");
+
+        public void RequestRegionSelection(
+            int timeoutSeconds,
+            Action<string, int, int, int, int, string, string> callback) =>
+            throw new InvalidOperationException("Recurring production bridge must not request region selection.");
+
+        public void SetRecording(RecordingUiPresentation presentation) { }
+        public void SetIdle(RecordingUiPresentation presentation) { }
+        public void SetAllIdle() { }
+        public void ShowError(string text) => LastError = text;
+        public void SetCountdown(RecordingUiPresentation presentation) => CountdownCalls++;
+    }
+
+    private sealed class MatchingDisplayTopologyProvider : IDisplayTopologyProvider
+    {
+        private readonly IReadOnlyList<DisplayTopologySnapshot> _displays;
+
+        internal MatchingDisplayTopologyProvider(RecurringLeaseCaptureExecutionTicket ticket)
+        {
+            var bounds = ticket.Specification.DisplayBounds;
+            _displays = new[]
+            {
+                new DisplayTopologySnapshot(
+                    "task278-display",
+                    ticket.Specification.StableDisplayFingerprint,
+                    DisplayIdentityResolutionStatus.Resolved,
+                    new CapturePlanBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height))
+            };
+        }
+
+        public IReadOnlyList<DisplayTopologySnapshot> GetCurrentDisplays() => _displays;
+    }
+
+    private sealed class TemporaryAuditLogger : IDisposable
+    {
+        private readonly string _directory = Path.Combine(
+            Path.GetTempPath(),
+            "agent-recorder-task278-audit-" + Guid.NewGuid().ToString("N"));
+
+        internal TemporaryAuditLogger()
+        {
+            Logger = new AuditLogger(Path.Combine(_directory, "audit.jsonl"));
+        }
+
+        internal AuditLogger Logger { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (Directory.Exists(_directory))
+                    Directory.Delete(_directory, recursive: true);
+            }
+            catch
+            {
+            }
+        }
     }
 
     private sealed class CancelAfterAttachSession :

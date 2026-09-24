@@ -226,4 +226,98 @@ internal static class CaptureAuthorizationGate
         failureReason = "";
         return true;
     }
+
+    /// <summary>
+    /// Validates the already-consumed recurring proof at the physical engine
+    /// boundary. The bridge has already claimed the ticket; this method never
+    /// consumes proof again and compares the mutable in-memory recording with
+    /// the immutable ticket specification before backend construction/start.
+    /// </summary>
+    internal static bool TryValidateRecurring(
+        CaptureAuthorizationProof? proof,
+        Recording recording,
+        CapturePlan? currentPlan,
+        RecurringLeaseCaptureExecutionTicket? ticket,
+        RecurringOccurrenceExecutionSpecification? specification,
+        DateTimeOffset nowUtc,
+        out string failureReason)
+    {
+        failureReason = "recurring_engine_proof_missing";
+        if (proof is not RecurringLeaseUseProof recurringProof ||
+            recording is null ||
+            currentPlan is null ||
+            ticket is null ||
+            specification is null)
+            return false;
+
+        if (!recording.IsRecurringLeaseExecution ||
+            !ReferenceEquals(proof, recording.AuthorizationProof) ||
+            !ReferenceEquals(proof, recording.RecurringLeaseUseProof) ||
+            !ReferenceEquals(ticket, recording.RecurringLeaseExecutionTicket) ||
+            !ReferenceEquals(specification, recording.RecurringLeaseSpecification))
+        {
+            failureReason = "recurring_engine_binding_invalid";
+            return false;
+        }
+
+        if (!RecurringLeaseCaptureExecutionBridge.TryValidateTicketForEngine(
+                ticket,
+                specification,
+                recurringProof,
+                nowUtc,
+                out failureReason))
+            return false;
+
+        if (!string.Equals(recording.Id, ticket.RunId, StringComparison.Ordinal) ||
+            !string.Equals(recording.OutputPath, specification.FrozenOutputFilePath, StringComparison.Ordinal) ||
+            recording.DurationSeconds != checked((int)specification.Duration.TotalSeconds) ||
+            recording.CountdownSeconds != specification.CountdownSeconds ||
+            !string.Equals(currentPlan.PlannedBackend, "ffmpeg-region", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.CaptureSemantics, "region_rectangle", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.CoordinateSpace, "physical_virtual_screen", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.SourceKind, "region", StringComparison.Ordinal) ||
+            currentPlan.Bounds is null ||
+            currentPlan.DisplayBounds is null ||
+            currentPlan.Bounds != new CapturePlanBounds(
+                specification.VirtualScreenRegion.X,
+                specification.VirtualScreenRegion.Y,
+                specification.VirtualScreenRegion.Width,
+                specification.VirtualScreenRegion.Height) ||
+            currentPlan.DisplayBounds != new CapturePlanBounds(
+                specification.DisplayBounds.X,
+                specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width,
+                specification.DisplayBounds.Height) ||
+            !string.Equals(currentPlan.TargetDisplayIdentity, specification.StableDisplayFingerprint, StringComparison.Ordinal) ||
+            currentPlan.TargetDisplayIdentityStatus != AgentRecorder.Windows.DisplayIdentityResolutionStatus.Resolved ||
+            currentPlan.AudioSourceKind != AudioCaptureSourceKind.None ||
+            recording.Config.IsScreenshotSeries ||
+            recording.Config.AudioRequested ||
+            recording.Config.Microphone ||
+            recording.Config.OutputConflictPolicy != "fail_if_exists" ||
+            recording.Config.Bounds != (
+                specification.VirtualScreenRegion.X,
+                specification.VirtualScreenRegion.Y,
+                specification.VirtualScreenRegion.Width,
+                specification.VirtualScreenRegion.Height) ||
+            recording.Config.DisplayBounds != (
+                specification.DisplayBounds.X,
+                specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width,
+                specification.DisplayBounds.Height) ||
+            !string.Equals(recording.Config.DisplayStableIdentity, specification.StableDisplayFingerprint, StringComparison.Ordinal) ||
+            recording.Config.DisplayIdentityStatus != AgentRecorder.Windows.DisplayIdentityResolutionStatus.Resolved ||
+            recording.Config.DurationSeconds != checked((int)specification.Duration.TotalSeconds) ||
+            recording.Config.CountdownSeconds != specification.CountdownSeconds ||
+            recording.Config.Fps != 30 ||
+            !string.Equals(recording.Config.Quality, "medium", StringComparison.Ordinal) ||
+            !string.Equals(recording.Config.OutputPath, specification.FrozenOutputFilePath, StringComparison.Ordinal))
+        {
+            failureReason = "recurring_engine_capture_binding_invalid";
+            return false;
+        }
+
+        failureReason = "";
+        return true;
+    }
 }

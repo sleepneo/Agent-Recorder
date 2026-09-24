@@ -411,6 +411,50 @@ public sealed class RecurringLeaseLifecycleTransactionTests
     }
 
     [Fact]
+    public void QuantizedLookingContainerDurationWithoutBackendEvidenceStillFailsClosed()
+    {
+        using var started = Start(recordingDuration: TimeSpan.FromSeconds(10));
+        var at = started.Context.Fixture.CreatedAt.AddMinutes(3);
+        Assert.True(started.Lifecycle.ObserveFirstFrame(
+            new FirstFrameObservation { FrameNumber = 0, TotalSizeBytes = 100 }, at).Succeeded);
+
+        var untrustedFormatOnlyMeta = ValidMeta(started, 10.023);
+        var result = started.Lifecycle.CompleteTermination(
+            RecurringLeaseLifecycleTerminationKind.NaturalExit,
+            0,
+            untrustedFormatOnlyMeta,
+            at.AddMinutes(1));
+
+        Assert.True(result.Succeeded && result.Terminal);
+        Assert.Equal("capture_duration_exceeds_authorization", result.Reason);
+        var use = new SqliteRecurringLeaseUseAccountingReader(started.Context.Fixture.Store)
+            .TryGetByOccurrence(started.Context.Slot.OccurrenceIdentity)!;
+        Assert.Equal(LeaseUseStatus.StartedUnknown, use.Status);
+        Assert.Null(use.ActualSettledDuration);
+    }
+
+    [Fact]
+    public void OutputExactlyAtAuthorizationDurationSettlesWithoutTolerance()
+    {
+        using var started = Start(recordingDuration: TimeSpan.FromSeconds(10));
+        var at = started.Context.Fixture.CreatedAt.AddMinutes(3);
+        Assert.True(started.Lifecycle.ObserveFirstFrame(
+            new FirstFrameObservation { FrameNumber = 0, TotalSizeBytes = 100 }, at).Succeeded);
+
+        var result = started.Lifecycle.CompleteTermination(
+            RecurringLeaseLifecycleTerminationKind.NaturalExit,
+            0,
+            ValidMeta(started, 10),
+            at.AddMinutes(1));
+
+        Assert.Equal("media_settled", result.Reason);
+        var use = new SqliteRecurringLeaseUseAccountingReader(started.Context.Fixture.Store)
+            .TryGetByOccurrence(started.Context.Slot.OccurrenceIdentity)!;
+        Assert.Equal(LeaseUseStatus.Settled, use.Status);
+        Assert.Equal(TimeSpan.FromSeconds(10), use.ActualSettledDuration);
+    }
+
+    [Fact]
     public void WindowsOutputPathComparisonIsCaseInsensitiveButDifferentPathIsRejected()
     {
         using (var matching = Start())
@@ -656,12 +700,14 @@ public sealed class RecurringLeaseLifecycleTransactionTests
     private static StartedContext Start(
         long maxUses = 10,
         int slotCount = 1,
-        TimeSpan? maxCumulativeDuration = null)
+        TimeSpan? maxCumulativeDuration = null,
+        TimeSpan? recordingDuration = null)
     {
         var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             maxUses: maxUses,
             slotCount: slotCount,
-            maxCumulativeDuration: maxCumulativeDuration);
+            maxCumulativeDuration: maxCumulativeDuration,
+            recordingDuration: recordingDuration);
         var reservation = new RecurringOccurrenceReservationService(
             context.Fixture.Store,
             () => context.Fixture.CreatedAt,

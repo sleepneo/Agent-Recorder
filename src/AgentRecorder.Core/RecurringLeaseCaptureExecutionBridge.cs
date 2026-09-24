@@ -38,6 +38,8 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
 
     private readonly IRecurringOccurrenceEnvironmentProvider? _environmentProvider;
     private readonly Func<RecurringOccurrenceExecutionSpecification, ICaptureBackend?> _backendFactory;
+    private readonly bool _hasFakeBackendFactory;
+    private readonly Func<RecurringLeaseCaptureExecutionTicket, StandingLeaseStartSafetyInterlock, CancellationToken, Task<RecurringLeaseCaptureExecutionResult>>? _productionEngineStarter;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<DateTimeOffset?> _utcNow;
     private readonly StandingLeaseStartSafetyInterlock? _startSafetyInterlock;
@@ -52,7 +54,8 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
             utcNowForTest: null,
             startSafetyInterlockForTest: null,
             currentSafetyValidatorForTest: null,
-            lifecycleSessionFactoryForTest: null)
+            lifecycleSessionFactoryForTest: null,
+            executionStarterForProduction: null)
     {
     }
 
@@ -66,15 +69,18 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
         Func<DateTimeOffset?>? utcNowForTest = null,
         StandingLeaseStartSafetyInterlock? startSafetyInterlockForTest = null,
         Func<RecurringLeaseCaptureExecutionTicket, DateTimeOffset, RecurringLeaseCurrentSafetyDecision>? currentSafetyValidatorForTest = null,
-        Func<RecurringLeaseCaptureExecutionTicket, ICaptureBackend, IRecurringLeaseCaptureLifecycleSession?>? lifecycleSessionFactoryForTest = null)
+        Func<RecurringLeaseCaptureExecutionTicket, ICaptureBackend, IRecurringLeaseCaptureLifecycleSession?>? lifecycleSessionFactoryForTest = null,
+        Func<RecurringLeaseCaptureExecutionTicket, StandingLeaseStartSafetyInterlock, CancellationToken, Task<RecurringLeaseCaptureExecutionResult>>? executionStarterForProduction = null)
     {
         _environmentProvider = environmentProviderForTest;
+        _hasFakeBackendFactory = backendFactoryForTest is not null;
         _backendFactory = backendFactoryForTest ?? UnsupportedBackendFactory;
         _delay = delayForTest ?? ((duration, cancellationToken) => Task.Delay(duration, cancellationToken));
         _utcNow = utcNowForTest ?? (() => DateTimeOffset.UtcNow);
         _startSafetyInterlock = startSafetyInterlockForTest;
         _currentSafetyValidator = currentSafetyValidatorForTest;
         _lifecycleSessionFactory = lifecycleSessionFactoryForTest;
+        _productionEngineStarter = executionStarterForProduction;
     }
 
     internal async Task<RecurringLeaseCaptureExecutionResult> ExecuteAsync(
@@ -183,6 +189,35 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
 
         if (!TryMapCaptureConfig(specification, out var config, out var configFailure))
             return RecurringLeaseCaptureExecutionResult.Rejected(configFailure);
+
+        if (_productionEngineStarter is not null)
+        {
+            if (_hasFakeBackendFactory)
+                return RecurringLeaseCaptureExecutionResult.Failed(
+                    "recurring_execution_backend_ownership_conflict");
+
+            // The production starter owns the engine, backend, lifecycle
+            // session and final safety gate. The bridge has completed the
+            // pre-start durable checks above but must not construct a second
+            // backend or attach a second callback owner.
+            if (_startSafetyInterlock is null)
+                return RecurringLeaseCaptureExecutionResult.Rejected(
+                    "recurring_execution_safety_interlock_unavailable");
+
+            try
+            {
+                return await _productionEngineStarter(
+                        ticket,
+                        _startSafetyInterlock!,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                return RecurringLeaseCaptureExecutionResult.Failed(
+                    "recurring_execution_engine_start_failed");
+            }
+        }
 
         // Backend construction is intentionally before the final synchronous
         // boundary. If that boundary rejects the start, this bridge remains
@@ -392,6 +427,76 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
         out CaptureConfig config,
         out string failureReason) =>
         TryMapCaptureConfig(specification, out config, out failureReason);
+
+    internal static bool TryBuildCapturePlanForEngine(
+        RecurringOccurrenceExecutionSpecification specification,
+        out CapturePlan plan,
+        out string failureReason)
+    {
+        plan = null!;
+        if (!TryMapCaptureConfig(specification, out _, out failureReason))
+            return false;
+
+        var bounds = specification.VirtualScreenRegion;
+        var displayBounds = specification.DisplayBounds;
+        plan = new CapturePlan(
+            "ffmpeg-region",
+            "ffmpeg-region",
+            new CaptureBackendSelectionEvidence(
+                "ffmpeg-region",
+                "ffmpeg-region",
+                "recurring_fixed_region",
+                "not_run",
+                null,
+                false),
+            "region_rectangle",
+            "region",
+            targetIdentity: null,
+            windowHandle: nint.Zero,
+            bounds: new CapturePlanBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height),
+            targetDisplayIdentity: specification.StableDisplayFingerprint,
+            displayBounds: new CapturePlanBounds(
+                displayBounds.X,
+                displayBounds.Y,
+                displayBounds.Width,
+                displayBounds.Height),
+            targetDisplayId: null,
+            targetDisplayIdentityStatus: AgentRecorder.Windows.DisplayIdentityResolutionStatus.Resolved,
+            audioSourceKind: AudioCaptureSourceKind.None,
+            previewSemantics: "region_rectangle",
+            coordinateSpace: "physical_virtual_screen");
+        failureReason = "";
+        return true;
+    }
+
+    internal static bool TryValidateTicketForEngine(
+        RecurringLeaseCaptureExecutionTicket ticket,
+        RecurringOccurrenceExecutionSpecification specification,
+        RecurringLeaseUseProof proof,
+        DateTimeOffset nowUtc,
+        out string failureReason)
+    {
+        failureReason = "recurring_execution_ticket_invalid";
+        if (ticket is null || !ticket.IsClaimed)
+        {
+            failureReason = "recurring_execution_ticket_unclaimed";
+            return false;
+        }
+
+        if (!ticket.IsProofConsumed)
+        {
+            failureReason = "recurring_execution_proof_not_consumed";
+            return false;
+        }
+
+        if (!TryValidateSpecificationForExecution(ticket, specification, out failureReason) ||
+            !TryValidateProofBinding(ticket, specification, proof, out failureReason) ||
+            !TryValidateExecutionTime(ticket, specification, proof, nowUtc, out failureReason))
+            return false;
+
+        failureReason = "";
+        return true;
+    }
 
     internal static bool TryMapCaptureConfig(
         RecurringOccurrenceExecutionSpecification specification,
@@ -731,7 +836,7 @@ internal sealed class RecurringLeaseCaptureExecutionBridge
         return true;
     }
 
-    private static string MapSafetyFailureReason(RecurringLeaseCurrentSafetyStatus status) => status switch
+    internal static string MapSafetyFailureReason(RecurringLeaseCurrentSafetyStatus status) => status switch
     {
         RecurringLeaseCurrentSafetyStatus.Allowed => "recurring_execution_safety_state_invalid",
         RecurringLeaseCurrentSafetyStatus.UnattendedDisabled =>

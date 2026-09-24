@@ -18,9 +18,9 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
 - AI agents use a small localhost API instead of controlling a traditional
   screen recorder UI.
 - Agent Recorder keeps the safety boundary local: ordinary recordings require
-  visible user selection and/or confirmation. The optional one-shot unattended
-  mode requires a separate local fixed-region selection and bounded lease
-  approval before anything can run later.
+  visible user selection and/or confirmation. Optional one-shot and daily/weekly
+  unattended plans each require a fresh local fixed-region selection and bounded
+  lease approval before later runs.
 
 ## Recommended Agent Path
 
@@ -70,6 +70,13 @@ Agents should use the paths returned by `ensure-running` or
 `GET /api/v1/capabilities`, especially `data_dir`, `ready_file`, and
 `api_key_file`.
 
+An agent running on an isolated Windows desktop can call an already-running
+service on loopback, but starting the tray app from that desktop does not make
+its dialogs visible on the user's input desktop. The current
+`host.supports_region_selection_ui` flag describes host capability, not
+cross-desktop visibility. Start the app once from the user's interactive
+desktop or opt in to per-user autostart before relying on local selection.
+
 ## Capabilities
 
 - Quick intent API for primary display, a Windows display number, active window, and selected region.
@@ -110,6 +117,11 @@ Agents should use the paths returned by `ensure-running` or
   default and limited to one silent run, a lease of at most one hour, a run of
   at most ten minutes, natural wake only, and an interactive desktop. The agent
   cannot approve or widen the lease over HTTP.
+- Optional daily/weekly fixed-region plans, also disabled by default. Each
+  plan has a bounded date range, run count, total duration, and lease validity.
+  The user selects the fixed region and approves the lease locally; each due
+  occurrence revalidates the approved environment before one silent run.
+  Missed windows and uncertain starts are not retried or silently replaced.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.
 - On the validated default FFmpeg path, role-aware capture visibility keeps

@@ -17,6 +17,7 @@ internal enum RecurringLeaseLocalApprovalActivationFailurePoint
     AfterApprovalEvidenceInsert,
     AfterPlanUpdate,
     AfterLeaseUpdate,
+    AfterIntentUpdate,
     BeforeCommitAfterFinalRead,
 }
 

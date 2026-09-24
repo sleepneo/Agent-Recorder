@@ -45,6 +45,12 @@ internal sealed class SqliteStandingSetupIntentCreateOrGetTransaction : SqliteRe
                 return StandingSetupIntentResult.Conflict(snapshot, "setup_intent_identity_conflict");
             }
 
+            if ((byIdentity is not null && byIdentity.IntentKindCode != StandingSetupIntentCodes.IntentKind) ||
+                (byIntentId is not null && byIntentId.IntentKindCode != StandingSetupIntentCodes.IntentKind))
+            {
+                return StandingSetupIntentResult.Conflict(snapshot, "setup_intent_cross_kind_conflict");
+            }
+
             if (byIdentity is not null)
             {
                 ValidatePersisted(byIdentity);
@@ -197,12 +203,10 @@ internal sealed class SqliteStandingSetupIntentCreateOrGetTransaction : SqliteRe
                    scheduled_start_utc, latest_start_utc, planned_end_utc,
                    maximum_duration_ms, lease_valid_until_utc, output_directory, frozen_file_name
             FROM setup_intents
-            WHERE intent_kind_code = $intent_kind_code
-              AND idempotency_key = $idempotency_key
+            WHERE idempotency_key = $idempotency_key
               AND current_user_sid = $current_user_sid
               AND session_binding = $session_binding;
             """);
-        Add(command, "$intent_kind_code", snapshot.IntentKindCode);
         Add(command, "$idempotency_key", snapshot.IdempotencyKey);
         Add(command, "$current_user_sid", snapshot.CurrentUserSid);
         Add(command, "$session_binding", snapshot.SessionBinding);

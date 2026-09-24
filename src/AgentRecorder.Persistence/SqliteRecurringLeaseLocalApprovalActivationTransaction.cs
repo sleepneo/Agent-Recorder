@@ -105,6 +105,11 @@ internal sealed class SqliteRecurringLeaseLocalApprovalActivationTransaction : S
             _failureHookForTest?.Invoke(RecurringLeaseLocalApprovalActivationFailurePoint.AfterPlanUpdate);
             UpdateLease(connection, transaction, lease, expectedVersion: lease.Version - 1);
             _failureHookForTest?.Invoke(RecurringLeaseLocalApprovalActivationFailurePoint.AfterLeaseUpdate);
+            // The legacy lease-bound activation path has no setup intent to
+            // update. Keep the extended failure seam observable here so the
+            // pre-existing rollback matrix remains compatible after the
+            // intent-bound path adds its own intent-write boundary.
+            _failureHookForTest?.Invoke(RecurringLeaseLocalApprovalActivationFailurePoint.AfterIntentUpdate);
 
             var finalPlan = ReadPlan(connection, transaction, plan.Id)
                 ?? throw Failure("activation_snapshot_invalid", "The final recurring plan readback was missing.");

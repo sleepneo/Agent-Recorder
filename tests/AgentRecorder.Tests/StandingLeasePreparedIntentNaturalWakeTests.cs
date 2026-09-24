@@ -888,16 +888,19 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         Assert.Equal("recording", ReadText(database.Store, "SELECT status_code FROM recording_runs WHERE id = (SELECT run_id FROM plan_occurrences WHERE id = 'occurrence-1');"));
         Assert.Equal("consumed", ReadText(database.Store, "SELECT status_code FROM lease_uses WHERE occurrence_id = 'occurrence-1';"));
 
-        backend.RaiseNaturalExit(0, new OutputMeta
-        {
-            OutputFileExists = true,
-            SizeBytes = 4096,
-            DurationSeconds = 30,
-        });
+        var configuration = Assert.IsType<CaptureConfig>(backend.Configuration);
+        Assert.Equal(30, configuration.DurationSeconds);
+        QuantizedTailTestMedia.Generate(configuration.OutputPath, 899, "599/20");
+        var probed = FfmpegCaptureBackend.ProbeAuthorizedFixedRateCapture(configuration.OutputPath, configuration);
+        Assert.True(probed.DurationSeconds > 30, $"probe duration was {probed.DurationSeconds:R}s");
+        Assert.NotNull(probed.QuantizedTailEvidence);
+        backend.RaiseNaturalExit(0, probed);
 
         await WaitForAsync(() =>
             ReadText(database.Store, "SELECT status_code FROM recording_runs WHERE id = (SELECT run_id FROM plan_occurrences WHERE id = 'occurrence-1');") == "settled");
         Assert.Equal("settled", ReadText(database.Store, "SELECT status_code FROM lease_uses WHERE occurrence_id = 'occurrence-1';"));
+        Assert.Equal(30000L,
+            Scalar(database.Store, "SELECT actual_settled_duration_ms FROM lease_uses WHERE occurrence_id = 'occurrence-1';"));
         Assert.Equal("completed", ReadText(database.Store, "SELECT status_code FROM plan_occurrences WHERE id = 'occurrence-1';"));
         Assert.Equal(0, backend.StopCalls);
         Assert.Equal(1, backend.DisposeCalls);
@@ -1458,7 +1461,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         var intent = StandingSetupIntentSnapshot.CreateForTrustedSetupAdapter(
             "intent-1", "request-1", currentUserSid, sessionBinding, At(0), At(300),
             At(10), At(20), At(80), TimeSpan.FromSeconds(30), At(3600),
-            Path.Combine(Path.GetTempPath(), "AgentRecorderNaturalWake", "captures"), "capture.mp4");
+            Path.Combine(database.RootPath, "captures"), "capture.mp4");
         Assert.Equal(StandingSetupIntentResultStatus.Created, new StandingSetupIntentService(database.Store, () => At(1)).CreateOrGet(intent).Result);
         if (prepare)
         {
@@ -1873,6 +1876,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         internal TaskCompletionSource<object?> StartEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool WaitInsideStart { get; set; }
+        internal CaptureConfig? Configuration { get; private set; }
 
         public event Action<FirstFrameObservation>? FirstFrameObserved;
 
@@ -1883,6 +1887,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof)
         {
             Interlocked.Increment(ref _startCalls);
+            Configuration = cfg;
             Started.TrySetResult(null);
             StartEntered.TrySetResult(null);
             if (WaitInsideStart)
@@ -2259,6 +2264,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         }
 
         internal SqliteOperationalStore Store { get; }
+        internal string RootPath => _directory;
 
         public void Dispose()
         {

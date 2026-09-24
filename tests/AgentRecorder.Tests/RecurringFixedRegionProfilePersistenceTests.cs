@@ -31,12 +31,12 @@ public sealed class RecurringFixedRegionProfilePersistenceTests
     };
 
     [Fact]
-    public void FreshSchemaV13HasAnEmptyImmutableProfileTableAndFixedMigrationEvidence()
+    public void FreshSchemaV15HasAnEmptyImmutableProfileTableAndFixedMigrationEvidence()
     {
         using var database = new TestDatabase();
         database.Store.Initialize();
 
-        Assert.Equal(13L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal(15L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal("schema_v9_recurring_fixed_region_profile_versions", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT name FROM schema_migrations WHERE version = 9;"));
         Assert.Equal("c5f3846be6a761dbeab25824e2c8de8184e691e14738669a0ac726ff4b09d11a", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT definition_checksum FROM schema_migrations WHERE version = 9;"));
         Assert.Equal("schema_v10_recurring_plan_profile_bindings", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT name FROM schema_migrations WHERE version = 10;"));

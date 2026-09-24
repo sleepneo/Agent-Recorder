@@ -10,7 +10,7 @@ bounded authorization permits recording to start.
 | --- | --- |
 | Local-only API | Server binds to `127.0.0.1:37891` |
 | API key | State-changing and sensitive endpoints require `X-Agent-Recorder-Key` |
-| Local authorization | Ordinary recordings require per-run confirmation; one-shot unattended plans require local fixed-region selection and bounded lease approval |
+| Local authorization | Ordinary recordings require per-run confirmation; one-shot and daily/weekly unattended plans each require local fixed-region selection and bounded lease approval |
 | HTTP self-approval blocked | `POST /confirmations/{id}/approve` returns `405 METHOD_NOT_ALLOWED` |
 | Region selection | Selected-region recording uses local UI controlled by the user |
 | Audit log | Recording and confirmation events are written to local JSONL logs |
@@ -32,23 +32,25 @@ The agent must not say "recording has started" while the state is still
 
 ## Bounded Unattended Authorization
 
-The optional one-shot unattended mode does not reuse or bypass an interactive
-confirmation. It uses a separate local standing-lease authorization:
+Optional unattended plans do not reuse or bypass an interactive confirmation.
+One-shot plans use standing leases; daily/weekly plans use separate recurring
+leases. Both follow the same local authorization boundary:
 
 1. The mode is disabled by default and must be enabled in the local tray safety controls.
-2. An authenticated agent may submit an idempotent one-shot setup request.
+2. An authenticated agent may submit an idempotent one-shot or bounded recurring setup request.
 3. The local user reselects the fixed physical region; `last_region` and active-window reuse are not accepted.
 4. A local lease dialog shows the target, output, schedule, duration, and privacy risk.
-5. Approval freezes the region, display identity, user/session binding, output file, execution window, and single-use quota.
+5. Approval freezes the region, display identity, user/session binding, output target, schedule, and bounded use/duration quota.
 6. At execution time the app revalidates durable state and current environment under the same start/revoke interlock, then issues a one-time consumed proof for the exact Run.
 7. The capture backend starts only after that final gate. HTTP cannot construct, approve, consume, or extend the proof.
 
-The first product slice is limited to one silent fixed-region run, a lease of
-at most one hour, a run of at most ten minutes, natural wake only, and an
-interactive desktop. It does not support unattended audio, windows, WGC,
-screenshot series, nesting, concurrency, active wake, or recurring public
-plans. Revocation, Stop All, session loss, sleep, target drift, output drift,
-expiry, and missed windows fail closed. A start-committed execution is never
+One-shot plans remain limited to a one-hour lease and one run. Recurring plans
+support bounded daily/weekly dates and quotas, with a newly approved lease per
+plan. Both are silent fixed-region FFmpeg recordings of at most ten minutes
+per run, natural wake only, on an interactive desktop. They do not support
+unattended audio, windows, WGC, screenshot series, nesting, concurrency, or
+active wake. Revocation, Stop All, session loss, sleep, target/output drift,
+expiry, and missed windows fail closed. A start-committed occurrence is never
 automatically retried after an uncertain crash.
 
 ## API Key Storage
@@ -127,6 +129,15 @@ Context files are written using a random temp file in the same directory and ato
 
 - Current builds target Windows.
 - The portable package is not code-signed.
+- A tray app cold-started by an agent on an isolated Windows desktop may be
+  API-ready while its local dialogs are not visible on the user's input
+  desktop. The current `host.supports_region_selection_ui` flag does not
+  prove cross-desktop visibility. Use a tray instance started on the user's
+  interactive desktop or opt in to per-user autostart; do not treat API
+  readiness as consent UI readiness.
+- Recurring setup status reports authorization and scheduling, not each
+  occurrence's execution result. An agent must not claim that a recording
+  started or completed solely because setup says `scheduled`.
 - Some GPU-accelerated windows may not capture reliably through FFmpeg
   `gdigrab`.
 - Microphone recording uses an isolated Windows WASAPI helper by default and is

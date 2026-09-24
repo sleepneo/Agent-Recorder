@@ -342,7 +342,8 @@ internal sealed class SqliteStandingLeaseAuthorizationActivationTransaction : Sq
                    maximum_duration_ms, lease_valid_until_utc,
                    output_directory, frozen_file_name
             FROM setup_intents
-            WHERE intent_id = $intent_id;
+            WHERE intent_id = $intent_id
+              AND intent_kind_code = 'standing_once_fixed_region';
             """;
         Add(command, "$intent_id", intentId);
         using var reader = command.ExecuteReader();
@@ -515,7 +516,7 @@ internal sealed class SqliteStandingLeaseAuthorizationActivationTransaction : Sq
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT status_code, version FROM setup_intents WHERE intent_id = $intent_id;";
+        command.CommandText = "SELECT status_code, version FROM setup_intents WHERE intent_id = $intent_id AND intent_kind_code = 'standing_once_fixed_region';";
         Add(command, "$intent_id", intent.IntentId);
         using var reader = command.ExecuteReader();
         if (!reader.Read())

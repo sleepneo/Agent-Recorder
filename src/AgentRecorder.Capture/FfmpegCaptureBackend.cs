@@ -244,7 +244,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     {
         DrainTask(stdoutReader, drainTimeout);
 
-        var meta = Probe(output);
+        var meta = ProbeForCapture(output);
         string stderr;
         CaptureAbortReason? abortReason;
         lock (_lock)
@@ -276,7 +276,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     {
         DrainTask(stdoutReader, drainTimeout);
 
-        var meta = Probe(output);
+        var meta = ProbeForCapture(output);
         meta.StderrLog = stderr;
         ClassifyAudioOutcome(meta, stderr, _cfg, _runtimeAudioLostAtMs);
         _completionMeta = meta;
@@ -482,7 +482,26 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         // the stdout reader parses to detect the first encoded/muxed frame.
         // Note: -stats_period is intentionally omitted because the bundled
         // FFmpeg (git-2019-10-22) does not recognize this option.
-        args.Add("-y");
+        switch (cfg.OutputConflictPolicy)
+        {
+            case "fail_if_exists":
+                // Recurring fixed-output capture is fail-closed at the final
+                // environment gate and must also be no-overwrite at FFmpeg's
+                // physical file-open boundary.
+                args.Add("-n");
+                break;
+            case "rename":
+            case "fail":
+            case "overwrite":
+                // Preserve the existing ordinary recording command contract;
+                // OutputPathResolver owns rename/fail path preparation.
+                args.Add("-y");
+                break;
+            default:
+                throw new ArgumentException(
+                    "Unsupported output conflict policy.",
+                    nameof(cfg));
+        }
         args.Add("-nostats");
         args.Add("-progress");
         args.Add("pipe:1");
@@ -774,6 +793,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             var fi = new FileInfo(path);
             fileExists = fi.Exists;
             m.SizeBytes = fileExists ? fi.Length : 0;
+            m.ProbeFileLastWriteUtcTicks = fileExists ? fi.LastWriteTimeUtc.Ticks : null;
         }
         catch { }
 
@@ -828,7 +848,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
                             CodecType = s["codec_type"]?.GetValue<string>(),
                             CodecName = s["codec_name"]?.GetValue<string>(),
                             StartTimeSeconds = TryParseProbeDouble(s["start_time"]?.GetValue<string>()),
-                            DurationSeconds = TryParseProbeDouble(s["duration"]?.GetValue<string>())
+                            DurationSeconds = TryParseProbeDouble(s["duration"]?.GetValue<string>()),
+                            TimeBaseSeconds = TryParseProbeRational(s["time_base"]?.GetValue<string>()),
+                            AverageFrameRate = TryParseProbeRational(s["avg_frame_rate"]?.GetValue<string>()),
+                            NominalFrameRate = TryParseProbeRational(s["r_frame_rate"]?.GetValue<string>()),
+                            FrameCount = TryParseProbeLong(s["nb_frames"]?.GetValue<string>())
                         };
                         infos.Add(info);
 
@@ -871,6 +895,191 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         return m;
     }
 
+    private OutputMeta ProbeForCapture(string path)
+    {
+        var config = _cfg;
+        return config is null ? Probe(path) : ProbeAuthorizedFixedRateCapture(path, config);
+    }
+
+    /// <summary>
+    /// Probes a file produced by this backend and conditionally attaches the
+    /// narrow duration-tail evidence consumed by recurring/standing lifecycle
+    /// settlement. Ordinary callers still use <see cref="Probe(string)"/>.
+    /// </summary>
+    internal static OutputMeta ProbeAuthorizedFixedRateCapture(string path, CaptureConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var meta = Probe(path);
+        if (!CanInspectQuantizedTail(config, meta) ||
+            !TryReadFileStamp(path, out var beforeLength, out var beforeLastWriteUtcTicks) ||
+            beforeLength != meta.SizeBytes ||
+            meta.ProbeFileLastWriteUtcTicks != beforeLastWriteUtcTicks)
+        {
+            return meta;
+        }
+
+        var durationCapsApplied = HasExactInputAndOutputDurationCaps(config);
+        if (!durationCapsApplied)
+            return meta;
+
+        var maximumPacketCount = checked(config.DurationSeconds!.Value * config.Fps + 2);
+        var timeline = ProbeVideoPacketTimeline(path, maximumPacketCount);
+        if (timeline is null ||
+            !TryReadFileStamp(path, out var afterLength, out var afterLastWriteUtcTicks))
+        {
+            return meta;
+        }
+
+        var evidence = FfmpegQuantizedTailEvidence.TryCreate(
+            meta,
+            config,
+            timeline,
+            durationCapsApplied,
+            beforeLength,
+            beforeLastWriteUtcTicks,
+            afterLength,
+            afterLastWriteUtcTicks);
+        if (evidence is not null)
+        {
+            meta.ProbeFileLastWriteUtcTicks = afterLastWriteUtcTicks;
+            meta.QuantizedTailEvidence = evidence;
+        }
+
+        return meta;
+    }
+
+    private static bool CanInspectQuantizedTail(CaptureConfig config, OutputMeta meta) =>
+        !config.AudioRequested &&
+        config.DurationSeconds is > 0 and <= 600 &&
+        config.Fps is 15 or 24 or 30 or 60 &&
+        string.Equals(config.SourceKind, "region", StringComparison.OrdinalIgnoreCase) &&
+        meta.OutputFileExists &&
+        meta.SizeBytes > 0 &&
+        double.IsFinite(meta.DurationSeconds) &&
+        meta.DurationSeconds > config.DurationSeconds.Value &&
+        string.Equals(meta.Container, "mp4", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(meta.Codec, "h264", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasExactInputAndOutputDurationCaps(CaptureConfig config)
+    {
+        if (config.DurationSeconds is not int expectedDuration || expectedDuration <= 0)
+            return false;
+
+        List<string> args;
+        try { args = BuildArgs(config); }
+        catch { return false; }
+
+        var inputIndex = args.IndexOf("-i");
+        var durationIndices = args
+            .Select((value, index) => (value, index))
+            .Where(item => string.Equals(item.value, "-t", StringComparison.Ordinal))
+            .Select(item => item.index)
+            .ToArray();
+        if (inputIndex < 0 || durationIndices.Length != 2 ||
+            durationIndices[0] >= inputIndex || durationIndices[1] <= inputIndex ||
+            durationIndices.Any(index => index + 1 >= args.Count))
+        {
+            return false;
+        }
+
+        return durationIndices.All(index =>
+            double.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
+            value == expectedDuration);
+    }
+
+    private static bool TryReadFileStamp(string path, out long length, out long lastWriteUtcTicks)
+    {
+        length = 0;
+        lastWriteUtcTicks = 0;
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists)
+                return false;
+            length = info.Length;
+            lastWriteUtcTicks = info.LastWriteTimeUtc.Ticks;
+            return length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static FfmpegPacketTimeline? ProbeVideoPacketTimeline(string path, int maximumPacketCount)
+    {
+        var packets = new List<FfmpegPacketTiming>(Math.Min(maximumPacketCount, 4096));
+        var invalid = false;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = FfmpegLocator.FfprobePath,
+            RedirectStandardOutput = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            ErrorDialog = false,
+        };
+        foreach (var argument in new[]
+                 {
+                     "-v", "error",
+                     "-select_streams", "v:0",
+                     "-show_packets",
+                     "-show_entries", "packet=pts_time,duration_time",
+                     "-of", "csv=p=0",
+                     path,
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        try
+        {
+            using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            process.OutputDataReceived += (_, eventArgs) =>
+            {
+                if (eventArgs.Data is null || invalid)
+                    return;
+
+                if (packets.Count >= maximumPacketCount)
+                {
+                    invalid = true;
+                    return;
+                }
+
+                var fields = eventArgs.Data.Split(',');
+                if (fields.Length != 2 ||
+                    !double.TryParse(fields[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var pts) ||
+                    !double.TryParse(fields[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var duration))
+                {
+                    invalid = true;
+                    return;
+                }
+
+                packets.Add(new FfmpegPacketTiming(pts, duration));
+            };
+
+            if (!process.Start())
+                return null;
+            process.BeginOutputReadLine();
+            if (!process.WaitForExit(15000))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                try { process.WaitForExit(1000); } catch { }
+                return null;
+            }
+            process.WaitForExit();
+            if (process.ExitCode != 0 || invalid || packets.Count == 0)
+                return null;
+
+            return new FfmpegPacketTimeline(packets);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string? NormalizeContainer(string? formatName)
     {
         if (string.IsNullOrWhiteSpace(formatName))
@@ -900,6 +1109,29 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             return d;
         return null;
     }
+
+    private static double? TryParseProbeRational(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var parts = value.Split('/');
+        if (parts.Length != 2 ||
+            !long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var numerator) ||
+            !long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var denominator) ||
+            numerator <= 0 || denominator <= 0)
+        {
+            return null;
+        }
+
+        var result = (double)numerator / denominator;
+        return double.IsFinite(result) && result > 0 ? result : null;
+    }
+
+    private static long? TryParseProbeLong(string? value) =>
+        long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0
+            ? parsed
+            : null;
 
     public void Dispose()
     {

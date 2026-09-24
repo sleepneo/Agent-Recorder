@@ -257,7 +257,13 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
             var hasSuccessfulExit = exitCode == 0;
             var mediaFailure = "capture_output_invalid";
             if (!hasSuccessfulExit ||
-                !TryReadValidDuration(meta, _authorizedOutputPath, chain.Use.ReservedDuration, out var actualDuration, out mediaFailure))
+                !TryReadValidDuration(
+                    meta,
+                    _authorizedOutputPath,
+                    chain.Use.ReservedDuration,
+                    allowQuantizedNaturalTail: kind == StandingLeaseLifecycleTerminationKind.NaturalExit && exitCode == 0,
+                    out var actualDuration,
+                    out mediaFailure))
             {
                 var runVersion = chain.Run.Version;
                 var useVersion = chain.Use.Version;
@@ -407,6 +413,7 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
         OutputMeta? meta,
         string authorizedOutputPath,
         TimeSpan authorizedDuration,
+        bool allowQuantizedNaturalTail,
         out TimeSpan actualDuration,
         out string failureReason)
     {
@@ -461,34 +468,48 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
             return false;
         }
 
-        if (meta.DurationSeconds > authorizedDuration.TotalSeconds)
+        var quantizedTail = meta.DurationSeconds > authorizedDuration.TotalSeconds;
+        if (quantizedTail &&
+            (!allowQuantizedNaturalTail ||
+             meta.QuantizedTailEvidence is not { } evidence ||
+             !evidence.Matches(meta, authorizedOutputPath, authorizedDuration)))
         {
             failureReason = "capture_duration_exceeds_authorization";
             return false;
         }
 
-        var milliseconds = meta.DurationSeconds * 1000d;
-        if (!double.IsFinite(milliseconds) || milliseconds < 0 || milliseconds > long.MaxValue)
+        if (quantizedTail)
         {
-            failureReason = "capture_duration_invalid";
-            return false;
+            // The FFmpeg evidence bounds the extra container time to the
+            // authorized final frame's presentation interval; lease use is
+            // charged at the authorization, not at container duration.
+            actualDuration = authorizedDuration;
         }
+        else
+        {
+            var milliseconds = meta.DurationSeconds * 1000d;
+            if (!double.IsFinite(milliseconds) || milliseconds < 0 || milliseconds > long.MaxValue)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
 
-        var roundedMilliseconds = Math.Round(milliseconds, MidpointRounding.ToEven);
-        if (roundedMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond)
-        {
-            failureReason = "capture_duration_invalid";
-            return false;
-        }
+            var roundedMilliseconds = Math.Round(milliseconds, MidpointRounding.ToEven);
+            if (roundedMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
 
-        try
-        {
-            actualDuration = TimeSpan.FromTicks(checked((long)roundedMilliseconds * TimeSpan.TicksPerMillisecond));
-        }
-        catch (OverflowException)
-        {
-            failureReason = "capture_duration_invalid";
-            return false;
+            try
+            {
+                actualDuration = TimeSpan.FromTicks(checked((long)roundedMilliseconds * TimeSpan.TicksPerMillisecond));
+            }
+            catch (OverflowException)
+            {
+                failureReason = "capture_duration_invalid";
+                return false;
+            }
         }
 
         if (actualDuration < TimeSpan.Zero || actualDuration > authorizedDuration)

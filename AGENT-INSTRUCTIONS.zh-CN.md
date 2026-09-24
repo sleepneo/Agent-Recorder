@@ -26,6 +26,8 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 **强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**，它会自动处理单实例检测、`/capabilities` 二次确认、启动等待，并返回机器可读的就绪信息。
 
+若 agent 运行在与用户输入桌面不同的 Windows desktop，`ensure-running` 可复用已在用户桌面运行的服务，但不能保证新启动的托盘 UI 对用户可见。当前 `host.supports_region_selection_ui` 只说明宿主具备 UI 代码，不证明用户能看到弹窗；不能把 API ready 当作本地 UI ready。需要选区或授权而窗口未出现在用户桌面时，应说明从用户交互桌面启动应用或先启用当前用户自启，不要反复创建请求。
+
 ### 方式一：CLI 握手（推荐）
 
 1. 定位 CLI 工具：
@@ -494,15 +496,15 @@ Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 
 | "录上次选区" | `context.last_selected_region != null` | 使用 `quick_recipes.record_last_region` |
 | "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用 `selected_region` |
 
-## 一次性有限无人值守计划
+## 有限无人值守计划
 
-仅当用户明确要求稍后自动录制时使用。先读取 `/capabilities.unattended_lease`；只有 `supported`、`current_enabled` 和 `execution_supported` 都为 `true` 才提交 `POST /plans`。该接口只支持一次固定区域、无音频、自然唤醒和交互桌面，单次最长 10 分钟、Lease 最长 1 小时。
+仅当用户明确要求稍后自动录制时使用。先读取 `/capabilities.unattended_lease`；只有 `supported`、`current_enabled` 和 `execution_supported` 都为 `true` 才提交 `POST /plans`。一次性计划限制为固定区域、无音频、自然唤醒和交互桌面，单次最长 10 分钟、Lease 最长 1 小时。每日/每周周期计划还需检查 `unattended_lease.recurring` 的支持状态和有界配额。
 
 提交时必须使用稳定 `Idempotency-Key`，并明确给出 UTC 的 `start_at`、`latest_start_at`、`planned_end_at`、Lease `expires_at`、绝对输出目录和冻结文件名。随后提示用户在本地完成重新选区与 Lease 批准，并通过 `/plan-setups/{id}` 的 `status_version_cursor` 做有界长轮询。
 
-不要声称 API 已经批准录制；不要复用 `last_region`、活动窗口或旧授权；不要请求音频、嵌套、并发或周期计划。出现 `recording_status_url` 后按普通录制状态查询，达到可信 `recording` 才报告已开始。拒绝、撤销、过期、错过窗口、会话不可用、目标/输出变化或重启后的不确定执行都应直接解释其 `reason_code`，不得自行重试或新建替代 Run。
+不要声称 API 已经批准录制；不要复用 `last_region`、活动窗口或旧授权；不要请求音频、嵌套或并发。一次性计划出现 `recording_status_url` 后按普通录制状态查询，达到可信 `recording` 才报告已开始。周期计划的 setup 状态 `scheduled` 只证明本地批准和排期，当前接口不返回逐次 Occurrence/Run 终态；不得因此声称录制已开始或已完成。拒绝、撤销、过期、错过窗口、会话不可用、目标/输出变化或重启后的不确定执行都应直接解释其 `reason_code`，不得自行重试或新建替代 Run。
 
-完整字段与示例见 `AGENT-API-REFERENCE.zh-CN.md` 的“一次性有限无人值守计划”。
+完整字段与示例见 `AGENT-API-REFERENCE.zh-CN.md` 的有限无人值守计划章节。
 
 ## 场景 1：用户说"帮我录制当前对话窗口 5 分钟"
 

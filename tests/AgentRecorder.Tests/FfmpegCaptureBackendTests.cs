@@ -73,6 +73,59 @@ public class FfmpegCaptureBackendTests : IDisposable
         Assert.True(progressIndex < inputIndex, "-progress must be an output/global option, before -i");
     }
 
+    [Fact]
+    public void BuildArgs_FailIfExistsUsesNoOverwriteAndNeverUsesOverwriteFlag()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "region",
+            Bounds = (0, 0, 1920, 1080),
+            Fps = 30,
+            OutputPath = Path.Combine(_tmpDir, "recurring.mp4"),
+            OutputConflictPolicy = "fail_if_exists",
+        };
+
+        var args = FfmpegCaptureBackend.BuildArgs(cfg);
+
+        Assert.Contains("-n", args);
+        Assert.DoesNotContain("-y", args);
+    }
+
+    [Theory]
+    [InlineData("rename")]
+    [InlineData("overwrite")]
+    public void BuildArgs_OrdinaryPoliciesRetainOverwriteCompatibility(string policy)
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "region",
+            Bounds = (0, 0, 1920, 1080),
+            Fps = 30,
+            OutputPath = Path.Combine(_tmpDir, "ordinary.mp4"),
+            OutputConflictPolicy = policy,
+        };
+
+        var args = FfmpegCaptureBackend.BuildArgs(cfg);
+
+        Assert.Contains("-y", args);
+        Assert.DoesNotContain("-n", args);
+    }
+
+    [Fact]
+    public void BuildArgs_UnknownOutputConflictPolicyFailsClosed()
+    {
+        var cfg = new CaptureConfig
+        {
+            SourceKind = "region",
+            Bounds = (0, 0, 1920, 1080),
+            Fps = 30,
+            OutputPath = Path.Combine(_tmpDir, "unknown.mp4"),
+            OutputConflictPolicy = "unexpected-policy",
+        };
+
+        Assert.Throws<ArgumentException>(() => FfmpegCaptureBackend.BuildArgs(cfg));
+    }
+
     [Theory]
     [InlineData("mov,mp4,m4a,3gp,3g2,mj2", "mp4")]
     [InlineData("mp4", "mp4")]

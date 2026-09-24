@@ -13,7 +13,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 - 人类用户只需要说“帮我录制当前窗口 5 分钟”或“选区录屏 30 秒”。
 - AI agent 负责启动应用、读取 API key、调用 API、轮询状态并报告结果。
 - 常见录屏意图优先使用 `POST /api/v1/recordings/quick`，减少 agent 往返。
-- Agent Recorder 保留本地安全边界：普通录制需要用户在本机逐次确认；可选的一次性无人值守模式必须先由用户在本地重新选择固定区域并批准有界 Lease，AI agent 不能自行授权或扩大范围。
+- Agent Recorder 保留本地安全边界：普通录制需要用户逐次确认；可选的一次性及每日/每周计划都必须先由用户在本地重新选择固定区域并批准有界 Lease，AI agent 不能自行授权或扩大范围。
 - 支持嵌套录制，外层视频可以记录 AI agent 发起内层录制的过程。
 - 录制控件采用角色感知的捕获可见性：默认 FFmpeg 路径下普通录制画面保持干净，嵌套外层可记录内层录制控件和操作过程；跨 Windows/DWM 环境的捕获排除属于 best-effort 行为。
 
@@ -57,6 +57,8 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 - 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
 - AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。
 
+隔离 Windows desktop 内的 agent 可以调用用户桌面已运行服务的本地 API，但从隔离桌面冷启动托盘程序不能保证弹窗出现在用户面前。当前 `host.supports_region_selection_ui` 表示宿主具备选区 UI，不是跨桌面可见性证明；需要本地选区时，可先从用户交互桌面启动应用或启用当前用户自启。
+
 `target.type` 支持：
 
 | target.type | 说明 |
@@ -96,6 +98,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | 嵌套录制 | 已实现 | 外层录制过程中可以启动内层录制 |
 | 本地确认 | 已实现 | 普通录制逐次由人类确认；麦克风、普通无音频 FFmpeg 与延迟授权 WGC 路径在批准后显示不采集画面的可配置 0-10 秒倒计时 |
 | 一次性有限无人值守 | 已实现 | 默认关闭；仅固定区域、单次、无音频、自然唤醒和交互桌面，Lease 最长 1 小时、Run 最长 10 分钟；必须先完成本地选区与 Lease 批准 |
+| 每日/每周有限无人值守 | 已实现 | 默认关闭；固定区域、无音频、自然唤醒；日期范围、次数、总时长和 Lease 有效期均受约束，每次到点重新验证环境，不补录错过的窗口 |
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示克制呼吸的红色边框和计时标签，支持 outer/inner；系统关闭动画时自动降级为静态显示 |
 | 本地停止控制 | 已实现 | 每条录制有独立圆角胶囊停止控件；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |

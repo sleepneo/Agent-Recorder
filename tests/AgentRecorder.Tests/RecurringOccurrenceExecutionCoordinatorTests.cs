@@ -1177,7 +1177,10 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             .ExecuteAsync(CreateRequest(context));
 
         Assert.Equal(RecurringOccurrenceExecutionStatus.CommittedNotStarted, result.Status);
-        Assert.Contains("recovered", result.Reason, StringComparison.Ordinal);
+        Assert.Contains(
+            "recovered:recurring_execution_stop_all_active",
+            result.Reason,
+            StringComparison.Ordinal);
         Assert.Equal(0, backend.StartCalls);
         Assert.Equal(RecordingRunStatus.StartedUnknown,
             new SqliteRecordingRunRepository(context.Fixture.Store).Get(result.RunId!).Status);

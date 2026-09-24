@@ -34,7 +34,6 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     private readonly StandingPlanSetupTerminalService _terminal;
     private readonly Func<IReadOnlyList<StandingLeaseDisplayMetadata>> _currentDisplays;
     private readonly ConcurrentDictionary<string, Lazy<Task>> _flights = new(StringComparer.Ordinal);
-    private readonly SemaphoreSlim _setupUiGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly object _approvalCommitGate = new();
     private readonly Func<Task>? _beforeApprovalCommitForTest;
@@ -213,6 +212,19 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
         return ToState(record, _query.GetExecution(setupIntentId, currentUserSid, sessionBinding));
     }
 
+    internal Task WaitForIdleAsync()
+    {
+        var flights = _flights.Values
+            .Select(lazy =>
+            {
+                try { return lazy.Value; }
+                catch { return Task.CompletedTask; }
+            })
+            .Distinct()
+            .ToArray();
+        return Task.WhenAll(flights);
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposeRequested, 1) == 1)
@@ -248,7 +260,6 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
 
         if (flights.All(flight => flight.IsCompleted))
         {
-            _setupUiGate.Dispose();
             _lifetimeCts.Dispose();
         }
         else
@@ -295,20 +306,12 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
 
     private async Task RunFlightAsync(string intentId)
     {
-        var enteredUiGate = false;
+        LocalSetupUiSerializationGate.Lease? uiLease = null;
         try
         {
-            await _setupUiGate.WaitAsync(_lifetimeCts.Token).ConfigureAwait(false);
-            enteredUiGate = true;
-            try
-            {
-                await RunFlightUnderUiGateAsync(intentId).ConfigureAwait(false);
-            }
-            finally
-            {
-                _setupUiGate.Release();
-                enteredUiGate = false;
-            }
+            uiLease = await LocalSetupUiSerializationGate.Instance
+                .WaitAsync(_lifetimeCts.Token).ConfigureAwait(false);
+            await RunFlightUnderUiGateAsync(intentId).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
         {
@@ -330,8 +333,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
         }
         finally
         {
-            if (enteredUiGate)
-                _setupUiGate.Release();
+            uiLease?.Dispose();
             _flights.TryRemove(intentId, out _);
         }
     }

@@ -75,7 +75,8 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 command.CommandText = """
                     SELECT intent_id
                     FROM setup_intents
-                    WHERE current_user_sid = $current_user_sid
+                    WHERE intent_kind_code = 'standing_once_fixed_region'
+                      AND current_user_sid = $current_user_sid
                     ORDER BY requested_at_utc DESC, intent_id ASC;
                     """;
                 Add(command, "$current_user_sid", currentUserSid);

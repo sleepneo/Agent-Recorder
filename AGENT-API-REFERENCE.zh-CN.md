@@ -1083,6 +1083,50 @@ cursor 必须原样回传。`wait_ms` 最大 25000。响应可能包含 `run_id`
 
 本地 UI 会要求用户重新选区并批准有界 Lease。到点时应用再次验证显示器身份、物理区域、用户会话、输出文件、执行窗口、Lease、安全开关和一次性 proof。撤销、Stop All、锁屏/会话断开、睡眠、目标或输出变化、文件已存在及错过窗口都 fail closed，不会自动换目标、换路径、重试或回退成普通录制。
 
+## 5.2 每日/每周有限无人值守计划
+
+`/capabilities.unattended_lease.recurring` 中的 `supported`、`setup_supported` 和 `execution_supported` 必须均为 `true`，且全局 `current_enabled=true`。用户必须为每个计划在本地重新选区并批准独立的周期 Lease；HTTP 只能创建或幂等恢复 setup，不能代替授权。输出目录须在请求前存在且可用。
+
+```http
+POST /plans
+X-Agent-Recorder-Key: <api-key>
+Idempotency-Key: <本次规范请求的稳定键>
+Content-Type: application/json
+```
+
+```json
+{
+  "recording_spec": {
+    "source": { "type": "fixed_region" },
+    "audio": { "mode": "none" },
+    "duration_seconds": 10,
+    "countdown_seconds": 0,
+    "backend": "ffmpeg-region",
+    "output": { "directory": "D:\\Videos", "filename_prefix": "daily-notes" }
+  },
+  "schedule": {
+    "kind": "daily",
+    "time_zone_id": "China Standard Time",
+    "local_start_date": "2026-10-01",
+    "local_end_date": "2026-10-03",
+    "local_time": "09:00:00",
+    "weekdays": null,
+    "maximum_occurrences": 3,
+    "latest_start_grace_seconds": 120
+  },
+  "requested_authorization": {
+    "mode": "recurring_lease",
+    "valid_until": "2026-10-03T02:00:00Z",
+    "max_runs": 3,
+    "max_total_duration_seconds": 30
+  }
+}
+```
+
+`kind` 只能是 `daily` 或 `weekly`；`weekly` 的 `weekdays` 必须是非空、去重的小写英文星期数组，`daily` 则为 `null`。日期跨度最多 366 天、次数最多 366、单次时长 `1..600` 秒、启动宽限最多 300 秒。`max_runs` 必须等于 `maximum_occurrences`，总授权时长必须覆盖全部次数，`valid_until` 必须严格晚于最后一次计划最晚结束时刻。计划不主动唤醒机器；错过窗口、环境不符或不确定启动都不自动补录或重试。
+
+与一次性计划不同，当前 `GET /plan-setups/{id}` 的周期响应只表示设置进度和 `scheduled` 排期，不提供每次 Occurrence/Run 的执行终态；不能把 `scheduled` 当成录制成功。媒体保存在授权时冻结的目录中，执行及失败证据写入本地审计日志。逐次执行状态 API 仍待实现。
+
 ## 6. 创建录制（原始 API）
 
 ```http

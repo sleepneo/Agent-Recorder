@@ -249,6 +249,144 @@ public sealed class SqliteRecurringConsentLeaseRepository : SqliteRepositoryBase
         return persistedLease;
     }
 
+    // The recurring setup preparation transaction owns the surrounding
+    // immediate transaction. Do not route this through InsertPending, which
+    // would create a second commit boundary.
+    internal static void InsertWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RecurringConsentLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        if (lease.Status != ConsentLeaseStatus.Pending || lease.Version != 0 || lease.UpdatedAtUtc != lease.CreatedAtUtc)
+        {
+            throw Failure(RecurringConsentLeasePersistenceReasonCodes.InvalidArgument, "Only a fresh pending recurring lease may be inserted.");
+        }
+
+        var values = BuildLeaseValues(lease);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            INSERT INTO {TableName} ({SelectColumns})
+            VALUES ($leaseId, $planId, $scheduleRevision, $scheduleDigest, $timeZoneRulesDigest,
+                    $profileId, $profileVersion, $profileDigest, $configurationDigest, $statusCode,
+                    $validFromUtc, $validUntilUtc, $authorizedPlanLatestEndUtc, $perRunDurationTicks,
+                    $maxUses, $maxCumulativeDurationTicks, $authorizationDigest, $createdAtUtc, $updatedAtUtc, $version);
+            """;
+        Add(command, "$leaseId", RequiredLeaseId(lease.LeaseId));
+        Add(command, "$planId", values.PlanId);
+        Add(command, "$scheduleRevision", values.ScheduleRevision);
+        Add(command, "$scheduleDigest", values.ScheduleDigest);
+        Add(command, "$timeZoneRulesDigest", values.TimeZoneRulesDigest);
+        Add(command, "$profileId", values.ProfileId);
+        Add(command, "$profileVersion", values.ProfileVersion);
+        Add(command, "$profileDigest", values.ProfileDigest);
+        Add(command, "$configurationDigest", values.ConfigurationDigest);
+        Add(command, "$statusCode", values.StatusCode);
+        Add(command, "$validFromUtc", values.ValidFromUtc);
+        Add(command, "$validUntilUtc", values.ValidUntilUtc);
+        Add(command, "$authorizedPlanLatestEndUtc", values.AuthorizedPlanLatestEndUtc);
+        Add(command, "$perRunDurationTicks", values.PerRunDurationTicks);
+        Add(command, "$maxUses", values.MaxUses);
+        Add(command, "$maxCumulativeDurationTicks", values.MaxCumulativeDurationTicks);
+        Add(command, "$authorizationDigest", values.AuthorizationDigest);
+        Add(command, "$createdAtUtc", values.CreatedAtUtc);
+        Add(command, "$updatedAtUtc", values.UpdatedAtUtc);
+        Add(command, "$version", values.Version);
+        if (command.ExecuteNonQuery() != 1)
+        {
+            throw Failure(RecurringConsentLeasePersistenceReasonCodes.StorageFailure, "The recurring lease insert did not affect exactly one row.");
+        }
+    }
+
+    // Internal aggregate CAS used by production lifecycle adapters that
+    // perform a domain-approved terminal transition outside the setup
+    // activation boundary. The recurring setup activation transaction keeps
+    // its own exact write set and does not route through this method.
+    internal void Update(RecurringConsentLease lease, long expectedVersion)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        if (expectedVersion < 0 || expectedVersion == long.MaxValue || lease.Version != expectedVersion + 1)
+        {
+            throw Failure(RecurringConsentLeasePersistenceReasonCodes.InvalidArgument, "The recurring lease update version does not describe one domain transition.");
+        }
+
+        using var connection = OpenLeaseConnection();
+        SqliteTransaction? transaction = null;
+        try
+        {
+            transaction = BeginWriteTransaction(connection);
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = $"""
+                UPDATE {TableName}
+                SET status_code = $statusCode, updated_at_utc = $updatedAtUtc, version = $newVersion
+                WHERE lease_id = $leaseId AND plan_id = $planId
+                  AND status_code = $expectedStatus AND version = $expectedVersion
+                  AND schedule_revision = $scheduleRevision AND schedule_digest = $scheduleDigest
+                  AND time_zone_rules_digest = $timeZoneRulesDigest
+                  AND profile_id = $profileId AND profile_version = $profileVersion AND profile_digest = $profileDigest
+                  AND configuration_digest = $configurationDigest AND valid_from_utc = $validFromUtc
+                  AND valid_until_utc = $validUntilUtc AND authorized_plan_latest_end_utc = $authorizedPlanLatestEndUtc
+                  AND per_run_duration_ticks = $perRunDurationTicks AND max_uses = $maxUses
+                  AND max_cumulative_duration_ticks = $maxCumulativeDurationTicks
+                  AND authorization_digest = $authorizationDigest AND created_at_utc = $createdAtUtc;
+                """;
+            Add(command, "$statusCode", lease.StatusCode);
+            Add(command, "$updatedAtUtc", UtcTicksInput(lease.UpdatedAtUtc));
+            Add(command, "$newVersion", lease.Version);
+            Add(command, "$leaseId", RequiredLeaseId(lease.LeaseId));
+            Add(command, "$planId", RequiredPlanId(lease.PlanId));
+            var expectedStatus = lease.Status switch
+            {
+                ConsentLeaseStatus.Expired or ConsentLeaseStatus.Exhausted when expectedVersion == 1 => ConsentLeaseStatus.Active,
+                ConsentLeaseStatus.Revoked when expectedVersion == 1 => ConsentLeaseStatus.Active,
+                ConsentLeaseStatus.Revoked when expectedVersion == 2 => ConsentLeaseStatus.Exhausted,
+                _ => throw Failure(RecurringConsentLeasePersistenceReasonCodes.InvalidArgument, "The recurring lease update target is outside the production transition shape."),
+            };
+            Add(command, "$expectedStatus", Phase3StateCodes.ToCode(expectedStatus));
+            Add(command, "$expectedVersion", expectedVersion);
+            Add(command, "$scheduleRevision", lease.ConfigurationRef.ScheduleRevision);
+            Add(command, "$scheduleDigest", lease.ConfigurationRef.ScheduleDigest);
+            Add(command, "$timeZoneRulesDigest", lease.ConfigurationRef.TimeZoneRulesDigest);
+            Add(command, "$profileId", lease.ConfigurationRef.ProfileRef.ProfileId);
+            Add(command, "$profileVersion", lease.ConfigurationRef.ProfileRef.ProfileVersion);
+            Add(command, "$profileDigest", lease.ConfigurationRef.ProfileRef.ProfileDigest);
+            Add(command, "$configurationDigest", lease.ConfigurationRef.ConfigurationDigest);
+            Add(command, "$validFromUtc", UtcTicksInput(lease.ValidFromUtc));
+            Add(command, "$validUntilUtc", UtcTicksInput(lease.ValidUntilUtc));
+            Add(command, "$authorizedPlanLatestEndUtc", UtcTicksInput(lease.AuthorizedPlanLatestEndUtc));
+            Add(command, "$perRunDurationTicks", lease.PerRunDuration.Ticks);
+            Add(command, "$maxUses", lease.MaxUses);
+            Add(command, "$maxCumulativeDurationTicks", lease.MaxCumulativeDuration.Ticks);
+            Add(command, "$authorizationDigest", lease.AuthorizationDigest);
+            Add(command, "$createdAtUtc", UtcTicksInput(lease.CreatedAtUtc));
+            if (command.ExecuteNonQuery() != 1)
+                throw Failure(RecurringConsentLeasePersistenceReasonCodes.StorageFailure, "The recurring lease update did not affect exactly one row.");
+
+            transaction.Commit();
+        }
+        catch (Phase3PersistenceException)
+        {
+            TryRollback(transaction);
+            throw;
+        }
+        catch (SqliteException exception) when (IsSqliteConstraint(exception))
+        {
+            TryRollback(transaction);
+            throw Failure(RecurringConsentLeasePersistenceReasonCodes.InvalidArgument, "The recurring lease update violated a persisted constraint.", exception);
+        }
+        catch (SqliteException exception)
+        {
+            TryRollback(transaction);
+            throw Failure(RecurringConsentLeasePersistenceReasonCodes.StorageFailure, "The recurring lease could not be updated.", exception);
+        }
+        finally
+        {
+            transaction?.Dispose();
+        }
+    }
+
     private static RecurringConsentLease ReadSnapshot(SqliteDataReader reader)
     {
         var leaseId = ReadRequiredText(reader, 0);
@@ -497,7 +635,14 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
             var runIds = new HashSet<string>(StringComparer.Ordinal);
             while (reader.Read())
             {
-                var entry = ReadAndValidateEntry(connection, transaction, reader, lease, occurrenceIdentities, runIds);
+                var entry = ReadAndValidateEntry(
+                    connection,
+                    transaction,
+                    reader,
+                    lease,
+                    occurrenceIdentities,
+                    runIds,
+                    requireProductionVersionShape: false);
                 entries.Add(entry);
             }
 
@@ -530,7 +675,8 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
     internal static IReadOnlyList<RecurringLeaseUseAccountingEntry> ReadAllWithinTransaction(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        RecurringConsentLease lease)
+        RecurringConsentLease lease,
+        bool requireProductionVersionShape = false)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -557,7 +703,8 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
                 reader,
                 lease,
                 occurrenceIdentities,
-                runIds));
+                runIds,
+                requireProductionVersionShape));
         }
 
         return entries;
@@ -597,8 +744,14 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
                 throw new PersistedSnapshotException("The recurring accounting row disappeared during a stable read.");
             }
 
-            var entry = ReadAndValidateEntry(connection, transaction, entryReader, lease,
-                new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
+            var entry = ReadAndValidateEntry(
+                connection,
+                transaction,
+                entryReader,
+                lease,
+                new HashSet<string>(StringComparer.Ordinal),
+                new HashSet<string>(StringComparer.Ordinal),
+                requireProductionVersionShape: false);
             entryReader.Close();
             transaction.Commit();
             return entry;
@@ -626,7 +779,8 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
         SqliteDataReader reader,
         RecurringConsentLease lease,
         HashSet<string> occurrenceIdentities,
-        HashSet<string> runIds)
+        HashSet<string> runIds,
+        bool requireProductionVersionShape)
     {
         var useId = ReadRequiredText(reader, 0);
         var leaseId = ReadRequiredText(reader, 1);
@@ -653,9 +807,10 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
         }
 
         EnsureOccurrenceAndRunRelations(connection, transaction, occurrenceIdentity, planId, occurrenceId, runId);
-        if (version < 0 || updatedAt < createdAt)
+        if (version < 0 || updatedAt < createdAt ||
+            (requireProductionVersionShape && !IsLegalPersistedUseVersion(status, version)))
         {
-            throw new PersistedSnapshotException("The recurring accounting version or time is not monotonic.");
+            throw new PersistedSnapshotException("The recurring accounting version, state, or time is not a legal production shape.");
         }
 
         RecurringLeaseUseAccountingEntry entry;
@@ -672,6 +827,23 @@ public sealed class SqliteRecurringLeaseUseAccountingReader : SqliteRepositoryBa
 
         return entry;
     }
+
+    private static bool IsLegalPersistedUseVersion(LeaseUseStatus status, long version) =>
+        status switch
+        {
+            // Reservation inserts the durable row already in Reserved/v0;
+            // the row is never persisted as the in-memory Available/v0 state.
+            LeaseUseStatus.Reserved => version == 0,
+            LeaseUseStatus.StartCommitted => version == 1,
+            LeaseUseStatus.Consumed => version == 2,
+            LeaseUseStatus.Settled => version == 3,
+            // StartCommitted -> StartedUnknown and Consumed ->
+            // StartedUnknown are the two production edges.
+            LeaseUseStatus.StartedUnknown => version is 2 or 3,
+            // A pre-start release is the only durable Available projection.
+            LeaseUseStatus.Available => version == 1,
+            _ => false,
+        };
 
     private static void EnsureOccurrenceAndRunRelations(
         SqliteConnection connection,

@@ -279,11 +279,11 @@ public sealed class RecurringPlanProfileBindingTests
     }
 
     [Fact]
-    public void SchemaV13ShapeTamperFailsClosedAndNoBindingHasCaptureSideEffects()
+    public void SchemaV14ShapeTamperFailsClosedAndNoBindingHasCaptureSideEffects()
     {
         using var database = new TestDatabase();
         database.Store.Initialize();
-        Assert.Equal(13L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal(15L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal("schema_v10_recurring_plan_profile_bindings", ScalarString(database.Store.DatabasePath, "SELECT name FROM schema_migrations WHERE version = 10;"));
         Assert.Equal("3ed33a8d8176dc56b35fa035f45a5bc2dd6ef95c70979065b73a399adee4e727", ScalarString(database.Store.DatabasePath, "SELECT definition_checksum FROM schema_migrations WHERE version = 10;"));
         Assert.Equal(0L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recurring_plan_profile_bindings;"));
@@ -423,7 +423,7 @@ public sealed class RecurringPlanProfileBindingTests
 
         database.Store.Initialize();
 
-        Assert.Equal(13L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal(15L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM plans WHERE id = 'v9-periodic-plan';"));
         Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recurring_schedule_versions WHERE plan_id = 'v9-periodic-plan' AND schedule_revision = 1;"));
         Assert.Equal(schedule.CanonicalDigest, ScalarString(database.Store.DatabasePath, "SELECT schedule_digest FROM recurring_schedule_versions WHERE plan_id = 'v9-periodic-plan' AND schedule_revision = 1;"));
