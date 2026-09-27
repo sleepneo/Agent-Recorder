@@ -25,6 +25,28 @@ internal sealed record StandingLeaseControlCenterLeaseSummary(
     bool ActiveRunPresent,
     bool RequiresActiveRunStop);
 
+internal sealed record StandingLeaseControlCenterRecurringLeaseSummary(
+    string PlanId,
+    string LeaseId,
+    RecurringScheduleKind ScheduleKind,
+    string TimeZoneId,
+    DateOnly LocalStartDate,
+    DateOnly LocalEndDate,
+    TimeOnly LocalWallClockTime,
+    IReadOnlyList<DayOfWeek> WeeklyDays,
+    DateOnly? NextOccurrenceLocalDate,
+    TimeOnly? NextOccurrenceLocalTime,
+    bool NoFurtherOccurrence,
+    ConsentLeaseStatus LeaseStatus,
+    DateTimeOffset LeaseValidUntilUtc,
+    long RemainingUses,
+    TimeSpan RemainingDuration,
+    bool ActiveRunPresent)
+{
+    internal bool CanRevoke => LeaseStatus is ConsentLeaseStatus.Pending or ConsentLeaseStatus.Active ||
+        LeaseStatus == ConsentLeaseStatus.Exhausted && ActiveRunPresent;
+}
+
 internal sealed record StandingLeaseControlCenterState(
     UnattendedModeStatus UnattendedMode,
     bool StopAllApplied,
@@ -32,7 +54,8 @@ internal sealed record StandingLeaseControlCenterState(
     string? StopAllReasonCode,
     DateTimeOffset? StopAllRequestedAtUtc,
     DateTimeOffset? StopAllAppliedAtUtc,
-    IReadOnlyList<StandingLeaseControlCenterLeaseSummary> Items);
+    IReadOnlyList<StandingLeaseControlCenterLeaseSummary> Items,
+    IReadOnlyList<StandingLeaseControlCenterRecurringLeaseSummary> RecurringItems);
 
 internal sealed class StandingLeaseControlCenterQueryResult
 {

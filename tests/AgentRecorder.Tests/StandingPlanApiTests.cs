@@ -71,6 +71,130 @@ public sealed class StandingPlanApiTests : IDisposable
     }
 
     [Fact]
+    public void RequiredModeParsesAsASeparateStrictRequestAndRejectsLeaseOnlyFields()
+    {
+        var required = ValidRequiredBody();
+
+        var parsed = StandingPlanApiRequestParser.ParseRequired(required, "required-key");
+        Assert.Equal("required-key", parsed.IdempotencyKey);
+        Assert.Equal(TimeSpan.FromSeconds(60), parsed.Duration);
+        Assert.Equal("one-shot-required.mp4", parsed.FrozenFileName);
+
+        var leaseFields = required.Replace(
+            "\"mode\":\"required\"",
+            "\"mode\":\"required\",\"max_runs\":1",
+            StringComparison.Ordinal);
+        var invalid = Assert.Throws<ApiException>(() => StandingPlanApiRequestParser.ParseRequired(leaseFields, "required-key"));
+        Assert.Equal(400, invalid.Status);
+        Assert.Equal("INVALID_ARGUMENT", invalid.Code);
+
+        var duplicateMode = required.Replace(
+            "\"mode\":\"required\"",
+            "\"mode\":\"required\",\"mode\":\"required\"",
+            StringComparison.Ordinal);
+        var duplicate = Assert.Throws<ApiException>(() => StandingPlanApiRequestParser.ParseRequired(duplicateMode, "required-key"));
+        Assert.Equal(400, duplicate.Status);
+        Assert.Equal("INVALID_ARGUMENT", duplicate.Code);
+    }
+
+    [Fact]
+    public async Task RequiredModeFailsClosedBeforeGatewayEvenWhenUnattendedModeIsDisabled()
+    {
+        var gateway = new FakeGateway { IsUnattendedEnabled = false };
+        var requiredGateway = new FakeRequiredOnceGateway { IsInteractiveDesktopAvailable = false };
+        _server = CreateServer(gateway, requiredGateway);
+        _server.Start();
+
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "required-no-lease");
+        var response = await client.PostAsync(
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans",
+            new StringContent(ValidRequiredBody(), Encoding.UTF8, "application/json"));
+
+        Assert.Equal(409, (int)response.StatusCode);
+        Assert.Contains("INTERACTIVE_DESKTOP_REQUIRED", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(0, gateway.CreateCalls);
+        Assert.Equal(0, requiredGateway.CreateCalls);
+    }
+
+    [Fact]
+    public async Task RequiredModeCreatesLocalSetupAndExposesExecutionConfirmationLimitation()
+    {
+        var requiredGateway = new FakeRequiredOnceGateway();
+        _server = CreateServer(null, requiredGateway);
+        _server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans")
+        {
+            Content = new StringContent(ValidRequiredBody(), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("Idempotency-Key", "required-setup-key");
+        using var response = await client.SendAsync(request);
+        Assert.Equal(202, (int)response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var data = document.RootElement.GetProperty("data");
+        Assert.Equal("required-once-setup-test-1", data.GetProperty("setup_intent_id").GetString());
+        Assert.Equal("pending_selection", data.GetProperty("status").GetString());
+        Assert.Equal("required", data.GetProperty("authorization_mode").GetString());
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("lease_id").ValueKind);
+        Assert.False(data.GetProperty("execution_supported").GetBoolean());
+        Assert.True(data.GetProperty("requires_execution_confirmation").GetBoolean());
+        Assert.Equal(1, requiredGateway.CreateCalls);
+        Assert.Equal(0, requiredGateway.ProofOrCaptureCalls);
+
+        using var statusResponse = await client.GetAsync(
+            $"http://127.0.0.1:{_server.BoundPort}/api/v1/plan-setups/required-once-setup-test-1");
+        Assert.Equal(200, (int)statusResponse.StatusCode);
+
+        using var capabilityResponse = await client.GetAsync(
+            $"http://127.0.0.1:{_server.BoundPort}/api/v1/capabilities");
+        using var capabilityDocument = JsonDocument.Parse(await capabilityResponse.Content.ReadAsStringAsync());
+        var requiredCapability = capabilityDocument.RootElement.GetProperty("data").GetProperty("required_once_plan");
+        Assert.True(requiredCapability.GetProperty("setup_supported").GetBoolean());
+        Assert.False(requiredCapability.GetProperty("execution_supported").GetBoolean());
+        Assert.Equal("required", requiredCapability.GetProperty("authorization_mode").GetString());
+        Assert.True(requiredCapability.GetProperty("second_confirmation_required_at_execution").GetBoolean());
+        Assert.Equal("inert_until_execution_runtime_is_available",
+            requiredCapability.GetProperty("due_occurrence_behavior").GetString());
+    }
+
+    [Fact]
+    public async Task RequiredModeCapabilityTracksHealthyExecutionRuntime()
+    {
+        var requiredGateway = new FakeRequiredOnceGateway
+        {
+            IsExecutionSupported = true,
+            CreateStatusCode = "scheduled",
+        };
+        _server = CreateServer(null, requiredGateway);
+        _server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans")
+        {
+            Content = new StringContent(ValidRequiredBody(), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("Idempotency-Key", "required-execution-capability");
+        using var response = await client.SendAsync(request);
+        Assert.Equal(202, (int)response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var data = document.RootElement.GetProperty("data");
+        Assert.True(data.GetProperty("execution_supported").GetBoolean());
+        Assert.Equal("required_once_natural_wake_execution", data.GetProperty("next_action").GetString());
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("execution_limitation").ValueKind);
+
+        using var capabilityResponse = await client.GetAsync(
+            $"http://127.0.0.1:{_server.BoundPort}/api/v1/capabilities");
+        using var capabilityDocument = JsonDocument.Parse(await capabilityResponse.Content.ReadAsStringAsync());
+        var requiredCapability = capabilityDocument.RootElement.GetProperty("data").GetProperty("required_once_plan");
+        Assert.True(requiredCapability.GetProperty("execution_supported").GetBoolean());
+        Assert.Equal("local_per_run_confirmation_then_fixed_region_capture",
+            requiredCapability.GetProperty("due_occurrence_behavior").GetString());
+    }
+
+    [Fact]
     public async Task PostPlanRequiresIdempotencyAndReturnsAcceptedSetupProjection()
     {
         var gateway = new FakeGateway();
@@ -81,10 +205,10 @@ public sealed class StandingPlanApiTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         var content = new StringContent(ValidBody(), Encoding.UTF8, "application/json");
 
-        var missing = await client.PostAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/plans", content);
+        var missing = await client.PostAsync($"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans", content);
         Assert.Equal(400, (int)missing.StatusCode);
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{ApiServer.Port}/api/v1/plans")
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans")
         {
             Content = new StringContent(ValidBody(), Encoding.UTF8, "application/json")
         };
@@ -104,7 +228,7 @@ public sealed class StandingPlanApiTests : IDisposable
         Assert.Equal(1, gateway.CreateCalls);
 
         using var status = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?since_status=setup_pending&wait_ms=10");
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/standing-setup-test-1?since_status=setup_pending&wait_ms=10");
         Assert.Equal(200, (int)status.StatusCode);
         using var statusDocument = JsonDocument.Parse(await status.Content.ReadAsStringAsync());
         Assert.Equal("standing-setup-test-1", statusDocument.RootElement.GetProperty("data").GetProperty("setup_intent_id").GetString());
@@ -120,13 +244,13 @@ public sealed class StandingPlanApiTests : IDisposable
         client.DefaultRequestHeaders.Add("Idempotency-Key", "headless-key");
 
         using var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plans",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans",
             new StringContent(ValidBody(), Encoding.UTF8, "application/json"));
         Assert.Equal(409, (int)response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("INTERACTIVE_DESKTOP_REQUIRED", body, StringComparison.Ordinal);
 
-        using var capabilities = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+        using var capabilities = await client.GetAsync($"http://127.0.0.1:{_server!.BoundPort}/api/v1/capabilities");
         using var capabilitiesDocument = JsonDocument.Parse(await capabilities.Content.ReadAsStringAsync());
         var unattended = capabilitiesDocument.RootElement.GetProperty("data").GetProperty("unattended_lease");
         Assert.False(unattended.GetProperty("supported").GetBoolean());
@@ -154,7 +278,7 @@ public sealed class StandingPlanApiTests : IDisposable
         })
         {
             using var response = await client.GetAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?{query}");
+                $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/standing-setup-test-1?{query}");
             Assert.Equal(400, (int)response.StatusCode);
             Assert.Contains("INVALID_ARGUMENT", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         }
@@ -185,7 +309,7 @@ public sealed class StandingPlanApiTests : IDisposable
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         using var current = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1");
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/standing-setup-test-1");
         using var currentDocument = JsonDocument.Parse(await current.Content.ReadAsStringAsync());
         var currentData = currentDocument.RootElement.GetProperty("data");
         Assert.Equal("run-1", currentData.GetProperty("run_id").GetString());
@@ -211,7 +335,7 @@ public sealed class StandingPlanApiTests : IDisposable
             "v1:2:1:4:5:3"));
 
         using var stale = await client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1");
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/standing-setup-test-1");
         using var staleDocument = JsonDocument.Parse(await stale.Content.ReadAsStringAsync());
         var staleData = staleDocument.RootElement.GetProperty("data");
         Assert.Equal("run-1", staleData.GetProperty("run_id").GetString());
@@ -245,7 +369,7 @@ public sealed class StandingPlanApiTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         var started = Stopwatch.GetTimestamp();
         var pending = client.GetAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/plan-setups/standing-setup-test-1?since_status_version=v1:2:1:3:3:3:1&wait_ms=2000");
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/standing-setup-test-1?since_status_version=v1:2:1:3:3:3:1&wait_ms=2000");
         await gateway.FirstGet.Task.WaitAsync(TimeSpan.FromSeconds(1));
         gateway.SetState(currentData: new StandingPlanSetupState(
             "standing-setup-test-1",
@@ -295,7 +419,7 @@ public sealed class StandingPlanApiTests : IDisposable
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
-        using var first = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{ApiServer.Port}/api/v1/plans")
+        using var first = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans")
         {
             Content = new StringContent(ValidBody(), Encoding.UTF8, "application/json"),
         };
@@ -303,7 +427,7 @@ public sealed class StandingPlanApiTests : IDisposable
         using var firstResponse = await client.SendAsync(first);
         Assert.Equal(202, (int)firstResponse.StatusCode);
 
-        using var second = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{ApiServer.Port}/api/v1/plans")
+        using var second = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans")
         {
             Content = new StringContent(
                 ValidBody()
@@ -326,7 +450,7 @@ public sealed class StandingPlanApiTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
     }
 
-    private ApiServer CreateServer(IStandingPlanSetupGateway? gateway)
+    private ApiServer CreateServer(IStandingPlanSetupGateway? gateway, IRequiredOncePlanSetupGateway? requiredGateway = null)
     {
         Directory.CreateDirectory(_dataDir);
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _dataDir, EnvironmentVariableTarget.Process);
@@ -335,7 +459,21 @@ public sealed class StandingPlanApiTests : IDisposable
         var engine = new RecordingEngine(audit);
         var tray = new HeadlessTray();
         engine.SetTray(tray);
-        return new ApiServer(engine, audit, tray, standingPlanSetupGateway: gateway);
+        return new ApiServer(
+            engine,
+            audit,
+            tray,
+            readiness: null,
+            autoStart: null,
+            ffmpegPrewarmer: null,
+            tracer: null,
+            ensureContextStore: null,
+            performanceSummaryProvider: null,
+            standingPlanSetupGateway: gateway,
+            recurringPlanSetupGateway: null,
+            planExecutionStatusGateway: null,
+            listenPort: 0,
+            requiredOncePlanSetupGateway: requiredGateway);
     }
 
     private static HttpClient CreateClient() => new(new HttpClientHandler { UseProxy = false })
@@ -374,6 +512,31 @@ public sealed class StandingPlanApiTests : IDisposable
         .Replace("2099-09-01T10:05:00+08:00", now.AddMinutes(2).ToString("O"), StringComparison.Ordinal)
         .Replace("2099-09-01T10:10:00+08:00", now.AddMinutes(3).ToString("O"), StringComparison.Ordinal)
         .Replace("2099-09-01T11:00:00+08:00", now.AddMinutes(10).ToString("O"), StringComparison.Ordinal);
+    }
+
+    private static string ValidRequiredBody()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return JsonSerializer.Serialize(new
+        {
+            recording_spec = new
+            {
+                source = new { type = "fixed_region" },
+                audio = new { mode = "none" },
+                duration_seconds = 60,
+                countdown_seconds = 0,
+                backend = "ffmpeg-region",
+                output = new { directory = @"C:\Recordings\Agent", filename = "one-shot-required.mp4" },
+            },
+            schedule = new
+            {
+                kind = "once",
+                start_at = now.AddMinutes(1).ToString("O"),
+                latest_start_at = now.AddMinutes(2).ToString("O"),
+                planned_end_at = now.AddMinutes(3).ToString("O"),
+            },
+            requested_authorization = new { mode = "required" },
+        });
     }
 
     private static string BuildBody(
@@ -415,7 +578,7 @@ public sealed class StandingPlanApiTests : IDisposable
         public int CreateCalls { get; private set; }
         public TaskCompletionSource<object?> FirstGet { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool IsInteractiveDesktopAvailable => true;
-        public bool IsUnattendedEnabled => true;
+        public bool IsUnattendedEnabled { get; set; } = true;
 
         public StandingPlanSetupCreateResult CreateOrGet(StandingPlanApiRequest request)
         {
@@ -445,6 +608,31 @@ public sealed class StandingPlanApiTests : IDisposable
 
         public void SetState(StandingPlanSetupState currentData) =>
             _states[currentData.SetupIntentId] = currentData;
+    }
+
+    private sealed class FakeRequiredOnceGateway : IRequiredOncePlanSetupGateway
+    {
+        private StandingPlanSetupState? _state = new(
+            "required-once-setup-test-1", "pending_selection", 0, null, null, null,
+            true, "local_region_selection", null,
+            StatusVersionCursor: "required-once-setup/v1:0",
+            AuthorizationMode: "required", RequiresExecutionConfirmation: true, ExecutionSupported: false);
+
+        public bool IsInteractiveDesktopAvailable { get; set; } = true;
+        public bool IsExecutionSupported { get; set; }
+        public string CreateStatusCode { get; set; } = "region_selection_pending";
+        public int CreateCalls { get; private set; }
+        public int ProofOrCaptureCalls { get; private set; }
+
+        public RequiredOncePlanSetupCreateResult CreateOrGet(RequiredOncePlanApiRequest request)
+        {
+            CreateCalls++;
+            return new(StandingPlanSetupCreateStatus.Created, "required-once-setup-test-1", CreateStatusCode, 0,
+                null, null, null, "required-once-setup/v1:0");
+        }
+
+        public StandingPlanSetupState? Get(string setupIntentId) =>
+            _state?.SetupIntentId == setupIntentId ? _state : null;
     }
 
     private sealed class HeadlessTray : ITrayContext

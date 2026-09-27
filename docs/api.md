@@ -61,6 +61,7 @@ path.
 | `POST /recordings` | Yes |
 | `POST /plans` | Yes |
 | `GET /plan-setups/{id}` | Yes |
+| `GET /plans/{plan_id}/status` | Yes |
 | `GET /recordings` | Yes |
 | `GET /recordings/{id}` | Yes |
 | `POST /recordings/{id}/marks` | Yes |
@@ -855,11 +856,188 @@ The cursor is opaque and should be returned unchanged. `wait_ms` is bounded to
 `completed_at`. Once a `recording_status_url` is present, use the normal
 recording status endpoint for media completion and output details.
 
-Before physical capture, the app revalidates the approved display identity,
-physical region, session, output target, execution window, lease state, global
-safety state, and one-time proof. A mismatch, revocation, Stop All, session
-loss, sleep, existing output file, or missed window fails closed and never
-falls back to an interactive or differently scoped recording.
+For `standing_lease` plans, before physical capture the app revalidates the
+approved display identity, physical region, session, output target, execution
+window, lease state, global safety state, and one-time proof. A mismatch,
+revocation, Stop All, session loss, sleep, existing output file, or missed
+window fails closed and never falls back to an interactive or differently
+scoped recording.
+
+### Durable plan execution status
+
+GET /api/v1/plan-setups/{setup_intent_id} describes creation, local selection,
+and approval of a plan. It is not the durable execution result. Use the
+authenticated endpoint below to read the plan and its persisted occurrences
+after setup or an application restart:
+
+~~~~http
+GET /api/v1/plans/{plan_id}/status
+X-Agent-Recorder-Key: <api-key>
+~~~~
+
+The response uses the normal ok/data/request_id envelope. kind is once, daily,
+or weekly; plan_status is the persisted plan state, not proof that recording
+succeeded. occurrence_count counts persisted occurrences. latest_occurrence
+is ordered by window start descending and then occurrence ID descending.
+next_occurrence is the earliest nonterminal persisted occurrence (including an
+in-progress run); each contains the plan window, occurrence state/reason,
+optional run state/reason, and output evidence. Historical pages are not
+included.
+
+Occurrence and Run are read from one SQLite snapshot and must form a reachable
+lifecycle pair. `run_created` requires its associated nonterminal Run;
+`completed` requires an associated `settled` Run with no terminal reason;
+`blocked` with a Run requires matching abnormal terminal reasons. A terminal
+occurrence without a Run is accepted only when its persisted shape is valid for
+the domain (for example, `missed` cannot have a Run). An inconsistent pair
+fails closed with `503 PLAN_STATUS_UNAVAILABLE` instead of being presented as
+a successful result.
+
+~~~~json
+{
+  "ok": true,
+  "data": {
+    "plan_id": "standing-plan-...",
+    "kind": "once",
+    "plan_status": "enabled",
+    "schedule_exhausted": null,
+    "occurrence_count": 1,
+    "next_occurrence": {
+      "occurrence_id": "occurrence-...",
+      "window_start_utc": "2026-10-01T01:00:00Z",
+      "window_end_utc": "2026-10-01T01:05:00Z",
+      "status": "run_created",
+      "terminal_reason_code": null,
+      "run_id": "run-...",
+      "run": {
+        "run_id": "run-...",
+        "status": "recording",
+        "terminal_reason_code": null
+      },
+      "output_path": null,
+      "output_path_recorded": false,
+      "output_file_exists": null
+    },
+    "latest_occurrence": {
+      "occurrence_id": "occurrence-...",
+      "window_start_utc": "2026-10-01T01:00:00Z",
+      "window_end_utc": "2026-10-01T01:05:00Z",
+      "status": "run_created",
+      "terminal_reason_code": null,
+      "run_id": "run-...",
+      "run": {
+        "run_id": "run-...",
+        "status": "recording",
+        "terminal_reason_code": null
+      },
+      "output_path": null,
+      "output_path_recorded": false,
+      "output_file_exists": null
+    }
+  },
+  "request_id": "..."
+}
+~~~~
+
+For one-time plans schedule_exhausted is null. For daily/weekly plans it
+reflects the durable schedule cursor. If it is true and next_occurrence is
+null, the cursor has no further schedule slots and every materialized
+occurrence is terminal; this plan will not automatically run again.
+
+After a successful, validated settlement, `output_path` is the immutable path
+reported by the media probe and matched to that occurrence's exact approved
+frozen target. `output_path_recorded` is true only for this durable path
+evidence. `output_file_exists` is a point-in-time check of that exact path: it
+is true or false when a path is recorded, and null otherwise. Deleting the file
+later leaves the recorded path intact and changes only this existence snapshot.
+
+Settled records that predate schema v16 have no trustworthy actual-path
+history. They remain `output_path: null`, `output_path_recorded: false`, and
+`output_file_exists: null`; migration does not infer a path from a destination
+or scan media folders. A current settled record with missing, damaged,
+cross-linked, or out-of-scope evidence fails closed with
+`503 PLAN_STATUS_UNAVAILABLE` rather than fabricating a path.
+
+The result is scoped to the current Windows user and interactive session.
+Unknown and differently owned plan IDs both return 404 PLAN_NOT_FOUND. A
+malformed ID returns 400 INVALID_ARGUMENT. Unavailable or inconsistent
+persisted status fails closed with 503 PLAN_STATUS_UNAVAILABLE.
+
+### Required-mode one-time fixed-region plan
+
+`requested_authorization.mode: "required"` creates a one-time plan without a
+Lease. Creation still requires local region selection and a separate local
+creation approval. At the scheduled time the tray host rechecks the original
+SID/session, display topology and frozen physical region, output readiness,
+and latest-start bound, then presents a second local confirmation showing the
+target display, region, duration, no-audio setting, and destination. The
+creation approval alone never starts capture, and HTTP cannot approve or
+trigger the execution confirmation.
+
+The narrow first implementation supports one fixed region, FFmpeg region
+capture, no audio, natural wake while the interactive desktop is available,
+and a bounded one-time start window. It does not wake the machine or replay a
+missed occurrence. Reject, timeout, unavailable desktop, identity/display/
+output drift, or corrupt approved specification produces a durable terminal
+reason without creating a Run. A committed start that is interrupted by a
+process restart is reported as `started_unknown` and is never retried.
+
+Discover the current host capability at `GET /capabilities`:
+
+```json
+{
+  "required_once_plan": {
+    "setup_supported": true,
+    "execution_supported": true,
+    "authorization_mode": "required",
+    "creation_requires_local_approval": true,
+    "second_confirmation_required_at_execution": true,
+    "due_occurrence_behavior": "local_per_run_confirmation_then_fixed_region_capture"
+  }
+}
+```
+
+`execution_supported` is false until the tray execution runtime has completed
+startup recovery, can read the current SID/session's due queue, and has a safe
+interactive confirmation host. When false, a scheduled required-mode setup
+remains inert and its response reports `execution_runtime_unavailable`.
+
+The durable status endpoint additionally returns `execution_status_code` for
+required-mode occurrences. It distinguishes `pending_confirmation`,
+`start_committed`, `recording`, `finalizing`, `settled`, `rejected`, `expired`,
+`blocked`, `started_unknown`, `session_interrupted`, and `failed`; the existing
+occurrence and Run status fields remain the public lifecycle projection.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "plan_id": "required-once-plan-...",
+    "kind": "once",
+    "plan_status": "enabled",
+    "schedule_exhausted": null,
+    "occurrence_count": 1,
+    "latest_occurrence": {
+      "occurrence_id": "occurrence-...",
+      "window_start_utc": "2026-10-01T01:00:00Z",
+      "window_end_utc": "2026-10-01T01:05:00Z",
+      "status": "pending_confirmation",
+      "terminal_reason_code": null,
+      "run_id": null,
+      "run": null,
+      "output_path": null,
+      "output_path_recorded": false,
+      "output_file_exists": null,
+      "execution_status_code": "pending_confirmation"
+    }
+  },
+  "request_id": "..."
+}
+```
+
+Only a validated media settlement exposes `output_path` with
+`output_path_recorded: true`. Required-mode execution creates neither a
+consent Lease nor a Lease-use proof.
 
 ## Bounded Daily/Weekly Fixed-Region Plan
 
@@ -906,11 +1084,17 @@ runs, and `valid_until` must be strictly after the latest planned end. Each
 due occurrence is revalidated and executed at most once; a missed window or
 uncertain start is not retried.
 
+The tray's local unattended safety center lists recurring plans separately
+from one-shot authorizations for the current Windows user and session. It
+shows the schedule, next local occurrence, remaining lease quota, and active
+Run state, and can revoke one exact lease after local confirmation. There is
+no HTTP lease-revocation endpoint; an API key or API request is not local
+consent.
+
 The recurring `GET /plan-setups/{id}` response reports setup progress and
-`scheduled` activation only. It does not yet expose per-occurrence execution
-status. Do not interpret `scheduled` as recording started or completed; the
-frozen output directory and local audit retain execution evidence until a
-dedicated execution-status API is available.
+`scheduled` activation only. Do not interpret `scheduled` as recording started
+or completed. Query `GET /api/v1/plans/{plan_id}/status` for the persisted
+occurrence/Run outcome and the verified output path when settlement succeeds.
 
 ## Lower-Level Endpoints
 

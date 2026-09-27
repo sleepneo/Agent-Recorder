@@ -58,7 +58,9 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
         }
     }
 
-    internal StandingLeaseControlCenterQueryResult QueryControlCenter(string currentUserSid)
+    internal StandingLeaseControlCenterQueryResult QueryControlCenter(
+        string currentUserSid,
+        string? currentSessionBinding)
     {
         using var connection = OpenBusinessConnection();
         SqliteTransaction? transaction = null;
@@ -121,6 +123,14 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 items.Add(BuildControlCenterItem(intent, chain, globalState));
             }
 
+            var recurringItems = string.IsNullOrWhiteSpace(currentSessionBinding)
+                ? Array.Empty<StandingLeaseControlCenterRecurringLeaseSummary>()
+                : ReadRecurringControlCenterItems(
+                    connection,
+                    transaction,
+                    currentUserSid,
+                    currentSessionBinding);
+
             transaction.Commit();
             return StandingLeaseControlCenterQueryResult.Available(
                 new StandingLeaseControlCenterState(
@@ -130,12 +140,180 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                     globalState.StopAllReasonCode,
                     globalState.StopAllRequestedAtUtc,
                     globalState.StopAllAppliedAtUtc,
-                    items));
+                    items,
+                    recurringItems));
         }
         finally
         {
             transaction?.Dispose();
         }
+    }
+
+    private static IReadOnlyList<StandingLeaseControlCenterRecurringLeaseSummary> ReadRecurringControlCenterItems(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string currentUserSid,
+        string currentSessionBinding)
+    {
+        var leaseIds = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT lease_id
+                FROM recurring_lease_local_approvals
+                WHERE current_user_sid = $sid AND session_binding = $session
+                ORDER BY approved_at_utc DESC, lease_id COLLATE BINARY ASC;
+                """;
+            Add(command, "$sid", currentUserSid);
+            Add(command, "$session", currentSessionBinding);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                leaseIds.Add(ReadRequiredText(reader, 0));
+        }
+
+        var result = new List<StandingLeaseControlCenterRecurringLeaseSummary>(leaseIds.Count);
+        var calculator = new RecurringOccurrenceCalculator();
+        foreach (var leaseId in leaseIds)
+        {
+            if (SqliteRecurringLeaseLocalApprovalEvidenceReader.CountWithinTransaction(
+                    connection, transaction, leaseId) != 1)
+                throw new PersistedSnapshotException("A recurring control-center lease has ambiguous approval evidence.");
+
+            var approval = SqliteRecurringLeaseLocalApprovalEvidenceReader.ReadWithinTransaction(
+                    connection, transaction, leaseId)
+                ?? throw new PersistedSnapshotException("A recurring control-center approval disappeared during the snapshot read.");
+            if (!string.Equals(approval.CurrentUserSid, currentUserSid, StringComparison.Ordinal) ||
+                !string.Equals(approval.SessionBinding, currentSessionBinding, StringComparison.Ordinal))
+                throw new PersistedSnapshotException("A recurring control-center approval is not owned by the current user session.");
+
+            using (var count = connection.CreateCommand())
+            {
+                count.Transaction = transaction;
+                count.CommandText = "SELECT COUNT(*) FROM recurring_lease_local_approvals WHERE plan_id = $plan_id;";
+                Add(count, "$plan_id", approval.PlanId);
+                if (count.ExecuteScalar() is not long approvalCount || approvalCount != 1)
+                    throw new PersistedSnapshotException("A recurring control-center plan has ambiguous local-approval bindings.");
+            }
+
+            var preparation = SqliteRecurringSetupPreparationTransaction.ReadPreparationByLeaseWithinTransaction(
+                    connection, transaction, leaseId)
+                ?? throw new PersistedSnapshotException("A recurring control-center lease has no setup preparation binding.");
+            if (!string.Equals(preparation.PlanId, approval.PlanId, StringComparison.Ordinal))
+                throw new PersistedSnapshotException("A recurring control-center approval points to another plan.");
+
+            var persistedIntent = SqliteRecurringSetupIntentCreateOrGetTransaction.ReadByIntentId(
+                    connection, transaction, preparation.IntentId)
+                ?? throw new PersistedSnapshotException("A recurring control-center preparation points to a missing setup intent.");
+            if (!string.Equals(persistedIntent.CurrentUserSid, currentUserSid, StringComparison.Ordinal) ||
+                !string.Equals(persistedIntent.SessionBinding, currentSessionBinding, StringComparison.Ordinal))
+                throw new PersistedSnapshotException("A recurring control-center setup intent is owned by another user session.");
+
+            var readback = SqliteRecurringSetupIntentCreateOrGetTransaction.ValidatePersistedAndRehydrate(
+                persistedIntent,
+                connection,
+                transaction);
+            if (readback.Status != RecurringSetupIntentStatus.Activated)
+                throw new PersistedSnapshotException("A recurring control-center lease is not bound to an activated setup intent.");
+
+            var chain = SqliteRecurringSetupPreparationTransaction.ValidateActivatedChainWithinTransaction(
+                connection,
+                transaction,
+                persistedIntent,
+                readback.Snapshot);
+            if (!string.Equals(chain.Preparation.IntentId, preparation.IntentId, StringComparison.Ordinal) ||
+                !string.Equals(chain.Preparation.PlanId, approval.PlanId, StringComparison.Ordinal) ||
+                !string.Equals(chain.Preparation.LeaseId, leaseId, StringComparison.Ordinal) ||
+                !string.Equals(approval.LeaseId, chain.Lease.LeaseId, StringComparison.Ordinal) ||
+                !string.Equals(approval.PlanId, chain.Plan.Id, StringComparison.Ordinal) ||
+                !string.Equals(approval.ConfigurationDigest, chain.Lease.ConfigurationRef.ConfigurationDigest, StringComparison.Ordinal) ||
+                !string.Equals(approval.AuthorizationDigest, chain.Lease.AuthorizationDigest, StringComparison.Ordinal))
+                throw new PersistedSnapshotException("A recurring control-center approval is not bound to its exact activated plan and lease.");
+
+            var schedule = chain.Schedule;
+            var cursor = SqliteRecurringAdvancementTransaction.ReadValidatedCursorWithinTransaction(
+                connection,
+                transaction,
+                chain.Plan.Id,
+                schedule.ScheduleRevision,
+                schedule);
+            RecurringOccurrenceCalculation next;
+            if (cursor is null)
+            {
+                EnsureNoRecurringAdvancementHistory(connection, transaction, chain.Plan.Id);
+                next = calculator.CalculateNext(
+                    chain.Plan.Id,
+                    schedule.ScheduleRevision,
+                    schedule.Schedule,
+                    readback.Snapshot.RequestedAtUtc);
+            }
+            else
+            {
+                next = calculator.CalculateNextFromCursor(
+                    chain.Plan.Id,
+                    schedule.ScheduleRevision,
+                    schedule.Schedule,
+                    cursor.ToPosition());
+            }
+
+            var entries = SqliteRecurringLeaseUseAccountingReader.ReadAllWithinTransaction(
+                connection,
+                transaction,
+                chain.Lease,
+                requireProductionVersionShape: true);
+            var quota = RecurringLeaseQuotaCalculator.Calculate(chain.Lease, entries);
+            if (!string.Equals(quota.LeaseId, chain.Lease.LeaseId, StringComparison.Ordinal) ||
+                quota.LeaseVersion != chain.Lease.Version ||
+                !string.Equals(quota.LeaseAuthorizationDigest, chain.Lease.AuthorizationDigest, StringComparison.Ordinal))
+                throw new PersistedSnapshotException("A recurring control-center quota snapshot is not bound to its lease.");
+
+            var activeRunPresent = HasActiveRecurringRun(connection, transaction, leaseId);
+            var leaseIsLive = chain.Lease.Status is ConsentLeaseStatus.Pending or ConsentLeaseStatus.Active;
+            var candidate = leaseIsLive ? next.Candidate : null;
+            result.Add(new StandingLeaseControlCenterRecurringLeaseSummary(
+                chain.Plan.Id,
+                chain.Lease.LeaseId,
+                schedule.Schedule.Kind,
+                schedule.Schedule.TimeZoneInfo.Id,
+                schedule.Schedule.LocalStartDate,
+                schedule.Schedule.LocalEndDate,
+                schedule.Schedule.LocalWallClockTime,
+                schedule.Schedule.WeeklyDays.ToArray(),
+                candidate?.LocalDate,
+                candidate?.LocalWallClockTime,
+                candidate is null,
+                chain.Lease.Status,
+                chain.Lease.ValidUntilUtc,
+                quota.RemainingUses,
+                quota.RemainingDuration,
+                activeRunPresent));
+        }
+
+        return result
+            .OrderBy(item => item.CanRevoke ? 0 : 1)
+            .ThenBy(item => item.CanRevoke ? (item.ActiveRunPresent ? 0 : 1) : 2)
+            .ThenBy(item => item.NextOccurrenceLocalDate)
+            .ThenBy(item => item.PlanId, StringComparer.Ordinal)
+            .ThenBy(item => item.LeaseId, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static void EnsureNoRecurringAdvancementHistory(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string planId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+              (SELECT COUNT(*) FROM recurring_advancement_operations WHERE plan_id = $plan) +
+              (SELECT COUNT(*) FROM recurring_occurrence_slots WHERE plan_id = $plan) +
+              (SELECT COUNT(*) FROM plan_occurrences WHERE plan_id = $plan);
+            """;
+        Add(command, "$plan", planId);
+        if (command.ExecuteScalar() is not long count || count != 0)
+            throw new PersistedSnapshotException("Recurring advancement history exists without its durable cursor.");
     }
 
     internal StandingLeaseSafetyControlResult RevokeLease(
@@ -341,8 +519,18 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                         StandingLeaseSafetyControlResult.Rejected(operationId, identityFailure));
                 }
 
+                var replayLease = SqliteRecurringConsentLeaseRepository.ReadWithinTransaction(
+                    connection,
+                    transaction,
+                    leaseId);
+                var replayActiveRunId = replayLease is null
+                    ? null
+                    : ReadActiveRecurringRunId(connection, transaction, leaseId, replayLease.PlanId);
                 transaction.Commit();
-                return ExistingOperationResult(existing);
+                return ExistingOperationResult(
+                    existing,
+                    requiresActiveRunStopOverride: replayActiveRunId is not null,
+                    targetRunId: replayActiveRunId);
             }
 
             var lease = SqliteRecurringConsentLeaseRepository.ReadWithinTransaction(
@@ -376,7 +564,12 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             // when the shared safety state or its ledger prerequisites are
             // damaged.
             _ = ReadGlobalState(connection, transaction);
-            var activeRunPresent = HasActiveRecurringRun(connection, transaction, lease.LeaseId);
+            var activeRunId = ReadActiveRecurringRunId(
+                connection,
+                transaction,
+                lease.LeaseId,
+                lease.PlanId);
+            var activeRunPresent = activeRunId is not null;
             StandingLeaseSafetyControlResult result;
 
             if (lease.Status == ConsentLeaseStatus.Revoked)
@@ -384,7 +577,8 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 result = StandingLeaseSafetyControlResult.AlreadyAppliedResult(
                     operationId,
                     StandingLeaseSafetyReasonCodes.LeaseAlreadyRevoked,
-                    activeRunPresent);
+                    activeRunPresent,
+                    targetRunId: activeRunId);
             }
             else if (lease.Status is ConsentLeaseStatus.Expired or ConsentLeaseStatus.Rejected ||
                 (lease.Status == ConsentLeaseStatus.Exhausted && !activeRunPresent))
@@ -399,21 +593,24 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 result = StandingLeaseSafetyControlResult.Rejected(
                     operationId,
                     terminalReason,
-                    requiresActiveRunStop: activeRunPresent);
+                    requiresActiveRunStop: activeRunPresent,
+                    targetRunId: activeRunId);
             }
             else if (lease.Status is not (ConsentLeaseStatus.Pending or ConsentLeaseStatus.Active or ConsentLeaseStatus.Exhausted))
             {
                 result = StandingLeaseSafetyControlResult.Rejected(
                     operationId,
                     "lease_status_invalid",
-                    requiresActiveRunStop: activeRunPresent);
+                    requiresActiveRunStop: activeRunPresent,
+                    targetRunId: activeRunId);
             }
             else if (lease.Version == long.MaxValue)
             {
                 result = StandingLeaseSafetyControlResult.Rejected(
                     operationId,
                     "safety_version_exhausted",
-                    requiresActiveRunStop: activeRunPresent);
+                    requiresActiveRunStop: activeRunPresent,
+                    targetRunId: activeRunId);
             }
             else
             {
@@ -425,7 +622,8 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                     result = StandingLeaseSafetyControlResult.Rejected(
                         operationId,
                         transition.ReasonCode,
-                        requiresActiveRunStop: activeRunPresent);
+                        requiresActiveRunStop: activeRunPresent,
+                        targetRunId: activeRunId);
                 }
                 else
                 {
@@ -433,7 +631,8 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                     result = StandingLeaseSafetyControlResult.ChangedResult(
                         operationId,
                         StandingLeaseSafetyReasonCodes.LeaseRevoked,
-                        activeRunPresent);
+                        activeRunPresent,
+                        targetRunId: activeRunId);
                 }
             }
 
@@ -902,19 +1101,22 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
 
     private static StandingLeaseSafetyControlResult ExistingOperationResult(
         StandingLeaseSafetyOperationRecord operation,
-        bool? requiresActiveRunStopOverride = null) =>
+        bool? requiresActiveRunStopOverride = null,
+        string? targetRunId = null) =>
         operation.ResultCode.StartsWith("rejected:", StringComparison.Ordinal)
             ? StandingLeaseSafetyControlResult.Rejected(
                 operation.OperationId,
                 operation.ResultCode["rejected:".Length..],
                 requiresActiveRunStop: requiresActiveRunStopOverride ?? operation.RequiresActiveRunStop,
-                durableOperationCommitted: true)
+                durableOperationCommitted: true,
+                targetRunId: targetRunId)
             : StandingLeaseSafetyControlResult.AlreadyAppliedResult(
                 operation.OperationId,
                 operation.ResultCode,
                 requiresActiveRunStopOverride ?? operation.RequiresActiveRunStop,
                 durableOperationCommitted: true,
-                durableStateChanged: operation.Changed);
+                durableStateChanged: operation.Changed,
+                targetRunId: targetRunId);
 
     private static StandingLeaseSafetyControlResult CommitResult(
         SqliteTransaction transaction,
@@ -1153,6 +1355,40 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             """;
         Add(command, "$lease_id", leaseId);
         return Convert.ToInt64(command.ExecuteScalar()) == 1;
+    }
+
+    private static string? ReadActiveRecurringRunId(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string leaseId,
+        string planId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT DISTINCT r.id
+            FROM recurring_lease_uses u
+            INNER JOIN recurring_consent_leases l
+                ON l.lease_id = u.lease_id AND l.plan_id = u.plan_id
+            INNER JOIN plan_occurrences o
+                ON o.id = u.occurrence_id AND o.plan_id = u.plan_id
+            INNER JOIN recording_runs r
+                ON r.id = u.run_id AND r.occurrence_id = u.occurrence_id
+            WHERE u.lease_id = $lease_id
+              AND u.plan_id = $plan_id
+              AND r.status_code NOT IN ('settled', 'started_unknown', 'session_interrupted', 'failed')
+            ORDER BY r.id;
+            """;
+        Add(command, "$lease_id", leaseId);
+        Add(command, "$plan_id", planId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+
+        var runId = ReadRequiredText(reader, 0);
+        if (reader.Read())
+            throw new PersistedSnapshotException("A recurring lease has more than one nonterminal Run.");
+        return runId;
     }
 
     private static StandingLeaseSafetyChain LoadExecutionChain(

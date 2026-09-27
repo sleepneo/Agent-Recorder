@@ -10,6 +10,129 @@ namespace AgentRecorder.Core;
 /// </summary>
 internal static class CaptureAuthorizationGate
 {
+    internal static bool TryConsumeRequiredOnce(
+        RequiredOnceCaptureExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        DateTimeOffset nowUtc,
+        out string failureReason)
+    {
+        if (!TryValidateRequiredOnceBindings(ticket, recording, currentPlan, currentUserSid,
+                currentSessionBinding, nowUtc, requireConsumed: false, out failureReason))
+            return false;
+        return ticket!.Proof!.TryConsume(nowUtc, out failureReason);
+    }
+
+    internal static bool TryValidateConsumedRequiredOnce(
+        RequiredOnceCaptureExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        DateTimeOffset nowUtc,
+        out string failureReason) =>
+        TryValidateRequiredOnceBindings(ticket, recording, currentPlan, currentUserSid,
+            currentSessionBinding, nowUtc, requireConsumed: true, out failureReason);
+
+    private static bool TryValidateRequiredOnceBindings(
+        RequiredOnceCaptureExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        DateTimeOffset nowUtc,
+        bool requireConsumed,
+        out string failureReason)
+    {
+        failureReason = "required_once_proof_missing";
+        if (ticket is null || recording is null || currentPlan is null ||
+            nowUtc.Offset != TimeSpan.Zero ||
+            ticket.Proof is not RequiredOnceExecutionProof proof)
+            return false;
+        var specification = ticket.Specification;
+        if (!recording.IsRequiredOnceExecution ||
+            !ReferenceEquals(ticket, recording.RequiredOnceExecutionTicket) ||
+            !ReferenceEquals(proof, recording.AuthorizationProof) ||
+            !string.Equals(recording.Id, ticket.RunId, StringComparison.Ordinal) ||
+            !string.Equals(proof.RecordingId, recording.Id, StringComparison.Ordinal) ||
+            !string.Equals(proof.RunId, ticket.RunId, StringComparison.Ordinal) ||
+            !string.Equals(proof.ProofId, ticket.ProofId, StringComparison.Ordinal) ||
+            !string.Equals(proof.ExecutionApprovalId, ticket.ExecutionApprovalId, StringComparison.Ordinal) ||
+            !string.Equals(proof.AuthorizationSourceId, ticket.ExecutionApprovalId, StringComparison.Ordinal) ||
+            !string.Equals(proof.OneTimeNonce, ticket.ProofNonce, StringComparison.Ordinal) ||
+            !string.Equals(proof.PlanId, specification.PlanId, StringComparison.Ordinal) ||
+            !string.Equals(proof.OccurrenceId, specification.OccurrenceId, StringComparison.Ordinal) ||
+            !string.Equals(proof.SpecificationDigest, specification.SpecificationDigest, StringComparison.Ordinal) ||
+            !string.Equals(proof.CurrentUserSid, specification.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(proof.SessionBinding, specification.SessionBinding, StringComparison.Ordinal) ||
+            !string.Equals(currentUserSid, specification.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(currentSessionBinding, specification.SessionBinding, StringComparison.Ordinal) ||
+            !string.Equals(proof.UserSessionBinding, currentUserSid + "|" + currentSessionBinding, StringComparison.Ordinal) ||
+            proof.IssuedAtUtc != ticket.CommittedAtUtc ||
+            proof.LatestStartUtc != specification.LatestStartUtc ||
+            nowUtc < ticket.CommittedAtUtc || nowUtc >= specification.LatestStartUtc ||
+            proof.MaxDuration != specification.Duration)
+        {
+            failureReason = "required_once_proof_binding_invalid";
+            return false;
+        }
+
+        var confirmation = ticket.Confirmation;
+        if (!string.Equals(confirmation.Id, ticket.ExecutionApprovalId, StringComparison.Ordinal) ||
+            !string.Equals(confirmation.RecordingId, recording.Id, StringComparison.Ordinal) ||
+            !string.Equals(confirmation.Status, "approved", StringComparison.Ordinal))
+        {
+            failureReason = "required_once_execution_approval_invalid";
+            return false;
+        }
+
+        if (!string.Equals(proof.CapturePlanDigest,
+                CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(currentPlan), StringComparison.Ordinal) ||
+            !string.Equals(proof.ScopeDigest,
+                CaptureAuthorizationProofIssuer.ComputeCaptureScopeDigest(recording, currentPlan), StringComparison.Ordinal) ||
+            !string.Equals(recording.OutputPath, specification.FrozenOutputFilePath, StringComparison.Ordinal) ||
+            recording.DurationSeconds != (int)specification.Duration.TotalSeconds ||
+            recording.CountdownSeconds != 0 || recording.Config.CountdownSeconds != 0 ||
+            recording.Config.AudioRequested || recording.Config.Microphone || recording.Config.IsScreenshotSeries ||
+            !string.Equals(recording.Config.OutputConflictPolicy, "fail_if_exists", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.PlannedBackend, "ffmpeg-region", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.SourceKind, "region", StringComparison.Ordinal) ||
+            !string.Equals(currentPlan.CoordinateSpace, "physical_virtual_screen", StringComparison.Ordinal) ||
+            currentPlan.AudioSourceKind != AudioCaptureSourceKind.None ||
+            currentPlan.Bounds is null || currentPlan.DisplayBounds is null ||
+            currentPlan.Bounds != new CapturePlanBounds(
+                specification.AbsoluteRegion.X, specification.AbsoluteRegion.Y,
+                specification.AbsoluteRegion.Width, specification.AbsoluteRegion.Height) ||
+            currentPlan.DisplayBounds != new CapturePlanBounds(
+                specification.DisplayBounds.X, specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width, specification.DisplayBounds.Height) ||
+            !string.Equals(currentPlan.TargetDisplayIdentity, specification.StableDisplayFingerprint, StringComparison.Ordinal) ||
+            currentPlan.TargetDisplayIdentityStatus != AgentRecorder.Windows.DisplayIdentityResolutionStatus.Resolved ||
+            recording.Config.Bounds != (specification.AbsoluteRegion.X, specification.AbsoluteRegion.Y,
+                specification.AbsoluteRegion.Width, specification.AbsoluteRegion.Height) ||
+            recording.Config.DisplayBounds != (specification.DisplayBounds.X, specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width, specification.DisplayBounds.Height) ||
+            !string.Equals(recording.Config.DisplayStableIdentity, specification.StableDisplayFingerprint, StringComparison.Ordinal) ||
+            recording.Config.DisplayIdentityStatus != AgentRecorder.Windows.DisplayIdentityResolutionStatus.Resolved ||
+            !string.Equals(recording.Config.OutputPath, specification.FrozenOutputFilePath, StringComparison.Ordinal))
+        {
+            failureReason = "required_once_capture_binding_invalid";
+            return false;
+        }
+
+        if (requireConsumed && !proof.IsConsumed)
+        {
+            failureReason = "required_once_proof_not_consumed";
+            return false;
+        }
+        if (!requireConsumed && !proof.CheckAvailableAt(nowUtc, out failureReason))
+            return false;
+        failureReason = string.Empty;
+        return true;
+    }
+
     internal static bool TryConsumeInteractive(
         CaptureAuthorizationProof? proof,
         Recording recording,

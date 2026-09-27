@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Security.Principal;
 using System.Windows.Forms;
+using AgentRecorder.Capture;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Persistence;
@@ -11,6 +12,7 @@ internal interface IUnattendedSafetyControlGateway
 {
     StandingLeaseControlCenterQueryResult Query();
     StandingLeaseSafetyControlResult RevokeLease(string intentId, string operationId);
+    StandingLeaseSafetyControlResult RevokeRecurringLease(string leaseId, string operationId);
     StandingLeaseSafetyControlResult StopAll(string operationId);
     StandingLeaseSafetyControlResult Disable(string operationId);
     StandingLeaseSafetyControlResult Enable(string operationId);
@@ -20,20 +22,26 @@ internal sealed class StandingLeaseSafetyControlGateway : IUnattendedSafetyContr
 {
     private readonly StandingLeaseSafetyControlService _service;
     private readonly Func<string?> _currentUserSid;
+    private readonly Func<string?> _currentSessionBinding;
 
     internal StandingLeaseSafetyControlGateway(
         StandingLeaseSafetyControlService service,
-        Func<string?>? currentUserSidForTest = null)
+        Func<string?>? currentUserSidForTest = null,
+        Func<string?>? currentSessionBindingForTest = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _currentUserSid = currentUserSidForTest ?? GetCurrentUserSid;
+        _currentSessionBinding = currentSessionBindingForTest ?? (() => CaptureAuthorizationSessionBinding.Current);
     }
 
     public StandingLeaseControlCenterQueryResult Query() =>
-        _service.QueryControlCenter(_currentUserSid());
+        _service.QueryControlCenter(_currentUserSid(), _currentSessionBinding());
 
     public StandingLeaseSafetyControlResult RevokeLease(string intentId, string operationId) =>
         _service.RevokeLease(intentId, operationId, "control_center_user");
+
+    public StandingLeaseSafetyControlResult RevokeRecurringLease(string leaseId, string operationId) =>
+        _service.RevokeRecurringLease(leaseId, operationId, "control_center_user");
 
     public StandingLeaseSafetyControlResult StopAll(string operationId) =>
         _service.StopAllAndRevokeAll(operationId, "control_center_user");
@@ -78,7 +86,9 @@ internal sealed class UnattendedSafetyControlForm : Form
     private readonly Button _disableButton;
     private readonly Button _enableButton;
     private readonly Button _closeButton;
+    private readonly TableLayoutPanel _leaseLists;
     private readonly FlowLayoutPanel _leasePanel;
+    private readonly FlowLayoutPanel _recurringPanel;
     private bool _busy;
     private bool _allowClose;
 
@@ -96,7 +106,7 @@ internal sealed class UnattendedSafetyControlForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         AutoScaleMode = AutoScaleMode.Dpi;
-        MinimumSize = new Size(680, 460);
+        MinimumSize = new Size(680, 520);
         ClientSize = new Size(900, 660);
         KeyPreview = true;
         ShowInTaskbar = false;
@@ -127,16 +137,16 @@ internal sealed class UnattendedSafetyControlForm : Form
 
         var statusPanel = new TableLayoutPanel
         {
-            AutoSize = true,
+            AutoSize = false,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 2,
             Margin = new Padding(0, 0, 0, 8),
         };
-        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var statusHeading = new Label { AutoSize = true, Dock = DockStyle.Fill };
-        var stopHeading = new Label { AutoSize = true, Dock = DockStyle.Fill };
+        var statusHeading = new Label { AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Left };
+        var stopHeading = new Label { AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Left };
         _globalStatusLabel = new Label { AutoSize = true, Dock = DockStyle.Fill };
         _stopSummaryLabel = new Label { AutoSize = true, Dock = DockStyle.Fill };
         statusPanel.Controls.Add(statusHeading, 0, 0);
@@ -159,22 +169,41 @@ internal sealed class UnattendedSafetyControlForm : Form
         _enableButton = CreateButton(actions);
         root.Controls.Add(actions, 0, 2);
 
-        _leasePanel = new FlowLayoutPanel
+        _leaseLists = new TableLayoutPanel
         {
-            AutoScroll = true,
-            BorderStyle = BorderStyle.FixedSingle,
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Padding = new Padding(8),
+            ColumnCount = 1,
+            RowCount = 2,
             Margin = new Padding(0),
         };
+        var oneShotGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8),
+            Text = _text.Get("UnattendedSafety_OneShotHeading"),
+            Tag = "one_shot_heading",
+        };
+        var recurringGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8),
+            Text = _text.Get("UnattendedSafety_RecurringHeading"),
+            Tag = "recurring_heading",
+        };
+        _leasePanel = CreateLeaseListPanel();
+        _recurringPanel = CreateLeaseListPanel();
+        oneShotGroup.Controls.Add(_leasePanel);
+        recurringGroup.Controls.Add(_recurringPanel);
+        _leaseLists.Controls.Add(oneShotGroup, 0, 0);
+        _leaseLists.Controls.Add(recurringGroup, 0, 1);
+        SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0);
         _leasePanel.Resize += (_, _) => ResizeCards();
-        root.Controls.Add(_leasePanel, 0, 3);
+        _recurringPanel.Resize += (_, _) => ResizeCards();
+        root.Controls.Add(_leaseLists, 0, 3);
 
         var footer = new TableLayoutPanel
         {
-            AutoSize = true,
+            AutoSize = false,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             Margin = new Padding(0, 8, 0, 0),
@@ -190,6 +219,9 @@ internal sealed class UnattendedSafetyControlForm : Form
         title.Tag = "title";
         statusHeading.Tag = "status_heading";
         stopHeading.Tag = "stop_heading";
+        _globalStatusLabel.Tag = "global_status_value";
+        _stopSummaryLabel.Tag = "stop_summary_value";
+        _resultLabel.Tag = "result";
         _refreshButton.Tag = "refresh";
         _stopAllButton.Tag = "stop_all";
         _disableButton.Tag = "disable";
@@ -219,7 +251,9 @@ internal sealed class UnattendedSafetyControlForm : Form
         RefreshState();
     }
 
-    internal int LeaseCardCountForTests => _leasePanel.Controls.Count;
+    internal int LeaseCardCountForTests => _leasePanel.Controls.Cast<Control>().Count(IsLeaseCard);
+    internal int RecurringLeaseCardCountForTests => _recurringPanel.Controls.Cast<Control>().Count(IsLeaseCard);
+    internal TableLayoutPanel LeaseListsForTests => _leaseLists;
     internal string GlobalStatusTextForTests => _globalStatusLabel.Text;
     internal string ResultTextForTests => _resultLabel.Text;
     internal bool BusyForTests => _busy;
@@ -229,6 +263,7 @@ internal sealed class UnattendedSafetyControlForm : Form
     internal Button RefreshButtonForTests => _refreshButton;
     internal Button CloseButtonForTests => _closeButton;
     internal Control LeaseCardForTests(int index) => _leasePanel.Controls[index];
+    internal Control RecurringLeaseCardForTests(int index) => _recurringPanel.Controls[index];
 
     internal void RefreshFromTray() => RefreshState();
 
@@ -294,6 +329,8 @@ internal sealed class UnattendedSafetyControlForm : Form
                     "disable" => _text.Get("UnattendedSafety_Disable"),
                     "enable" => _text.Get("UnattendedSafety_Enable"),
                     "close" => _text.Get("UnattendedSafety_Close"),
+                    "one_shot_heading" => _text.Get("UnattendedSafety_OneShotHeading"),
+                    "recurring_heading" => _text.Get("UnattendedSafety_RecurringHeading"),
                     _ => control.Text,
                 };
             }
@@ -364,16 +401,31 @@ internal sealed class UnattendedSafetyControlForm : Form
 
     private string FormatControlResult(string operationKind, StandingLeaseSafetyControlResult result)
     {
-        var status = result.Status switch
-        {
-            StandingLeaseSafetyControlResultStatus.Changed => _text.Get("UnattendedSafety_ResultChanged"),
-            StandingLeaseSafetyControlResultStatus.AlreadyApplied => _text.Get("UnattendedSafety_ResultAlreadyApplied"),
-            _ => _text.Get("UnattendedSafety_ResultRejected"),
-        };
+        var status = operationKind == "recurring-revoke" &&
+            result.DurableStateChanged &&
+            result.Status != StandingLeaseSafetyControlResultStatus.AlreadyApplied
+            ? _text.Get("UnattendedSafety_ResultRecurringRevoked")
+            : result.Status switch
+            {
+                StandingLeaseSafetyControlResultStatus.Changed => _text.Get("UnattendedSafety_ResultChanged"),
+                StandingLeaseSafetyControlResultStatus.AlreadyApplied => _text.Get("UnattendedSafety_ResultAlreadyApplied"),
+                _ => _text.Get("UnattendedSafety_ResultRejected"),
+            };
         var reason = LocalizeReason(result.Reason);
         var note = operationKind == "enable" && result.Status != StandingLeaseSafetyControlResultStatus.Rejected
             ? " " + _text.Get("UnattendedSafety_EnableNote")
             : string.Empty;
+        if (operationKind == "recurring-revoke" &&
+            result.RequiresActiveRunStop &&
+            result.DurableOperationCommitted &&
+            (result.Status != StandingLeaseSafetyControlResultStatus.Rejected || result.DurableStateChanged))
+        {
+            note += " " + _text.Get(result.PhysicalStopFailed
+                ? "UnattendedSafety_RecurringStopFailed"
+                : result.PhysicalStopNoOp
+                    ? "UnattendedSafety_RecurringStopNoOp"
+                    : "UnattendedSafety_RecurringStopRequested");
+        }
         return _text.Format("UnattendedSafety_Result", status, reason, result.Reason) + note;
     }
 
@@ -401,6 +453,10 @@ internal sealed class UnattendedSafetyControlForm : Form
             _stopSummaryLabel.Text = _text.Format("UnattendedSafety_ReasonCode", LocalizeReason(result.Reason), result.Reason);
             _resultLabel.Text = string.Empty;
             _leasePanel.Controls.Clear();
+            _recurringPanel.Controls.Clear();
+            SetEmptyState(_leasePanel, "UnattendedSafety_CategoryUnavailable", "empty_state_one_shot");
+            SetEmptyState(_recurringPanel, "UnattendedSafety_CategoryUnavailable", "empty_state_recurring");
+            SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0);
             _stopAllButton.Enabled = false;
             _disableButton.Enabled = false;
             _enableButton.Enabled = false;
@@ -421,16 +477,90 @@ internal sealed class UnattendedSafetyControlForm : Form
             : _text.Get("UnattendedSafety_NoStopAll");
 
         _leasePanel.SuspendLayout();
+        _recurringPanel.SuspendLayout();
         _leasePanel.Controls.Clear();
+        _recurringPanel.Controls.Clear();
         foreach (var item in state.Items)
             _leasePanel.Controls.Add(CreateLeaseCard(item));
+        foreach (var item in state.RecurringItems)
+            _recurringPanel.Controls.Add(CreateRecurringLeaseCard(item));
+        if (state.Items.Count == 0)
+            SetEmptyState(_leasePanel, "UnattendedSafety_EmptyOneShot", "empty_state_one_shot");
+        if (state.RecurringItems.Count == 0)
+            SetEmptyState(_recurringPanel, "UnattendedSafety_EmptyRecurring", "empty_state_recurring");
+        SetLeaseSectionRows(state.Items.Count, state.RecurringItems.Count);
         _leasePanel.ResumeLayout();
+        _recurringPanel.ResumeLayout();
         ResizeCards();
         _disableButton.Enabled = !_busy && state.UnattendedMode == UnattendedModeStatus.Enabled;
         _enableButton.Enabled = !_busy && state.UnattendedMode == UnattendedModeStatus.Disabled;
         _stopAllButton.Enabled = !_busy;
         _refreshButton.Enabled = !_busy;
     }
+
+    private static FlowLayoutPanel CreateLeaseListPanel() => new()
+    {
+        AutoScroll = true,
+        BorderStyle = BorderStyle.FixedSingle,
+        Dock = DockStyle.Fill,
+        FlowDirection = FlowDirection.TopDown,
+        WrapContents = false,
+        Padding = new Padding(8),
+        Margin = new Padding(0),
+    };
+
+    private void SetEmptyState(FlowLayoutPanel panel, string textKey, string tag)
+    {
+        var emptyState = new Label
+        {
+            AutoSize = true,
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(0, 2, 0, 2),
+            Text = _text.Get(textKey),
+            Tag = tag,
+        };
+        panel.Controls.Add(emptyState);
+    }
+
+    private void SetLeaseSectionRows(int oneShotCount, int recurringCount)
+    {
+        _leaseLists.RowStyles.Clear();
+        if (oneShotCount == 0 && recurringCount == 0)
+        {
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_leasePanel, 0)));
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_recurringPanel, 1)));
+        }
+        else if (oneShotCount == 0)
+        {
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_leasePanel, 0)));
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        }
+        else if (recurringCount == 0)
+        {
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_recurringPanel, 1)));
+        }
+        else
+        {
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        }
+    }
+
+    private float CompactEmptySectionHeight(FlowLayoutPanel list, int row)
+    {
+        var group = _leaseLists.GetControlFromPosition(0, row) as GroupBox;
+        var label = list.Controls
+            .OfType<Label>()
+            .FirstOrDefault(control => control.Tag is string tag && tag.StartsWith("empty_state_", StringComparison.Ordinal));
+        var labelHeight = label?.PreferredSize.Height ?? Font.Height;
+        var groupFontHeight = group?.Font.Height ?? Font.Height;
+        return Math.Max(64, labelHeight + list.Padding.Vertical + groupFontHeight + 21);
+    }
+
+    private static bool IsLeaseCard(Control control) =>
+        !string.Equals(control.Tag as string, "empty_state_one_shot", StringComparison.Ordinal) &&
+        !string.Equals(control.Tag as string, "empty_state_recurring", StringComparison.Ordinal);
 
     private Control CreateLeaseCard(StandingLeaseControlCenterLeaseSummary item)
     {
@@ -493,6 +623,98 @@ internal sealed class UnattendedSafetyControlForm : Form
             operationId => _gateway.RevokeLease(item.IntentId, operationId));
     }
 
+    private Control CreateRecurringLeaseCard(StandingLeaseControlCenterRecurringLeaseSummary item)
+    {
+        var card = new Panel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BorderStyle = BorderStyle.FixedSingle,
+            Padding = new Padding(8),
+            Margin = new Padding(0, 0, 0, 8),
+            Tag = item.LeaseId,
+        };
+        var content = new TableLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var details = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            MaximumSize = new Size(760, 0),
+            Text = FormatRecurringItem(item),
+            Margin = new Padding(0, 0, 10, 0),
+        };
+        var revoke = new Button
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Text = _text.Get("UnattendedSafety_Revoke"),
+            AccessibleName = _text.Get("UnattendedSafety_Revoke"),
+            Tag = item.LeaseId,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Enabled = item.CanRevoke,
+        };
+        revoke.Click += (_, _) => ConfirmAndRevokeRecurring(item);
+        content.Controls.Add(details, 0, 0);
+        content.Controls.Add(revoke, 1, 0);
+        card.Controls.Add(content);
+        return card;
+    }
+
+    private void ConfirmAndRevokeRecurring(StandingLeaseControlCenterRecurringLeaseSummary item)
+    {
+        if (_busy)
+            return;
+
+        StandingLeaseControlCenterQueryResult liveQuery;
+        try
+        {
+            liveQuery = _gateway.Query();
+        }
+        catch
+        {
+            liveQuery = StandingLeaseControlCenterQueryResult.Rejected("safety_query_failed");
+        }
+
+        var liveMatches = liveQuery.State?.RecurringItems
+            .Where(candidate => string.Equals(candidate.LeaseId, item.LeaseId, StringComparison.Ordinal))
+            .ToArray() ?? Array.Empty<StandingLeaseControlCenterRecurringLeaseSummary>();
+        if (liveQuery.Status != StandingLeaseControlCenterQueryStatus.Available ||
+            liveMatches.Length != 1 ||
+            !string.Equals(liveMatches[0].PlanId, item.PlanId, StringComparison.Ordinal) ||
+            !liveMatches[0].CanRevoke)
+        {
+            RefreshState();
+            _resultLabel.ForeColor = Color.DarkRed;
+            _resultLabel.Text = _text.Get("UnattendedSafety_RecurringStale");
+            return;
+        }
+
+        var liveItem = liveMatches[0];
+        if (!_confirmation.Confirm(
+                this,
+                _text.Get("UnattendedSafety_ConfirmTitle"),
+                _text.Format(
+                    "UnattendedSafety_ConfirmRecurringRevoke",
+                    liveItem.PlanId,
+                    liveItem.LeaseId,
+                    liveItem.ActiveRunPresent ? _text.Get("UnattendedSafety_Yes") : _text.Get("UnattendedSafety_No"))))
+        {
+            return;
+        }
+
+        ExecuteControl(
+            "recurring-revoke",
+            operationId => _gateway.RevokeRecurringLease(liveItem.LeaseId, operationId));
+    }
+
     private string FormatItem(StandingLeaseControlCenterLeaseSummary item)
     {
         var leaseStatus = item.LeaseStatus is null
@@ -525,16 +747,74 @@ internal sealed class UnattendedSafetyControlForm : Form
             reason);
     }
 
+    private string FormatRecurringItem(StandingLeaseControlCenterRecurringLeaseSummary item)
+    {
+        var scheduleKind = item.ScheduleKind == RecurringScheduleKind.Daily
+            ? _text.Get("UnattendedSafety_Daily")
+            : _text.Get("UnattendedSafety_Weekly");
+        var weekdays = item.ScheduleKind == RecurringScheduleKind.Weekly
+            ? string.Join(", ", item.WeeklyDays.Select(FormatWeekday))
+            : _text.Get("UnattendedSafety_NotApplicable");
+        var nextOccurrence = item.NextOccurrenceLocalDate is { } date && item.NextOccurrenceLocalTime is { } time
+            ? date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + " " +
+              time.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " (" + item.TimeZoneId + ")"
+            : _text.Get("UnattendedSafety_NoFurtherOccurrence");
+        return _text.Format(
+            "UnattendedSafety_RecurringItem",
+            item.PlanId,
+            item.LeaseId,
+            scheduleKind,
+            item.TimeZoneId,
+            item.LocalStartDate.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+            item.LocalEndDate.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture),
+            item.LocalWallClockTime.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+            weekdays,
+            nextOccurrence,
+            LocalizeStatus(item.LeaseStatus.ToString()),
+            FormatDate(item.LeaseValidUntilUtc),
+            item.RemainingUses,
+            item.RemainingDuration.ToString("c", System.Globalization.CultureInfo.InvariantCulture),
+            item.ActiveRunPresent ? _text.Get("UnattendedSafety_Yes") : _text.Get("UnattendedSafety_No"));
+    }
+
+    private string FormatWeekday(DayOfWeek weekday) => _text.Get(weekday switch
+    {
+        DayOfWeek.Monday => "UnattendedSafety_DayMonday",
+        DayOfWeek.Tuesday => "UnattendedSafety_DayTuesday",
+        DayOfWeek.Wednesday => "UnattendedSafety_DayWednesday",
+        DayOfWeek.Thursday => "UnattendedSafety_DayThursday",
+        DayOfWeek.Friday => "UnattendedSafety_DayFriday",
+        DayOfWeek.Saturday => "UnattendedSafety_DaySaturday",
+        _ => "UnattendedSafety_DaySunday",
+    });
+
     private void ResizeCards()
     {
-        var width = Math.Max(360, _leasePanel.ClientSize.Width - _leasePanel.Padding.Horizontal - 24);
-        foreach (Control card in _leasePanel.Controls)
+        ResizeCards(_leasePanel);
+        ResizeCards(_recurringPanel);
+    }
+
+    private static void ResizeCards(FlowLayoutPanel list)
+    {
+        var scrollBarWidth = SystemInformation.VerticalScrollBarWidth;
+        var availableWidth = Math.Max(
+            100,
+            list.ClientSize.Width - list.Padding.Horizontal - scrollBarWidth - 4);
+        foreach (Control card in list.Controls)
         {
-            card.Width = width;
-            if (card.Controls.Count > 0 && card.Controls[0] is TableLayoutPanel content && content.Controls.Count > 0)
-            {
-                content.Controls[0].MaximumSize = new Size(Math.Max(220, width - 150), 0);
-            }
+            if (card is not Panel || card.Tag is not string tag || tag.StartsWith("empty_state_", StringComparison.Ordinal))
+                continue;
+
+            card.MinimumSize = new Size(availableWidth, 0);
+            card.Width = availableWidth;
+            if (card.Controls.Count == 0 || card.Controls[0] is not TableLayoutPanel content || content.Controls.Count < 2)
+                continue;
+
+            var details = content.Controls[0];
+            var action = content.Controls[1];
+            var reservedWidth = action.PreferredSize.Width + action.Margin.Horizontal + details.Margin.Horizontal +
+                content.Padding.Horizontal + card.Padding.Horizontal + 14;
+            details.MaximumSize = new Size(Math.Max(100, availableWidth - reservedWidth), 0);
         }
     }
 
@@ -546,6 +826,11 @@ internal sealed class UnattendedSafetyControlForm : Form
         _disableButton.Enabled = !busy;
         _enableButton.Enabled = !busy;
         foreach (Control card in _leasePanel.Controls)
+        {
+            foreach (Control child in card.Controls)
+                SetChildButtonsEnabled(child, !busy);
+        }
+        foreach (Control card in _recurringPanel.Controls)
         {
             foreach (Control child in card.Controls)
                 SetChildButtonsEnabled(child, !busy);
@@ -577,6 +862,7 @@ internal sealed class UnattendedSafetyControlForm : Form
         nameof(ConsentLeaseStatus.Pending) => _text.Get("UnattendedSafety_StatusPending"),
         nameof(ConsentLeaseStatus.Active) => _text.Get("UnattendedSafety_StatusActive"),
         nameof(ConsentLeaseStatus.Revoked) => _text.Get("UnattendedSafety_StatusRevoked"),
+        nameof(ConsentLeaseStatus.Exhausted) => _text.Get("UnattendedSafety_StatusExhausted"),
         _ => value,
     };
 

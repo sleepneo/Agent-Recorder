@@ -1333,7 +1333,7 @@ public sealed class Phase3StartGateTransactionTests
         var backend = new LifecycleCaptureBackend
         {
             EmitFirstFrameOnStart = true,
-            StopResult = ValidOutputMeta(1),
+            StopResult = ValidOutputMeta(1, database.Scope.OutputFilePath),
         };
         var tray = new StandingEngineTestTray();
         using var engine = new RecordingEngine(
@@ -1400,7 +1400,7 @@ public sealed class Phase3StartGateTransactionTests
         {
             EmitFirstFrameOnStart = true,
             ThrowAfterFirstFrameOnStart = true,
-            StopResult = ValidOutputMeta(1),
+            StopResult = ValidOutputMeta(1, database.Scope.OutputFilePath),
         };
         var tray = new StandingEngineTestTray();
         using var engine = new RecordingEngine(
@@ -1551,7 +1551,7 @@ public sealed class Phase3StartGateTransactionTests
                 attachBackendCallbacks: false));
 
         Assert.Equal(StandingLeaseCaptureExecutionStatus.Started, result.Status);
-        backend.RaiseNaturalExit(0, ValidOutputMeta(1));
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1, database.Scope.OutputFilePath));
 
         Assert.Equal(1, backend.StartCalls);
         Assert.Equal(1, backend.StopCalls);
@@ -1559,6 +1559,8 @@ public sealed class Phase3StartGateTransactionTests
         Assert.NotEqual(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
         Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
         Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath,
+            "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = 'run-1';"));
         Assert.NotEqual(RecState.completed, engine._recs["run-1"].State);
     }
 
@@ -2807,8 +2809,8 @@ public sealed class Phase3StartGateTransactionTests
         backend.RaiseCaptureEnded();
         Assert.Equal(RecordingRunStatus.Finalizing, database.Runs.Get("run-1").Status);
         Assert.Equal(LeaseUseStatus.Consumed, database.Uses.Get("use-1").Status);
-        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5));
-        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5));
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5, database.Scope.OutputFilePath));
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1.5, Path.Combine(database.RootPath, "unapproved-replay.mp4")));
         backend.RaiseFirstFrame();
 
         var run = database.Runs.Get("run-1");
@@ -2818,6 +2820,8 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(LeaseUseStatus.Settled, use.Status);
         Assert.Equal(TimeSpan.FromMilliseconds(1500), use.ActualSettledDuration);
         Assert.Equal(PlanOccurrenceStatus.Completed, occurrence.Status);
+        Assert.Equal(1L, RawScalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = 'run-1' AND evidence_kind_code = 'verified_output_path';"));
+        Assert.Equal(database.Scope.OutputFilePath, RawText(database.Store.DatabasePath, "SELECT output_path FROM recording_run_output_evidence WHERE run_id = 'run-1';"));
         Assert.Null(run.TerminalReasonCode);
         Assert.Equal(6L, run.Version);
         Assert.Equal(4L, use.Version);
@@ -2826,6 +2830,22 @@ public sealed class Phase3StartGateTransactionTests
         Assert.Equal(0, backend.StopCalls);
         Assert.Equal(1, backend.DisposeCalls);
         Assert.NotNull(result.LifecycleSession);
+
+        SeedStatusOwnership(database);
+        Directory.CreateDirectory(Path.GetDirectoryName(database.Scope.OutputFilePath)!);
+        File.WriteAllText(database.Scope.OutputFilePath, "verified probe output");
+        var status = new PlanExecutionStatusQueryService(database.Store).Get(
+            "plan-1", database.Scope.CurrentUserSid, database.Scope.SessionBinding)!;
+        Assert.Equal(database.Scope.OutputFilePath, status.LatestOccurrence!.OutputPath);
+        Assert.True(status.LatestOccurrence.OutputPathRecorded);
+        Assert.True(status.LatestOccurrence.OutputFileExists);
+        File.Delete(database.Scope.OutputFilePath);
+        var reopenedStore = new SqliteOperationalStore(database.Store.DatabasePath);
+        var afterDelete = new PlanExecutionStatusQueryService(reopenedStore).Get(
+            "plan-1", database.Scope.CurrentUserSid, database.Scope.SessionBinding)!;
+        Assert.Equal(database.Scope.OutputFilePath, afterDelete.LatestOccurrence!.OutputPath);
+        Assert.True(afterDelete.LatestOccurrence.OutputPathRecorded);
+        Assert.False(afterDelete.LatestOccurrence.OutputFileExists);
     }
 
     [Fact]
@@ -2846,8 +2866,8 @@ public sealed class Phase3StartGateTransactionTests
             Task.Run(firstBackend.RaiseFirstFrame),
             Task.Run(secondBackend.RaiseFirstFrame));
         await Task.WhenAll(
-            Task.Run(() => firstBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25))),
-            Task.Run(() => secondBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25))));
+            Task.Run(() => firstBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25, database.Scope.OutputFilePath))),
+            Task.Run(() => secondBackend.RaiseNaturalExit(0, ValidOutputMeta(1.25, database.Scope.OutputFilePath))));
 
         Assert.Equal(RecordingRunStatus.Settled, database.Runs.Get("run-1").Status);
         Assert.Equal(LeaseUseStatus.Settled, database.Uses.Get("use-1").Status);
@@ -2873,7 +2893,7 @@ public sealed class Phase3StartGateTransactionTests
 
         await coordinator.ExecuteAsync(CreateOneShotRequest(database));
         backend.RaiseFirstFrame();
-        backend.RaiseNaturalExit(0, ValidOutputMeta(durationSeconds));
+        backend.RaiseNaturalExit(0, ValidOutputMeta(durationSeconds, database.Scope.OutputFilePath));
 
         Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
         Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
@@ -2892,7 +2912,7 @@ public sealed class Phase3StartGateTransactionTests
 
         await coordinator.ExecuteAsync(CreateOneShotRequest(database));
         backend.RaiseFirstFrame();
-        backend.RaiseNaturalExit(7, ValidOutputMeta(1));
+        backend.RaiseNaturalExit(7, ValidOutputMeta(1, database.Scope.OutputFilePath));
 
         Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
         Assert.Equal("capture_exit_nonzero", database.Runs.Get("run-1").TerminalReasonCode);
@@ -2927,10 +2947,28 @@ public sealed class Phase3StartGateTransactionTests
     }
 
     [Fact]
+    public async Task StandingLeaseLifecycleRejectsMismatchedActualOutputPathWithoutEvidence()
+    {
+        using var database = new TemporaryDatabase();
+        var backend = new LifecycleCaptureBackend();
+        var coordinator = CreateLifecycleCoordinator(database, backend);
+
+        await coordinator.ExecuteAsync(CreateOneShotRequest(database));
+        backend.RaiseFirstFrame();
+        backend.RaiseNaturalExit(0, ValidOutputMeta(1, Path.Combine(database.RootPath, "unapproved", "capture.mp4")));
+
+        Assert.Equal(RecordingRunStatus.Failed, database.Runs.Get("run-1").Status);
+        Assert.Equal(LeaseUseStatus.StartedUnknown, database.Uses.Get("use-1").Status);
+        Assert.Equal(PlanOccurrenceStatus.Blocked, database.Occurrences.Get("occ-1").Status);
+        Assert.Equal(0L, RawScalar(database.Store.DatabasePath,
+            "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = 'run-1';"));
+    }
+
+    [Fact]
     public async Task StandingLeaseLifecycleUserStopUsesOneStopAndTheSameSettlementPath()
     {
         using var database = new TemporaryDatabase();
-        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(2) };
+        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(2, database.Scope.OutputFilePath) };
         var coordinator = CreateLifecycleCoordinator(database, backend);
         var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
         backend.RaiseFirstFrame();
@@ -2973,7 +3011,7 @@ public sealed class Phase3StartGateTransactionTests
     public async Task StandingLeaseLifecycleStopBeforeFirstFrameIsConservativeAndIdempotent()
     {
         using var database = new TemporaryDatabase();
-        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(1) };
+        var backend = new LifecycleCaptureBackend { StopResult = ValidOutputMeta(1, database.Scope.OutputFilePath) };
         var coordinator = CreateLifecycleCoordinator(database, backend);
         var result = await coordinator.ExecuteAsync(CreateOneShotRequest(database));
 
@@ -4194,7 +4232,7 @@ public sealed class Phase3StartGateTransactionTests
             Assert.True(lifecycle.CompleteTermination(
                 StandingLeaseLifecycleTerminationKind.NaturalExit,
                 0,
-                ValidOutputMeta(1),
+                ValidOutputMeta(1, database.Scope.OutputFilePath),
                 At(4)).Succeeded);
             return;
         }
@@ -4220,7 +4258,7 @@ public sealed class Phase3StartGateTransactionTests
                 ? StandingLeaseLifecycleTerminationKind.UserStop
                 : StandingLeaseLifecycleTerminationKind.NaturalExit,
             terminalKind == "failed" ? 7 : -1,
-            terminalKind == "failed" ? ValidOutputMeta(1) : null,
+            terminalKind == "failed" ? ValidOutputMeta(1, database.Scope.OutputFilePath) : null,
             At(4)).Succeeded);
     }
 
@@ -4268,12 +4306,33 @@ public sealed class Phase3StartGateTransactionTests
             (_, _) => Task.CompletedTask,
             () => At(2));
 
-    private static OutputMeta ValidOutputMeta(double durationSeconds) => new()
+    private static OutputMeta ValidOutputMeta(double durationSeconds, string? outputPath = null) => new()
     {
         OutputFileExists = true,
         SizeBytes = 4096,
         DurationSeconds = durationSeconds,
+        OutputPath = outputPath,
     };
+
+    private static void SeedStatusOwnership(TemporaryDatabase database)
+    {
+        using var connection = database.Store.OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO setup_intents
+                (intent_id, intent_kind_code, idempotency_key, request_digest, current_user_sid,
+                 session_binding, status_code, requested_at_utc, expires_at_utc, plan_id,
+                 created_at_utc, updated_at_utc, version)
+            VALUES ('task288-status-owner', 'standing_once_fixed_region', 'task288-status-key', $digest,
+                    $sid, $session, 'activated', $at, $expiry, 'plan-1', $at, $at, 0);
+            """;
+        command.Parameters.AddWithValue("$digest", new string('a', 64));
+        command.Parameters.AddWithValue("$sid", database.Scope.CurrentUserSid);
+        command.Parameters.AddWithValue("$session", database.Scope.SessionBinding);
+        command.Parameters.AddWithValue("$at", At(0).UtcDateTime.Ticks);
+        command.Parameters.AddWithValue("$expiry", At(3600).UtcDateTime.Ticks);
+        command.ExecuteNonQuery();
+    }
 
     private static string CaptureGateCode(Func<Phase3StartGateCommitResult> operation)
     {

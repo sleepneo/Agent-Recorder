@@ -73,6 +73,12 @@ mode in the local tray safety controls, then select a fixed region and approve
 that plan's lease locally. The agent can observe setup status but cannot grant
 the lease over HTTP. See `docs/api.md` for the plan request and limits.
 
+To decide at execution time instead, ask for a one-time `required` plan.
+After local region selection and plan-creation approval, a second local dialog
+must be approved when the run is due. Read setup progress from
+`/plan-setups/{id}` and durable execution status from
+`/plans/{plan_id}/status`; a scheduled plan is not a completed recording.
+
 `countdown_seconds` is optional for both raw and quick recording requests. It
 defaults to `3` and accepts only integer values `0` through `10`. Use `0` to
 skip the visible countdown while keeping local confirmation, preparation,
@@ -102,6 +108,8 @@ without `AGENT_RECORDER_DATA_DIR`, the default data directory is
 - Ordinary recordings need local confirmation; unattended plans need separate
   local fixed-region selection and lease approval. The ordinary confirmation
   window also lets the user choose the save directory for that recording.
+- One-time `required` plans have no Lease and require separate local approvals
+  at creation and execution.
 - HTTP self-approval is blocked with `405 METHOD_NOT_ALLOWED`.
 
 Before showing confirmation and again before capture starts, Agent Recorder

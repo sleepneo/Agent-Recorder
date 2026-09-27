@@ -231,6 +231,27 @@ public sealed class SqliteAuthorizedCaptureScopeRepository : SqliteRepositoryBas
         return scope;
     }
 
+    internal static AuthorizedFixedRegionScope? TryReadOutputScopeByPlanOccurrence(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string planId,
+        string occurrenceId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT " + SelectColumns + " FROM authorized_capture_scopes WHERE plan_id = $plan_id AND occurrence_id = $occurrence_id LIMIT 2;";
+        Add(command, "$plan_id", planId);
+        Add(command, "$occurrence_id", occurrenceId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+
+        var scope = ReadScopeSnapshot(reader);
+        if (reader.Read())
+            throw new PersistedSnapshotException("More than one authorization scope exists for the plan occurrence output target.");
+        return scope;
+    }
+
     internal static AuthorizedFixedRegionScope? TryReadByLeaseId(
         SqliteConnection connection,
         SqliteTransaction transaction,

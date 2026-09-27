@@ -502,7 +502,9 @@ Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 
 
 提交时必须使用稳定 `Idempotency-Key`，并明确给出 UTC 的 `start_at`、`latest_start_at`、`planned_end_at`、Lease `expires_at`、绝对输出目录和冻结文件名。随后提示用户在本地完成重新选区与 Lease 批准，并通过 `/plan-setups/{id}` 的 `status_version_cursor` 做有界长轮询。
 
-不要声称 API 已经批准录制；不要复用 `last_region`、活动窗口或旧授权；不要请求音频、嵌套或并发。一次性计划出现 `recording_status_url` 后按普通录制状态查询，达到可信 `recording` 才报告已开始。周期计划的 setup 状态 `scheduled` 只证明本地批准和排期，当前接口不返回逐次 Occurrence/Run 终态；不得因此声称录制已开始或已完成。拒绝、撤销、过期、错过窗口、会话不可用、目标/输出变化或重启后的不确定执行都应直接解释其 `reason_code`，不得自行重试或新建替代 Run。
+不要声称 API 已经批准录制；不要复用 `last_region`、活动窗口或旧授权；不要请求音频、嵌套或并发。`/plan-setups/{id}` 的 `scheduled` 只证明本地批准和排期。使用 `GET /plans/{plan_id}/status` 查询持久化的 Occurrence/Run 状态与经核验的实际媒体路径；只有可信 `recording` 才能报告已开始，只有成功结算且有产物证据才能报告已完成。拒绝、撤销、过期、错过窗口、会话不可用、目标/输出变化或重启后的不确定执行都应解释其 `reason_code`，不得自行重试或新建替代 Run。
+
+若用户要求“到点时再由我确认”，使用一次性 `requested_authorization.mode: "required"`，并先检查 `/capabilities.required_once_plan.execution_supported`。这不是无人值守 Lease：用户需要本地选区、批准创建计划，并在到点时第二次点击本地执行确认；创建批准或 `scheduled` 都不表示已授权捕获。若第二个窗口被拒绝、过期或不可安全显示，不得改用无人值守模式或直接创建普通录制作为替代。
 
 完整字段与示例见 `AGENT-API-REFERENCE.zh-CN.md` 的有限无人值守计划章节。
 

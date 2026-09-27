@@ -1756,9 +1756,19 @@ public sealed class RecurringLeaseExecutionGateTests
     {
         using var context = CreateCommittedContext(maxUses: 10);
         var ticket = CreateExecutionTicket(context, out var provider);
+        using var audit = new TemporaryAuditLogger();
+        using var engine = new RecordingEngine(
+            audit.Logger,
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null);
         var revoked = new StandingLeaseSafetyControlService(
             context.Context.Fixture.Store,
-            () => context.Now)
+            () => context.Now,
+            activeRunStopper: new RecordingEngineStandingLeaseActiveRunStopper(engine))
             .RevokeRecurringLease(
                 context.Context.Lease.LeaseId,
                 "task271-old-ticket-revoke",
@@ -2679,9 +2689,12 @@ public sealed class RecurringLeaseExecutionGateTests
         Assert.Equal(10, configuration.DurationSeconds);
         Assert.Equal(ticket.Specification.FrozenOutputFilePath, configuration.OutputPath);
 
-        QuantizedTailTestMedia.Generate(configuration.OutputPath, 299, "179/6");
+        QuantizedTailTestMedia.Generate(configuration.OutputPath, 294, "88/3");
         var probed = FfmpegCaptureBackend.ProbeAuthorizedFixedRateCapture(configuration.OutputPath, configuration);
         Assert.True(probed.DurationSeconds > 10, $"probe duration was {probed.DurationSeconds:R}s");
+        Assert.Equal(294, probed.ProbeStreams.Single().FrameCount);
+        Assert.Equal(88d / 3d, probed.ProbeStreams.Single().AverageFrameRate!.Value, 5);
+        Assert.Equal(10.023, probed.DurationSeconds, 3);
         Assert.True(probed.ProbeStreams.Single().StartTimeSeconds < 10);
         Assert.NotNull(probed.QuantizedTailEvidence);
 
@@ -2704,6 +2717,16 @@ public sealed class RecurringLeaseExecutionGateTests
         Assert.Equal(LeaseUseStatus.Settled, use!.Status);
         Assert.Equal(PlanOccurrenceStatus.Completed, occurrence.Status);
         Assert.Equal(TimeSpan.FromSeconds(10), use.ActualSettledDuration);
+        Assert.Equal(1L, ReadLong(
+            context,
+            "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = $run AND evidence_kind_code = 'verified_output_path';",
+            ("$run", ticket.RunId)));
+        Assert.Equal(
+            ticket.OutputFilePath,
+            ReadText(
+                context,
+                "SELECT output_path FROM recording_run_output_evidence WHERE run_id = $run AND evidence_kind_code = 'verified_output_path';",
+                ("$run", ticket.RunId)));
         Assert.Equal(1, backend.StartCalls);
         Assert.Equal(1, backend.DisposeCalls);
         Assert.Equal(1L, ReadLong(context, "SELECT COUNT(*) FROM plan_occurrences WHERE id = $id;", ("$id", ticket.OccurrenceId)));
@@ -3381,6 +3404,19 @@ public sealed class RecurringLeaseExecutionGateTests
         return Convert.ToInt64(command.ExecuteScalar());
     }
 
+    private static string? ReadText(
+        CommittedContext context,
+        string sql,
+        params (string Name, object? Value)[] parameters)
+    {
+        using var connection = context.Context.Fixture.Store.OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+            command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        return Convert.ToString(command.ExecuteScalar());
+    }
+
     private static void ExecuteSql(
         CommittedContext context,
         string sql,
@@ -3877,5 +3913,11 @@ public sealed class RecurringLeaseExecutionGateTests
         internal int Count => _count;
 
         public void StopAll(string reason) => Interlocked.Increment(ref _count);
+
+        public RecurringActiveRunStopDisposition StopRecurringRun(string leaseId, string runId, string reason)
+        {
+            Interlocked.Increment(ref _count);
+            return RecurringActiveRunStopDisposition.StopRequested;
+        }
     }
 }

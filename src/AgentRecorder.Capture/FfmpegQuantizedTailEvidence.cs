@@ -7,8 +7,11 @@ namespace AgentRecorder.Capture;
 /// </summary>
 internal sealed class FfmpegQuantizedTailEvidence
 {
+    // ffprobe's format duration is millisecond-rounded; this allows one
+    // decimal millisecond plus a small representation margin, not extra media.
     private const double FormatDurationRoundingToleranceSeconds = 0.0011;
-    private const double FrameRateDeviationRatio = 0.01;
+    private const double MaximumRequestedFrameRateDeviationRatio = 0.03;
+    private const double StreamFrameRateAgreementRatio = 0.01;
 
     private FfmpegQuantizedTailEvidence(
         string outputPath,
@@ -96,6 +99,7 @@ internal sealed class FfmpegQuantizedTailEvidence
             meta.SizeBytes <= 0 ||
             meta.SizeBytes != beforeProbeLength || beforeProbeLength != afterProbeLength ||
             beforeProbeLastWriteUtcTicks != afterProbeLastWriteUtcTicks ||
+            meta.ProbeFileLastWriteUtcTicks != beforeProbeLastWriteUtcTicks ||
             meta.DurationSeconds <= configuredDuration ||
             !string.Equals(meta.Container, "mp4", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(meta.Codec, "h264", StringComparison.OrdinalIgnoreCase) ||
@@ -105,14 +109,19 @@ internal sealed class FfmpegQuantizedTailEvidence
         }
 
         string outputPath;
+        string configuredOutputPath;
         try
         {
             outputPath = Path.GetFullPath(meta.OutputPath);
+            configuredOutputPath = Path.GetFullPath(config.OutputPath);
         }
         catch
         {
             return null;
         }
+
+        if (!string.Equals(outputPath, configuredOutputPath, StringComparison.OrdinalIgnoreCase))
+            return null;
 
         var videoStreams = meta.ProbeStreams
             .Where(stream => string.Equals(stream.CodecType, "video", StringComparison.OrdinalIgnoreCase))
@@ -163,6 +172,10 @@ internal sealed class FfmpegQuantizedTailEvidence
         var observedFrameRate = intervals.Length / (last.PtsSeconds - firstPts);
         var nominalPeriod = 1d / config.Fps;
         var timestampTolerance = timeBase + 1e-9;
+        // Container duration may be rounded to milliseconds while stream and
+        // packet timestamps use the stream time base. The independent packet
+        // end and authorization-cutoff checks below keep this metadata bound
+        // from authorizing another frame or an unbounded duration tail.
         var formatTolerance = Math.Max(FormatDurationRoundingToleranceSeconds, timeBase * 2);
         var lastFrameEnd = last.PtsSeconds + last.DurationSeconds;
 
@@ -176,16 +189,22 @@ internal sealed class FfmpegQuantizedTailEvidence
                 maximumPacketDuration,
                 observedFrameRate,
                 lastFrameEnd) ||
+            !IsRoundedReportedFrameRate(meta.Fps, nominalFrameRate) ||
             Math.Abs(firstPts) > timestampTolerance ||
             Math.Abs(videoStart) > timestampTolerance ||
             maximumInterval - minimumInterval > timestampTolerance ||
             maximumPacketDuration - minimumPacketDuration > timestampTolerance ||
             Math.Abs(minimumInterval - minimumPacketDuration) > timestampTolerance ||
             Math.Abs(maximumInterval - maximumPacketDuration) > timestampTolerance ||
-            maximumPacketDuration > nominalPeriod * (1 + FrameRateDeviationRatio) + timestampTolerance ||
-            Math.Abs(observedFrameRate - config.Fps) > config.Fps * FrameRateDeviationRatio ||
-            Math.Abs(averageFrameRate - observedFrameRate) > observedFrameRate * FrameRateDeviationRatio ||
-            Math.Abs(nominalFrameRate - observedFrameRate) > observedFrameRate * FrameRateDeviationRatio ||
+            // A fixed, small 3% rate allowance covers FFmpeg's stable 88/3 fps
+            // output for a requested 30 fps capture (2.22% slower). This is
+            // not a duration grace period: every packet remains subject to the
+            // exact authorization cutoff below. One stream tick covers packet
+            // timestamp quantization in the period comparison.
+            maximumPacketDuration > nominalPeriod * (1 + MaximumRequestedFrameRateDeviationRatio) + timestampTolerance ||
+            Math.Abs(observedFrameRate - config.Fps) > config.Fps * MaximumRequestedFrameRateDeviationRatio ||
+            Math.Abs(averageFrameRate - observedFrameRate) > observedFrameRate * StreamFrameRateAgreementRatio ||
+            Math.Abs(nominalFrameRate - observedFrameRate) > observedFrameRate * StreamFrameRateAgreementRatio ||
             Math.Abs(videoDuration - lastFrameEnd) > timestampTolerance ||
             Math.Abs(meta.DurationSeconds - videoDuration) > formatTolerance ||
             last.PtsSeconds >= configuredDuration ||
@@ -226,7 +245,9 @@ internal sealed class FfmpegQuantizedTailEvidence
             !double.IsFinite(meta.DurationSeconds) || meta.DurationSeconds != FormatDurationSeconds ||
             !string.Equals(meta.Container, "mp4", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(meta.Codec, "h264", StringComparison.OrdinalIgnoreCase) ||
-            meta.HasAudioStream || meta.Fps != ConfiguredFrameRate ||
+            meta.HasAudioStream || !IsRoundedReportedFrameRate(meta.Fps, NominalFrameRate) ||
+            Math.Abs(NominalFrameRate - ConfiguredFrameRate) >
+                ConfiguredFrameRate * MaximumRequestedFrameRateDeviationRatio ||
             meta.ProbeFileLastWriteUtcTicks != OutputLastWriteUtcTicks ||
             meta.ProbeStreams.Length != 1 ||
             !string.Equals(meta.ProbeStreams[0].CodecType, "video", StringComparison.OrdinalIgnoreCase) ||
@@ -263,6 +284,15 @@ internal sealed class FfmpegQuantizedTailEvidence
                MinimumFrameIntervalSeconds > 0 &&
                MaximumFrameIntervalSeconds >= MinimumFrameIntervalSeconds;
     }
+
+    // OutputMeta.Fps is a legacy integer projection of ffprobe's rational
+    // r_frame_rate, so validate that projection against the stream value rather
+    // than incorrectly requiring it to equal the capture request.
+    private static bool IsRoundedReportedFrameRate(int reportedFps, double nominalFrameRate) =>
+        double.IsFinite(nominalFrameRate) &&
+        nominalFrameRate >= 0 &&
+        nominalFrameRate < int.MaxValue &&
+        reportedFps == (int)Math.Round(nominalFrameRate);
 
     private static bool AllFinite(params double[] values) => values.All(double.IsFinite);
 }

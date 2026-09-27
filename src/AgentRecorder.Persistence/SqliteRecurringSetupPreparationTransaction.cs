@@ -261,6 +261,31 @@ internal sealed class SqliteRecurringSetupPreparationTransaction : SqliteReposit
         string intentId) =>
         ReadPreparation(connection, transaction, intentId);
 
+    internal static RecurringSetupPreparationSnapshot? ReadPreparationByLeaseWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string leaseId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT intent_id FROM recurring_setup_preparations WHERE lease_id = $lease_id ORDER BY intent_id COLLATE BINARY LIMIT 2;";
+        Add(command, "$lease_id", leaseId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+
+        var intentId = ReadRequiredText(reader, 0);
+        if (reader.Read())
+            throw new PersistedSnapshotException("A recurring lease is associated with multiple setup preparations.");
+        reader.Close();
+
+        var preparation = ReadPreparation(connection, transaction, intentId)
+            ?? throw new PersistedSnapshotException("A recurring lease setup preparation disappeared during the snapshot read.");
+        if (!string.Equals(preparation.LeaseId, leaseId, StringComparison.Ordinal))
+            throw new PersistedSnapshotException("A recurring setup preparation is bound to another lease.");
+        return preparation;
+    }
+
     internal static RecurringPreparedChainSnapshot ValidatePreparedChainWithinTransaction(
         SqliteConnection connection,
         SqliteTransaction transaction,

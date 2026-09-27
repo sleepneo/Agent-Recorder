@@ -890,9 +890,11 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
 
         var configuration = Assert.IsType<CaptureConfig>(backend.Configuration);
         Assert.Equal(30, configuration.DurationSeconds);
-        QuantizedTailTestMedia.Generate(configuration.OutputPath, 899, "599/20");
+        QuantizedTailTestMedia.Generate(configuration.OutputPath, 878, "117/4");
         var probed = FfmpegCaptureBackend.ProbeAuthorizedFixedRateCapture(configuration.OutputPath, configuration);
         Assert.True(probed.DurationSeconds > 30, $"probe duration was {probed.DurationSeconds:R}s");
+        Assert.Equal(878, probed.ProbeStreams.Single().FrameCount);
+        Assert.Equal(117d / 4d, probed.ProbeStreams.Single().AverageFrameRate!.Value, 5);
         Assert.NotNull(probed.QuantizedTailEvidence);
         backend.RaiseNaturalExit(0, probed);
 

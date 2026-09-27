@@ -8,6 +8,11 @@ namespace AgentRecorder.Persistence;
 internal interface IStandingLeaseActiveRunStopper
 {
     void StopAll(string reason);
+
+    RecurringActiveRunStopDisposition StopRecurringRun(
+        string leaseId,
+        string runId,
+        string reason) => throw new NotSupportedException("Targeted recurring Run stop is unavailable.");
 }
 
 internal sealed class RecordingEngineStandingLeaseActiveRunStopper : IStandingLeaseActiveRunStopper
@@ -20,6 +25,11 @@ internal sealed class RecordingEngineStandingLeaseActiveRunStopper : IStandingLe
     }
 
     public void StopAll(string reason) => _engine.StopAllSync(reason);
+
+    public RecurringActiveRunStopDisposition StopRecurringRun(
+        string leaseId,
+        string runId,
+        string reason) => _engine.StopRecurringCapture(leaseId, runId, reason);
 }
 
 /// <summary>
@@ -120,7 +130,7 @@ internal sealed class StandingLeaseSafetyControlService
 
         try
         {
-            var result = _transaction.QueryControlCenter(currentUserSid);
+            var result = _transaction.QueryControlCenter(currentUserSid, currentSessionBinding: null);
             return result.Status == StandingLeaseControlCenterQueryStatus.Available &&
                 result.State?.UnattendedMode == UnattendedModeStatus.Enabled;
         }
@@ -131,15 +141,21 @@ internal sealed class StandingLeaseSafetyControlService
     }
 
     internal StandingLeaseControlCenterQueryResult QueryControlCenter(string? currentUserSid)
+        => QueryControlCenter(currentUserSid, currentSessionBinding: null);
+
+    internal StandingLeaseControlCenterQueryResult QueryControlCenter(
+        string? currentUserSid,
+        string? currentSessionBinding)
     {
-        if (!IsCanonicalUserSid(currentUserSid))
+        if (!IsCanonicalUserSid(currentUserSid) ||
+            currentSessionBinding is not null && !IsCanonicalUserSid(currentSessionBinding))
         {
             return StandingLeaseControlCenterQueryResult.Rejected("safety_user_identity_invalid");
         }
 
         try
         {
-            return _transaction.QueryControlCenter(currentUserSid!);
+            return _transaction.QueryControlCenter(currentUserSid!, currentSessionBinding);
         }
         catch (Phase3PersistenceException exception)
         {
@@ -233,7 +249,8 @@ internal sealed class StandingLeaseSafetyControlService
                 StandingLeaseSafetyControlResult.Rejected(operationId, clockFailure));
         }
 
-        var result = Execute(
+        var result = ExecuteRecurringRevoke(
+            leaseId!,
             operationId!,
             () => _transaction.RevokeRecurringLease(leaseId!, operationId!, reasonCode, nowUtc));
         return CompleteControlAudit(
@@ -388,6 +405,69 @@ internal sealed class StandingLeaseSafetyControlService
         }
     }
 
+    private StandingLeaseSafetyControlResult ExecuteRecurringRevoke(
+        string leaseId,
+        string operationId,
+        Func<StandingLeaseSafetyControlResult> operation)
+    {
+        StandingLeaseSafetyControlResult result;
+        try
+        {
+            result = _startSafetyInterlock is null
+                ? operation()
+                : _startSafetyInterlock.Execute("standing_safety_control", operation);
+        }
+        catch (Phase3PersistenceException exception)
+        {
+            return StandingLeaseSafetyControlResult.Rejected(operationId, NormalizeFailure(exception.Code));
+        }
+        catch (PersistedSnapshotException)
+        {
+            return StandingLeaseSafetyControlResult.Rejected(operationId, "safety_snapshot_invalid");
+        }
+        catch (Phase3DomainException)
+        {
+            return StandingLeaseSafetyControlResult.Rejected(operationId, "safety_snapshot_invalid");
+        }
+        catch (Exception)
+        {
+            return StandingLeaseSafetyControlResult.Rejected(operationId, "safety_sqlite_failure");
+        }
+
+        var durableRevokeApplied = result.DurableOperationCommitted &&
+            (result.Status is StandingLeaseSafetyControlResultStatus.Changed or StandingLeaseSafetyControlResultStatus.AlreadyApplied);
+        if (!durableRevokeApplied || !result.RequiresActiveRunStop)
+            return result;
+
+        if (string.IsNullOrWhiteSpace(result.TargetRunId) || _activeRunStopper is null)
+            return result.WithPhysicalStopFailure();
+
+        try
+        {
+            var disposition = _activeRunStopper.StopRecurringRun(
+                leaseId,
+                result.TargetRunId,
+                "recurring_lease_safety_control");
+            return disposition switch
+            {
+                RecurringActiveRunStopDisposition.StopRequested => result,
+                RecurringActiveRunStopDisposition.NoOp => result.WithPhysicalStopNoOp(),
+                _ => result.WithPhysicalStopFailure(),
+            };
+        }
+        catch
+        {
+            SafeAudit("standing_lease.active_run_stop_failed", new
+            {
+                operation_id = operationId,
+                lease_id = leaseId,
+                run_id = result.TargetRunId,
+                reason_code = "active_run_stop_failed",
+            });
+            return result.WithPhysicalStopFailure();
+        }
+    }
+
     private StandingLeaseSafetyControlResult CompleteControlAudit(
         string operationKind,
         string? intentId,
@@ -410,6 +490,8 @@ internal sealed class StandingLeaseSafetyControlService
             durable_state_changed = result.DurableStateChanged,
             physical_stop_failed = result.PhysicalStopFailed,
             physical_stop_retry_recommended = result.PhysicalStopRetryRecommended,
+            physical_stop_no_op = result.PhysicalStopNoOp,
+            target_run_id = result.TargetRunId,
             requires_active_run_stop = result.RequiresActiveRunStop,
         });
         return result;

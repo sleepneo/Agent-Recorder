@@ -1134,11 +1134,20 @@ public sealed class RecurringOccurrenceNaturalWakeTests
     {
         var result = new StandingLeaseSafetyControlService(
                 context.Fixture.Store,
-                () => context.Slot.ScheduledStartUtc!.Value.AddMinutes(1))
+                () => context.Slot.ScheduledStartUtc!.Value.AddMinutes(1),
+                activeRunStopper: new AcknowledgingActiveRunStopper())
             .RevokeRecurringLease(context.Lease.LeaseId, operationId, "natural_wake_test");
         Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, result.Status);
         Assert.Equal(ConsentLeaseStatus.Revoked,
             new SqliteRecurringConsentLeaseRepository(context.Fixture.Store).Get(context.Lease.LeaseId).Status);
+    }
+
+    private sealed class AcknowledgingActiveRunStopper : IStandingLeaseActiveRunStopper
+    {
+        public void StopAll(string reason) { }
+
+        public RecurringActiveRunStopDisposition StopRecurringRun(string leaseId, string runId, string reason) =>
+            RecurringActiveRunStopDisposition.StopRequested;
     }
 
     private static void TamperSpecificationField(

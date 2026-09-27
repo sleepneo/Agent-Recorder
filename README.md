@@ -122,6 +122,11 @@ desktop or opt in to per-user autostart before relying on local selection.
   The user selects the fixed region and approves the lease locally; each due
   occurrence revalidates the approved environment before one silent run.
   Missed windows and uncertain starts are not retried or silently replaced.
+- One-time `required` plans do not use a Lease. The user selects a fixed region
+  and approves plan creation locally, then must approve a second local dialog
+  when that run is due. If that execution dialog is rejected, expires, or
+  cannot be shown safely, no recording starts. Agents can query durable plan
+  and run status with `GET /api/v1/plans/{plan_id}/status`.
 - Nested recording: one outer recording can capture the process of starting an
   inner recording.
 - On the validated default FFmpeg path, role-aware capture visibility keeps

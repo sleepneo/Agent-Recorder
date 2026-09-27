@@ -1,5 +1,8 @@
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Core;
+using AgentRecorder.Capture;
+using AgentRecorder.Infrastructure;
+using AgentRecorder.Logging;
 using AgentRecorder.Persistence;
 using Xunit;
 
@@ -78,6 +81,53 @@ public sealed class RecurringLeaseSafetyControlTests
         Assert.Equal(ConsentLeaseStatus.Revoked, new SqliteRecurringConsentLeaseRepository(fixture.Store).Get(lease.LeaseId).Status);
         Assert.Equal(1L, Count(fixture, "recurring_lease_uses"));
         Assert.Equal("created", fixture.Scalar("SELECT status_code FROM recording_runs WHERE id = 'run-0';"));
+    }
+
+    [Fact]
+    public async Task LocalRecurringRevokeLinearizesBeforeWaitingNaturalWakeFinalStart()
+    {
+        using var fixture = RecurringLeaseFixture.Create(maxOccurrences: 1);
+        EnableUnattended(fixture, "task289-revoke-wake-enable");
+        var lease = fixture.CreateLease(
+            "task289-revoke-wake-race",
+            fixture.CreatedAt.AddHours(-1),
+            fixture.CreatedAt.AddMinutes(-30),
+            fixture.CreatedAt.AddHours(2));
+        new SqliteRecurringConsentLeaseRepository(fixture.Store).InsertPending(lease);
+        Activate(fixture, lease, "task289-revoke-wake-approval");
+
+        var interlock = new StandingLeaseStartSafetyInterlock();
+        var commitEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowCommit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = new StandingLeaseSafetyControlService(
+            fixture.Store,
+            () => fixture.CreatedAt.AddMinutes(5),
+            beforeCommitForTest: (_, _) =>
+            {
+                commitEntered.TrySetResult();
+                allowCommit.Task.GetAwaiter().GetResult();
+            },
+            startSafetyInterlock: interlock);
+
+        var revokeTask = Task.Run(() => service.RevokeRecurringLease(
+            lease.LeaseId,
+            "task289-revoke-wake-linearized",
+            "control_center_user"));
+        await commitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var naturalWakeFinalStart = Task.Run(() => interlock.Execute(
+            "recurring_natural_wake_final_start",
+            () => new SqliteRecurringConsentLeaseRepository(fixture.Store).Get(lease.LeaseId).Status == ConsentLeaseStatus.Active));
+        await Task.Delay(100);
+        Assert.False(naturalWakeFinalStart.IsCompleted);
+
+        allowCommit.TrySetResult();
+        var revoked = await revokeTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var wakeWasAllowed = await naturalWakeFinalStart.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, revoked.Status);
+        Assert.False(wakeWasAllowed);
+        Assert.Equal(ConsentLeaseStatus.Revoked, new SqliteRecurringConsentLeaseRepository(fixture.Store).Get(lease.LeaseId).Status);
     }
 
     [Fact]
@@ -185,6 +235,7 @@ public sealed class RecurringLeaseSafetyControlTests
         Assert.True(result.RequiresActiveRunStop);
         Assert.True(result.DurableOperationCommitted);
         Assert.True(result.DurableStateChanged);
+        Assert.Equal("run-0", result.TargetRunId);
         Assert.Equal(1, stopper.Count);
         Assert.Equal(ConsentLeaseStatus.Revoked, repository.Get(target.LeaseId).Status);
         Assert.Equal(2, repository.Get(target.LeaseId).Version);
@@ -233,6 +284,128 @@ public sealed class RecurringLeaseSafetyControlTests
         Assert.Equal(0, stopper.Count);
         Assert.Equal(ConsentLeaseStatus.Exhausted, repository.Get(target.LeaseId).Status);
         Assert.Equal(ConsentLeaseStatus.Pending, repository.Get(other.LeaseId).Status);
+    }
+
+    [Fact]
+    public void ProductionTargetedStopCancelsOnlyRunBoundToRevokedExhaustedLease()
+    {
+        using var fixture = RecurringLeaseFixture.Create(maxOccurrences: 2);
+        var targetLease = fixture.CreateLease("task289r-production-target", fixture.CreatedAt.AddHours(-1), fixture.CreatedAt.AddMinutes(-30), fixture.CreatedAt.AddHours(2));
+        var otherLease = fixture.CreateLease("task289r-production-other", fixture.CreatedAt.AddHours(-1), fixture.CreatedAt.AddMinutes(-30), fixture.CreatedAt.AddHours(2));
+        var leases = new SqliteRecurringConsentLeaseRepository(fixture.Store);
+        leases.InsertPending(targetLease);
+        leases.InsertPending(otherLease);
+        var slots = fixture.CreateSlots(2);
+        fixture.InsertAccountingRow("task289r-target-use", targetLease, slots[0], "run-0", "reserved", fixture.CreatedAt.AddMinutes(4), 1, targetLease.PerRunDuration, null);
+        fixture.InsertAccountingRow("task289r-other-use", otherLease, slots[1], "run-1", "reserved", fixture.CreatedAt.AddMinutes(4), 1, otherLease.PerRunDuration, null);
+        ForceRecurringStatus(fixture, targetLease, "exhausted", fixture.CreatedAt.AddMinutes(5), 1);
+        ForceRecurringStatus(fixture, otherLease, "exhausted", fixture.CreatedAt.AddMinutes(5), 1);
+
+        using var engine = CreateStopTestEngine();
+        var targetLifecycle = new TargetRecurringLifecycle();
+        var targetRun = AddRecurringRecording(engine, "run-0", targetLease.LeaseId, targetLifecycle);
+        var otherRun = AddRecurringRecording(engine, "run-1", otherLease.LeaseId, new TargetRecurringLifecycle());
+        var service = CreateService(
+            fixture,
+            fixture.CreatedAt.AddMinutes(6),
+            stopper: new RecordingEngineStandingLeaseActiveRunStopper(engine));
+
+        var result = service.RevokeRecurringLease(targetLease.LeaseId, "task289r-targeted-stop", "control_center_user");
+
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, result.Status);
+        Assert.Equal("run-0", result.TargetRunId);
+        Assert.False(result.PhysicalStopNoOp);
+        Assert.False(result.PhysicalStopFailed);
+        Assert.Equal(ConsentLeaseStatus.Revoked, leases.Get(targetLease.LeaseId).Status);
+        Assert.Equal(ConsentLeaseStatus.Exhausted, leases.Get(otherLease.LeaseId).Status);
+        Assert.Equal(RecState.cancelled, targetRun.State);
+        Assert.Equal("recurring_lease_safety_control", targetLifecycle.FailBeforeStartReason);
+        Assert.Equal(RecState.preparing, otherRun.State);
+
+        engine._recs.TryRemove(otherRun.Id, out _);
+    }
+
+    [Fact]
+    public void ProductionTargetedStopIsNoOpWhenTargetEndedBeforeDispatchAndLeavesNewRunAlone()
+    {
+        using var engine = CreateStopTestEngine();
+        var target = AddRecurringRecording(engine, "run-ended", "lease-target", new TargetRecurringLifecycle());
+        target.State = RecState.completed;
+        engine._recs.TryRemove(target.Id, out _);
+        var newlyStarted = AddRecurringRecording(engine, "run-new", "lease-other", new TargetRecurringLifecycle());
+
+        var disposition = new RecordingEngineStandingLeaseActiveRunStopper(engine)
+            .StopRecurringRun("lease-target", "run-ended", "recurring_lease_safety_control");
+
+        Assert.Equal(RecurringActiveRunStopDisposition.NoOp, disposition);
+        Assert.Equal(RecState.preparing, newlyStarted.State);
+        engine._recs.TryRemove(newlyStarted.Id, out _);
+    }
+
+    [Fact]
+    public void RevokeCarriesExactRunAcrossCommitAndNoOpsIfItEndsBeforeTargetedDispatch()
+    {
+        using var fixture = RecurringLeaseFixture.Create(maxOccurrences: 1);
+        var targetLease = fixture.CreateLease("task289r-race-target", fixture.CreatedAt.AddHours(-1), fixture.CreatedAt.AddMinutes(-30), fixture.CreatedAt.AddHours(2));
+        var otherLease = fixture.CreateLease("task289r-race-other", fixture.CreatedAt.AddHours(-1), fixture.CreatedAt.AddMinutes(-30), fixture.CreatedAt.AddHours(2));
+        var leases = new SqliteRecurringConsentLeaseRepository(fixture.Store);
+        leases.InsertPending(targetLease);
+        leases.InsertPending(otherLease);
+        var slot = fixture.CreateSlots(1).Single();
+        fixture.InsertAccountingRow("task289r-race-use", targetLease, slot, "run-0", "reserved", fixture.CreatedAt.AddMinutes(4), 1, targetLease.PerRunDuration, null);
+        ForceRecurringStatus(fixture, targetLease, "exhausted", fixture.CreatedAt.AddMinutes(5), 1);
+
+        using var engine = CreateStopTestEngine();
+        var target = AddRecurringRecording(engine, "run-0", targetLease.LeaseId, new TargetRecurringLifecycle());
+        Recording? unrelated = null;
+        var stopper = new RecordingEngineStandingLeaseActiveRunStopper(engine);
+        var service = CreateService(
+            fixture,
+            fixture.CreatedAt.AddMinutes(6),
+            stopper: stopper,
+            beforeCommit: (_, _) =>
+            {
+                target.State = RecState.completed;
+                engine._recs.TryRemove(target.Id, out _);
+                unrelated = AddRecurringRecording(
+                    engine,
+                    "run-started-after-target-ended",
+                    otherLease.LeaseId,
+                    new TargetRecurringLifecycle());
+            });
+
+        var result = service.RevokeRecurringLease(targetLease.LeaseId, "task289r-race-revoke", "control_center_user");
+
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, result.Status);
+        Assert.Equal("run-0", result.TargetRunId);
+        Assert.True(result.PhysicalStopNoOp);
+        Assert.False(result.PhysicalStopFailed);
+        Assert.Equal(ConsentLeaseStatus.Revoked, leases.Get(targetLease.LeaseId).Status);
+        Assert.Equal(ConsentLeaseStatus.Pending, leases.Get(otherLease.LeaseId).Status);
+        Assert.NotNull(unrelated);
+        Assert.Equal(RecState.preparing, unrelated!.State);
+
+        var replay = service.RevokeRecurringLease(targetLease.LeaseId, "task289r-race-revoke", "control_center_user");
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.AlreadyApplied, replay.Status);
+        Assert.Equal("run-0", replay.TargetRunId);
+        Assert.True(replay.PhysicalStopNoOp);
+        Assert.Equal(RecState.preparing, unrelated.State);
+
+        engine._recs.TryRemove(unrelated.Id, out _);
+    }
+
+    [Fact]
+    public void ProductionTargetedStopRejectsLeaseMismatchWithoutStoppingRecording()
+    {
+        using var engine = CreateStopTestEngine();
+        var other = AddRecurringRecording(engine, "run-bound-to-other", "lease-other", new TargetRecurringLifecycle());
+
+        var disposition = new RecordingEngineStandingLeaseActiveRunStopper(engine)
+            .StopRecurringRun("lease-selected", other.Id, "recurring_lease_safety_control");
+
+        Assert.Equal(RecurringActiveRunStopDisposition.TargetMismatch, disposition);
+        Assert.Equal(RecState.preparing, other.State);
+        engine._recs.TryRemove(other.Id, out _);
     }
 
     [Fact]
@@ -749,6 +922,37 @@ public sealed class RecurringLeaseSafetyControlTests
         Action<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction>? beforeCommit = null) =>
         new(fixture.Store, () => now, activeRunStopper: stopper, beforeCommitForTest: beforeCommit);
 
+    private static RecordingEngine CreateStopTestEngine()
+    {
+        var engine = new RecordingEngine(
+            new NoOpAuditLogger(),
+            tracer: null,
+            bundleGenerator: null,
+            microphoneProvider: null,
+            microphoneStatusProvider: null,
+            displayTopologyProvider: null,
+            systemAudioEndpointProvider: null);
+        engine.SetTray(new NoOpStopTray());
+        return engine;
+    }
+
+    private static Recording AddRecurringRecording(
+        RecordingEngine engine,
+        string runId,
+        string leaseId,
+        TargetRecurringLifecycle lifecycle)
+    {
+        var recording = new Recording(runId)
+        {
+            State = RecState.preparing,
+            IsRecurringLeaseExecution = true,
+            RecurringLeaseId = leaseId,
+            RecurringLifecycleSession = lifecycle,
+        };
+        Assert.True(engine._recs.TryAdd(runId, recording));
+        return recording;
+    }
+
     private static void EnableUnattended(RecurringLeaseFixture fixture, string operationId) =>
         new SqliteStandingLeaseSafetyControlTransaction(fixture.Store)
             .SetUnattendedMode(operationId, true, "task271-test", fixture.CreatedAt.AddMinutes(1));
@@ -949,6 +1153,12 @@ public sealed class RecurringLeaseSafetyControlTests
         {
             Count++;
         }
+
+        public RecurringActiveRunStopDisposition StopRecurringRun(string leaseId, string runId, string reason)
+        {
+            Count++;
+            return RecurringActiveRunStopDisposition.StopRequested;
+        }
     }
 
     private sealed class FailOnceStopper : IStandingLeaseActiveRunStopper
@@ -961,5 +1171,70 @@ public sealed class RecurringLeaseSafetyControlTests
             if (Count == 1)
                 throw new InvalidOperationException("stopper-first-call");
         }
+
+        public RecurringActiveRunStopDisposition StopRecurringRun(string leaseId, string runId, string reason)
+        {
+            Count++;
+            if (Count == 1)
+                throw new InvalidOperationException("targeted-stopper-first-call");
+            return RecurringActiveRunStopDisposition.StopRequested;
+        }
+    }
+
+    private sealed class TargetRecurringLifecycle : IRecurringLeaseCaptureLifecycleSession, IRecurringLeaseCaptureLifecycleDriver
+    {
+        internal string? FailBeforeStartReason { get; private set; }
+
+        public bool TryAttach(ICaptureBackend backend, out string failureReason)
+        {
+            failureReason = string.Empty;
+            return true;
+        }
+
+        public RecurringLeaseCaptureLifecycleHandoffResult CompleteStartHandoff() =>
+            new(RecurringLeaseCaptureLifecycleHandoffStatus.Active);
+
+        public RecurringLeaseLifecycleActionResult StartFailed() =>
+            RecurringLeaseLifecycleActionResult.Applied("start_failed", terminal: true);
+
+        public RecurringLeaseLifecycleActionResult Stop() =>
+            RecurringLeaseLifecycleActionResult.Applied("stopped", terminal: true);
+
+        public RecurringLeaseLifecycleActionResult ObserveFirstFrame(FirstFrameObservation observation) =>
+            RecurringLeaseLifecycleActionResult.Applied("first_frame");
+
+        public RecurringLeaseLifecycleActionResult ObserveCaptureEnded(CaptureEndedObservation observation) =>
+            RecurringLeaseLifecycleActionResult.Applied("capture_ended");
+
+        public RecurringLeaseLifecycleActionResult ObserveNaturalExit(int exitCode, OutputMeta meta) =>
+            RecurringLeaseLifecycleActionResult.Applied("natural_exit", terminal: true);
+
+        public RecurringLeaseLifecycleActionResult FailBeforeStart(string reason)
+        {
+            FailBeforeStartReason = reason;
+            return RecurringLeaseLifecycleActionResult.Applied(reason, terminal: true);
+        }
+
+        public RecurringLeaseCaptureStopResult StopForEngine(string? reason = null) =>
+            new(RecurringLeaseLifecycleActionResult.Applied(reason ?? "stopped", terminal: true), new OutputMeta(), 0);
+
+        public void Dispose() { }
+    }
+
+    private sealed class NoOpAuditLogger : AuditLogger
+    {
+        public override void Log(string evt, object payload) { }
+    }
+
+    private sealed class NoOpStopTray : ITrayContext
+    {
+        public string HostMode => "headless";
+        public bool SupportsRegionSelectionUi => false;
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { }
+        public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
+        public void SetRecording(RecordingUiPresentation presentation) { }
+        public void SetIdle(RecordingUiPresentation presentation) { }
+        public void SetAllIdle() { }
+        public void ShowError(string text) { }
     }
 }

@@ -302,7 +302,10 @@ public sealed class RecurringPreparedIntentApprovalTests
     public void ActivatedReadbackAcceptsExhaustedThenRevokedV3ThroughProductionSafetyControl()
     {
         using var database = CreateProductionExhaustedDatabase(completeLastLifecycle: false);
-        var revoke = new StandingLeaseSafetyControlService(database.Store, () => At(172700))
+        var revoke = new StandingLeaseSafetyControlService(
+                database.Store,
+                () => At(172700),
+                activeRunStopper: new AcknowledgingActiveRunStopper())
             .RevokeRecurringLease("lease-1", "task-282r2-revoke", "task-282r2-test");
 
         Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, revoke.Status);
@@ -569,6 +572,14 @@ public sealed class RecurringPreparedIntentApprovalTests
         public string CreateProfileId() => "profile-1";
         public string CreatePlanId() => "plan-1";
         public string CreateLeaseId() => "lease-1";
+    }
+
+    private sealed class AcknowledgingActiveRunStopper : IStandingLeaseActiveRunStopper
+    {
+        public void StopAll(string reason) { }
+
+        public RecurringActiveRunStopDisposition StopRecurringRun(string leaseId, string runId, string reason) =>
+            RecurringActiveRunStopDisposition.StopRequested;
     }
 
     private sealed class PreparedDatabase : IDisposable

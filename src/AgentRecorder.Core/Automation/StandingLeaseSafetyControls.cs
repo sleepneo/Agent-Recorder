@@ -33,6 +33,13 @@ internal enum StandingLeaseSafetyControlResultStatus
     Rejected,
 }
 
+internal enum RecurringActiveRunStopDisposition
+{
+    StopRequested,
+    NoOp,
+    TargetMismatch,
+}
+
 internal enum StandingLeaseSafetyQueryStatus
 {
     Available,
@@ -113,6 +120,8 @@ internal sealed class StandingLeaseSafetyControlResult
         StandingLeaseSafetyState? state,
         bool durableOperationCommitted,
         bool durableStateChanged,
+        string? targetRunId,
+        bool physicalStopNoOp,
         bool physicalStopFailed,
         bool physicalStopRetryRecommended)
     {
@@ -124,6 +133,8 @@ internal sealed class StandingLeaseSafetyControlResult
         State = state;
         DurableOperationCommitted = durableOperationCommitted;
         DurableStateChanged = durableStateChanged;
+        TargetRunId = targetRunId;
+        PhysicalStopNoOp = physicalStopNoOp;
         PhysicalStopFailed = physicalStopFailed;
         PhysicalStopRetryRecommended = physicalStopRetryRecommended;
     }
@@ -142,7 +153,11 @@ internal sealed class StandingLeaseSafetyControlResult
     // The first application outcome recorded by the durable operation. This
     // remains true on an exact replay of a changed operation.
     internal bool DurableStateChanged { get; }
+    // Exact recurring recording identity observed in the same durable
+    // transaction as the single-lease revoke.
+    internal string? TargetRunId { get; }
     // The result of the external physical stopper call made by this request.
+    internal bool PhysicalStopNoOp { get; }
     internal bool PhysicalStopFailed { get; }
     // True when the physical stopper should be attempted again.
     internal bool PhysicalStopRetryRecommended { get; }
@@ -152,7 +167,8 @@ internal sealed class StandingLeaseSafetyControlResult
         string reason,
         bool requiresActiveRunStop = false,
         StandingLeaseSafetyState? state = null,
-        bool durableOperationCommitted = false) =>
+        bool durableOperationCommitted = false,
+        string? targetRunId = null) =>
         new(
             StandingLeaseSafetyControlResultStatus.Changed,
             reason,
@@ -162,6 +178,8 @@ internal sealed class StandingLeaseSafetyControlResult
             state,
             durableOperationCommitted,
             durableStateChanged: true,
+            targetRunId: targetRunId,
+            physicalStopNoOp: false,
             physicalStopFailed: false,
             physicalStopRetryRecommended: false);
 
@@ -171,7 +189,8 @@ internal sealed class StandingLeaseSafetyControlResult
         bool requiresActiveRunStop = false,
         StandingLeaseSafetyState? state = null,
         bool durableOperationCommitted = false,
-        bool durableStateChanged = false) =>
+        bool durableStateChanged = false,
+        string? targetRunId = null) =>
         new(
             StandingLeaseSafetyControlResultStatus.AlreadyApplied,
             reason,
@@ -181,6 +200,8 @@ internal sealed class StandingLeaseSafetyControlResult
             state,
             durableOperationCommitted,
             durableStateChanged,
+            targetRunId,
+            physicalStopNoOp: false,
             physicalStopFailed: false,
             physicalStopRetryRecommended: false);
 
@@ -191,6 +212,8 @@ internal sealed class StandingLeaseSafetyControlResult
         bool requiresActiveRunStop = false,
         bool durableOperationCommitted = false,
         bool durableStateChanged = false,
+        string? targetRunId = null,
+        bool physicalStopNoOp = false,
         bool physicalStopFailed = false,
         bool physicalStopRetryRecommended = false) =>
         new(
@@ -202,6 +225,8 @@ internal sealed class StandingLeaseSafetyControlResult
             state,
             durableOperationCommitted,
             durableStateChanged,
+            targetRunId,
+            physicalStopNoOp,
             physicalStopFailed,
             physicalStopRetryRecommended);
 
@@ -215,6 +240,8 @@ internal sealed class StandingLeaseSafetyControlResult
             State,
             durableOperationCommitted: true,
             durableStateChanged: DurableStateChanged,
+            targetRunId: TargetRunId,
+            physicalStopNoOp: PhysicalStopNoOp,
             physicalStopFailed: PhysicalStopFailed,
             physicalStopRetryRecommended: PhysicalStopRetryRecommended);
 
@@ -228,8 +255,25 @@ internal sealed class StandingLeaseSafetyControlResult
             state: State,
             durableOperationCommitted: DurableOperationCommitted,
             durableStateChanged: DurableStateChanged,
+            targetRunId: TargetRunId,
+            physicalStopNoOp: false,
             physicalStopFailed: true,
             physicalStopRetryRecommended: true);
+
+    internal StandingLeaseSafetyControlResult WithPhysicalStopNoOp() =>
+        new(
+            Status,
+            Reason,
+            OperationId,
+            Changed,
+            RequiresActiveRunStop,
+            State,
+            durableOperationCommitted: DurableOperationCommitted,
+            durableStateChanged: DurableStateChanged,
+            targetRunId: TargetRunId,
+            physicalStopNoOp: true,
+            physicalStopFailed: false,
+            physicalStopRetryRecommended: false);
 }
 
 internal static class StandingLeaseSafetyPolicy

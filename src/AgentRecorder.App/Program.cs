@@ -222,6 +222,8 @@ internal static class Program
         }
 
         StandingPlanSetupCoordinator? standingPlanSetupCoordinator = null;
+        RequiredOncePlanSetupCoordinator? requiredOncePlanSetupCoordinator = null;
+        RequiredOncePlanExecutionCoordinator? requiredOncePlanExecutionCoordinator = null;
         RecurringPlanSetupCoordinator? recurringPlanSetupCoordinator = null;
         try
         {
@@ -251,12 +253,63 @@ internal static class Program
             () => standingNaturalWakeRuntime?.ExecutionSupported == true,
             engine.HasRecording);
 
+        try
+        {
+            requiredOncePlanExecutionCoordinator = new RequiredOncePlanExecutionCoordinator(
+                operationalStore,
+                engine,
+                tray,
+                audit,
+                new TrayRequiredOncePlanExecutionUi(tray, audit.Log));
+            if (!requiredOncePlanExecutionCoordinator.Start())
+            {
+                audit.Log("required_once_execution.runtime_blocked", new
+                {
+                    reason_code = "startup_recovery_or_scheduler_failed",
+                    execution_supported = false,
+                });
+            }
+        }
+        catch (Exception exception)
+        {
+            requiredOncePlanExecutionCoordinator?.Dispose();
+            requiredOncePlanExecutionCoordinator = null;
+            audit.Log("required_once_execution.runtime_blocked", new
+            {
+                reason_code = "required_once_execution_composition_failed",
+                exception_type = exception.GetType().Name,
+                execution_supported = false,
+            });
+        }
+
+        try
+        {
+            requiredOncePlanSetupCoordinator = new RequiredOncePlanSetupCoordinator(
+                operationalStore,
+                audit,
+                new TrayRequiredOncePlanSetupUi(tray),
+                executionSupportedProvider: () => requiredOncePlanExecutionCoordinator?.ExecutionSupported == true);
+        }
+        catch (Exception exception)
+        {
+            requiredOncePlanSetupCoordinator?.Dispose();
+            requiredOncePlanSetupCoordinator = null;
+            audit.Log("required_once_setup.runtime_blocked", new
+            {
+                reason_code = "required_once_setup_composition_failed",
+                exception_type = exception.GetType().Name,
+                execution_supported = false,
+            });
+        }
+
         var appExePath = Application.ExecutablePath;
         var autoStart = new WindowsAutoStartManager(appExePath);
         var ffmpegPrewarmer = new FfmpegPrewarmer();
 
         var ensureContextStore = new EnsureContextStore(dataDir);
         var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(dataDir);
+        var planExecutionStatusGateway = new PlanExecutionStatusGateway(
+            new PlanExecutionStatusQueryService(operationalStore));
         var server = new ApiServer(
             engine,
             audit,
@@ -268,7 +321,9 @@ internal static class Program
             ensureContextStore,
             perfSummaryProvider,
             standingPlanSetupCoordinator,
-            recurringPlanSetupCoordinator);
+            recurringPlanSetupCoordinator,
+            planExecutionStatusGateway,
+            requiredOncePlanSetupCoordinator);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -330,8 +385,11 @@ internal static class Program
             // First quiesce HTTP, then cancel setup flights while their store,
             // tray and shared UI gate are still alive.
             SafeShutdownStep("api", server.Stop);
+            SafeShutdownStep("required_once_execution_runtime", () => requiredOncePlanExecutionCoordinator?.Dispose());
             SafeShutdownStep("recurring_setup", () => recurringPlanSetupCoordinator?.Dispose());
             SafeShutdownStep("recurring_setup_wait", () => recurringPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
+            SafeShutdownStep("required_once_setup", () => requiredOncePlanSetupCoordinator?.Dispose());
+            SafeShutdownStep("required_once_setup_wait", () => requiredOncePlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
             SafeShutdownStep("standing_setup", () => standingPlanSetupCoordinator?.Dispose());
             SafeShutdownStep("standing_setup_wait", () => standingPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
             SafeShutdownStep("recurring_runtime", () => recurringNaturalWakeRuntime?.Dispose());

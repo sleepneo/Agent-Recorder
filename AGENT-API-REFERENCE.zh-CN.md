@@ -1081,7 +1081,113 @@ GET /plan-setups/{setup_intent_id}?since_status_version=<opaque-cursor>&wait_ms=
 
 cursor 必须原样回传。`wait_ms` 最大 25000。响应可能包含 `run_id`、`recording_status_url`、`started_at` 和 `completed_at`；出现 `recording_status_url` 后，再按普通录制状态接口查询最终媒体和输出路径。不要把 `scheduled` 当作已经开始，只有返回的录制状态达到可信 `recording` 才能向用户报告已开始。
 
-本地 UI 会要求用户重新选区并批准有界 Lease。到点时应用再次验证显示器身份、物理区域、用户会话、输出文件、执行窗口、Lease、安全开关和一次性 proof。撤销、Stop All、锁屏/会话断开、睡眠、目标或输出变化、文件已存在及错过窗口都 fail closed，不会自动换目标、换路径、重试或回退成普通录制。
+`standing_lease` 模式下，本地 UI 会要求用户重新选区并批准有界 Lease。到点时应用再次验证显示器身份、物理区域、用户会话、输出文件、执行窗口、Lease、安全开关和一次性 proof。撤销、Stop All、锁屏/会话断开、睡眠、目标或输出变化、文件已存在及错过窗口都 fail closed，不会自动换目标、换路径、重试或回退成普通录制。
+
+### 持久化计划执行状态
+
+GET /api/v1/plan-setups/{setup_intent_id} 描述的是计划建立、本地选区和批准流程；它不是录制执行结果。计划 setup 完成后，Agent 应使用下面经过 API key 认证的只读端点查询实际持久化的执行状态，应用重启后也不依赖内存中的录制列表：
+
+~~~~http
+GET /api/v1/plans/{plan_id}/status
+X-Agent-Recorder-Key: <api-key>
+~~~~
+
+响应使用标准 ok/data/request_id 包装。kind 为 once、daily 或 weekly；plan_status 只是计划持久化状态，不能单独证明录制成功。occurrence_count 是已物化实例数。latest_occurrence 按计划窗口开始时间倒序、再按 occurrence ID 倒序；next_occurrence 是最早的非终态实例（也包括执行中的实例）。每个实例摘要包含窗口、实例状态/原因、可选 Run 状态/原因和产物证据；首版不返回历史分页。
+
+Occurrence 与 Run 来自同一个 SQLite 读取快照，且必须构成可达的生命周期组合：`run_created` 必须关联仍处于非终态的 Run；`completed` 必须关联无终态原因的 `settled` Run；带 Run 的 `blocked` 必须与 Run 具有相同的异常终态原因。无 Run 的终态只有在符合领域模型约束时才接受（例如 `missed` 不允许有 Run）。关联不一致时 fail closed，返回 `503 PLAN_STATUS_UNAVAILABLE`，不会把它呈现为成功结果。
+
+~~~~json
+{
+  "ok": true,
+  "data": {
+    "plan_id": "recurring-plan-...",
+    "kind": "daily",
+    "plan_status": "enabled",
+    "schedule_exhausted": true,
+    "occurrence_count": 1,
+    "next_occurrence": null,
+    "latest_occurrence": {
+      "occurrence_id": "recurring-occurrence-...",
+      "window_start_utc": "2026-10-01T01:30:00Z",
+      "window_end_utc": "2026-10-01T02:02:00Z",
+      "status": "completed",
+      "terminal_reason_code": null,
+      "run_id": "run-...",
+      "run": {
+        "run_id": "run-...",
+        "status": "settled",
+        "terminal_reason_code": null
+      },
+      "output_path": "C:\\Users\\alice\\Videos\\recurring-20261001-013000.mp4",
+      "output_path_recorded": true,
+      "output_file_exists": true
+    }
+  },
+  "request_id": "..."
+}
+~~~~
+
+一次性计划的 schedule_exhausted 为 null。周期计划该字段来自持久化 schedule cursor；若为 true 且 next_occurrence 为 null，表示 cursor 已无后续时间槽且所有已物化实例均已终结，本计划不会再自动运行。
+
+成功且已验证的结算会把媒体探测实际报告、并与该 occurrence 精确批准的冻结目标匹配的路径作为不可变证据保存。此时 `output_path` 返回该路径，`output_path_recorded` 为 true；`output_file_exists` 是查询时对该确切路径的文件存在性快照（true 或 false），没有路径时为 null。文件后来被删除只会让下一次查询的 `output_file_exists` 变成 false，不会清除已记录路径或改写 Run 状态。
+
+schema v16 之前已结算的历史记录没有可信的实际路径历史，迁移不会从授权目录/冻结文件名推导路径，也不会扫描 Videos 或猜文件名；它们继续返回 `output_path: null`、`output_path_recorded: false`、`output_file_exists: null`。当前 settled 记录若缺少证据、证据损坏/跨 Run 或 Occurrence 关联、或路径越出批准目录，则 fail closed，返回 `503 PLAN_STATUS_UNAVAILABLE`，不会伪造路径。
+
+状态查询限定为当前 Windows 用户和交互会话。未知或属于其他身份的计划均返回 404 PLAN_NOT_FOUND；格式非法的 ID 返回 400 INVALID_ARGUMENT。持久化状态不可用或关联损坏时 fail closed，返回 503 PLAN_STATUS_UNAVAILABLE。
+
+### 必需授权的一次性固定区域执行（无 Lease）
+
+`requested_authorization.mode` 也可设为 `required`。这会创建不使用 Lease 的一次性计划，但创建时仍必须由本地用户完成选区和独立的计划创建批准。到达计划时间后，托盘宿主重新检查原 Windows SID/交互会话、显示拓扑与冻结物理区域、输出目标和最晚启动时间，再显示第二个本地执行确认；确认内容包含显示器、区域、时长、无音频和输出路径。计划创建批准本身不会启动捕获，HTTP 不能批准或绕过执行确认。
+
+首版边界是单次、固定区域、FFmpeg 区域捕获、无音频、仅自然唤醒且交互桌面可用。应用不会唤醒机器，也不会补跑错过的实例。拒绝、超时、桌面不可用、身份/显示/输出变化或批准规格损坏都会持久化终态原因，且不会创建 Run。提交启动后若进程重启，状态为 `started_unknown`，不会重试。
+
+通过 `GET /capabilities` 检查运行时能力：
+
+```json
+{
+  "required_once_plan": {
+    "setup_supported": true,
+    "execution_supported": true,
+    "authorization_mode": "required",
+    "creation_requires_local_approval": true,
+    "second_confirmation_required_at_execution": true,
+    "due_occurrence_behavior": "local_per_run_confirmation_then_fixed_region_capture"
+  }
+}
+```
+
+只有托盘执行运行时已完成启动恢复、能够查询当前 SID/会话的到期队列，并且安全的本地确认 UI 可用时，`execution_supported` 才为 true。否则为 false；已建立的 required 计划保持 inert，setup 响应会给出 `execution_runtime_unavailable`。
+
+在 `/api/v1/plans/{plan_id}/status` 中，required 实例还会返回 `execution_status_code`，用于区分 `pending_confirmation`、`start_committed`、`recording`、`finalizing`、`settled`、`rejected`、`expired`、`blocked`、`started_unknown`、`session_interrupted` 和 `failed`。常规 occurrence/Run 状态字段仍是公开生命周期投影：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "plan_id": "required-once-plan-...",
+    "kind": "once",
+    "plan_status": "enabled",
+    "schedule_exhausted": null,
+    "occurrence_count": 1,
+    "latest_occurrence": {
+      "occurrence_id": "occurrence-...",
+      "window_start_utc": "2026-10-01T01:00:00Z",
+      "window_end_utc": "2026-10-01T01:05:00Z",
+      "status": "pending_confirmation",
+      "terminal_reason_code": null,
+      "run_id": null,
+      "run": null,
+      "output_path": null,
+      "output_path_recorded": false,
+      "output_file_exists": null,
+      "execution_status_code": "pending_confirmation"
+    }
+  },
+  "request_id": "..."
+}
+```
+
+只有媒体结算证据通过核验后才会返回 `output_path` 并置 `output_path_recorded: true`。该模式不创建 consent Lease，也不签发 Lease-use proof。
 
 ## 5.2 每日/每周有限无人值守计划
 
@@ -1125,7 +1231,9 @@ Content-Type: application/json
 
 `kind` 只能是 `daily` 或 `weekly`；`weekly` 的 `weekdays` 必须是非空、去重的小写英文星期数组，`daily` 则为 `null`。日期跨度最多 366 天、次数最多 366、单次时长 `1..600` 秒、启动宽限最多 300 秒。`max_runs` 必须等于 `maximum_occurrences`，总授权时长必须覆盖全部次数，`valid_until` 必须严格晚于最后一次计划最晚结束时刻。计划不主动唤醒机器；错过窗口、环境不符或不确定启动都不自动补录或重试。
 
-与一次性计划不同，当前 `GET /plan-setups/{id}` 的周期响应只表示设置进度和 `scheduled` 排期，不提供每次 Occurrence/Run 的执行终态；不能把 `scheduled` 当成录制成功。媒体保存在授权时冻结的目录中，执行及失败证据写入本地审计日志。逐次执行状态 API 仍待实现。
+托盘中的本地无人值守安全控制会按当前 Windows 用户和会话单独列出周期计划，并显示排期、下次本地执行、剩余 Lease 配额和活动 Run 状态。用户可在本地明确确认后撤销某一个精确 Lease。没有 HTTP Lease 撤销端点；API key 或 API 请求不能代替本地同意。
+
+与一次性计划不同，`GET /plan-setups/{id}` 的周期响应只表示设置进度和 `scheduled` 排期，不能把 `scheduled` 当成录制成功。请查询 `GET /api/v1/plans/{plan_id}/status` 获取持久化的 Occurrence/Run 终态；成功结算时还会返回核验后的实际媒体路径及当前文件存在性。
 
 ## 6. 创建录制（原始 API）
 

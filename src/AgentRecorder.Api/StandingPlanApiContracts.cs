@@ -34,6 +34,36 @@ public sealed record StandingPlanApiRequest(
     string OutputDirectory,
     string FrozenFileName);
 
+public sealed record RequiredOncePlanApiRequest(
+    string IdempotencyKey,
+    DateTimeOffset ScheduledStartUtc,
+    DateTimeOffset LatestStartUtc,
+    DateTimeOffset PlannedEndUtc,
+    TimeSpan Duration,
+    string OutputDirectory,
+    string FrozenFileName);
+
+public interface IRequiredOncePlanSetupGateway
+{
+    bool IsInteractiveDesktopAvailable { get; }
+
+    bool IsExecutionSupported => false;
+
+    RequiredOncePlanSetupCreateResult CreateOrGet(RequiredOncePlanApiRequest request);
+
+    StandingPlanSetupState? Get(string setupIntentId);
+}
+
+public sealed record RequiredOncePlanSetupCreateResult(
+    StandingPlanSetupCreateStatus Status,
+    string? SetupIntentId,
+    string StatusCode,
+    long StatusVersion,
+    string? PlanId,
+    string? OccurrenceId,
+    string? ReasonCode,
+    string? StatusVersionCursor = null);
+
 public enum StandingPlanSetupCreateStatus
 {
     Created,
@@ -68,7 +98,10 @@ public sealed record StandingPlanSetupState(
     string? RecordingStatusUrl = null,
     DateTimeOffset? StartedAtUtc = null,
     DateTimeOffset? CompletedAtUtc = null,
-    string? StatusVersionCursor = null);
+    string? StatusVersionCursor = null,
+    string AuthorizationMode = "standing_lease",
+    bool RequiresExecutionConfirmation = false,
+    bool ExecutionSupported = false);
 
 /// <summary>
 /// A lexicographically comparable durable snapshot cursor.  The values are

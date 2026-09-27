@@ -324,6 +324,13 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
             UpdateRun(connection, transaction, chain.Run, normalRunVersion);
             UpdateUse(connection, transaction, chain.Use, normalUseVersion);
             UpdateOccurrence(connection, transaction, chain.Occurrence, normalOccurrenceVersion);
+            _ = SqliteRecordingRunOutputEvidence.InsertVerifiedWithinTransaction(
+                connection,
+                transaction,
+                chain.Run.Id,
+                chain.Occurrence.Id,
+                meta!.OutputPath!,
+                terminatedAtUtc);
             return StandingLeaseLifecycleActionResult.Applied("media_settled", terminal: true);
         });
     }
@@ -425,12 +432,11 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
             return false;
         }
 
-        // FFmpeg Probe always supplies OutputPath/OutputFileExists, while a
-        // backend that only reports in-memory terminal metadata may omit the
-        // path. Require the strong file-exists bit when a path is supplied,
-        // and always require positive output bytes.
+        // Path evidence is only persisted when the actual probed media target
+        // is positively identified and still exists at settlement time.
         if (meta.SizeBytes <= 0 ||
-            (!string.IsNullOrWhiteSpace(meta.OutputPath) && !meta.OutputFileExists))
+            string.IsNullOrWhiteSpace(meta.OutputPath) ||
+            !meta.OutputFileExists)
         {
             failureReason = "capture_output_missing";
             return false;

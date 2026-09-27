@@ -26,7 +26,7 @@ public sealed class ApiServer
     private const string Prefix = "/api/v1";
     private static readonly string ProductVersion = ResolveProductVersion();
 
-    private readonly TcpListener _listener = new(IPAddress.Loopback, Port);
+    private readonly TcpListener _listener;
     private readonly object _lifecycleGate = new();
     private readonly object _clientTaskGate = new();
     private readonly HashSet<Task> _clientTasks = new();
@@ -42,6 +42,8 @@ public sealed class ApiServer
     private readonly IPerformanceSummaryProvider _performanceSummaryProvider;
     private readonly IStandingPlanSetupGateway? _standingPlanSetupGateway;
     private readonly IRecurringPlanSetupGateway? _recurringPlanSetupGateway;
+    private readonly IPlanExecutionStatusGateway? _planExecutionStatusGateway;
+    private readonly IRequiredOncePlanSetupGateway? _requiredOncePlanSetupGateway;
     private CancellationTokenSource _cts = new();
     private Task? _loopTask;
     private int _started;
@@ -62,8 +64,31 @@ public sealed class ApiServer
         IEnsureContextStore? ensureContextStore = null,
         IPerformanceSummaryProvider? performanceSummaryProvider = null,
         IStandingPlanSetupGateway? standingPlanSetupGateway = null,
-        IRecurringPlanSetupGateway? recurringPlanSetupGateway = null)
+        IRecurringPlanSetupGateway? recurringPlanSetupGateway = null,
+        IPlanExecutionStatusGateway? planExecutionStatusGateway = null,
+        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null)
+        : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
+            performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
+            planExecutionStatusGateway, Port, requiredOncePlanSetupGateway)
     {
+    }
+
+    internal ApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray,
+        RuntimeReadiness? readiness,
+        WindowsAutoStartManager? autoStart,
+        FfmpegPrewarmer? ffmpegPrewarmer,
+        IPerformanceTracer? tracer,
+        IEnsureContextStore? ensureContextStore,
+        IPerformanceSummaryProvider? performanceSummaryProvider,
+        IStandingPlanSetupGateway? standingPlanSetupGateway,
+        IRecurringPlanSetupGateway? recurringPlanSetupGateway,
+        IPlanExecutionStatusGateway? planExecutionStatusGateway,
+        int listenPort,
+        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null)
+    {
+        if (listenPort is < 0 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(listenPort));
+        _listener = new TcpListener(IPAddress.Loopback, listenPort);
         _engine = engine; _audit = audit; _tray = tray;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _ensureContextStore = ensureContextStore;
@@ -73,8 +98,14 @@ public sealed class ApiServer
         _performanceSummaryProvider = performanceSummaryProvider ?? NoDataPerformanceSummaryProvider.Instance;
         _standingPlanSetupGateway = standingPlanSetupGateway;
         _recurringPlanSetupGateway = recurringPlanSetupGateway;
+        _planExecutionStatusGateway = planExecutionStatusGateway;
+        _requiredOncePlanSetupGateway = requiredOncePlanSetupGateway;
         _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
+
+    internal int BoundPort => _started == 0
+        ? throw new InvalidOperationException("The API server has not started.")
+        : ((IPEndPoint)_listener.LocalEndpoint).Port;
 
     /// <summary>
     /// Returns the single microphone provider used for request parsing and public
@@ -391,6 +422,13 @@ public sealed class ApiServer
             return GetPlanSetup(seg[1], req, reqId);
         }
 
+        if (seg.Length >= 1 && seg[0] == "plans" && method == "GET")
+        {
+            if (seg.Length != 3 || seg[2] != "status")
+                throw new ApiException(404, "PLAN_NOT_FOUND", "The requested plan was not found.");
+            return GetPlanExecutionStatus(seg[1], reqId);
+        }
+
         if (seg.Length >= 2 && seg[0] == "confirmations" && method == "GET")
         {
             var confId = seg[1];
@@ -434,6 +472,61 @@ public sealed class ApiServer
         throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint: " + sub);
     }
 
+    private string GetPlanExecutionStatus(string planId, string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(planId) || planId.Length > 128 ||
+            planId != planId.Trim() ||
+            !planId.All(character => character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.'))
+            throw new ApiException(400, "INVALID_ARGUMENT", "plan_id is not a valid plan identifier.");
+        if (_planExecutionStatusGateway is null)
+            throw new ApiException(503, "PLAN_STATUS_UNAVAILABLE", "Durable plan execution status is unavailable.");
+
+        PlanExecutionStatusState? state;
+        try
+        {
+            state = _planExecutionStatusGateway.Get(planId);
+        }
+        catch
+        {
+            // Keep persistence details, file paths, and identities out of HTTP errors.
+            throw new ApiException(503, "PLAN_STATUS_UNAVAILABLE", "Durable plan execution status is unavailable.");
+        }
+        if (state is null)
+            throw new ApiException(404, "PLAN_NOT_FOUND", "The requested plan was not found.");
+
+        return ApiResponse.Ok(new
+        {
+            plan_id = state.PlanId,
+            kind = state.Kind,
+            plan_status = state.PlanStatus,
+            schedule_exhausted = state.ScheduleExhausted,
+            occurrence_count = state.OccurrenceCount,
+            next_occurrence = PlanExecutionOccurrenceObject(state.NextOccurrence),
+            latest_occurrence = PlanExecutionOccurrenceObject(state.LatestOccurrence)
+        }, requestId);
+    }
+
+    private static object? PlanExecutionOccurrenceObject(PlanExecutionOccurrenceState? occurrence) =>
+        occurrence is null ? null : new
+        {
+            occurrence_id = occurrence.OccurrenceId,
+            window_start_utc = occurrence.WindowStartUtc,
+            window_end_utc = occurrence.WindowEndUtc,
+            status = occurrence.Status,
+            terminal_reason_code = occurrence.TerminalReasonCode,
+            run_id = occurrence.RunId,
+            run = occurrence.Run is null ? null : new
+            {
+                run_id = occurrence.Run.RunId,
+                status = occurrence.Run.Status,
+                terminal_reason_code = occurrence.Run.TerminalReasonCode
+            },
+            output_path = occurrence.OutputPath,
+            output_path_recorded = occurrence.OutputPathRecorded,
+            output_file_exists = occurrence.OutputFileExists,
+            execution_status_code = occurrence.ExecutionStatusCode
+        };
+
     private string CreatePlan(HttpRequest req, string reqBody, string reqId, ref int status)
     {
         var idempotencyKey = StandingPlanApiRequestParser.NormalizeIdempotencyKey(
@@ -441,10 +534,57 @@ public sealed class ApiServer
 
         return ReadPlanScheduleKind(reqBody) switch
         {
-            "once" => CreateStandingPlan(reqBody, idempotencyKey, reqId, ref status),
+            "once" => CreateOneTimePlan(reqBody, idempotencyKey, reqId, ref status),
             "daily" or "weekly" => CreateRecurringPlan(reqBody, idempotencyKey, reqId, ref status),
             _ => throw new ApiException(400, "INVALID_ARGUMENT", "schedule.kind must be 'once', 'daily', or 'weekly'."),
         };
+    }
+
+    private string CreateOneTimePlan(string reqBody, string idempotencyKey, string reqId, ref int status)
+    {
+        if (StandingPlanApiRequestParser.IsRequiredAuthorizationMode(reqBody))
+        {
+            var request = StandingPlanApiRequestParser.ParseRequired(reqBody, idempotencyKey);
+            if (_requiredOncePlanSetupGateway is null)
+                throw new ApiException(503, "REQUIRED_PLAN_SETUP_UNAVAILABLE", "The local required-plan setup host is unavailable.");
+            if (!RequiredOnceInteractiveDesktopAvailable())
+                throw new ApiException(409, "INTERACTIVE_DESKTOP_REQUIRED",
+                    "A local interactive desktop is required to create and approve a required-mode plan.",
+                    new { suggested_action = "run_tray_host" });
+
+            RequiredOncePlanSetupCreateResult result;
+            try { result = _requiredOncePlanSetupGateway.CreateOrGet(request); }
+            catch (Exception exception)
+            {
+                _audit.Log("required_once_setup.api_create_failed", new
+                {
+                    reason_code = "setup_persistence_failed",
+                    exception_type = exception.GetType().Name,
+                });
+                throw new ApiException(500, "SETUP_PERSISTENCE_FAILED", "The required one-time setup could not be persisted.");
+            }
+            if (result.Status == StandingPlanSetupCreateStatus.Conflict)
+                throw new ApiException(409, "IDEMPOTENCY_KEY_REUSED",
+                    "The Idempotency-Key is already bound to a different normalized request.",
+                    new { setup_intent_id = result.SetupIntentId, reason_code = result.ReasonCode ?? "idempotency_key_reused" });
+            if (result.Status == StandingPlanSetupCreateStatus.Rejected || result.SetupIntentId is null)
+                throw new ApiException(409,
+                    result.ReasonCode == "interactive_desktop_unavailable" ? "INTERACTIVE_DESKTOP_REQUIRED" : "REQUIRED_PLAN_SETUP_REJECTED",
+                    "The required one-time setup was not accepted.",
+                    new { reason_code = result.ReasonCode ?? "setup_rejected" });
+
+            status = 202;
+            return ApiResponse.Ok(RequiredOncePlanSetupResponse(new StandingPlanSetupState(
+                result.SetupIntentId, result.StatusCode, result.StatusVersion, result.PlanId, result.OccurrenceId,
+                null, result.StatusCode is "region_selection_pending" or "creation_approval_pending",
+                NextRequiredOnceAction(result.StatusCode, _requiredOncePlanSetupGateway.IsExecutionSupported), result.ReasonCode,
+                StatusVersionCursor: result.StatusVersionCursor,
+                AuthorizationMode: "required",
+                RequiresExecutionConfirmation: true,
+                ExecutionSupported: _requiredOncePlanSetupGateway.IsExecutionSupported)), reqId);
+        }
+
+        return CreateStandingPlan(reqBody, idempotencyKey, reqId, ref status);
     }
 
     private static string ReadPlanScheduleKind(string requestBody)
@@ -641,17 +781,20 @@ public sealed class ApiServer
 
         var recurring = setupIntentId.StartsWith("recurring-setup-", StringComparison.Ordinal);
         var standing = setupIntentId.StartsWith("standing-setup-", StringComparison.Ordinal);
-        if (!recurring && !standing)
+        var requiredOnce = setupIntentId.StartsWith("required-once-setup-", StringComparison.Ordinal);
+        if (!recurring && !standing && !requiredOnce)
             throw PlanSetupNotFound();
 
         var waitMs = ParsePlanSetupWaitMs(req.Query.GetValueOrDefault("wait_ms"));
         var sinceStatus = req.Query.GetValueOrDefault("since_status");
         var sinceVersionText = req.Query.GetValueOrDefault("since_status_version") ??
                                req.Query.GetValueOrDefault("since_version");
-        var sinceVersion = ParsePlanSetupSinceVersion(sinceVersionText, recurring);
+        var sinceVersion = ParsePlanSetupSinceVersion(sinceVersionText, recurring, requiredOnce);
 
         if (recurring)
             return GetRecurringPlanSetup(setupIntentId, reqId, waitMs, sinceStatus, sinceVersion);
+        if (requiredOnce)
+            return GetRequiredOncePlanSetup(setupIntentId, reqId, waitMs, sinceStatus, sinceVersion);
 
         var state = ReadStandingPlanSetup(setupIntentId);
 
@@ -708,12 +851,44 @@ public sealed class ApiServer
         return ApiResponse.Ok(RecurringPlanSetupResponse(state), reqId);
     }
 
+    private string GetRequiredOncePlanSetup(string setupIntentId, string reqId, int waitMs,
+        string? sinceStatus, string? sinceVersion)
+    {
+        var state = ReadRequiredOncePlanSetup(setupIntentId);
+        if (waitMs > 0 && (sinceStatus is not null || sinceVersion is not null) &&
+            IsSameRequiredOnceState(state, sinceStatus, sinceVersion))
+        {
+            var deadline = Environment.TickCount64 + waitMs;
+            while (Environment.TickCount64 < deadline)
+            {
+                if (_cts.IsCancellationRequested) break;
+                Thread.Sleep(Math.Min(100, Math.Max(1, (int)(deadline - Environment.TickCount64))));
+                state = ReadRequiredOncePlanSetup(setupIntentId);
+                if (!IsSameRequiredOnceState(state, sinceStatus, sinceVersion)) break;
+            }
+        }
+        return ApiResponse.Ok(RequiredOncePlanSetupResponse(state), reqId);
+    }
+
     private StandingPlanSetupState ReadStandingPlanSetup(string id)
     {
         StandingPlanSetupState? state;
         try { state = _standingPlanSetupGateway?.Get(id); }
         catch { throw PlanSetupNotFound(); }
         if (state is null || !string.Equals(state.SetupIntentId, id, StringComparison.Ordinal))
+            throw PlanSetupNotFound();
+        return state;
+    }
+
+    private StandingPlanSetupState ReadRequiredOncePlanSetup(string id)
+    {
+        StandingPlanSetupState? state;
+        try { state = _requiredOncePlanSetupGateway?.Get(id); }
+        catch { throw PlanSetupNotFound(); }
+        if (state is null || !string.Equals(state.SetupIntentId, id, StringComparison.Ordinal) ||
+            !string.Equals(state.AuthorizationMode, "required", StringComparison.Ordinal) ||
+            !TryParseRequiredOnceStatusVersionCursor(state.StatusVersionCursor, out var cursorVersion) ||
+            cursorVersion != state.StatusVersion)
             throw PlanSetupNotFound();
         return state;
     }
@@ -754,6 +929,22 @@ public sealed class ApiServer
             version >= 0 && string.Equals(suffix, version.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
     }
 
+    private static bool IsSameRequiredOnceState(StandingPlanSetupState state, string? sinceStatus, string? sinceVersion) =>
+        (sinceStatus is null || string.Equals(state.StatusCode, sinceStatus, StringComparison.Ordinal)) &&
+        (sinceVersion is null ||
+         (long.TryParse(sinceVersion, NumberStyles.None, CultureInfo.InvariantCulture, out var numericVersion) && state.StatusVersion <= numericVersion) ||
+         (TryParseRequiredOnceStatusVersionCursor(sinceVersion, out var cursor) && state.StatusVersion <= cursor));
+
+    private static bool TryParseRequiredOnceStatusVersionCursor(string? value, out long version)
+    {
+        const string prefix = "required-once-setup/v1:";
+        version = 0;
+        if (value is null || !value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var suffix = value[prefix.Length..];
+        return long.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out version) &&
+            version >= 0 && string.Equals(suffix, version.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    }
+
     private static object RecurringPlanSetupResponse(AgentRecorder.Api.RecurringPlanSetupState state) => new
     {
         setup_intent_id = state.SetupIntentId,
@@ -769,6 +960,42 @@ public sealed class ApiServer
         reason_code = state.ReasonCode,
         run_id = (string?)null,
         recording_status_url = (string?)null,
+    };
+
+    private static object RequiredOncePlanSetupResponse(StandingPlanSetupState state) => new
+    {
+        setup_intent_id = state.SetupIntentId,
+        status = ProjectRequiredOnceStatus(state.StatusCode),
+        status_version = state.StatusVersion,
+        status_version_cursor = state.StatusVersionCursor,
+        status_url = $"{Prefix}/plan-setups/{Uri.EscapeDataString(state.SetupIntentId)}",
+        plan_id = state.PlanId,
+        occurrence_id = state.OccurrenceId,
+        lease_id = (string?)null,
+        authorization_mode = "required",
+        requires_local_action = state.RequiresLocalAction,
+        next_action = state.NextAction,
+        reason_code = state.ReasonCode,
+        run_id = (string?)null,
+        recording_status_url = (string?)null,
+        execution_supported = state.ExecutionSupported,
+        requires_execution_confirmation = true,
+        execution_limitation = state.ExecutionSupported ? null : "execution_runtime_unavailable",
+    };
+
+    private static string? NextRequiredOnceAction(string statusCode, bool executionSupported) => statusCode switch
+    {
+        "region_selection_pending" => "local_region_selection",
+        "creation_approval_pending" => "local_plan_creation_approval",
+        "scheduled" => executionSupported ? "required_once_natural_wake_execution" : "execution_runtime_unavailable",
+        _ => null,
+    };
+
+    private static string ProjectRequiredOnceStatus(string statusCode) => statusCode switch
+    {
+        "region_selection_pending" => "pending_selection",
+        "creation_approval_pending" => "pending_creation_approval",
+        _ => statusCode,
     };
 
     private static bool IsSameState(StandingPlanSetupState state, string? sinceStatus, string? sinceVersion) =>
@@ -1659,22 +1886,31 @@ public sealed class ApiServer
         return Math.Min(ms, 25000);
     }
 
-    private static string? ParsePlanSetupSinceVersion(string? value, bool recurring)
+    private static string? ParsePlanSetupSinceVersion(string? value, bool recurring, bool requiredOnce = false)
     {
         if (string.IsNullOrEmpty(value)) return null;
         if (long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var version) && version >= 0)
             return version.ToString(CultureInfo.InvariantCulture);
-        if (recurring ? TryParseRecurringStatusVersionCursor(value, out _) : StandingPlanStatusVersionCursor.TryParse(value, out _))
+        if (recurring ? TryParseRecurringStatusVersionCursor(value, out _) :
+            requiredOnce ? TryParseRequiredOnceStatusVersionCursor(value, out _) : StandingPlanStatusVersionCursor.TryParse(value, out _))
             return value;
         throw new ApiException(400, "INVALID_ARGUMENT",
             recurring
                 ? "since_status_version must be a non-negative integer or a canonical recurring setup cursor."
-                : "since_status_version must be a non-negative integer or a valid standing setup cursor.");
+                : requiredOnce
+                    ? "since_status_version must be a non-negative integer or a canonical required-once setup cursor."
+                    : "since_status_version must be a non-negative integer or a valid standing setup cursor.");
     }
 
     private bool RecurringInteractiveDesktopAvailable()
     {
         try { return _recurringPlanSetupGateway?.IsInteractiveDesktopAvailable == true; }
+        catch { return false; }
+    }
+
+    private bool RequiredOnceInteractiveDesktopAvailable()
+    {
+        try { return _requiredOncePlanSetupGateway?.IsInteractiveDesktopAvailable == true; }
         catch { return false; }
     }
 
@@ -1882,6 +2118,7 @@ public sealed class ApiServer
                 profile_crud_supported = false,
                 create_endpoint = "/api/v1/plans",
                 status_endpoint = "/api/v1/plan-setups/{setup_intent_id}",
+                execution_status_endpoint = "/api/v1/plans/{plan_id}/status",
                 execution_supported = _standingPlanSetupGateway?.IsExecutionSupported ?? false,
                 recurring = new
                 {
@@ -1898,8 +2135,23 @@ public sealed class ApiServer
                     nested_recording_allowed = false,
                     profile_crud_supported = false,
                     create_endpoint = "/api/v1/plans",
-                    status_endpoint = "/api/v1/plan-setups/{setup_intent_id}"
+                    status_endpoint = "/api/v1/plan-setups/{setup_intent_id}",
+                    execution_status_endpoint = "/api/v1/plans/{plan_id}/status"
                 }
+            },
+            required_once_plan = new
+            {
+                setup_supported = _requiredOncePlanSetupGateway is not null && RequiredOnceInteractiveDesktopAvailable(),
+                execution_supported = _requiredOncePlanSetupGateway?.IsExecutionSupported == true,
+                authorization_mode = "required",
+                creation_requires_local_approval = true,
+                second_confirmation_required_at_execution = true,
+                due_occurrence_behavior = _requiredOncePlanSetupGateway?.IsExecutionSupported == true
+                    ? "local_per_run_confirmation_then_fixed_region_capture"
+                    : "inert_until_execution_runtime_is_available",
+                create_endpoint = "/api/v1/plans",
+                status_endpoint = "/api/v1/plan-setups/{setup_intent_id}",
+                execution_status_endpoint = "/api/v1/plans/{plan_id}/status",
             },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
             readiness = _readiness?.ToCapabilitiesObject(),

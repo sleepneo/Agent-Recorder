@@ -522,6 +522,43 @@ internal static class CaptureAuthorizationProofIssuer
             maxFrameCount: recording.Config.ScreenshotSeries?.PlannedFrameCount);
     }
 
+    internal static RequiredOnceExecutionProof IssueRequiredOnceExecution(
+        Recording recording,
+        CapturePlan approvedPlan,
+        RequiredOnceCaptureExecutionSpecification specification,
+        string executionApprovalId,
+        string proofId,
+        string oneTimeNonce,
+        DateTimeOffset committedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(recording);
+        ArgumentNullException.ThrowIfNull(approvedPlan);
+        ArgumentNullException.ThrowIfNull(specification);
+        if (recording.Id.Length == 0 || recording.OutputPath != specification.FrozenOutputFilePath ||
+            recording.DurationSeconds != (int)specification.Duration.TotalSeconds ||
+            recording.Config.DurationSeconds != recording.DurationSeconds || recording.CountdownSeconds != 0 ||
+            recording.Config.CountdownSeconds != 0 || recording.Config.AudioRequested || recording.Config.Microphone ||
+            recording.Config.IsScreenshotSeries || recording.Config.OutputConflictPolicy != "fail_if_exists" ||
+            approvedPlan.PlannedBackend != "ffmpeg-region" || approvedPlan.SourceKind != "region" ||
+            approvedPlan.AudioSourceKind != AudioCaptureSourceKind.None)
+            throw new InvalidOperationException("The recording is not the exact required-once capture specification.");
+        return new RequiredOnceExecutionProof(
+            proofId,
+            recording.Id,
+            executionApprovalId,
+            ComputeCapturePlanDigest(approvedPlan),
+            ComputeCaptureScopeDigest(recording, approvedPlan),
+            committedAtUtc,
+            specification.LatestStartUtc,
+            specification.CurrentUserSid,
+            specification.SessionBinding,
+            specification.PlanId,
+            specification.OccurrenceId,
+            specification.SpecificationDigest,
+            oneTimeNonce,
+            specification.Duration);
+    }
+
     /// <summary>
     /// Synthetic proof used only by the existing direct-engine test seam. It
     /// is never reachable from API/App composition and is marked on Recording

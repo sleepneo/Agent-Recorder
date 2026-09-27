@@ -946,6 +946,7 @@ public sealed class RecurringOccurrenceEnvironmentRecheckPersistenceTests
         internal void AllowMultipleRunsPerOccurrenceForCorruption()
         {
             Fixture.Execute("""
+                DROP TRIGGER trg_recording_run_output_evidence_settled_chain_insert;
                 PRAGMA foreign_keys = OFF;
                 BEGIN;
                 CREATE TABLE recording_runs_corrupt (
@@ -977,6 +978,7 @@ public sealed class RecurringOccurrenceEnvironmentRecheckPersistenceTests
         internal void AllowMultipleUsesPerRunForCorruption()
         {
             Fixture.Execute("""
+                DROP TRIGGER trg_recording_run_output_evidence_settled_chain_insert;
                 PRAGMA foreign_keys = OFF;
                 BEGIN;
                 CREATE TABLE recurring_lease_uses_corrupt (

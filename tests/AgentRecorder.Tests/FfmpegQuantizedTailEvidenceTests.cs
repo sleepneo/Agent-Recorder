@@ -122,7 +122,102 @@ public sealed class FfmpegQuantizedTailEvidenceTests : IDisposable
             meta.SizeBytes, meta.ProbeFileLastWriteUtcTicks.Value));
     }
 
-    private static CaptureConfig CreateConfig(string outputPath, string sourceKind = "region", int fps = 30, bool audio = false) => new()
+    [Fact]
+    public void ProbeAcceptsTheRealStable88Over3FpsTailAndRejectsUntrustedVariants()
+    {
+        var config = CreateConfig(Path.Combine(_root, "recurring-88-over-3.mp4"));
+        QuantizedTailTestMedia.Generate(config.OutputPath, 294, "88/3");
+
+        var meta = FfmpegCaptureBackend.ProbeAuthorizedFixedRateCapture(config.OutputPath, config);
+        var video = Assert.Single(meta.ProbeStreams);
+        Assert.True(meta.OutputFileExists);
+        Assert.Equal(294, video.FrameCount);
+        Assert.Equal(88d / 3d, video.AverageFrameRate!.Value, 5);
+        Assert.Equal(88d / 3d, video.NominalFrameRate!.Value, 5);
+        Assert.Equal(29, meta.Fps); // Probe's legacy integer projection rounds 88/3.
+        Assert.Equal(10.023, meta.DurationSeconds, 3);
+        Assert.Equal(10.022727, video.DurationSeconds!.Value, 6);
+
+        var evidence = Assert.IsType<FfmpegQuantizedTailEvidence>(meta.QuantizedTailEvidence);
+        Assert.True(evidence.Matches(meta, config.OutputPath, TimeSpan.FromSeconds(10)));
+
+        var timeline = CreateTimeline(294, 3d / 88);
+        var stamp = meta.ProbeFileLastWriteUtcTicks!.Value;
+        FfmpegQuantizedTailEvidence? Attempt(
+            FfmpegPacketTimeline? candidateTimeline = null,
+            OutputMeta? candidateMeta = null,
+            CaptureConfig? candidateConfig = null,
+            bool capsApplied = true,
+            long? beforeLength = null,
+            long? beforeStamp = null,
+            long? afterLength = null,
+            long? afterStamp = null) =>
+            FfmpegQuantizedTailEvidence.TryCreate(
+                candidateMeta ?? meta,
+                candidateConfig ?? config,
+                candidateTimeline ?? timeline,
+                capsApplied,
+                beforeLength ?? meta.SizeBytes,
+                beforeStamp ?? stamp,
+                afterLength ?? meta.SizeBytes,
+                afterStamp ?? stamp);
+
+        Assert.NotNull(Attempt());
+
+        // A packet beginning exactly at the cutoff is never an authorized tail.
+        const double cutoffStep = 10d / 293;
+        var atCutoff = CreateTimeline(294, cutoffStep);
+        var atCutoffMeta = Clone(meta, durationSeconds: 10.034, streamDurationSeconds: 10 + cutoffStep, frameCount: 294);
+        Assert.Null(Attempt(atCutoff, atCutoffMeta));
+
+        // A single gap or a regular timeline that disagrees with stream metadata is not proof.
+        var gapIndex = 80;
+        var gapped = WithPacket(
+            timeline,
+            gapIndex,
+            new FfmpegPacketTiming(timeline.Packets[gapIndex].PtsSeconds + 0.01, 3d / 88));
+        Assert.Null(Attempt(gapped));
+        Assert.Null(Attempt(CreateTimeline(294, 1d / 30)));
+
+        Assert.Null(Attempt(candidateConfig: CreateConfig(config.OutputPath + ".wrong")));
+        Assert.Null(Attempt(candidateMeta: Clone(meta, outputPath: config.OutputPath + ".wrong")));
+        Assert.Null(Attempt(beforeStamp: stamp + 1));
+        Assert.Null(Attempt(candidateMeta: Clone(meta, fileStamp: stamp + 1)));
+        Assert.Null(Attempt(afterStamp: stamp + 1));
+        Assert.Null(Attempt(capsApplied: false));
+        Assert.Null(Attempt(candidateConfig: CreateConfig(config.OutputPath, durationSeconds: null)));
+
+        const double outOfBoundPeriod = 20d / 579; // 28.95 fps is more than 3% below the requested 30.
+        var outOfBoundTimeline = CreateTimeline(290, outOfBoundPeriod);
+        var outOfBoundMeta = Clone(
+            meta,
+            durationSeconds: 10.017,
+            streamDurationSeconds: 290 * outOfBoundPeriod,
+            frameCount: 290,
+            frameRate: 579d / 20);
+        Assert.Null(Attempt(outOfBoundTimeline, outOfBoundMeta));
+
+        // A coherent additional frame after the cutoff remains a real overrun, not quantization.
+        var overlongTimeline = CreateTimeline(295, 3d / 88);
+        var overlongEnd = 295 * (3d / 88);
+        var overlongMeta = Clone(
+            meta,
+            durationSeconds: 10.057,
+            streamDurationSeconds: overlongEnd,
+            frameCount: 295);
+        Assert.Null(Attempt(overlongTimeline, overlongMeta));
+
+        Assert.False(evidence.Matches(Clone(meta, fileStamp: stamp + 1), config.OutputPath, TimeSpan.FromSeconds(10)));
+        Assert.False(evidence.Matches(Clone(meta, outputPath: config.OutputPath + ".wrong"), config.OutputPath, TimeSpan.FromSeconds(10)));
+        Assert.False(evidence.Matches(Clone(meta, durationSeconds: 10.1), config.OutputPath, TimeSpan.FromSeconds(10)));
+    }
+
+    private static CaptureConfig CreateConfig(
+        string outputPath,
+        string sourceKind = "region",
+        int fps = 30,
+        bool audio = false,
+        int? durationSeconds = 10) => new()
     {
         SourceKind = sourceKind,
         Mode = "video",
@@ -130,7 +225,7 @@ public sealed class FfmpegQuantizedTailEvidenceTests : IDisposable
         Fps = fps,
         OutputPath = outputPath,
         OutputConflictPolicy = "fail_if_exists",
-        DurationSeconds = 10,
+        DurationSeconds = durationSeconds,
         AudioSourceKind = audio ? AudioCaptureSourceKind.Microphone : AudioCaptureSourceKind.None,
         Microphone = audio,
     };
@@ -140,7 +235,10 @@ public sealed class FfmpegQuantizedTailEvidenceTests : IDisposable
         string? outputPath = null,
         double? durationSeconds = null,
         long? fileStamp = null,
-        bool? hasAudio = null)
+        bool? hasAudio = null,
+        double? streamDurationSeconds = null,
+        long? frameCount = null,
+        double? frameRate = null)
     {
         var clone = new OutputMeta
         {
@@ -158,21 +256,20 @@ public sealed class FfmpegQuantizedTailEvidenceTests : IDisposable
                 CodecType = stream.CodecType,
                 CodecName = stream.CodecName,
                 StartTimeSeconds = stream.StartTimeSeconds,
-                DurationSeconds = stream.DurationSeconds,
+                DurationSeconds = streamDurationSeconds ?? stream.DurationSeconds,
                 TimeBaseSeconds = stream.TimeBaseSeconds,
-                AverageFrameRate = stream.AverageFrameRate,
-                NominalFrameRate = stream.NominalFrameRate,
-                FrameCount = stream.FrameCount,
+                AverageFrameRate = frameRate ?? stream.AverageFrameRate,
+                NominalFrameRate = frameRate ?? stream.NominalFrameRate,
+                FrameCount = frameCount ?? stream.FrameCount,
             }).ToArray(),
         };
         clone.ProbeFileLastWriteUtcTicks = fileStamp ?? source.ProbeFileLastWriteUtcTicks;
         return clone;
     }
 
-    private static FfmpegPacketTimeline CreateTimeline()
+    private static FfmpegPacketTimeline CreateTimeline(int frameCount = 299, double framePeriod = 6d / 179)
     {
-        const double framePeriod = 6d / 179;
-        return new FfmpegPacketTimeline(Enumerable.Range(0, 299)
+        return new FfmpegPacketTimeline(Enumerable.Range(0, frameCount)
             .Select(index => new FfmpegPacketTiming(index * framePeriod, framePeriod))
             .ToArray());
     }

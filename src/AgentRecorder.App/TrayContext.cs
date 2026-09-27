@@ -31,6 +31,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     public string? ChapterMarksHotkeyGesture => "Ctrl+Shift+F11";
     public string ChapterMarksHotkeyRegistrationPolicy => "while_recording";
     internal IUiTextProvider CurrentUiTextProvider => _uiText;
+    internal IWindowActivator ConfirmationWindowActivator => _confirmationWindowActivator;
 
     private readonly NotifyIcon _icon;
     private readonly RecordingEngine _engine;

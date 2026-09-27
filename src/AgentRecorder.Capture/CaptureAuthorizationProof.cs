@@ -13,7 +13,8 @@ public enum CaptureAuthorizationProofKind
 {
     InteractiveConfirmation = 0,
     StandingLeaseUse = 1,
-    RecurringLeaseUse = 2
+    RecurringLeaseUse = 2,
+    RequiredOnceExecution = 3
 }
 
 /// <summary>
@@ -210,6 +211,93 @@ public abstract class CaptureAuthorizationProof
     {
         if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException("Authorization proof fields cannot be empty.", parameterName);
+        return value;
+    }
+}
+
+/// <summary>
+/// One-run interactive authorization issued from a durable required-once
+/// start-commit receipt. It is intentionally distinct from both Lease proof
+/// kinds and cannot be constructed from transport input.
+/// </summary>
+public sealed class RequiredOnceExecutionProof : CaptureAuthorizationProof
+{
+    internal RequiredOnceExecutionProof(
+        string proofId,
+        string runId,
+        string executionApprovalId,
+        string capturePlanDigest,
+        string scopeDigest,
+        DateTimeOffset committedAtUtc,
+        DateTimeOffset latestStartUtc,
+        string currentUserSid,
+        string sessionBinding,
+        string planId,
+        string occurrenceId,
+        string specificationDigest,
+        string oneTimeNonce,
+        TimeSpan maxDuration)
+        : base(
+            proofId,
+            recordingId: runId,
+            runId,
+            CaptureAuthorizationProofKind.RequiredOnceExecution,
+            executionApprovalId,
+            capturePlanDigest,
+            scopeDigest,
+            committedAtUtc,
+            latestStartUtc,
+            currentUserSid + "|" + sessionBinding,
+            maxDurationSeconds: null,
+            maxFrameCount: null)
+    {
+        PlanId = RequireField(planId, nameof(planId));
+        OccurrenceId = RequireField(occurrenceId, nameof(occurrenceId));
+        SpecificationDigest = RequireDigest(specificationDigest, nameof(specificationDigest));
+        ExecutionApprovalId = RequireField(executionApprovalId, nameof(executionApprovalId));
+        CurrentUserSid = RequireField(currentUserSid, nameof(currentUserSid));
+        SessionBinding = RequireField(sessionBinding, nameof(sessionBinding));
+        LatestStartUtc = latestStartUtc;
+        OneTimeNonce = RequireNonce(oneTimeNonce);
+        if (committedAtUtc.Offset != TimeSpan.Zero || latestStartUtc.Offset != TimeSpan.Zero ||
+            committedAtUtc >= latestStartUtc || maxDuration <= TimeSpan.Zero ||
+            maxDuration.Ticks % TimeSpan.TicksPerMillisecond != 0)
+            throw new ArgumentOutOfRangeException(nameof(maxDuration));
+        MaxDuration = maxDuration;
+        MaxDurationMilliseconds = maxDuration.Ticks / TimeSpan.TicksPerMillisecond;
+    }
+
+    public string PlanId { get; }
+    public string OccurrenceId { get; }
+    public string SpecificationDigest { get; }
+    public string ExecutionApprovalId { get; }
+    public string CurrentUserSid { get; }
+    public string SessionBinding { get; }
+    public DateTimeOffset LatestStartUtc { get; }
+    public string OneTimeNonce { get; }
+    public TimeSpan MaxDuration { get; }
+    public long MaxDurationMilliseconds { get; }
+
+    private static string RequireField(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value != value.Trim() || value.Any(char.IsControl))
+            throw new ArgumentException("Required-once proof fields must be canonical.", parameterName);
+        return value;
+    }
+
+    private static string RequireDigest(string value, string parameterName)
+    {
+        if (value is null || value.Length != 64 || value.Any(character =>
+                !(character is >= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("The required-once specification digest must be lowercase hexadecimal.", parameterName);
+        return value;
+    }
+
+    private static string RequireNonce(string value)
+    {
+        if (value is null || value.Length != 32 || value.Any(character =>
+                !(character is >= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("The required-once proof nonce must be 128-bit lowercase hexadecimal.", nameof(value));
         return value;
     }
 }

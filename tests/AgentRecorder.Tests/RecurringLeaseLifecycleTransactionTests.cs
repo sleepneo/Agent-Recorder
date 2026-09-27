@@ -1,6 +1,7 @@
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Core.Automation;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Persistence;
 using Xunit;
 
@@ -72,6 +73,99 @@ public sealed class RecurringLeaseLifecycleTransactionTests
         Assert.Equal(terminalRunVersion, run.Version);
         Assert.Equal(terminalUseVersion, started.Context.Fixture.ReadAccountingRow(use.UseId).Version);
         Assert.Equal(terminalOccurrenceVersion, occurrence.Version);
+    }
+
+    [Fact]
+    public void SuccessfulRecurringSettlementPersistsExactPathAcrossQueryRestartAndFileDeletion()
+    {
+        using var started = Start();
+        var outputPath = started.Receipt.Specification.FrozenOutputFilePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        File.WriteAllText(outputPath, "validated recurring media");
+        var at = started.Context.Fixture.CreatedAt.AddMinutes(3);
+        Assert.True(started.Lifecycle.ObserveFirstFrame(
+            new FirstFrameObservation { FrameNumber = 0, TotalSizeBytes = 100 }, at).Succeeded);
+
+        var settled = started.Lifecycle.CompleteTermination(
+            RecurringLeaseLifecycleTerminationKind.NaturalExit,
+            0,
+            ValidMeta(started, 1.25),
+            at.AddMinutes(1));
+        Assert.True(settled.Succeeded && settled.Changed && settled.Terminal);
+        Assert.Equal(1L, Convert.ToInt64(started.Context.Fixture.Scalar(
+            "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = $run AND evidence_kind_code = 'verified_output_path';",
+            ("$run", started.Receipt.Run.Id))));
+        Assert.Equal(RecordingRunStatus.Settled, new SqliteRecordingRunRepository(started.Context.Fixture.Store)
+            .Get(started.Receipt.Run.Id).Status);
+        Assert.Equal(PlanOccurrenceStatus.Completed, new SqlitePlanOccurrenceRepository(started.Context.Fixture.Store)
+            .Get(started.Context.Slot.OccurrenceId!).Status);
+        Assert.Equal(LeaseUseStatus.Settled, new SqliteRecurringLeaseUseAccountingReader(started.Context.Fixture.Store)
+            .TryGetByOccurrence(started.Context.Slot.OccurrenceIdentity)!.Status);
+
+        var first = new PlanExecutionStatusQueryService(started.Context.Fixture.Store).Get(
+            started.Context.Fixture.PlanId, "S-1-5-21-task261", "session-task261")!;
+        Assert.Equal(outputPath, first.LatestOccurrence!.OutputPath);
+        Assert.True(first.LatestOccurrence.OutputPathRecorded);
+        Assert.True(first.LatestOccurrence.OutputFileExists);
+
+        var changedReplay = ValidMeta(started, 1.25);
+        changedReplay.OutputPath = Path.Combine(started.Context.Fixture.RootPath, "replay-must-not-replace.mp4");
+        var replay = started.Lifecycle.CompleteTermination(
+            RecurringLeaseLifecycleTerminationKind.NaturalExit, 0, changedReplay, at.AddMinutes(2));
+        Assert.True(replay.Succeeded && !replay.Changed && replay.Terminal);
+        Assert.Equal(outputPath, Convert.ToString(started.Context.Fixture.Scalar(
+            "SELECT output_path FROM recording_run_output_evidence WHERE run_id = $run;",
+            ("$run", started.Receipt.Run.Id))));
+
+        File.Delete(outputPath);
+        var reopened = new SqliteOperationalStore(started.Context.Fixture.Store.DatabasePath);
+        var afterRestart = new PlanExecutionStatusQueryService(reopened).Get(
+            started.Context.Fixture.PlanId, "S-1-5-21-task261", "session-task261")!;
+        Assert.Equal(outputPath, afterRestart.LatestOccurrence!.OutputPath);
+        Assert.True(afterRestart.LatestOccurrence.OutputPathRecorded);
+        Assert.False(afterRestart.LatestOccurrence.OutputFileExists);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("outside")]
+    [InlineData("cross_link")]
+    public void CorruptOrMissingOutputEvidenceFailsClosed(string corruption)
+    {
+        using var started = Start();
+        var at = started.Context.Fixture.CreatedAt.AddMinutes(3);
+        Assert.True(started.Lifecycle.ObserveFirstFrame(
+            new FirstFrameObservation { FrameNumber = 0, TotalSizeBytes = 100 }, at).Succeeded);
+        Assert.True(started.Lifecycle.CompleteTermination(
+            RecurringLeaseLifecycleTerminationKind.NaturalExit, 0, ValidMeta(started, 1.25), at.AddMinutes(1)).Succeeded);
+
+        switch (corruption)
+        {
+            case "missing":
+                started.Context.Fixture.Execute(
+                    "DROP TRIGGER trg_recording_run_output_evidence_immutable_delete; DELETE FROM recording_run_output_evidence WHERE run_id = $run;",
+                    ("$run", started.Receipt.Run.Id));
+                break;
+            case "outside":
+                started.Context.Fixture.Execute(
+                    "DROP TRIGGER trg_recording_run_output_evidence_immutable_update; UPDATE recording_run_output_evidence SET output_path = $path WHERE run_id = $run;",
+                    ("$path", Path.Combine(started.Context.Fixture.RootPath, "outside", "video.mp4")),
+                    ("$run", started.Receipt.Run.Id));
+                break;
+            case "cross_link":
+                var crossLinkedPath = Path.Combine(
+                    Path.GetDirectoryName(started.Receipt.Specification.FrozenOutputFilePath)!,
+                    "other-run-output.mp4");
+                started.Context.Fixture.Execute(
+                    "DROP TRIGGER trg_recording_run_output_evidence_immutable_update; UPDATE recording_run_output_evidence SET output_path = $path WHERE run_id = $run;",
+                    ("$path", crossLinkedPath),
+                    ("$run", started.Receipt.Run.Id));
+                break;
+        }
+
+        var exception = Assert.Throws<Phase3PersistenceException>(() => new PlanExecutionStatusQueryService(started.Context.Fixture.Store)
+            .Get(started.Context.Fixture.PlanId, "S-1-5-21-task261", "session-task261"));
+        Assert.Equal("plan_status_data_invalid", exception.Code);
     }
 
     [Fact]
@@ -616,6 +710,9 @@ public sealed class RecurringLeaseLifecycleTransactionTests
         Assert.Equal(RecordingRunStatus.Recording, run.Status);
         Assert.Equal(LeaseUseStatus.Consumed, use.Status);
         Assert.Equal(PlanOccurrenceStatus.RunCreated, occurrence.Status);
+        Assert.Equal(0L, Convert.ToInt64(started.Context.Fixture.Scalar(
+            "SELECT COUNT(*) FROM recording_run_output_evidence WHERE run_id = $run;",
+            ("$run", started.Receipt.Run.Id))));
     }
 
     [Fact]
@@ -708,6 +805,20 @@ public sealed class RecurringLeaseLifecycleTransactionTests
             slotCount: slotCount,
             maxCumulativeDuration: maxCumulativeDuration,
             recordingDuration: recordingDuration);
+        var initialAfterUtc = context.Fixture.CreatedAt.AddHours(-1);
+        for (var index = 0; index < context.Slots.Count; index++)
+        {
+            var advancement = new SqliteRecurringAdvancementTransaction(context.Fixture.Store).AdvanceOne(
+                context.Fixture.PlanId,
+                1,
+                $"task288-lifecycle-cursor-{Guid.NewGuid():N}-{index}",
+                index,
+                initialAfterUtc,
+                context.Fixture.CreatedAt.AddMinutes(index + 2));
+            Assert.Equal("scheduled", advancement.ResultCode);
+            Assert.Equal(context.Slots[index].OccurrenceIdentity, advancement.OccurrenceIdentity);
+        }
+
         var reservation = new RecurringOccurrenceReservationService(
             context.Fixture.Store,
             () => context.Fixture.CreatedAt,

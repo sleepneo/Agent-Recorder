@@ -204,6 +204,20 @@ public sealed class RecordingEngine : IDisposable
     /// </summary>
     internal Action<Recording>? BeforeRecurringBackendFinalGateForTests { get; set; }
 
+    internal Func<(string CurrentUserSid, string SessionBinding)> RequiredOnceIdentityProviderForTests { get; set; } = () =>
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Current);
+    };
+
+    internal Func<IReadOnlyList<StandingLeaseDisplayMetadata>> RequiredOnceDisplaysForTests { get; set; } =
+        () => SystemQueryDisplayTopologyProvider.Instance.GetCurrentExecutionMetadata();
+
+    internal IStandingLeaseOutputReadinessProvider RequiredOnceOutputReadinessForTests { get; set; } =
+        SystemQueryStandingLeaseOutputReadinessProvider.Instance;
+
+    internal Action<Recording>? BeforeRequiredOnceBackendFinalGateForTests { get; set; }
+
     /// <summary>
     /// Deterministic creation-wait race seams. The snapshot callback runs after
     /// the wait signal returns and immediately before the coherent snapshot is
@@ -2081,6 +2095,7 @@ public sealed class RecordingEngine : IDisposable
             ApprovedCapturePlan = plan,
             AuthorizationProof = proof,
             IsRecurringLeaseExecution = true,
+            RecurringLeaseId = ticket.LeaseId,
             RecurringLeaseUseProof = proof,
             RecurringLeaseSpecification = specification,
             RecurringLeaseExecutionTicket = ticket,
@@ -2156,6 +2171,139 @@ public sealed class RecordingEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Starts the exact fixed-region Run that has already crossed the
+    /// required-once atomic start-commit. Its proof is consumed by the shared
+    /// capture authorization gate immediately before backend construction.
+    /// </summary>
+    internal RequiredOnceCaptureExecutionResult StartRequiredOnceCapture(
+        RequiredOnceCaptureExecutionTicket ticket,
+        ITrayContext tray,
+        Func<ICaptureBackend, IRequiredOnceCaptureLifecycleSession?> lifecycleFactory)
+    {
+        ArgumentNullException.ThrowIfNull(ticket);
+        ArgumentNullException.ThrowIfNull(tray);
+        ArgumentNullException.ThrowIfNull(lifecycleFactory);
+        _tray = tray;
+        if (!ticket.TryClaim(out var claimFailure))
+            return RequiredOnceCaptureExecutionResult.Rejected(claimFailure);
+        if (ticket.Proof is not null)
+            return RequiredOnceCaptureExecutionResult.Rejected("required_once_proof_already_attached");
+        if (!TryBuildRequiredOnceCaptureInputs(ticket, out var config, out var plan, out var mappingFailure))
+            return RequiredOnceCaptureExecutionResult.Rejected(mappingFailure);
+
+        var specification = ticket.Specification;
+        var rec = new Recording(ticket.RunId)
+        {
+            State = RecState.created,
+            Agent = "required_once_plan",
+            SourceType = "region",
+            SourceTitle = "计划固定区域 / Scheduled fixed region",
+            OutputPath = specification.FrozenOutputFilePath,
+            Config = config,
+            DurationSeconds = checked((int)specification.Duration.TotalSeconds),
+            CountdownSeconds = 0,
+            ApprovedCapturePlan = plan,
+            ConfirmationId = ticket.ExecutionApprovalId,
+            IsRequiredOnceExecution = true,
+            RequiredOnceSpecification = specification,
+            RequiredOnceExecutionTicket = ticket,
+            RequiredOnceLifecycleFactory = lifecycleFactory,
+            BackendType = "ffmpeg-region",
+        };
+        try
+        {
+            var proof = CaptureAuthorizationProofIssuer.IssueRequiredOnceExecution(
+                rec, plan, specification, ticket.ExecutionApprovalId, ticket.ProofId,
+                ticket.ProofNonce, ticket.CommittedAtUtc);
+            ticket.AttachProof(proof);
+            rec.AuthorizationProof = proof;
+        }
+        catch
+        {
+            return RequiredOnceCaptureExecutionResult.Rejected("required_once_proof_issue_failed");
+        }
+        lock (_lock)
+        {
+            if (_recs.Values.Any(IsActiveRecordingState))
+                return RequiredOnceCaptureExecutionResult.Rejected("recording_conflict");
+            if (!_recs.TryAdd(rec.Id, rec))
+                return RequiredOnceCaptureExecutionResult.Rejected("required_once_recording_identity_conflict");
+            if (!_confs.TryAdd(ticket.Confirmation.Id, ticket.Confirmation))
+            {
+                _recs.TryRemove(rec.Id, out _);
+                return RequiredOnceCaptureExecutionResult.Rejected("required_once_confirmation_identity_conflict");
+            }
+        }
+
+        var traceId = "required_once_" + Guid.NewGuid().ToString("N")[..16];
+        try
+        {
+            _tracer.IntentAccepted(traceId, "required-once-natural-wake");
+            _tracer.CorrelationSet(traceId, rec.Id, rec.ConfirmationId, rec.SourceType);
+            StartCapture(rec, traceId, tray);
+            if (rec.State is RecState.failed or RecState.cancelled or RecState.rejected || rec.IsFinalized)
+                return RequiredOnceCaptureExecutionResult.Failed(rec.Error ?? "required_once_engine_start_failed");
+            if (rec.Backend is null || rec.RequiredOnceLifecycleSession is null)
+                return RequiredOnceCaptureExecutionResult.Failed("required_once_engine_backend_not_started");
+            return RequiredOnceCaptureExecutionResult.Started();
+        }
+        catch
+        {
+            return RequiredOnceCaptureExecutionResult.Failed("required_once_engine_start_failed");
+        }
+    }
+
+    private static bool TryBuildRequiredOnceCaptureInputs(
+        RequiredOnceCaptureExecutionTicket ticket,
+        out CaptureConfig config,
+        out CapturePlan plan,
+        out string failureReason)
+    {
+        config = new CaptureConfig();
+        plan = null!;
+        failureReason = "required_once_specification_invalid";
+        var specification = ticket.Specification;
+        if (specification.Duration.Ticks % TimeSpan.TicksPerSecond != 0 ||
+            specification.Duration > TimeSpan.FromMinutes(10) ||
+            specification.FrozenOutputFilePath.Length == 0 ||
+            specification.RegionWithinDisplay.Width <= 0 || specification.RegionWithinDisplay.Height <= 0)
+            return false;
+        var region = specification.AbsoluteRegion;
+        config = new CaptureConfig
+        {
+            SourceKind = "region",
+            Mode = "video",
+            Bounds = (region.X, region.Y, region.Width, region.Height),
+            DisplayBounds = (specification.DisplayBounds.X, specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width, specification.DisplayBounds.Height),
+            DisplayStableIdentity = specification.StableDisplayFingerprint,
+            DisplayIdentityStatus = DisplayIdentityResolutionStatus.Resolved,
+            OutputPath = specification.FrozenOutputFilePath,
+            OutputConflictPolicy = "fail_if_exists",
+            AudioSourceKind = AudioCaptureSourceKind.None,
+            Microphone = false,
+            Fps = 30,
+            Quality = "medium",
+            DurationSeconds = checked((int)specification.Duration.TotalSeconds),
+            CountdownSeconds = 0,
+            DeferCaptureStart = false,
+        };
+        var evidence = new CaptureBackendSelectionEvidence(
+            "ffmpeg-region", "ffmpeg-region", "required_once_fixed_region", "not_run", null, false);
+        plan = new CapturePlan(
+            "ffmpeg-region", "ffmpeg-region", evidence, "region_rectangle", "region", null, nint.Zero,
+            new CapturePlanBounds(region.X, region.Y, region.Width, region.Height),
+            specification.StableDisplayFingerprint,
+            new CapturePlanBounds(specification.DisplayBounds.X, specification.DisplayBounds.Y,
+                specification.DisplayBounds.Width, specification.DisplayBounds.Height),
+            targetDisplayIdentityStatus: DisplayIdentityResolutionStatus.Resolved,
+            audioSourceKind: AudioCaptureSourceKind.None,
+            coordinateSpace: "physical_virtual_screen");
+        failureReason = string.Empty;
+        return true;
+    }
+
     private static void CleanupRecurringStartResources(Recording rec)
     {
         var lifecycle = rec.RecurringLifecycleSession;
@@ -2226,6 +2374,32 @@ public sealed class RecordingEngine : IDisposable
         lock (rec)
         {
             var proof = rec.AuthorizationProof;
+            if (rec.IsRequiredOnceExecution)
+            {
+                DateTimeOffset nowUtc;
+                (string CurrentUserSid, string SessionBinding) identity;
+                try
+                {
+                    nowUtc = new DateTimeOffset(DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                    identity = RequiredOnceIdentityProviderForTests();
+                }
+                catch
+                {
+                    throw new CaptureAuthorizationStartException("required_once_execution_identity_unavailable");
+                }
+
+                var accepted = proof?.IsConsumed == true
+                    ? CaptureAuthorizationGate.TryValidateConsumedRequiredOnce(
+                        rec.RequiredOnceExecutionTicket, rec, rec.ApprovedCapturePlan,
+                        identity.CurrentUserSid, identity.SessionBinding, nowUtc, out var requiredFailure)
+                    : CaptureAuthorizationGate.TryConsumeRequiredOnce(
+                        rec.RequiredOnceExecutionTicket, rec, rec.ApprovedCapturePlan,
+                        identity.CurrentUserSid, identity.SessionBinding, nowUtc, out requiredFailure);
+                if (!accepted)
+                    throw new CaptureAuthorizationStartException(requiredFailure);
+                return proof!;
+            }
+
             if (rec.IsRecurringLeaseExecution)
             {
                 DateTimeOffset nowUtc;
@@ -2296,6 +2470,60 @@ public sealed class RecordingEngine : IDisposable
 
             return proof!;
         }
+    }
+
+    private void ValidateRequiredOnceEnvironmentAtBackendBoundary(Recording rec)
+    {
+        var specification = rec.RequiredOnceSpecification;
+        var ticket = rec.RequiredOnceExecutionTicket;
+        if (!rec.IsRequiredOnceExecution || specification is null || ticket is null ||
+            !ReferenceEquals(ticket.Specification, specification) ||
+            !string.Equals(rec.OutputPath, specification.FrozenOutputFilePath, StringComparison.Ordinal))
+            throw new CaptureAuthorizationStartException("required_once_execution_specification_missing");
+
+        DateTimeOffset nowUtc;
+        (string CurrentUserSid, string SessionBinding) identity;
+        IReadOnlyList<StandingLeaseDisplayMetadata> displays;
+        try
+        {
+            nowUtc = new DateTimeOffset(DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+            identity = RequiredOnceIdentityProviderForTests();
+            displays = RequiredOnceDisplaysForTests();
+        }
+        catch
+        {
+            throw new CaptureAuthorizationStartException("required_once_execution_environment_unavailable");
+        }
+        if (nowUtc >= specification.LatestStartUtc || nowUtc < ticket.CommittedAtUtc)
+            throw new CaptureAuthorizationStartException("required_once_latest_start_window_expired");
+        if (!string.Equals(identity.CurrentUserSid, specification.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(identity.SessionBinding, specification.SessionBinding, StringComparison.Ordinal))
+            throw new CaptureAuthorizationStartException("required_once_session_changed");
+        if (!StandingLeaseDisplayTopologyDigest.TryCompute(displays, out var topologyDigest) ||
+            !string.Equals(topologyDigest, specification.TopologyDigest, StringComparison.Ordinal))
+            throw new CaptureAuthorizationStartException("required_once_display_topology_changed");
+        var match = displays.Where(display => display.IdentityStatus == DisplayIdentityResolutionStatus.Resolved &&
+            string.Equals(display.StableDisplayFingerprint, specification.StableDisplayFingerprint, StringComparison.Ordinal)).ToArray();
+        if (match.Length != 1 || match[0].PhysicalBounds != specification.DisplayBounds ||
+            match[0].DpiX != specification.DpiX || match[0].DpiY != specification.DpiY ||
+            match[0].PhysicalWidth != specification.PhysicalWidth || match[0].PhysicalHeight != specification.PhysicalHeight ||
+            match[0].Orientation != specification.Orientation)
+            throw new CaptureAuthorizationStartException("required_once_display_geometry_changed");
+
+        StandingLeaseOutputReadinessResult output;
+        try
+        {
+            output = RequiredOnceOutputReadinessForTests.Check(
+                specification.OutputDirectory, specification.FrozenFileName, specification.Duration);
+        }
+        catch
+        {
+            throw new CaptureAuthorizationStartException("required_once_output_environment_unavailable");
+        }
+        if (!output.IsReady || output.Snapshot.FrozenFileExists ||
+            !string.Equals(output.Snapshot.FrozenOutputFilePath, specification.FrozenOutputFilePath, StringComparison.OrdinalIgnoreCase))
+            throw new CaptureAuthorizationStartException(
+                string.IsNullOrWhiteSpace(output.ReasonCode) ? "required_once_output_changed" : output.ReasonCode);
     }
 
     private static StandingLeaseCaptureExecutionTicket BuildStandingTicketForBackendBoundary(Recording rec) =>
@@ -2429,18 +2657,51 @@ public sealed class RecordingEngine : IDisposable
             }
         }
 
+        if (rec.IsRequiredOnceExecution &&
+            rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+        {
+            try
+            {
+                if (rec.BackendStartAttempted)
+                {
+                    _ = requiredDriver.StopForEngine("required_once_lifecycle_start_failure");
+                    _ = requiredDriver.FailBeforeStart("required_once_lifecycle_start_failure");
+                }
+                else
+                    _ = rec.RequiredOnceLifecycleSession.StartFailed("required_once_lifecycle_start_failure");
+            }
+            catch
+            {
+                // A committed Run is never retried; startup reconciliation
+                // classifies any unobserved post-commit state as interrupted.
+            }
+        }
+
         bool recurring = rec.IsRecurringLeaseExecution;
+        bool requiredOnce = rec.IsRequiredOnceExecution;
         var stableRecurringReason = recurring
             ? StableRecurringStartFailureCode(failure.Reason)
             : "capture_authorization_invalid";
+        var stableRequiredOnceReason = requiredOnce &&
+            !string.IsNullOrWhiteSpace(failure.Reason) &&
+            (failure.Reason.StartsWith("required_once_", StringComparison.Ordinal) ||
+             failure.Reason.StartsWith("execution_", StringComparison.Ordinal))
+            ? failure.Reason
+            : "required_once_authorization_invalid";
         var error = recurring
             ? stableRecurringReason
+            : requiredOnce
+                ? stableRequiredOnceReason
             : "Recording authorization is not valid.";
         var warning = recurring
             ? "recurring_start_failed: " + stableRecurringReason
+            : requiredOnce
+                ? "required_once_start_failed: " + stableRequiredOnceReason
             : "authorization_gate_failed: " + failure.Reason;
         var stopReason = recurring
             ? stableRecurringReason
+            : requiredOnce
+                ? stableRequiredOnceReason
             : "capture_authorization_invalid";
 
         var ownership = TryClaimStartFailure(
@@ -2454,7 +2715,7 @@ public sealed class RecordingEngine : IDisposable
                 rec,
                 traceId,
                 tray,
-                errorCode: recurring ? stableRecurringReason : "capture_authorization_invalid",
+                errorCode: recurring ? stableRecurringReason : requiredOnce ? stableRequiredOnceReason : "capture_authorization_invalid",
                 errorType: nameof(CaptureAuthorizationStartException),
                 stopReason,
                 error,
@@ -2527,6 +2788,19 @@ public sealed class RecordingEngine : IDisposable
                 return;
             }
         }
+        else if (rec.IsRequiredOnceExecution)
+        {
+            try
+            {
+                ValidateRequiredOnceEnvironmentAtBackendBoundary(rec);
+                _ = RequireCaptureAuthorization(rec);
+            }
+            catch (CaptureAuthorizationStartException ex)
+            {
+                FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+                return;
+            }
+        }
 
         // Production creates the backend only from the already-approved plan.
         // Legacy test seams may still supply a concrete selection or factory.
@@ -2554,11 +2828,17 @@ public sealed class RecordingEngine : IDisposable
         {
             throw new RecurringEngineStartException("recurring_execution_backend_unavailable");
         }
+        catch when (rec.IsRequiredOnceExecution)
+        {
+            throw new CaptureAuthorizationStartException("required_once_execution_backend_unavailable");
+        }
 
         if (selection.Backend is null)
         {
             if (rec.IsRecurringLeaseExecution)
                 throw new RecurringEngineStartException("recurring_execution_backend_unavailable");
+            if (rec.IsRequiredOnceExecution)
+                throw new CaptureAuthorizationStartException("required_once_execution_backend_unavailable");
 
             throw new InvalidOperationException("Capture backend factory returned null.");
         }
@@ -2644,6 +2924,26 @@ public sealed class RecordingEngine : IDisposable
                     lifecycle is null
                         ? "recurring_execution_lifecycle_session_unavailable"
                         : "recurring_execution_lifecycle_session_attach_failed");
+            }
+        }
+        else if (rec.IsRequiredOnceExecution)
+        {
+            try
+            {
+                var lifecycle = rec.RequiredOnceLifecycleFactory?.Invoke(rec.Backend);
+                rec.RequiredOnceLifecycleSession = lifecycle;
+                if (lifecycle is null || lifecycle is not IRequiredOnceCaptureLifecycleDriver)
+                    throw new CaptureAuthorizationStartException("required_once_lifecycle_session_unavailable");
+                if (!lifecycle.TryAttach(rec.Backend, out _))
+                    throw new CaptureAuthorizationStartException("required_once_lifecycle_session_attach_failed");
+            }
+            catch (CaptureAuthorizationStartException)
+            {
+                throw;
+            }
+            catch
+            {
+                throw new CaptureAuthorizationStartException("required_once_lifecycle_session_attach_failed");
             }
         }
         var evidence = selectionEvidence?.Evidence ?? rec.ApprovedCapturePlan?.Evidence ?? new CaptureBackendSelectionEvidence(
@@ -2743,6 +3043,17 @@ public sealed class RecordingEngine : IDisposable
                 if (lifecycle.Reason == "natural_exit_during_stop")
                     return;
             }
+            else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+            {
+                var lifecycle = requiredDriver.ObserveNaturalExit(exitCode, meta);
+                if (!lifecycle.Succeeded)
+                {
+                    FailRequiredOnceLifecycleClosed(rec, requiredDriver, lifecycle.Reason, traceId, tray, meta, exitCode);
+                    return;
+                }
+                if (lifecycle.Reason == "natural_exit_during_stop")
+                    return;
+            }
             FinalizeRecording(rec, meta, exitCode, natural: true, stopReason: null, tray);
         });
 
@@ -2781,6 +3092,17 @@ public sealed class RecordingEngine : IDisposable
                             tray,
                             new OutputMeta { StopReason = "recurring_lifecycle_persistence_failure" },
                             -1);
+                        return;
+                    }
+                }
+                else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+                {
+                    var lifecycle = requiredDriver.ObserveFirstFrame(obs);
+                    if (!lifecycle.Succeeded)
+                    {
+                        FailRequiredOnceLifecycleClosed(
+                            rec, requiredDriver, lifecycle.Reason, traceId, tray,
+                            new OutputMeta { StopReason = "required_once_lifecycle_persistence_failure" }, -1);
                         return;
                     }
                 }
@@ -2831,6 +3153,19 @@ public sealed class RecordingEngine : IDisposable
                         return;
                     }
 
+                    if (lifecycle.Reason == "capture_ended_during_stop")
+                        return;
+                }
+                else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+                {
+                    var lifecycle = requiredDriver.ObserveCaptureEnded(obs);
+                    if (!lifecycle.Succeeded)
+                    {
+                        FailRequiredOnceLifecycleClosed(
+                            rec, requiredDriver, lifecycle.Reason, traceId, tray,
+                            new OutputMeta { StopReason = "required_once_lifecycle_persistence_failure" }, obs.ExitCode);
+                        return;
+                    }
                     if (lifecycle.Reason == "capture_ended_during_stop")
                         return;
                 }
@@ -2991,6 +3326,11 @@ public sealed class RecordingEngine : IDisposable
                         if (rec.RecurringExecutionCancellationToken.IsCancellationRequested)
                             throw new CaptureAuthorizationStartException("recurring_execution_cancelled");
                     }
+                    else if (rec.IsRequiredOnceExecution)
+                    {
+                        ValidateRequiredOnceEnvironmentAtBackendBoundary(rec);
+                        authorizationProof = RequireCaptureAuthorization(rec);
+                    }
 
                     rec.BackendStartAtUtc = DateTime.UtcNow;
                     rec.BackendStartAttempted = true;
@@ -3004,6 +3344,8 @@ public sealed class RecordingEngine : IDisposable
                 BeforeStandingBackendFinalGateForTests?.Invoke(rec);
             else if (rec.IsRecurringLeaseExecution)
                 BeforeRecurringBackendFinalGateForTests?.Invoke(rec);
+            else if (rec.IsRequiredOnceExecution)
+                BeforeRequiredOnceBackendFinalGateForTests?.Invoke(rec);
 
             if (rec.IsStandingLeaseExecution && _standingStartSafetyInterlock is not null)
                 _standingStartSafetyInterlock.Execute("standing_backend_start", StartBackendAtFinalBoundary);
@@ -3087,6 +3429,17 @@ public sealed class RecordingEngine : IDisposable
                         _ = recurringDriver.StopForEngine("recurring_lifecycle_start_failure");
                     else
                         _ = recurringDriver.FailBeforeStart("recurring_lifecycle_start_failure");
+                }
+                catch { }
+            }
+            else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+            {
+                try
+                {
+                    if (rec.BackendStartAttempted)
+                        _ = requiredDriver.StopForEngine("required_once_lifecycle_start_failure");
+                    else
+                        _ = requiredDriver.FailBeforeStart("required_once_lifecycle_start_failure");
                 }
                 catch { }
             }
@@ -4142,15 +4495,20 @@ public sealed class RecordingEngine : IDisposable
         Recording rec,
         string? traceId,
         ITrayContext tray,
-        CountdownOperation op)
+        CountdownOperation op,
+        bool invokeRequiredOnceStartHook = false)
     {
         try
         {
+            if (invokeRequiredOnceStartHook)
+                BeforeStartActionForTests?.Invoke(rec, "backend.start");
+
             return TryClaimAndRunStartAction(rec, op, () =>
             {
                 var authorizationProof = RequireCaptureAuthorization(rec);
                 rec.BackendStartAtUtc = DateTime.UtcNow;
                 _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                rec.BackendStartAttempted = true;
                 rec.Backend!.Start(rec.Config, authorizationProof);
                 _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
 
@@ -4172,11 +4530,39 @@ public sealed class RecordingEngine : IDisposable
             }
 
             BeforeStartFailureForTests?.Invoke(rec, "countdown.backend.start");
+            var requiredOnceFailureReason = rec.IsRequiredOnceExecution
+                ? rec.BackendStartAttempted
+                    ? "required_once_start_outcome_unknown"
+                    : "required_once_backend_start_failed"
+                : null;
+            if (requiredOnceFailureReason is not null)
+            {
+                try
+                {
+                    if (rec.BackendStartAttempted &&
+                        rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+                    {
+                        _ = requiredDriver.StopForEngine(requiredOnceFailureReason);
+                        _ = requiredDriver.FailBeforeStart(requiredOnceFailureReason);
+                    }
+                    else if (rec.RequiredOnceLifecycleSession is not null)
+                    {
+                        _ = rec.RequiredOnceLifecycleSession.StartFailed(requiredOnceFailureReason);
+                    }
+                }
+                catch
+                {
+                    // A committed required-once Run is never retried. Its
+                    // durable recovery path will classify any unsettled state.
+                }
+            }
             var ownership = TryClaimStartFailure(
                 rec,
-                error: ex.Message,
-                warning: "launch_error: " + ex.Message,
-                stopReason: "unexpected_exit");
+                error: requiredOnceFailureReason ?? ex.Message,
+                warning: requiredOnceFailureReason is null
+                    ? "launch_error: " + ex.Message
+                    : "required_once_start_failed: " + requiredOnceFailureReason,
+                stopReason: requiredOnceFailureReason ?? "unexpected_exit");
             if (ownership != StartFailureOwnership.Failed)
                 return false;
 
@@ -4184,10 +4570,10 @@ public sealed class RecordingEngine : IDisposable
                 rec,
                 traceId,
                 tray,
-                errorCode: "backend_start_exception",
+                errorCode: requiredOnceFailureReason ?? "backend_start_exception",
                 errorType: ex.GetType().Name,
-                stopReason: "unexpected_exit",
-                error: "Recording failed: " + ex.Message,
+                stopReason: requiredOnceFailureReason ?? "unexpected_exit",
+                error: requiredOnceFailureReason ?? "Recording failed: " + ex.Message,
                 stage: "backend_start");
             return false;
         }
@@ -4371,9 +4757,18 @@ public sealed class RecordingEngine : IDisposable
 
             if (startBackendAtZero)
             {
-                BeforeStartActionForTests?.Invoke(rec, "backend.start");
-                if (!TryStartBackendAtCountdownZero(rec, traceId, tray, op))
-                    return;
+                if (rec.IsRequiredOnceExecution)
+                {
+                    if (!TryStartBackendAtCountdownZero(rec, traceId, tray, op,
+                            invokeRequiredOnceStartHook: true))
+                        return;
+                }
+                else
+                {
+                    BeforeStartActionForTests?.Invoke(rec, "backend.start");
+                    if (!TryStartBackendAtCountdownZero(rec, traceId, tray, op))
+                        return;
+                }
             }
             else if (rec.Backend is IAudioReadyBackend audioReady)
             {
@@ -4644,6 +5039,32 @@ public sealed class RecordingEngine : IDisposable
         FinalizeRecording(rec, meta, exitCode, natural: false, stopReason, tray);
     }
 
+    private void FailRequiredOnceLifecycleClosed(
+        Recording rec,
+        IRequiredOnceCaptureLifecycleDriver driver,
+        string reason,
+        string? traceId,
+        ITrayContext tray,
+        OutputMeta fallbackMeta,
+        int fallbackExitCode)
+    {
+        const string stopReason = "required_once_lifecycle_persistence_failure";
+        OutputMeta meta = fallbackMeta;
+        var exitCode = fallbackExitCode;
+        try
+        {
+            var stop = driver.StopForEngine(stopReason);
+            meta = stop.Meta ?? meta;
+            exitCode = stop.ExitCode;
+        }
+        catch
+        {
+            // The durable start commit is non-retryable and will be reconciled.
+        }
+        meta.StopReason = stopReason;
+        FinalizeRecording(rec, meta, exitCode, natural: false, stopReason, tray);
+    }
+
     private void FinalizeRecording(Recording rec, OutputMeta meta, int exitCode, bool natural, string? stopReason, ITrayContext tray)
     {
         CancelCountdown(rec.Id);
@@ -4745,6 +5166,16 @@ public sealed class RecordingEngine : IDisposable
                            trustedLifecycleAbortCode == null &&
                            !wgcContinuousOutputValidationFailed &&
                            !unattendedInterrupted;
+            if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredLifecycleDriver)
+            {
+                var settlement = requiredLifecycleDriver.SettleFinalization(
+                    success, meta, exitCode, success ? null : (rec.StopReason ?? meta.StopReason ?? "required_once_media_invalid"));
+                if (!settlement.Succeeded)
+                {
+                    success = false;
+                    rec.Warnings.Add("required_once_lifecycle_settlement_failed");
+                }
+            }
             if (!success)
             {
                 if (!fileOk) rec.Warnings.Add($"empty_output: file size {meta.SizeBytes} bytes < {minSize}");
@@ -4911,6 +5342,10 @@ public sealed class RecordingEngine : IDisposable
         if (rec.IsRecurringLeaseExecution && rec.RecurringLifecycleSession is IDisposable recurringLifecycleSession)
         {
             try { recurringLifecycleSession.Dispose(); } catch { }
+        }
+        if (rec.IsRequiredOnceExecution && rec.RequiredOnceLifecycleSession is IDisposable requiredOnceLifecycleSession)
+        {
+            try { requiredOnceLifecycleSession.Dispose(); } catch { }
         }
 
         _tracer.FinalizationCompleted(GetTraceIdForRecording(rec.Id), rec.Id, finalizationSuccess);
@@ -5175,6 +5610,50 @@ public sealed class RecordingEngine : IDisposable
     public object Stop(string id, string reason)
     {
         var rec = Get(id);
+        return Stop(rec, reason);
+    }
+
+    /// <summary>
+    /// Stops only the exact in-memory recurring Run whose trusted start ticket
+    /// bound it to <paramref name="leaseId"/>. Missing or already-settling
+    /// targets are idempotent no-ops; a mismatched target is never redirected
+    /// to another active recording.
+    /// </summary>
+    internal RecurringActiveRunStopDisposition StopRecurringCapture(
+        string leaseId,
+        string runId,
+        string reason)
+    {
+        if (string.IsNullOrWhiteSpace(leaseId) || string.IsNullOrWhiteSpace(runId))
+            return RecurringActiveRunStopDisposition.TargetMismatch;
+
+        if (!_recs.TryGetValue(runId, out var rec))
+            return RecurringActiveRunStopDisposition.NoOp;
+
+        if (!string.Equals(rec.Id, runId, StringComparison.Ordinal) ||
+            !rec.IsRecurringLeaseExecution ||
+            !string.Equals(rec.RecurringLeaseId, leaseId, StringComparison.Ordinal))
+        {
+            return RecurringActiveRunStopDisposition.TargetMismatch;
+        }
+
+        lock (rec)
+        {
+            if (IsTerminalState(rec.State) || rec.State is RecState.finalizing or RecState.stopping)
+                return RecurringActiveRunStopDisposition.NoOp;
+        }
+
+        _ = Stop(rec, reason, out var stopAccepted);
+        return stopAccepted
+            ? RecurringActiveRunStopDisposition.StopRequested
+            : RecurringActiveRunStopDisposition.NoOp;
+    }
+
+    private object Stop(Recording rec, string reason) => Stop(rec, reason, out _);
+
+    private object Stop(Recording rec, string reason, out bool stopAccepted)
+    {
+        stopAccepted = false;
         BeforeStopForTests?.Invoke(rec);
         if (rec.IsScreenshotSeries)
             return StopScreenshotSeries(rec, reason);
@@ -5182,6 +5661,7 @@ public sealed class RecordingEngine : IDisposable
         bool enteredStopping = false;
         bool standingCancelledBeforeFirstFrame = false;
         bool recurringCancelledBeforeFirstFrame = false;
+        bool requiredOnceCancelledBeforeFirstFrame = false;
 
         lock (rec)
         {
@@ -5221,18 +5701,24 @@ public sealed class RecordingEngine : IDisposable
                     recurringCancelledBeforeFirstFrame = true;
                     enteredStopping = true;
                 }
+                else if (rec.IsRequiredOnceExecution)
+                {
+                    rec.State = RecState.stopping;
+                    requiredOnceCancelledBeforeFirstFrame = true;
+                    enteredStopping = true;
+                }
                 else
                 {
                     rec.State = RecState.cancelled;
                 }
                 rec.StopReason = NormalizeStopReason(reason);
-                if (!standingCancelledBeforeFirstFrame && !recurringCancelledBeforeFirstFrame)
+                if (!standingCancelledBeforeFirstFrame && !recurringCancelledBeforeFirstFrame && !requiredOnceCancelledBeforeFirstFrame)
                 {
                     rec.CompletedAtUtc = DateTime.UtcNow;
                     MarkBundleNotApplicable(rec);
                 }
                 BumpStateVersion();
-                if (!standingCancelledBeforeFirstFrame && !recurringCancelledBeforeFirstFrame)
+                if (!standingCancelledBeforeFirstFrame && !recurringCancelledBeforeFirstFrame && !requiredOnceCancelledBeforeFirstFrame)
                     rec.PublishFinalized();
             }
             else
@@ -5243,6 +5729,8 @@ public sealed class RecordingEngine : IDisposable
                 BumpStateVersion();
             }
         }
+
+        stopAccepted = enteredStopping;
 
         if (enteredStopping)
             _tray?.SetStopping(CreateRecordingUiPresentation(rec, RecordingUiState.Stopping));
@@ -5356,6 +5844,39 @@ public sealed class RecordingEngine : IDisposable
             return BuildStopResponse(rec, recurringStop.Meta);
         }
 
+        if (requiredOnceCancelledBeforeFirstFrame)
+        {
+            RequiredOnceCaptureStopResult requiredStop;
+            try
+            {
+                requiredStop = rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver
+                    ? rec.BackendStartAttempted
+                        ? requiredDriver.StopForEngine(rec.StopReason)
+                        : new RequiredOnceCaptureStopResult(
+                            requiredDriver.FailBeforeStart(rec.StopReason), null, -1)
+                    : new RequiredOnceCaptureStopResult(
+                        RequiredOnceLifecycleActionResult.Rejected("required_once_lifecycle_session_missing"), null, -1);
+            }
+            catch
+            {
+                requiredStop = new RequiredOnceCaptureStopResult(
+                    RequiredOnceLifecycleActionResult.Rejected("required_once_lifecycle_persistence_failure"), null, -1);
+            }
+            if (!requiredStop.Lifecycle.Succeeded)
+            {
+                rec.StopReason = "required_once_lifecycle_persistence_failure";
+                var failedMeta = requiredStop.Meta ?? new OutputMeta { StopReason = rec.StopReason };
+                failedMeta.StopReason = rec.StopReason;
+                FinalizeRecording(rec, failedMeta, requiredStop.ExitCode, natural: false, rec.StopReason, _tray!);
+                return BuildStopResponse(rec, failedMeta);
+            }
+            PublishPreFirstFrameCancellation(rec);
+            _audit.Log("recording.cancelled", new { recording_id = rec.Id, reason = rec.StopReason });
+            _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
+            _tray!.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+            return BuildStopResponse(rec, requiredStop.Meta);
+        }
+
         if (rec.State == RecState.cancelled)
         {
             _audit.Log("recording.cancelled", new { recording_id = rec.Id, reason = rec.StopReason });
@@ -5366,6 +5887,8 @@ public sealed class RecordingEngine : IDisposable
             {
                 if (rec.RecurringLifecycleSession is IRecurringLeaseCaptureLifecycleDriver recurringDriver)
                     _ = recurringDriver.StopForEngine(rec.StopReason);
+                else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredDriver)
+                    _ = requiredDriver.StopForEngine(rec.StopReason);
                 else if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingDriver)
                     _ = standingDriver.StopForEngine(rec.StopReason);
                 else
@@ -5388,6 +5911,14 @@ public sealed class RecordingEngine : IDisposable
             exitCode = stopResult.ExitCode;
             if (!stopResult.Lifecycle.Succeeded)
                 rec.StopReason = "recurring_lifecycle_persistence_failure";
+            }
+        else if (rec.RequiredOnceLifecycleSession is IRequiredOnceCaptureLifecycleDriver requiredOnceLifecycleDriver)
+            {
+            var stopResult = requiredOnceLifecycleDriver.StopForEngine(rec.StopReason);
+            meta = stopResult.Meta ?? new OutputMeta();
+            exitCode = stopResult.ExitCode;
+            if (!stopResult.Lifecycle.Succeeded)
+                rec.StopReason = "required_once_lifecycle_persistence_failure";
         }
         else if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingLifecycleDriver)
             {
@@ -6106,6 +6637,11 @@ public sealed class RecordingEngine : IDisposable
                     recording.RecurringLifecycleSession is IDisposable recurringLifecycleSession)
                 {
                     try { recurringLifecycleSession.Dispose(); } catch { }
+                }
+                if (recording.IsRequiredOnceExecution &&
+                    recording.RequiredOnceLifecycleSession is IDisposable requiredOnceLifecycleSession)
+                {
+                    try { requiredOnceLifecycleSession.Dispose(); } catch { }
                 }
             }
         }

@@ -210,6 +210,21 @@ public sealed class Recording
     /// </summary>
     internal bool IsRecurringLeaseExecution { get; set; }
 
+    /// <summary>True only for a committed, locally approved required-once Run.</summary>
+    internal bool IsRequiredOnceExecution { get; set; }
+
+    internal RequiredOnceCaptureExecutionSpecification? RequiredOnceSpecification { get; set; }
+
+    internal RequiredOnceCaptureExecutionTicket? RequiredOnceExecutionTicket { get; set; }
+
+    internal IRequiredOnceCaptureLifecycleSession? RequiredOnceLifecycleSession { get; set; }
+
+    internal Func<ICaptureBackend, IRequiredOnceCaptureLifecycleSession?>? RequiredOnceLifecycleFactory { get; set; }
+
+    // Immutable identity copied by the trusted recurring start path so local
+    // safety controls can verify a targeted physical stop against the Lease.
+    internal string? RecurringLeaseId { get; set; }
+
     internal RecurringLeaseUseProof? RecurringLeaseUseProof { get; set; }
 
     internal RecurringOccurrenceExecutionSpecification? RecurringLeaseSpecification { get; set; }

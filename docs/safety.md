@@ -11,6 +11,7 @@ bounded authorization permits recording to start.
 | Local-only API | Server binds to `127.0.0.1:37891` |
 | API key | State-changing and sensitive endpoints require `X-Agent-Recorder-Key` |
 | Local authorization | Ordinary recordings require per-run confirmation; one-shot and daily/weekly unattended plans each require local fixed-region selection and bounded lease approval |
+| Required one-time plans | Local fixed-region selection and creation approval do not authorize capture; a second local per-run confirmation is required when the plan is due |
 | HTTP self-approval blocked | `POST /confirmations/{id}/approve` returns `405 METHOD_NOT_ALLOWED` |
 | Region selection | Selected-region recording uses local UI controlled by the user |
 | Audit log | Recording and confirmation events are written to local JSONL logs |
@@ -52,6 +53,15 @@ unattended audio, windows, WGC, screenshot series, nesting, concurrency, or
 active wake. Revocation, Stop All, session loss, sleep, target/output drift,
 expiry, and missed windows fail closed. A start-committed occurrence is never
 automatically retried after an uncertain crash.
+
+One-time `required` plans are a separate, non-Lease path. The user first
+selects a fixed region and approves creating the plan. At execution time,
+the tray host rechecks the frozen target, output, session, and start window,
+then requires an explicit second local confirmation for that Run. Rejection,
+timeout, an unavailable confirmation desktop, or changed conditions prevent
+capture. The agent cannot approve either dialog over HTTP. Creation and
+execution are independently visible in the audit and durable plan status;
+`scheduled` alone is not proof that a recording started.
 
 ## API Key Storage
 
@@ -137,7 +147,9 @@ Context files are written using a random temp file in the same directory and ato
   readiness as consent UI readiness.
 - Recurring setup status reports authorization and scheduling, not each
   occurrence's execution result. An agent must not claim that a recording
-  started or completed solely because setup says `scheduled`.
+  started or completed solely because setup says `scheduled`. Use the
+  authenticated `GET /plans/{plan_id}/status` endpoint for persisted
+  occurrence/Run state and verified output evidence.
 - Some GPU-accelerated windows may not capture reliably through FFmpeg
   `gdigrab`.
 - Microphone recording uses an isolated Windows WASAPI helper by default and is

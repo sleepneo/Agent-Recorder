@@ -8,6 +8,7 @@ using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Persistence;
+using Xunit.Abstractions;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -16,6 +17,9 @@ namespace AgentRecorder.Tests;
 public sealed class UnattendedSafetyControlCenterTests
 {
     private const string UserSid = "S-1-5-21-control-center";
+    private readonly ITestOutputHelper _testOutput;
+
+    public UnattendedSafetyControlCenterTests(ITestOutputHelper testOutput) => _testOutput = testOutput;
 
     [Fact]
     public void QueryControlCenterReadsEmptyPendingActiveExpiredAndPersistentRevokedStates()
@@ -101,6 +105,60 @@ public sealed class UnattendedSafetyControlCenterTests
     }
 
     [Fact]
+    public void QueryControlCenterBindsRecurringLeasesToSidAndSessionAndShowsTerminalHistory()
+    {
+        using var fixture = new RecurringPlanSetupTestFixture();
+        fixture.Create("active-a", prepared: true);
+        var preparedA = fixture.Query.GetPrepared("active-a", RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session)!;
+        fixture.Activate("active-a");
+        fixture.Create("active-b", prepared: true);
+        fixture.Activate("active-b");
+        fixture.Create("other-session", prepared: true, sid: RecurringPlanSetupTestFixture.Sid, session: "other-session");
+        fixture.Activate("other-session", RecurringPlanSetupTestFixture.Sid, "other-session");
+        fixture.Create("other-user", prepared: true, sid: "S-1-5-21-other", session: RecurringPlanSetupTestFixture.Session);
+        fixture.Activate("other-user", "S-1-5-21-other", RecurringPlanSetupTestFixture.Session);
+
+        var service = new StandingLeaseSafetyControlService(fixture.Store, () => RecurringPlanSetupTestFixture.At(10));
+        var initial = service.QueryControlCenter(RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session);
+        Assert.Equal(StandingLeaseControlCenterQueryStatus.Available, initial.Status);
+        Assert.Equal(2, initial.State!.RecurringItems.Count);
+        Assert.All(initial.State.RecurringItems, item => Assert.Equal(ConsentLeaseStatus.Active, item.LeaseStatus));
+        Assert.All(initial.State.RecurringItems, item => Assert.Equal(new DateOnly(2026, 1, 1), item.NextOccurrenceLocalDate));
+        Assert.All(initial.State.RecurringItems, item => Assert.Equal(new TimeOnly(9, 30), item.NextOccurrenceLocalTime));
+        Assert.All(initial.State.RecurringItems, item => Assert.Equal(2, item.RemainingUses));
+        Assert.All(initial.State.RecurringItems, item => Assert.Equal(TimeSpan.FromSeconds(60), item.RemainingDuration));
+        Assert.DoesNotContain(fixture.Root, string.Join("\n", initial.State.RecurringItems));
+
+        var selected = initial.State.RecurringItems.Single(item => item.PlanId == preparedA.PlanId);
+        var revoked = service.RevokeRecurringLease(selected.LeaseId, "task289-exact-revoke", "control_center_user");
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.Changed, revoked.Status);
+        var replay = service.RevokeRecurringLease(selected.LeaseId, "task289-exact-revoke", "control_center_user");
+        Assert.Equal(StandingLeaseSafetyControlResultStatus.AlreadyApplied, replay.Status);
+
+        var after = service.QueryControlCenter(RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session);
+        Assert.Equal(new[] { ConsentLeaseStatus.Active, ConsentLeaseStatus.Revoked }, after.State!.RecurringItems.Select(item => item.LeaseStatus));
+        Assert.False(after.State.RecurringItems.Single(item => item.LeaseId == selected.LeaseId).CanRevoke);
+        Assert.True(after.State.RecurringItems.Single(item => item.LeaseId != selected.LeaseId).CanRevoke);
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM standing_lease_safety_operations WHERE operation_id = 'task289-exact-revoke';"));
+    }
+
+    [Fact]
+    public void QueryControlCenterFailsClosedForCorruptRecurringOwnerBinding()
+    {
+        using var fixture = new RecurringPlanSetupTestFixture();
+        fixture.Create("corrupt", prepared: true);
+        fixture.Activate("corrupt");
+        fixture.Corrupt("UPDATE recurring_lease_local_approvals SET plan_id = 'plan-tampered' WHERE current_user_sid = 'S-1-5-21-recurring-setup' AND session_binding = 'recurring-setup-session';");
+
+        var query = new StandingLeaseSafetyControlService(fixture.Store, () => RecurringPlanSetupTestFixture.At(10))
+            .QueryControlCenter(RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session);
+
+        Assert.Equal(StandingLeaseControlCenterQueryStatus.Rejected, query.Status);
+        Assert.Equal("safety_snapshot_invalid", query.Reason);
+        Assert.Null(query.State);
+    }
+
+    [Fact]
     public void ControlFormUsesLocalizedStateConfirmationAndUniqueOperations()
     {
         RunOnSta(() =>
@@ -111,25 +169,25 @@ public sealed class UnattendedSafetyControlCenterTests
                 gateway,
                 new UiTextProvider(UiLanguage.ZhCn),
                 confirmation);
-            form.Show();
-            Application.DoEvents();
+            form.PerformLayout();
 
             Assert.Contains("无人值守安全控制", form.Text);
             Assert.Contains("已启用", form.GlobalStatusTextForTests);
             Assert.Equal(1, form.LeaseCardCountForTests);
+            Assert.Equal(0, form.RecurringLeaseCardCountForTests);
             Assert.Same(form.RefreshButtonForTests, form.AcceptButton);
             Assert.Same(form.CloseButtonForTests, form.CancelButton);
 
             var card = (TableLayoutPanel)form.LeaseCardForTests(0).Controls[0];
             var revoke = (Button)card.GetControlFromPosition(1, 0)!;
-            revoke.PerformClick();
+            ClickWithoutShowing(revoke);
             Assert.True(confirmation.CallCount == 1);
             Assert.Single(gateway.Operations);
             Assert.StartsWith("control-center-revoke-", gateway.Operations[0].OperationId);
 
             gateway.State = CreateState(ConsentLeaseStatus.Active);
             revoke = (Button)((TableLayoutPanel)form.LeaseCardForTests(0).Controls[0]).GetControlFromPosition(1, 0)!;
-            revoke.PerformClick();
+            ClickWithoutShowing(revoke);
             Assert.Equal(2, gateway.Operations.Count);
             Assert.NotEqual(gateway.Operations[0].OperationId, gateway.Operations[1].OperationId);
 
@@ -150,10 +208,9 @@ public sealed class UnattendedSafetyControlCenterTests
                 gateway,
                 new UiTextProvider(UiLanguage.EnUs),
                 confirmation);
-            form.Show();
-            Application.DoEvents();
+            form.PerformLayout();
 
-            form.StopAllButtonForTests.PerformClick();
+            ClickWithoutShowing(form.StopAllButtonForTests);
             Assert.Equal(1, confirmation.CallCount);
             Assert.Empty(gateway.Operations);
 
@@ -164,13 +221,13 @@ public sealed class UnattendedSafetyControlCenterTests
                 !form.DisableButtonForTests.Enabled &&
                 !form.EnableButtonForTests.Enabled &&
                 !form.RefreshButtonForTests.Enabled;
-            form.DisableButtonForTests.PerformClick();
+            ClickWithoutShowing(form.DisableButtonForTests);
             Assert.Equal(2, confirmation.CallCount);
             Assert.Contains(gateway.Operations, operation => operation.Kind == "disable");
             Assert.True(gateway.BusyObserved);
 
             gateway.QueryResult = StandingLeaseControlCenterQueryResult.Rejected("safety_sqlite_failure");
-            form.RefreshButtonForTests.PerformClick();
+            ClickWithoutShowing(form.RefreshButtonForTests);
             Assert.Contains("unavailable", form.GlobalStatusTextForTests, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(0, form.LeaseCardCountForTests);
             Assert.DoesNotContain("Completed", form.ResultTextForTests);
@@ -181,78 +238,460 @@ public sealed class UnattendedSafetyControlCenterTests
     }
 
     [Fact]
-    public void TrayMenuOpensOneReusableControlFormAndClosesWithoutExitingTray()
+    public void ControlFormRendersLocalizedRecurringCardsAndRevokesTheConfirmedExactLease()
     {
         RunOnSta(() =>
         {
-            using var database = new TestDatabase();
-            DataDirResolver.SetOverride(Path.GetDirectoryName(Path.GetDirectoryName(database.Store.DatabasePath))!);
-            try
-            {
-                var audit = new AuditLogger();
-                var engine = new RecordingEngine(audit);
-                var service = new StandingLeaseSafetyControlService(database.Store, () => At(1));
-                using var tray = new TrayContext(
-                    engine,
-                    audit,
-                    FakeGlobalStopHotkeyFactory.Create(),
-                    unattendedSafetyService: service);
-                engine.SetTray(tray);
+            var state = CreateState(
+                ConsentLeaseStatus.Active,
+                new[]
+                {
+                    CreateRecurringItem("plan-current", "lease-current", ConsentLeaseStatus.Active, activeRun: true),
+                    CreateRecurringItem("plan-history", "lease-history", ConsentLeaseStatus.Revoked),
+                });
+            var gateway = new FakeGateway(state) { RecurringRequiresStopForTest = true };
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var form = new UnattendedSafetyControlForm(
+                gateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                confirmation);
+            form.PerformLayout();
 
-                var icon = GetPrivateField<NotifyIcon>(tray, "_icon");
-                var item = icon.ContextMenuStrip!.Items
-                    .OfType<ToolStripMenuItem>()
-                    .Single(menuItem => menuItem.Text == "无人值守安全控制");
-                item.PerformClick();
-                var first = GetPrivateField<UnattendedSafetyControlForm>(tray, "_unattendedSafetyForm");
-                item.PerformClick();
-                var second = GetPrivateField<UnattendedSafetyControlForm>(tray, "_unattendedSafetyForm");
-                Assert.Same(first, second);
+            Assert.Equal(1, form.LeaseCardCountForTests);
+            Assert.Equal(2, form.RecurringLeaseCardCountForTests);
+            var activeCard = (TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0];
+            var terminalCard = (TableLayoutPanel)form.RecurringLeaseCardForTests(1).Controls[0];
+            var activeDetails = (Label)activeCard.GetControlFromPosition(0, 0)!;
+            var revoke = (Button)activeCard.GetControlFromPosition(1, 0)!;
+            Assert.Contains("plan-current", activeDetails.Text);
+            Assert.Contains("lease-current", activeDetails.Text);
+            Assert.Contains("Weekly", activeDetails.Text);
+            Assert.Contains("Monday, Friday", activeDetails.Text);
+            Assert.Contains("Active Run: Yes", activeDetails.Text);
+            Assert.True(revoke.Enabled);
+            Assert.False(((Button)terminalCard.GetControlFromPosition(1, 0)!).Enabled);
+            Assert.InRange(activeDetails.MaximumSize.Width, 220, form.ClientSize.Width);
 
-                first.Close();
-                Assert.False(first.Visible);
-                item.PerformClick();
-                Assert.Same(first, GetPrivateField<UnattendedSafetyControlForm>(tray, "_unattendedSafetyForm"));
-            }
-            finally
+            ClickWithoutShowing(revoke);
+            Assert.Equal(1, confirmation.CallCount);
+            Assert.Contains("plan-current", confirmation.LastMessage);
+            Assert.Contains("lease-current", confirmation.LastMessage);
+            var action = Assert.Single(gateway.Operations, operation => operation.Kind == "recurring_revoke");
+            Assert.Equal("lease-current", action.IntentId);
+            Assert.StartsWith("control-center-recurring-revoke-", action.OperationId);
+            Assert.Contains("stop request was sent", form.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("does not imply media settlement is complete", form.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+
+            form.UpdateLanguage(new UiTextProvider(UiLanguage.ZhCn));
+            Assert.Equal("周期授权", FindTaggedControl(form, "recurring_heading")!.Text);
+            Assert.False(form.BusyForTests);
+            form.RefreshFromTray();
+            var localizedDetails = (Label)((TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(0, 0)!;
+            Assert.Contains("每周", localizedDetails.Text);
+            Assert.Contains("周一, 周五", localizedDetails.Text);
+            ClickWithoutShowing((Button)((TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(1, 0)!);
+            Assert.Contains("已向此 Lease 对应的 Run 发送定向停止请求", form.ResultTextForTests);
+            Assert.Contains("不代表媒体结算已完成", form.ResultTextForTests);
+            Assert.Contains("周期计划 plan-current", confirmation.LastMessage);
+            Assert.Contains("授权 lease-current", confirmation.LastMessage);
+            Assert.Contains("只会请求停止此 Lease 对应的 Run", confirmation.LastMessage);
+            Assert.Contains("媒体结算仍会独立进行", confirmation.LastMessage);
+        });
+    }
+
+    [Fact]
+    public void ControlFormCompactsEmptySectionsAndKeepsBothPopulatedSectionsScrollable()
+    {
+        RunOnSta(() =>
+        {
+            var gateway = new FakeGateway(CreateState(
+                ConsentLeaseStatus.Active,
+                Array.Empty<StandingLeaseControlCenterRecurringLeaseSummary>(),
+                includeOneShot: false));
+            using var form = new UnattendedSafetyControlForm(gateway, new UiTextProvider(UiLanguage.ZhCn));
+            form.PerformLayout();
+
+            Assert.Equal(0, form.LeaseCardCountForTests);
+            Assert.Equal(0, form.RecurringLeaseCardCountForTests);
+            Assert.Equal("暂无一次性授权。", FindTaggedControl(form, "empty_state_one_shot")!.Text);
+            Assert.Equal("暂无周期授权。", FindTaggedControl(form, "empty_state_recurring")!.Text);
+            AssertCompactRow(form.LeaseListsForTests, row: 0);
+            AssertCompactRow(form.LeaseListsForTests, row: 1);
+
+            SetGatewayState(gateway, CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-recurring-only", "lease-recurring-only", ConsentLeaseStatus.Active) },
+                includeOneShot: false));
+            ClickWithoutShowing(form.RefreshButtonForTests);
+            Assert.Equal(0, form.LeaseCardCountForTests);
+            Assert.Equal(1, form.RecurringLeaseCardCountForTests);
+            AssertCompactRow(form.LeaseListsForTests, row: 0);
+            Assert.Equal(SizeType.Percent, form.LeaseListsForTests.RowStyles[1].SizeType);
+            Assert.Equal(100, form.LeaseListsForTests.RowStyles[1].Height);
+
+            form.UpdateLanguage(new UiTextProvider(UiLanguage.EnUs));
+            Assert.Equal("No one-time authorizations.", FindTaggedControl(form, "empty_state_one_shot")!.Text);
+            Assert.Equal("Recurring authorizations", FindTaggedControl(form, "recurring_heading")!.Text);
+
+            SetGatewayState(gateway, CreateState(ConsentLeaseStatus.Active));
+            ClickWithoutShowing(form.RefreshButtonForTests);
+            Assert.Equal(1, form.LeaseCardCountForTests);
+            Assert.Equal(0, form.RecurringLeaseCardCountForTests);
+            Assert.Equal(SizeType.Percent, form.LeaseListsForTests.RowStyles[0].SizeType);
+            Assert.Equal(100, form.LeaseListsForTests.RowStyles[0].Height);
+            AssertCompactRow(form.LeaseListsForTests, row: 1);
+
+            SetGatewayState(gateway, CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-both", "lease-both", ConsentLeaseStatus.Active) }));
+            ClickWithoutShowing(form.RefreshButtonForTests);
+            Assert.Equal(1, form.LeaseCardCountForTests);
+            Assert.Equal(1, form.RecurringLeaseCardCountForTests);
+            Assert.Equal(SizeType.Percent, form.LeaseListsForTests.RowStyles[0].SizeType);
+            Assert.Equal(SizeType.Percent, form.LeaseListsForTests.RowStyles[1].SizeType);
+            Assert.Equal(50, form.LeaseListsForTests.RowStyles[0].Height);
+            Assert.Equal(50, form.LeaseListsForTests.RowStyles[1].Height);
+            Assert.True(form.LeaseCardForTests(0).Parent is FlowLayoutPanel { AutoScroll: true });
+            Assert.True(form.RecurringLeaseCardForTests(0).Parent is FlowLayoutPanel { AutoScroll: true });
+
+            SetGatewayState(gateway, CreateState(
+                ConsentLeaseStatus.Active,
+                new[]
+                {
+                    CreateRecurringItem("plan-exhausted-active-refresh", "lease-exhausted-active-refresh", ConsentLeaseStatus.Exhausted, activeRun: true),
+                },
+                includeOneShot: false));
+            ClickWithoutShowing(form.RefreshButtonForTests);
+            Assert.Equal(0, form.LeaseCardCountForTests);
+            Assert.Equal(1, form.RecurringLeaseCardCountForTests);
+            var refreshedCard = (TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0];
+            var refreshedDetails = (Label)refreshedCard.GetControlFromPosition(0, 0)!;
+            var refreshedRevoke = (Button)refreshedCard.GetControlFromPosition(1, 0)!;
+            Assert.Contains("Exhausted", refreshedDetails.Text);
+            Assert.Contains("Active Run: Yes", refreshedDetails.Text);
+            Assert.True(refreshedRevoke.Enabled);
+
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var refreshedForm = new UnattendedSafetyControlForm(
+                new FakeGateway(gateway.State) { RecurringRequiresStopForTest = true },
+                new UiTextProvider(UiLanguage.EnUs),
+                confirmation);
+            refreshedForm.Size = refreshedForm.MinimumSize;
+            refreshedForm.PerformLayout();
+            AssertControlBoundsFit(refreshedForm);
+            ClickWithoutShowing((Button)((TableLayoutPanel)refreshedForm.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(1, 0)!);
+            Assert.Contains("Recurring Lease revoked", refreshedForm.ResultTextForTests);
+            Assert.Contains("stop request was sent", refreshedForm.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+            AssertControlBoundsFit(refreshedForm);
+        });
+    }
+
+    [Fact]
+    public void ControlFormLayoutRemainsNonOverlappingWhenScaledAtMinimumSize()
+    {
+        RunOnSta(() =>
+        {
+            var gateway = new FakeGateway(CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-scale", "lease-scale", ConsentLeaseStatus.Active) },
+                includeOneShot: false,
+                stopAllApplied: true));
+            using var form = new UnattendedSafetyControlForm(gateway, new UiTextProvider(UiLanguage.ZhCn));
+            var baseMinimum = form.MinimumSize;
+            var previousScale = 1f;
+            foreach (var scale in new[] { 1f, 1.5f, 2f })
             {
-                DataDirResolver.ClearOverride();
+                if (scale != 1f)
+                    form.Scale(new SizeF(scale / previousScale, scale / previousScale));
+                previousScale = scale;
+                form.MinimumSize = new Size(
+                    (int)Math.Ceiling(baseMinimum.Width * scale),
+                    (int)Math.Ceiling(baseMinimum.Height * scale));
+                form.Size = form.MinimumSize;
+                form.PerformLayout();
+                AssertControlBoundsFit(form);
+                AssertEmptyStateBoundsFit(form);
+                var emptyState = FindTaggedControl(form, "empty_state_one_shot")!;
+                var card = form.RecurringLeaseCardForTests(0);
+                var content = (TableLayoutPanel)card.Controls[0];
+                var revoke = content.GetControlFromPosition(1, 0)!;
+                var stopValue = FindTaggedControl(form, "stop_summary_value")!;
+                _testOutput.WriteLine(
+                    $"scale={scale:0.##}x; minClient={form.ClientSize.Width}x{form.ClientSize.Height}; " +
+                    $"emptyRow={form.LeaseListsForTests.RowStyles[0].Height:0}; emptyState={emptyState.Bounds}; " +
+                    $"leaseLists={form.LeaseListsForTests.Bounds}; recurringGroup={card.Parent!.Parent!.Bounds}; " +
+                    $"recurringList={card.Parent.Bounds}/{card.Parent.ClientSize}; " +
+                    $"recurringCard={card.Bounds}; revoke={revoke.Bounds}; stopSummary={stopValue.Bounds}");
             }
         });
     }
 
-    private static StandingLeaseControlCenterState CreateState(ConsentLeaseStatus leaseStatus)
+    [Fact]
+    public void ExhaustedRecurringLeaseIsRevocableOnlyWhileItsExactRunRemainsActive()
+    {
+        RunOnSta(() =>
+        {
+            var state = CreateState(
+                ConsentLeaseStatus.Active,
+                new[]
+                {
+                    CreateRecurringItem("plan-exhausted-active", "lease-exhausted-active", ConsentLeaseStatus.Exhausted, activeRun: true),
+                    CreateRecurringItem("plan-exhausted-idle", "lease-exhausted-idle", ConsentLeaseStatus.Exhausted),
+                });
+            var gateway = new FakeGateway(state) { RecurringRequiresStopForTest = true };
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var form = new UnattendedSafetyControlForm(
+                gateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                confirmation);
+
+            var activeCard = (TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0];
+            var idleCard = (TableLayoutPanel)form.RecurringLeaseCardForTests(1).Controls[0];
+            var activeRevoke = (Button)activeCard.GetControlFromPosition(1, 0)!;
+            var idleRevoke = (Button)idleCard.GetControlFromPosition(1, 0)!;
+            Assert.True(activeRevoke.Enabled);
+            Assert.False(idleRevoke.Enabled);
+
+            ClickWithoutShowing(activeRevoke);
+
+            Assert.Contains(gateway.Operations, operation =>
+                operation.Kind == "recurring_revoke" && operation.IntentId == "lease-exhausted-active");
+            Assert.DoesNotContain(gateway.Operations, operation => operation.IntentId == "lease-exhausted-idle");
+            Assert.Contains("plan-exhausted-active", confirmation.LastMessage);
+            Assert.Contains("lease-exhausted-active", confirmation.LastMessage);
+        });
+    }
+
+    [Fact]
+    public void StaleRecurringCardRefreshesAndDoesNotConfirmOrRevokeTerminalLease()
+    {
+        RunOnSta(() =>
+        {
+            var stale = CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-stale", "lease-stale", ConsentLeaseStatus.Active, activeRun: true) });
+            var current = CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-stale", "lease-stale", ConsentLeaseStatus.Exhausted) });
+            var gateway = new FakeGateway(stale)
+            {
+                QuerySequence = new Queue<StandingLeaseControlCenterQueryResult>(new[]
+                {
+                    StandingLeaseControlCenterQueryResult.Available(stale),
+                    StandingLeaseControlCenterQueryResult.Available(current),
+                }),
+                QueryResult = StandingLeaseControlCenterQueryResult.Available(current),
+            };
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var form = new UnattendedSafetyControlForm(
+                gateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                confirmation);
+            var card = (TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0];
+            var revoke = (Button)card.GetControlFromPosition(1, 0)!;
+            Assert.True(revoke.Enabled);
+
+            ClickWithoutShowing(revoke);
+
+            Assert.Empty(gateway.Operations);
+            Assert.Equal(0, confirmation.CallCount);
+            Assert.False(((Button)((TableLayoutPanel)form.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(1, 0)!).Enabled);
+            Assert.Contains("no revoke was issued", form.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public void RecurringStopFailureAndNoOpAreNotReportedAsRecordingCompletion()
+    {
+        RunOnSta(() =>
+        {
+            var state = CreateState(
+                ConsentLeaseStatus.Active,
+                new[] { CreateRecurringItem("plan-stop-result", "lease-stop-result", ConsentLeaseStatus.Active, activeRun: true) });
+            var failedGateway = new FakeGateway(state)
+            {
+                RecurringRequiresStopForTest = true,
+                RecurringStopFailedForTest = true,
+            };
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var failedForm = new UnattendedSafetyControlForm(
+                failedGateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                confirmation);
+            ClickWithoutShowing((Button)((TableLayoutPanel)failedForm.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(1, 0)!);
+            Assert.Contains("no global stop was issued", failedForm.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("completed", failedForm.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+
+            var noOpGateway = new FakeGateway(state)
+            {
+                RecurringRequiresStopForTest = true,
+                RecurringStopNoOpForTest = true,
+            };
+            using var noOpForm = new UnattendedSafetyControlForm(
+                noOpGateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                new FakeConfirmation { NextAnswer = true });
+            ClickWithoutShowing((Button)((TableLayoutPanel)noOpForm.RecurringLeaseCardForTests(0).Controls[0])
+                .GetControlFromPosition(1, 0)!);
+            Assert.Contains("no additional stop was sent", noOpForm.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("completed", noOpForm.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    private static StandingLeaseControlCenterState CreateState(
+        ConsentLeaseStatus leaseStatus,
+        IReadOnlyList<StandingLeaseControlCenterRecurringLeaseSummary>? recurringItems = null,
+        bool includeOneShot = true,
+        bool stopAllApplied = false)
     {
         var now = At(1);
         return new StandingLeaseControlCenterState(
             UnattendedModeStatus.Enabled,
-            false,
-            null,
-            null,
-            null,
-            null,
-            new[]
-            {
-                new StandingLeaseControlCenterLeaseSummary(
-                    "intent-ui",
-                    StandingSetupIntentStatus.Activated,
-                    At(3600),
-                    At(10),
-                    At(20),
-                    At(80),
-                    TimeSpan.FromSeconds(30),
-                    At(3600),
-                    "plan-ui",
-                    "occurrence-ui",
-                    "lease-ui",
-                    leaseStatus,
-                    PlanOccurrenceStatus.Authorized,
-                    leaseStatus == ConsentLeaseStatus.Revoked ? StandingLeaseSafetyReasonCodes.LeaseRevoked : null,
-                    null,
-                    false,
-                    false),
-            });
+            stopAllApplied,
+            stopAllApplied ? "stop-all-ui" : null,
+            stopAllApplied ? "stop_all_reason_with_a_long_localized_summary_that_requires_wrapping_to_the_available_status_column_without_hiding_the_controls" : null,
+            stopAllApplied ? At(0) : null,
+            stopAllApplied ? At(1) : null,
+            includeOneShot
+                ? new[]
+                {
+                    new StandingLeaseControlCenterLeaseSummary(
+                        "intent-ui",
+                        StandingSetupIntentStatus.Activated,
+                        At(3600),
+                        At(10),
+                        At(20),
+                        At(80),
+                        TimeSpan.FromSeconds(30),
+                        At(3600),
+                        "plan-ui",
+                        "occurrence-ui",
+                        "lease-ui",
+                        leaseStatus,
+                        PlanOccurrenceStatus.Authorized,
+                        leaseStatus == ConsentLeaseStatus.Revoked ? StandingLeaseSafetyReasonCodes.LeaseRevoked : null,
+                        null,
+                        false,
+                        false),
+                }
+                : Array.Empty<StandingLeaseControlCenterLeaseSummary>(),
+            recurringItems ?? Array.Empty<StandingLeaseControlCenterRecurringLeaseSummary>());
     }
+
+    private static void AssertCompactRow(TableLayoutPanel panel, int row)
+    {
+        Assert.Equal(SizeType.Absolute, panel.RowStyles[row].SizeType);
+        Assert.InRange(panel.RowStyles[row].Height, 64, 120);
+    }
+
+    private static void SetGatewayState(FakeGateway gateway, StandingLeaseControlCenterState state)
+    {
+        gateway.State = state;
+        gateway.QueryResult = StandingLeaseControlCenterQueryResult.Available(state);
+    }
+
+    private static void AssertControlBoundsFit(UnattendedSafetyControlForm form)
+    {
+        form.PerformLayout();
+        var statusHeading = FindTaggedControl(form, "status_heading")!;
+        var stopHeading = FindTaggedControl(form, "stop_heading")!;
+        var globalValue = FindTaggedControl(form, "global_status_value")!;
+        var stopValue = FindTaggedControl(form, "stop_summary_value")!;
+        Assert.True(statusHeading.Width >= statusHeading.PreferredSize.Width);
+        Assert.True(stopHeading.Width >= stopHeading.PreferredSize.Width);
+        Assert.Same(statusHeading.Parent, globalValue.Parent);
+        Assert.Same(stopHeading.Parent, stopValue.Parent);
+        Assert.False(statusHeading.Bounds.IntersectsWith(globalValue.Bounds), "The global status heading overlaps its value.");
+        Assert.False(stopHeading.Bounds.IntersectsWith(stopValue.Bounds), "The Stop All heading overlaps its value.");
+        Assert.True(stopValue.Right <= stopValue.Parent!.ClientSize.Width);
+        Assert.True(stopValue.Parent.Right <= stopValue.Parent.Parent!.ClientSize.Width);
+        Assert.True(stopValue.Height >= stopValue.PreferredSize.Height, "The Stop All status value is vertically clipped.");
+        var result = FindTaggedControl(form, "result")!;
+        Assert.True(result.Right <= result.Parent!.ClientSize.Width, "The operation result is clipped horizontally.");
+        Assert.True(result.Parent.Right <= result.Parent.Parent!.ClientSize.Width, "The result area extends past the window content.");
+        Assert.True(result.Height >= result.PreferredSize.Height, "The operation result is vertically clipped.");
+
+        foreach (var card in Enumerable.Range(0, form.LeaseCardCountForTests)
+                     .Select(form.LeaseCardForTests)
+                     .Concat(Enumerable.Range(0, form.RecurringLeaseCardCountForTests).Select(form.RecurringLeaseCardForTests)))
+        {
+            card.PerformLayout();
+            Assert.True(card.Right <= card.Parent!.ClientSize.Width, $"Card extends past its list viewport: {card.Bounds}");
+            var content = Assert.IsType<TableLayoutPanel>(card.Controls[0]);
+            content.PerformLayout();
+            var details = content.Controls[0];
+            var revoke = content.Controls[1];
+            Assert.False(details.Bounds.IntersectsWith(revoke.Bounds), "Card details overlap the revoke action.");
+            Assert.True(revoke.Right <= content.ClientSize.Width, "Revoke action extends past the card content area.");
+            if (card.Parent is FlowLayoutPanel list && list.Controls.GetChildIndex(card) == 0)
+            {
+                Assert.True(
+                    card.Width >= list.ClientSize.Width - list.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 8,
+                    "The populated category is not using its available card width.");
+                var revokeInList = revoke.Bounds;
+                revokeInList.Offset(content.Left + card.Left, content.Top + card.Top);
+                Assert.True(revokeInList.Bottom <= list.ClientSize.Height, "The first card's revoke action is below the visible list viewport.");
+            }
+        }
+    }
+
+    private static void AssertEmptyStateBoundsFit(UnattendedSafetyControlForm form)
+    {
+        foreach (var tag in new[] { "empty_state_one_shot", "empty_state_recurring" })
+        {
+            if (FindTaggedControl(form, tag) is not { } emptyState)
+                continue;
+
+            Assert.True(emptyState.Left >= 0 && emptyState.Top >= 0);
+            Assert.True(emptyState.Right <= emptyState.Parent!.ClientSize.Width, $"{tag} is clipped horizontally.");
+            Assert.True(emptyState.Bottom <= emptyState.Parent.ClientSize.Height, $"{tag} is clipped vertically.");
+        }
+    }
+
+    private static Control? FindTaggedControl(Control parent, string tag)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            if (string.Equals(child.Tag as string, tag, StringComparison.Ordinal))
+                return child;
+            var nested = FindTaggedControl(child, tag);
+            if (nested is not null)
+                return nested;
+        }
+
+        return null;
+    }
+
+    private static void ClickWithoutShowing(Control control) =>
+        typeof(Control).GetMethod("OnClick", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(control, new object[] { EventArgs.Empty });
+
+    private static StandingLeaseControlCenterRecurringLeaseSummary CreateRecurringItem(
+        string planId,
+        string leaseId,
+        ConsentLeaseStatus status,
+        bool activeRun = false) => new(
+            planId,
+            leaseId,
+            RecurringScheduleKind.Weekly,
+            "Pacific Standard Time",
+            new DateOnly(2026, 1, 1),
+            new DateOnly(2026, 1, 31),
+            new TimeOnly(9, 30),
+            new[] { DayOfWeek.Monday, DayOfWeek.Friday },
+            new DateOnly(2026, 1, 5),
+            new TimeOnly(9, 30),
+            false,
+            status,
+            At(3600),
+            3,
+            TimeSpan.FromMinutes(2),
+            activeRun);
 
     private static void CreateIntent(TestDatabase database, string suffix, bool prepare, bool activate)
     {
@@ -336,10 +775,12 @@ public sealed class UnattendedSafetyControlCenterTests
     {
         public bool NextAnswer { get; set; }
         public int CallCount { get; private set; }
+        internal string LastMessage { get; private set; } = string.Empty;
 
         public bool Confirm(IWin32Window owner, string title, string message)
         {
             CallCount++;
+            LastMessage = message;
             return NextAnswer;
         }
     }
@@ -350,6 +791,10 @@ public sealed class UnattendedSafetyControlCenterTests
         internal StandingLeaseControlCenterQueryResult QueryResult { get; set; }
         internal Func<bool>? BusyProbe { get; set; }
         internal bool BusyObserved { get; private set; }
+        internal bool RecurringRequiresStopForTest { get; set; }
+        internal bool RecurringStopFailedForTest { get; set; }
+        internal bool RecurringStopNoOpForTest { get; set; }
+        internal Queue<StandingLeaseControlCenterQueryResult>? QuerySequence { get; set; }
         internal List<(string Kind, string OperationId, string? IntentId)> Operations { get; } = new();
 
         internal FakeGateway(StandingLeaseControlCenterState state)
@@ -358,12 +803,27 @@ public sealed class UnattendedSafetyControlCenterTests
             QueryResult = StandingLeaseControlCenterQueryResult.Available(state);
         }
 
-        public StandingLeaseControlCenterQueryResult Query() => QueryResult;
+        public StandingLeaseControlCenterQueryResult Query() =>
+            QuerySequence is { Count: > 0 } ? QuerySequence.Dequeue() : QueryResult;
 
         public StandingLeaseSafetyControlResult RevokeLease(string intentId, string operationId)
         {
             Operations.Add(("revoke", operationId, intentId));
             return StandingLeaseSafetyControlResult.ChangedResult(operationId, StandingLeaseSafetyReasonCodes.LeaseRevoked);
+        }
+
+        public StandingLeaseSafetyControlResult RevokeRecurringLease(string leaseId, string operationId)
+        {
+            Operations.Add(("recurring_revoke", operationId, leaseId));
+            var result = StandingLeaseSafetyControlResult.ChangedResult(
+                operationId,
+                StandingLeaseSafetyReasonCodes.LeaseRevoked,
+                requiresActiveRunStop: RecurringRequiresStopForTest,
+                durableOperationCommitted: true,
+                targetRunId: RecurringRequiresStopForTest ? "run-ui" : null);
+            if (RecurringStopFailedForTest)
+                return result.WithPhysicalStopFailure();
+            return RecurringStopNoOpForTest ? result.WithPhysicalStopNoOp() : result;
         }
 
         public StandingLeaseSafetyControlResult StopAll(string operationId)

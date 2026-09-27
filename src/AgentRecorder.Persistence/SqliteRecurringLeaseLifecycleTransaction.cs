@@ -342,6 +342,13 @@ internal sealed class SqliteRecurringLeaseLifecycleTransaction : SqlitePeriodicO
             UpdateOccurrence(connection, transaction, snapshot.Occurrence, occurrenceVersion);
             InvokeFailureHook(RecurringLeaseLifecycleFailurePoint.AfterOccurrenceUpdate);
             ReconcileLeaseQuota(connection, transaction, snapshot, terminatedAtUtc);
+            _ = SqliteRecordingRunOutputEvidence.InsertVerifiedWithinTransaction(
+                connection,
+                transaction,
+                snapshot.Run.Id,
+                snapshot.Occurrence.Id,
+                meta!.OutputPath!,
+                terminatedAtUtc);
             FinalReadback(connection, transaction, snapshot, "media_settled");
             return RecurringLeaseLifecycleActionResult.Applied("media_settled", terminal: true);
         });

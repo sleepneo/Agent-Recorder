@@ -12,6 +12,45 @@ internal static class StandingPlanApiRequestParser
 {
     private static readonly StringComparer Comparer = StringComparer.Ordinal;
 
+    internal static bool IsRequiredAuthorizationMode(string requestBody)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(requestBody, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 16,
+            });
+
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return false;
+
+            foreach (var property in root.EnumerateObject())
+            {
+                if (!string.Equals(property.Name, "requested_authorization", StringComparison.Ordinal) ||
+                    property.Value.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                foreach (var authorizationProperty in property.Value.EnumerateObject())
+                {
+                    if (string.Equals(authorizationProperty.Name, "mode", StringComparison.Ordinal) &&
+                        authorizationProperty.Value.ValueKind == JsonValueKind.String &&
+                        string.Equals(authorizationProperty.Value.GetString(), "required", StringComparison.Ordinal))
+                        return true;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // The normal parser owns malformed-body diagnostics. This probe is
+            // only used to select the explicit required-mode fail-closed path.
+        }
+
+        return false;
+    }
+
     internal static string NormalizeIdempotencyKey(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -29,6 +68,41 @@ internal static class StandingPlanApiRequestParser
     }
 
     internal static StandingPlanApiRequest Parse(string requestBody, string idempotencyKey)
+    {
+        var parsed = ParseCore(requestBody, idempotencyKey);
+        if (!string.Equals(parsed.AuthorizationMode, "standing_lease", StringComparison.Ordinal) ||
+            parsed.LeaseExpiresUtc is null)
+            throw Invalid("requested_authorization.mode must be 'standing_lease'.");
+
+        return new StandingPlanApiRequest(
+            parsed.IdempotencyKey,
+            parsed.ScheduledStartUtc,
+            parsed.LatestStartUtc,
+            parsed.PlannedEndUtc,
+            parsed.LeaseExpiresUtc.Value,
+            parsed.Duration,
+            parsed.OutputDirectory,
+            parsed.FrozenFileName);
+    }
+
+    internal static RequiredOncePlanApiRequest ParseRequired(string requestBody, string idempotencyKey)
+    {
+        var parsed = ParseCore(requestBody, idempotencyKey);
+        if (!string.Equals(parsed.AuthorizationMode, "required", StringComparison.Ordinal) ||
+            parsed.LeaseExpiresUtc is not null)
+            throw Invalid("requested_authorization.mode must be 'required'.");
+
+        return new RequiredOncePlanApiRequest(
+            parsed.IdempotencyKey,
+            parsed.ScheduledStartUtc,
+            parsed.LatestStartUtc,
+            parsed.PlannedEndUtc,
+            parsed.Duration,
+            parsed.OutputDirectory,
+            parsed.FrozenFileName);
+    }
+
+    private static ParsedOneTimePlanRequest ParseCore(string requestBody, string idempotencyKey)
     {
         JsonDocument document;
         try
@@ -102,19 +176,29 @@ internal static class StandingPlanApiRequestParser
                 throw Invalid("planned_end_at must contain the full duration after the latest allowed start.");
 
             var authorization = RequireObjectProperty(root, "requested_authorization");
-            RequireProperties(authorization, "requested_authorization", "mode", "expires_at", "max_runs", "max_duration_seconds");
-            RequireString(authorization, "mode", "standing_lease", "requested_authorization.mode");
-            var leaseExpiresUtc = RequireUtc(authorization, "expires_at", "requested_authorization.expires_at");
-            if (leaseExpiresUtc <= plannedEndUtc)
-                throw Invalid("requested_authorization.expires_at must be after planned_end_at.");
-            if (leaseExpiresUtc - DateTimeOffset.UtcNow > TimeSpan.FromHours(1))
-                throw Invalid("requested_authorization.expires_at must be within one hour of request time.");
-            if (RequireInt(authorization, "max_runs", "requested_authorization.max_runs") != 1)
-                throw Invalid("requested_authorization.max_runs must be 1.");
-            if (RequireInt(authorization, "max_duration_seconds", "requested_authorization.max_duration_seconds") != durationSeconds)
-                throw Invalid("requested_authorization.max_duration_seconds must equal duration_seconds.");
+            var authorizationMode = RequireNonBlankString(authorization, "mode", "requested_authorization.mode");
+            DateTimeOffset? leaseExpiresUtc = null;
+            if (string.Equals(authorizationMode, "required", StringComparison.Ordinal))
+            {
+                RequireProperties(authorization, "requested_authorization", "mode");
+            }
+            else
+            {
+                RequireProperties(authorization, "requested_authorization", "mode", "expires_at", "max_runs", "max_duration_seconds");
+                RequireString(authorization, "mode", "standing_lease", "requested_authorization.mode");
+                leaseExpiresUtc = RequireUtc(authorization, "expires_at", "requested_authorization.expires_at");
+                if (leaseExpiresUtc <= plannedEndUtc)
+                    throw Invalid("requested_authorization.expires_at must be after planned_end_at.");
+                if (leaseExpiresUtc - DateTimeOffset.UtcNow > TimeSpan.FromHours(1))
+                    throw Invalid("requested_authorization.expires_at must be within one hour of request time.");
+                if (RequireInt(authorization, "max_runs", "requested_authorization.max_runs") != 1)
+                    throw Invalid("requested_authorization.max_runs must be 1.");
+                if (RequireInt(authorization, "max_duration_seconds", "requested_authorization.max_duration_seconds") != durationSeconds)
+                    throw Invalid("requested_authorization.max_duration_seconds must equal duration_seconds.");
+            }
 
-            return new StandingPlanApiRequest(
+            return new ParsedOneTimePlanRequest(
+                authorizationMode,
                 idempotencyKey,
                 scheduledStartUtc,
                 latestStartUtc,
@@ -125,6 +209,17 @@ internal static class StandingPlanApiRequestParser
                 frozenFileName);
         }
     }
+
+    private sealed record ParsedOneTimePlanRequest(
+        string AuthorizationMode,
+        string IdempotencyKey,
+        DateTimeOffset ScheduledStartUtc,
+        DateTimeOffset LatestStartUtc,
+        DateTimeOffset PlannedEndUtc,
+        DateTimeOffset? LeaseExpiresUtc,
+        TimeSpan Duration,
+        string OutputDirectory,
+        string FrozenFileName);
 
     private static void ValidateOutputShape(string directory, string fileName)
     {
@@ -224,10 +319,13 @@ internal static class StandingPlanApiRequestParser
     private static void RequireProperties(JsonElement value, string fieldName, params string[] expected)
     {
         var expectedSet = new HashSet<string>(expected, Comparer);
+        var seen = new HashSet<string>(Comparer);
         foreach (var property in value.EnumerateObject())
         {
             if (!expectedSet.Contains(property.Name))
                 throw Invalid($"{fieldName} contains unsupported property '{property.Name}'.");
+            if (!seen.Add(property.Name))
+                throw Invalid($"{fieldName} contains duplicate property '{property.Name}'.");
         }
 
         foreach (var property in expected)
