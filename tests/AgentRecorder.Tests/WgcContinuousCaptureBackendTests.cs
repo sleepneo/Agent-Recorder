@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Windows;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -467,6 +468,194 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
         Assert.Equal(1, process.StartInvocationCount);
 
         backend.Dispose();
+    }
+
+    [Fact]
+    public void Start_StrictWindowSurface600Seconds_UsesIsolatedLongRunHelperContract()
+    {
+        SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+        {
+            new("window_4660", "Test Window", "test.exe", 42, true, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+        try
+        {
+            WgcContinuousSessionOptions? options = null;
+            var backend = CreateBackend(config =>
+            {
+                options = config;
+                var session = new FakeSession(config);
+                session.AuthorizeTcs.TrySetResult(true);
+                return session;
+            }, out _, out _);
+            var cfg = CreateValidConfig(
+                outputPath: Path.Combine(_finalDir, "strict-window-600.mp4"),
+                durationSeconds: WindowSurfaceDurationPolicy.MaxSeconds,
+                bounds: (0, 0, 1280, 720));
+            cfg.SourceKind = "window";
+            cfg.WindowHandle = (nint)0x1234;
+            cfg.WindowProcessId = 42;
+            cfg.WindowSurfaceBounds = (0, 0, 1280, 720);
+            cfg.RequireWindowSurface = true;
+
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+
+            Assert.NotNull(options);
+            Assert.Equal(600000, options!.DurationMs);
+            Assert.True(options.AllowExtendedWindowSurfaceDuration);
+            Assert.Equal(WgcContinuousTargetKind.Window, options.TargetKind);
+            Assert.Equal(615000, options.ProcessTimeoutMs);
+            Assert.Contains("--allow-long-window-surface-duration", cfg.CommandArgs, StringComparison.Ordinal);
+            backend.Dispose();
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public async Task StrictWindowSurfacePrematureNaturalExit_FailsBeforePublishingAndNotifiesOnce()
+    {
+        const int requestedSeconds = 61;
+        SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+        {
+            new("window_4660", "Test Window", "test.exe", 42, true, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+        try
+        {
+            FakeSession? session = null;
+            var backend = CreateBackend(options =>
+            {
+                session = new FakeSession(options);
+                session.AuthorizeTcs.TrySetResult(true);
+                return session;
+            }, out var publisher, out var probe);
+            probe.OnProbe = path => new OutputMeta
+            {
+                Container = "mp4",
+                Codec = "h264",
+                Width = 1280,
+                Height = 720,
+                Fps = 30,
+                DurationSeconds = 5,
+                SizeBytes = new FileInfo(path).Length,
+                OutputFileExists = true
+            };
+            var cfg = CreateValidConfig(
+                outputPath: Path.Combine(_finalDir, "strict-window-premature.mp4"),
+                durationSeconds: requestedSeconds,
+                bounds: (0, 0, 1280, 720));
+            cfg.SourceKind = "window";
+            cfg.WindowHandle = (nint)0x1234;
+            cfg.WindowProcessId = 42;
+            cfg.WindowSurfaceBounds = (0, 0, 1280, 720);
+            cfg.RequireWindowSurface = true;
+
+            var callbackCount = 0;
+            var callback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            backend.OnNaturalExit((_, _) =>
+            {
+                Interlocked.Increment(ref callbackCount);
+                callback.TrySetResult();
+            });
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            Assert.NotNull(session);
+            File.WriteAllBytes(session!.Options.OutputPath, new byte[10000]);
+            var earlyResult = session.DefaultResult;
+            earlyResult.Summary!.CaptureMethod = "WGC_D3D11_WINDOW_FRAME_STREAM";
+            earlyResult.Summary.Width = 1280;
+            earlyResult.Summary.Height = 720;
+            earlyResult.Summary.DurationMs = 5000;
+            session.CompletionTcs.TrySetResult(earlyResult);
+
+            await callback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var meta = backend.Stop();
+
+            Assert.Equal(1, Volatile.Read(ref callbackCount));
+            Assert.Equal(0, publisher.CallCount);
+            Assert.False(meta.OutputFileExists);
+            Assert.Equal("output_validation_failed", meta.StopReason);
+            Assert.Contains(meta.Warnings, warning => warning.Contains("requested_duration_mismatch", StringComparison.Ordinal));
+            Assert.False(File.Exists(cfg.OutputPath));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public async Task StrictWindowSurface61SecondNaturalCompletion_FinalizesAndNotifiesExactlyOnce()
+    {
+        const int requestedSeconds = 61;
+        SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+        {
+            new("window_4660", "Test Window", "test.exe", 42, true, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+        try
+        {
+            FakeSession? session = null;
+            var backend = CreateBackend(options =>
+            {
+                session = new FakeSession(options);
+                session.AuthorizeTcs.TrySetResult(true);
+                return session;
+            }, out var publisher, out var probe);
+            probe.OnProbe = path => new OutputMeta
+            {
+                Container = "mp4",
+                Codec = "h264",
+                Width = 1280,
+                Height = 720,
+                Fps = 30,
+                DurationSeconds = requestedSeconds,
+                SizeBytes = new FileInfo(path).Length,
+                OutputFileExists = true
+            };
+            var cfg = CreateValidConfig(
+                outputPath: Path.Combine(_finalDir, "strict-window-61.mp4"),
+                durationSeconds: requestedSeconds,
+                bounds: (0, 0, 1280, 720));
+            cfg.SourceKind = "window";
+            cfg.WindowHandle = (nint)0x1234;
+            cfg.WindowProcessId = 42;
+            cfg.WindowSurfaceBounds = (0, 0, 1280, 720);
+            cfg.RequireWindowSurface = true;
+
+            var callbackCount = 0;
+            var callback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            backend.OnNaturalExit((_, _) =>
+            {
+                Interlocked.Increment(ref callbackCount);
+                callback.TrySetResult();
+            });
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            Assert.NotNull(session);
+            File.WriteAllBytes(session!.Options.OutputPath, new byte[10000]);
+            var completedResult = session.DefaultResult;
+            completedResult.Summary!.CaptureMethod = "WGC_D3D11_WINDOW_FRAME_STREAM";
+            completedResult.Summary.Width = 1280;
+            completedResult.Summary.Height = 720;
+            completedResult.Summary.DurationMs = requestedSeconds * 1000L;
+            session.CompletionTcs.TrySetResult(completedResult);
+
+            await callback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var meta = backend.Stop();
+
+            Assert.Equal(1, Volatile.Read(ref callbackCount));
+            Assert.Equal(1, publisher.CallCount);
+            Assert.True(meta.OutputFileExists);
+            Assert.Equal(cfg.OutputPath, meta.OutputPath);
+            Assert.Equal(requestedSeconds, meta.DurationSeconds);
+            Assert.True(File.Exists(cfg.OutputPath));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
     }
 
     [Fact]

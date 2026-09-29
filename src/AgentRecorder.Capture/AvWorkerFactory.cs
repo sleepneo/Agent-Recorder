@@ -49,6 +49,15 @@ public sealed class AvWorkerFactory : IAvWorkerFactory
 
     public IVideoCaptureWorker CreateVideoWorker() => new VideoCaptureWorker(_runner);
 
+    public IVideoCaptureWorker CreateVideoWorker(CaptureConfig config, CaptureAuthorizationProof authorizationProof)
+    {
+        if (config == null) throw new ArgumentNullException(nameof(config));
+        if (authorizationProof == null) throw new ArgumentNullException(nameof(authorizationProof));
+        return config.RequireWindowSurface
+            ? new WgcContinuousVideoCaptureWorker(authorizationProof)
+            : CreateVideoWorker();
+    }
+
     public static string GetBackend()
     {
         var value = Environment.GetEnvironmentVariable(BackendEnvVarName)?.Trim();

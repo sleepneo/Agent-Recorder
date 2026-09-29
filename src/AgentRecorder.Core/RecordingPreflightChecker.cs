@@ -24,6 +24,47 @@ internal static class RecordingPreflightChecker
     public delegate string? TryResolveAudioHelper();
     public delegate AudioHelperProbeResult RunAudioHelperProbe(string helperPath, CancellationToken token);
 
+    private static readonly object SystemAudioHelperCapabilityLock = new();
+    private static long _systemAudioHelperCapabilityCheckedAtTicks;
+    private static bool _systemAudioHelperCapabilityCacheValid;
+    private static string? _systemAudioHelperCapabilityPath;
+    private static bool _systemAudioHelperCapabilityAvailable;
+    private static string? _systemAudioHelperCapabilityReason;
+
+    internal static (bool Available, string? ReasonCode) ProbeSystemAudioHelperAvailability()
+    {
+        string? path;
+        try { path = AudioHelperPathResolver(); }
+        catch { path = null; }
+
+        lock (SystemAudioHelperCapabilityLock)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (_systemAudioHelperCapabilityCacheValid &&
+                string.Equals(path, _systemAudioHelperCapabilityPath, StringComparison.Ordinal) &&
+                now - _systemAudioHelperCapabilityCheckedAtTicks < Stopwatch.Frequency * 30L)
+            {
+                return (_systemAudioHelperCapabilityAvailable, _systemAudioHelperCapabilityReason);
+            }
+
+            var recording = new Recording
+            {
+                Config = new CaptureConfig
+                {
+                    AudioSourceKind = AudioCaptureSourceKind.SystemLoopback,
+                    SystemLoopbackEndpoint = "capability-probe"
+                }
+            };
+            var result = CheckWasapiHelperPreflight(recording);
+            _systemAudioHelperCapabilityPath = path;
+            _systemAudioHelperCapabilityAvailable = result.Passed;
+            _systemAudioHelperCapabilityReason = result.ErrorCode;
+            _systemAudioHelperCapabilityCheckedAtTicks = now;
+            _systemAudioHelperCapabilityCacheValid = true;
+            return (_systemAudioHelperCapabilityAvailable, _systemAudioHelperCapabilityReason);
+        }
+    }
+
     /// <summary>
     /// Injectable disk-space provider for tests. Returns true if free space could
     /// be determined, with the value in <paramref name="freeBytes"/>.
@@ -221,7 +262,15 @@ internal static class RecordingPreflightChecker
         if (rec.SourceType != "window" || rec.Config.WindowHandle == nint.Zero)
             return Pass(warnings);
 
-        var windows = SystemQuery.EnumWindows(includeMinimized: true, includeSystem: false);
+        List<SystemQuery.WindowInfo> windows;
+        try { windows = SystemQuery.EnumWindows(includeMinimized: true, includeSystem: false); }
+        catch
+        {
+            if (rec.Config.RequireWindowSurface)
+                return Fail("WINDOW_TARGET_UNAVAILABLE",
+                    "The approved window identity could not be revalidated.", "retry_after_checking_the_window");
+            throw;
+        }
         var window = windows.FirstOrDefault(w => w.id == $"window_{rec.Config.WindowHandle.ToInt64()}");
 
         if (window == null)
@@ -237,6 +286,10 @@ internal static class RecordingPreflightChecker
                 $"Target window '{rec.SourceTitle}' is minimized and cannot be captured.",
                 "restore_or_move_window_then_retry");
         }
+
+        var strictTargetResult = ValidateWindowSurfaceTarget(rec, window);
+        if (!strictTargetResult.Passed)
+            return strictTargetResult;
 
         const int MinSize = 32;
         if (window.bounds.width < MinSize || window.bounds.height < MinSize)
@@ -255,6 +308,50 @@ internal static class RecordingPreflightChecker
         }
 
         return Pass(warnings);
+    }
+
+    internal static RecordingPreflightResult CheckWindowSurfaceTarget(Recording rec)
+    {
+        if (!rec.Config.RequireWindowSurface)
+            return Pass(new List<string>());
+        if (rec.Config.WindowHandle == nint.Zero)
+            return Fail("WINDOW_IDENTITY_CHANGED",
+                "The selected window identity is no longer valid.", "choose_source_again");
+
+        List<SystemQuery.WindowInfo> windows;
+        try { windows = SystemQuery.EnumWindows(includeMinimized: true, includeSystem: false); }
+        catch
+        {
+            return Fail("WINDOW_TARGET_UNAVAILABLE",
+                "The approved window identity could not be revalidated.", "retry_after_checking_the_window");
+        }
+        var window = windows.FirstOrDefault(w => w.id == $"window_{rec.Config.WindowHandle.ToInt64()}");
+        if (window == null)
+            return Fail("SOURCE_NOT_FOUND",
+                $"Target window '{rec.SourceTitle}' no longer exists.", "choose_source_again");
+        if (window.is_minimized)
+            return Fail("SOURCE_UNAVAILABLE",
+                $"Target window '{rec.SourceTitle}' is minimized and cannot be captured.", "restore_or_move_window_then_retry");
+        return ValidateWindowSurfaceTarget(rec, window);
+    }
+
+    private static RecordingPreflightResult ValidateWindowSurfaceTarget(
+        Recording rec,
+        SystemQuery.WindowInfo window)
+    {
+        if (!rec.Config.RequireWindowSurface)
+            return Pass(new List<string>());
+        if (rec.Config.WindowProcessId is not int expectedProcessId ||
+            expectedProcessId <= 0 || window.process_id != expectedProcessId)
+            return Fail("WINDOW_IDENTITY_CHANGED",
+                "The selected window identity changed after the request was prepared. Create a new request for the current window.",
+                "choose_source_again");
+        if (rec.Config.WindowSurfaceBounds is not { } expectedBounds ||
+            window.bounds.width != expectedBounds.w || window.bounds.height != expectedBounds.h)
+            return Fail("WINDOW_SIZE_CHANGED",
+                "The selected window size changed after the request was prepared. Restore its approved size and create a new request.",
+                "restore_approved_window_size");
+        return Pass(new List<string>());
     }
 
     private static RecordingPreflightResult CheckBounds(Recording rec, List<string> warnings)

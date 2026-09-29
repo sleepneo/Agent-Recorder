@@ -255,9 +255,11 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC continuous 边界**：仓库内包含实验性原生 `wgc-native-helper.exe`、托管会话与 capture backend 适配器；受控 selector、非捕获能力探测、短期成功缓存和 FFmpeg 自动回退已接通。符合条件的 **1–60 秒、无音频** display/window/region 请求可由对应本地环境开关进入 WGC continuous；window 模式使用真实 HWND，并把窗口关闭、最小化或尺寸变化保留为明确终态；region 模式按稳定显示器身份复核 topology，并在编码前执行 GPU 裁剪。60 秒是当前受控验收边界，不代表所有 GPU、驱动、Windows 版本或应用都已兼容。请求带麦克风/系统声音、时长不合格、能力探测失败或运行期目标失效时，继续自动回退现有 FFmpeg（需要时为 A/V split）路径。self-contained portable 包包含唯一生产 helper，但 **WGC continuous 仍未作为公共 API 能力开放**，默认关闭。公共请求不能直接指定该后端；普通 agent 应继续按本文档使用公开的 display/window/region 能力。
+**WGC 能力边界**：display/region 的实验性 WGC 路径仍是内部受控功能，默认关闭；固定 window 有独立的公共严格请求，见“窗口捕获语义”。该请求只在 `recording.window_surface.supported=true` 时可用；WGC 探测失败不会回退桌面矩形。严格窗口表面请求时长为 1–600 秒，并使用正常本地逐次确认；能力探测只证明运行时可用，不代表已经完成该设备/窗口/端点的 5 分钟 A/V 稳定性验收；600 秒上限也不表示完整直播录制已经就绪。system loopback 变体还要求 `recording.window_surface.system_audio_supported=true` 和一个可用输出端点。display、region 与未声明严格语义的旧 WGC 路径仍为最多 60 秒。
 
 **音频能力**：麦克风和系统声音均由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone", "system_audio"]`。`recording.audio_capabilities.microphone` 与 `.system_audio` 都返回 `supported: true`，状态为新鲜的 `ready`、`no_devices` 或 `unavailable`。系统声音请求仍须本地确认；批准的 render endpoint 在本次录制中保持固定，默认输出切换不会自动跟随，切回批准端点后执行有界同端点恢复并通过连续性指标披露缺口。麦克风和系统声音不能在同一请求中同时启用。
+
+`recording.window_surface` 报告 WGC 窗口运行时当前探测结果、失败原因、1–600 秒范围和逐次本地确认要求。`long_run_readiness="bounded_duration_only"` 与 `long_run_stress_tested=false` 表明能力探测不等于长时 A/V 验收。只有 WGC、render endpoint 与 WASAPI helper 协议探测都可用时，`system_audio_supported` 才为 true；`system_audio_helper_status`/`system_audio_helper_reason_code` 单独说明 helper 状态；若没有可用 endpoint，helper 状态为 `not_checked`。system audio 是批准的 Windows 输出端点 loopback，捕获该端点播放的系统声音，**不是所选窗口独占的音轨**。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -1976,9 +1978,33 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 | `window_id` | 现有公开窗口身份契约；不暴露 HWND 以外的内部句柄或路径。 |
 | `selection_reason_code` / `selection_fallback` | 稳定的选择原因与是否发生回退。 |
 
-`wgc-continuous` 的合格窗口计划使用 `window_surface`；窗口 FFmpeg 区域路径
-使用 `screen_rectangle`。61 秒及其他不符合 WGC 实验条件的请求会在确认前显示
-`screen_rectangle`，不会先承诺窗口表面语义。
+不传严格字段时，普通窗口录制保持现有 `screen_rectangle` 行为。请求真实窗口表面语义时，使用普通 `POST /api/v1/recordings` 顶层字段：
+
+```json
+{
+  "required_capture_semantics": "window_surface",
+  "source": { "type": "window", "window_id": "window_123456" },
+  "stop_condition": { "type": "duration", "seconds": 300 },
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+该字段只接受精确字符串 `window_surface`。仅支持固定 `window_id`、普通
+`video` 模式、1–600 秒以及无音频或 system audio；不支持麦克风、`quick`、
+`screenshot_series`、`nested` 或计划/Lease 请求。请求仍须本地逐次确认，HTTP
+不能批准确认。确认摘要应显示 `capture_semantics=window_surface`；系统声音版本的
+`planned_backend` 为 `wgc-window-av-split`，且 `selection_fallback=false`。批准后由
+WGC 捕获所选 HWND 的窗口表面、由 WASAPI loopback 捕获固定输出端点，现有 A/V
+finalizer 输出含 AAC 音轨的 MP4。系统声音范围是整个输出端点而非窗口独占声音。
+
+若能力不可用，严格请求在确认前失败（`WINDOW_SURFACE_UNAVAILABLE`），绝不静默
+退回 `screen_rectangle`。601 秒及以上返回稳定的 `400 INVALID_ARGUMENT`，不会创建
+confirmation 或启动 capture。字段非法、窗口身份/PID/尺寸改变、窗口最小化或关闭、
+音频端点不可用也会明确失败。省略字段的默认窗口录制和显示器/区域能力不变。
+
+不带严格字段时，符合现有 WGC 实验条件的受控计划仍可能使用 `window_surface`；
+普通 FFmpeg 窗口路径使用 `screen_rectangle`。61 秒及其他不符合实验条件的旧请求
+仍保持原有窗口矩形语义，不会被自动升级为窗口表面。
 
 ### 每条录制的开始前倒计时
 

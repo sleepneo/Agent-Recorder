@@ -34,7 +34,8 @@ void PrintHelp() {
         "  --region-bounds <region-x,region-y,region-width,region-height>\n"
         "  --recording-id <safe-id>\n"
         "  --output <absolute-mp4-path>\n"
-        "  --duration-ms <1000..60000>\n"
+        "  --duration-ms <1000..60000; strict window_surface: up to 600000>\n"
+        "  --allow-long-window-surface-duration (window mode only; strict path)\n"
         "  --fps <1..60>\n"
         "  --encoder-mode <software|hardware-preferred>\n"
         "  --begin-signal <absolute-path>\n"
@@ -121,6 +122,10 @@ bool ValidateContinuousOptions(const Options& opts, std::string& error) {
             return false;
         }
     }
+    if (opts.allowLongWindowSurfaceDuration && opts.mode != CaptureMode::ContinuousWindow) {
+        error = "--allow-long-window-surface-duration is available only for window capture";
+        return false;
+    }
     if (opts.mode == CaptureMode::ContinuousRegion) {
         if (!opts.hasDisplayBounds || !opts.hasRegionBounds) {
             error = "Region capture requires both --display-bounds and --region-bounds";
@@ -141,9 +146,14 @@ bool ValidateContinuousOptions(const Options& opts, std::string& error) {
             return false;
         }
     }
+    const int maxDurationMs = opts.allowLongWindowSurfaceDuration
+        ? kWgcWindowSurfaceMaxDurationMs
+        : kWgcContinuousMaxDurationMs;
     if (opts.durationMs < kWgcContinuousMinDurationMs ||
-        opts.durationMs > kWgcContinuousMaxDurationMs) {
-        error = "Invalid duration-ms; expected 1000..60000";
+        opts.durationMs > maxDurationMs) {
+        error = opts.allowLongWindowSurfaceDuration
+            ? "Invalid strict window-surface duration-ms; expected 1000..600000"
+            : "Invalid duration-ms; expected 1000..60000";
         return false;
     }
     if (opts.fps < 1 || opts.fps > 60) {

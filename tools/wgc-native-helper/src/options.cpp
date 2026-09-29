@@ -200,10 +200,12 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             if (!takeNext(value, L"duration-ms")) return result;
             if (!ParseInt(TrimWide(value), opts.durationMs) ||
                 opts.durationMs < kWgcContinuousMinDurationMs ||
-                opts.durationMs > kWgcContinuousMaxDurationMs) {
-                result.error = "Invalid duration-ms; expected 1000..60000";
+                opts.durationMs > kWgcWindowSurfaceMaxDurationMs) {
+                result.error = "Invalid duration-ms; expected 1000..600000";
                 return result;
             }
+        } else if (EqualsArg(arg, L"allow-long-window-surface-duration")) {
+            opts.allowLongWindowSurfaceDuration = true;
         } else if (EqualsArg(arg, L"fps")) {
             std::wstring value;
             if (!takeNext(value, L"fps")) return result;
@@ -239,6 +241,24 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             if (!takeNext(opts.stopSignalPath, L"stop-signal")) return result;
         } else {
             result.error = std::format("Unknown argument: {}", WideToUtf8(arg));
+            return result;
+        }
+    }
+
+    if (opts.mode == CaptureMode::ContinuousDisplay ||
+        opts.mode == CaptureMode::ContinuousWindow ||
+        opts.mode == CaptureMode::ContinuousRegion) {
+        if (opts.allowLongWindowSurfaceDuration && opts.mode != CaptureMode::ContinuousWindow) {
+            result.error = "--allow-long-window-surface-duration is available only for window capture";
+            return result;
+        }
+        const int maxDurationMs = opts.allowLongWindowSurfaceDuration
+            ? kWgcWindowSurfaceMaxDurationMs
+            : kWgcContinuousMaxDurationMs;
+        if (opts.durationMs != 0 && opts.durationMs > maxDurationMs) {
+            result.error = opts.allowLongWindowSurfaceDuration
+                ? "Invalid strict window-surface duration-ms; expected 1000..600000"
+                : "Invalid duration-ms; expected 1000..60000";
             return result;
         }
     }

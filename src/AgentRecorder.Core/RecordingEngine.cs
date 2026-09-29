@@ -1190,6 +1190,7 @@ public sealed class RecordingEngine : IDisposable
         DisplayTopologySnapshot? currentTopology = null;
         string? topologyFailure = null;
         string? audioEndpointFailure = null;
+        string? windowTargetFailure = null;
         bool approvedRegion = string.Equals(approved.SourceKind, "region", StringComparison.Ordinal);
         bool screenshotDisplay = rec.IsScreenshotSeries &&
             string.Equals(approved.SourceKind, "display", StringComparison.Ordinal);
@@ -1205,6 +1206,13 @@ public sealed class RecordingEngine : IDisposable
             // countdown, or output-directory side effect.
         }
 
+        if (approved.IsWindowSurface)
+        {
+            var targetCheck = RecordingPreflightChecker.CheckWindowSurfaceTarget(rec);
+            if (!targetCheck.Passed)
+                windowTargetFailure = targetCheck.ErrorCode ?? "window_target_unavailable";
+        }
+
         if (topologyFailure == null && rec.Config.IsSystemLoopback &&
             !IsApprovedSystemAudioEndpointCurrent(rec, out audioEndpointFailure))
         {
@@ -1215,7 +1223,7 @@ public sealed class RecordingEngine : IDisposable
 
         CapturePlan? revalidated = null;
         string? failureType = null;
-        if (topologyFailure == null && audioEndpointFailure == null)
+        if (topologyFailure == null && audioEndpointFailure == null && windowTargetFailure == null)
         {
             try
             {
@@ -1229,7 +1237,8 @@ public sealed class RecordingEngine : IDisposable
             }
         }
 
-        bool changed = topologyFailure != null || audioEndpointFailure != null || revalidated == null || IsCapturePlanDrift(approved, revalidated);
+        bool changed = topologyFailure != null || audioEndpointFailure != null || windowTargetFailure != null ||
+            revalidated == null || IsCapturePlanDrift(approved, revalidated);
         var approvedDisplayBounds = approved.DisplayBounds == null
             ? null
             : new
@@ -1286,12 +1295,13 @@ public sealed class RecordingEngine : IDisposable
                 topology_reason = topologyRequired
                     ? topologyFailure ?? "matched"
                     : "not_required",
+                window_target_status = windowTargetFailure ?? (approved.IsWindowSurface ? "matched" : "not_required"),
                 approved_audio_source_kind = AudioSourceKindName(approved.AudioSourceKind),
                 approved_audio_endpoint_id = approved.AudioEndpointId ?? "",
                 approved_audio_endpoint_name = approved.AudioEndpointName ?? "",
                 audio_endpoint_status = audioEndpointFailure == null ? "matched" : audioEndpointFailure,
                 semantics_changed = changed,
-                failure_type = topologyFailure ?? audioEndpointFailure ?? failureType ?? ""
+                failure_type = topologyFailure ?? audioEndpointFailure ?? windowTargetFailure ?? failureType ?? ""
             });
         }
         catch { }
@@ -1588,6 +1598,10 @@ public sealed class RecordingEngine : IDisposable
         // be able to keep a stale identity string while switching the actual
         // source window handle after confirmation.
         if (approved.WindowHandle != current.WindowHandle)
+            return true;
+
+        if (approved.TargetWindowProcessId != current.TargetWindowProcessId ||
+            approved.TargetWindowSurfaceBounds != current.TargetWindowSurfaceBounds)
             return true;
 
         if (approved.Bounds != current.Bounds)
@@ -4775,7 +4789,18 @@ public sealed class RecordingEngine : IDisposable
                 try
                 {
                     BeforeStartActionForTests?.Invoke(rec, "start_video");
-                    if (!TryClaimAndRunStartAction(rec, op, audioReady.StartVideo))
+                    void StartApprovedVideo()
+                    {
+                        if (rec.Config.RequireWindowSurface)
+                        {
+                            var targetCheck = RecordingPreflightChecker.CheckWindowSurfaceTarget(rec);
+                            if (!targetCheck.Passed)
+                                throw new ApiException(409, targetCheck.ErrorCode ?? "WINDOW_SURFACE_TARGET_CHANGED",
+                                    targetCheck.Message ?? "The approved window_surface target changed before capture.");
+                        }
+                        audioReady.StartVideo();
+                    }
+                    if (!TryClaimAndRunStartAction(rec, op, StartApprovedVideo))
                         return;
                 }
                 catch (Exception ex)
@@ -4811,6 +4836,13 @@ public sealed class RecordingEngine : IDisposable
                     BeforeStartActionForTests?.Invoke(rec, "start_capture");
                     if (!TryClaimAndRunStartAction(rec, op, () =>
                     {
+                        if (rec.Config.RequireWindowSurface)
+                        {
+                            var targetCheck = RecordingPreflightChecker.CheckWindowSurfaceTarget(rec);
+                            if (!targetCheck.Passed)
+                                throw new ApiException(409, targetCheck.ErrorCode ?? "WINDOW_SURFACE_TARGET_CHANGED",
+                                    targetCheck.Message ?? "The approved window_surface target changed before capture.");
+                        }
                         // This audit is deliberately adjacent to the real
                         // authorization call and occurs only after the start
                         // action claim has been acquired. A Stop-before-claim

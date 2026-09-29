@@ -273,6 +273,45 @@ public sealed class CaptureAuthorizationProofTests
     }
 
     [Fact]
+    public void WindowSurfaceCaptureDigests_BindProcessIdentityAndRawSurfaceSize()
+    {
+        var recording = CreateRecording();
+        recording.SourceType = "window";
+        recording.Config.SourceKind = "window";
+        recording.Config.WindowHandle = (nint)12345;
+        recording.Config.RequireWindowSurface = true;
+        recording.Config.WindowProcessId = 42;
+        recording.Config.WindowSurfaceBounds = (10, 20, 1280, 720);
+        var evidence = new CaptureBackendSelectionEvidence(
+            "required_window_surface", "wgc-continuous", "wgc_probe_success", "fresh_probe", 1, false);
+        CapturePlan MakePlan(int processId, CapturePlanBounds targetSize) => new(
+            "required_window_surface",
+            "wgc-continuous",
+            evidence,
+            "window_surface",
+            "window",
+            "window_12345",
+            (nint)12345,
+            new CapturePlanBounds(10, 20, 1280, 720),
+            targetWindowProcessId: processId,
+            targetWindowSurfaceBounds: targetSize);
+
+        var approved = MakePlan(42, new CapturePlanBounds(10, 20, 1280, 720));
+        var approvedDigest = CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(approved);
+        Assert.NotEqual(approvedDigest, CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(
+            MakePlan(99, new CapturePlanBounds(10, 20, 1280, 720))));
+        Assert.NotEqual(approvedDigest, CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(
+            MakePlan(42, new CapturePlanBounds(10, 20, 1024, 720))));
+
+        var scopeDigest = CaptureAuthorizationProofIssuer.ComputeCaptureScopeDigest(recording, approved);
+        recording.Config.WindowProcessId = 99;
+        Assert.NotEqual(scopeDigest, CaptureAuthorizationProofIssuer.ComputeCaptureScopeDigest(recording, approved));
+        recording.Config.WindowProcessId = 42;
+        recording.Config.WindowSurfaceBounds = (10, 20, 1024, 720);
+        Assert.NotEqual(scopeDigest, CaptureAuthorizationProofIssuer.ComputeCaptureScopeDigest(recording, approved));
+    }
+
+    [Fact]
     public void Gate_RejectsPlanAndRunMismatchesBeforeConsumption()
     {
         var recording = CreateRecording();

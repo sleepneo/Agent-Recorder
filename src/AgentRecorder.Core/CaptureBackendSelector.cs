@@ -50,6 +50,9 @@ public static class CaptureBackendSelector
     {
         if (cfg == null) throw new ArgumentNullException(nameof(cfg));
         cfg.NormalizeAudioSource();
+        if (cfg.RequireWindowSurface)
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics is not supported for screenshot_series.");
         if (!IsKnownSourceKind(cfg.SourceKind))
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
@@ -123,6 +126,9 @@ public static class CaptureBackendSelector
                 $"Unsupported source type: '{cfg.SourceKind}'. Expected 'display', 'window', or 'region'.");
         }
 
+        if (cfg.RequireWindowSurface)
+            return BuildRequiredWindowSurfacePlan(cfg, displayProbe);
+
         var decision = Determine(cfg, displayProbe);
         return new CapturePlan(
             decision.Evidence.RequestedBackend,
@@ -151,6 +157,99 @@ public static class CaptureBackendSelector
             cfg.SystemLoopbackEndpoint,
             cfg.SystemLoopbackEndpointName,
             cfg.SystemLoopbackEndpointIsDefault);
+    }
+
+    /// <summary>
+    /// Returns the live, non-capturing WGC capability result used by both the
+    /// strict selector and the public capability projection.
+    /// </summary>
+    public static WgcContinuousAvailabilityResult ProbeWindowSurfaceAvailability()
+    {
+        var probeConfig = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = new nint(1),
+            Bounds = (0, 0, 2, 2),
+            DurationSeconds = WgcContinuousDurationPolicy.MinSeconds,
+            Fps = 30
+        };
+        try { return DefaultDisplayProbe.Check(probeConfig); }
+        catch
+        {
+            return new WgcContinuousAvailabilityResult(false, "probe_exception", "fresh_probe");
+        }
+    }
+
+    private static CapturePlan BuildRequiredWindowSurfacePlan(
+        CaptureConfig cfg,
+        IWgcContinuousAvailabilityProbe probe)
+    {
+        if (!string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal) ||
+            cfg.IsScreenshotSeries)
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics='window_surface' is supported only for ordinary window video.");
+        if (cfg.WindowHandle == nint.Zero || cfg.Bounds.w <= 0 || cfg.Bounds.h <= 0 ||
+            cfg.WindowProcessId is not > 0 || cfg.WindowSurfaceBounds is not { w: > 0, h: > 0 })
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "window_surface requires a fixed, available window_id with a positive process identity and surface size.");
+        if (cfg.DurationSeconds is not int duration || !WindowSurfaceDurationPolicy.IsEligibleSeconds(duration))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                $"window_surface duration must be between {WindowSurfaceDurationPolicy.MinSeconds} and {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
+                new { field = "stop_condition.seconds", minimum = WindowSurfaceDurationPolicy.MinSeconds, maximum = WindowSurfaceDurationPolicy.MaxSeconds });
+        if (cfg.Fps is < 1 or > 60)
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "window_surface frame rate must be between 1 and 60 FPS.");
+        if (cfg.IsMicrophone || cfg.AudioSourceKind is not
+            (AudioCaptureSourceKind.None or AudioCaptureSourceKind.SystemLoopback))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "window_surface supports no audio or system_audio only; microphone capture is not supported.");
+        if (cfg.IsSystemLoopback)
+        {
+            var audioError = cfg.ValidateAudioSource();
+            if (audioError != null)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "window_surface system_audio requires a resolved output endpoint.",
+                    new { reason = audioError });
+        }
+
+        WgcContinuousAvailabilityResult availability;
+        try { availability = probe.Check(cfg); }
+        catch { availability = new WgcContinuousAvailabilityResult(false, "probe_exception", "fresh_probe"); }
+        if (!availability.Available)
+            throw new ApiException(503, "WINDOW_SURFACE_UNAVAILABLE",
+                $"The required window_surface backend is unavailable ({availability.ReasonCode}); no screen_rectangle fallback was selected.",
+                new { required_capture_semantics = "window_surface", reason_code = availability.ReasonCode });
+
+        string backend = cfg.IsSystemLoopback ? "wgc-window-av-split" : WgcContinuousBackend;
+        var evidence = new CaptureBackendSelectionEvidence(
+            "required_window_surface",
+            backend,
+            "wgc_probe_success",
+            NormalizeAvailabilitySource(availability.AvailabilitySource),
+            availability.ElapsedMs,
+            false);
+        return new CapturePlan(
+            "required_window_surface",
+            backend,
+            evidence,
+            "window_surface",
+            cfg.SourceKind,
+            $"window_{cfg.WindowHandle.ToInt64()}",
+            cfg.WindowHandle,
+            new CapturePlanBounds(cfg.Bounds.x, cfg.Bounds.y, cfg.Bounds.w, cfg.Bounds.h),
+            audioSourceKind: cfg.AudioSourceKind,
+            audioEndpointId: cfg.SystemLoopbackEndpoint,
+            audioEndpointName: cfg.SystemLoopbackEndpointName,
+            audioEndpointIsDefault: cfg.SystemLoopbackEndpointIsDefault,
+            previewSemantics: "window_surface",
+            targetWindowProcessId: cfg.WindowProcessId,
+            targetWindowSurfaceBounds: cfg.WindowSurfaceBounds.HasValue
+                ? new CapturePlanBounds(
+                    cfg.WindowSurfaceBounds.Value.x,
+                    cfg.WindowSurfaceBounds.Value.y,
+                    cfg.WindowSurfaceBounds.Value.w,
+                    cfg.WindowSurfaceBounds.Value.h)
+                : null);
     }
 
     public static CaptureBackendSelection SelectWithEvidence(CaptureConfig cfg) =>
@@ -490,7 +589,8 @@ public static class CaptureBackendSelector
     public static ICaptureBackend CreateBackend(string backendType) =>
         backendType switch
         {
-            "wgc-continuous" => new WgcContinuousCaptureBackend(),
+        "wgc-continuous" => new WgcContinuousCaptureBackend(),
+        "wgc-window-av-split" => new AvSplitCaptureBackend(),
             "ffmpeg-av-split" or "ffmpeg-window-region-av-split" or "ffmpeg-region-av-split"
                 => new AvSplitCaptureBackend(),
             "ffmpeg" or "ffmpeg-window-region" or "ffmpeg-region"
@@ -508,6 +608,7 @@ public static class CaptureBackendSelector
             return backendType switch
             {
                 "wgc-continuous" => "window_surface",
+                "wgc-window-av-split" => "window_surface",
                 "ffmpeg-window-region" or "ffmpeg-window-region-av-split" => "screen_rectangle",
                 _ => throw new ApiException(
                     500,

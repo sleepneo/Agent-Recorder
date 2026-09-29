@@ -34,7 +34,9 @@ public sealed class CapturePlan
         string? audioEndpointName = null,
         bool? audioEndpointIsDefault = null,
         string? previewSemantics = null,
-        string coordinateSpace = "virtual_screen")
+        string coordinateSpace = "virtual_screen",
+        int? targetWindowProcessId = null,
+        CapturePlanBounds? targetWindowSurfaceBounds = null)
     {
         RequestedBackend = string.IsNullOrWhiteSpace(requestedBackend)
             ? "default"
@@ -58,6 +60,8 @@ public sealed class CapturePlan
         TargetIdentity = string.IsNullOrWhiteSpace(targetIdentity) ? null : targetIdentity;
         WindowHandle = windowHandle;
         Bounds = bounds;
+        TargetWindowProcessId = targetWindowProcessId;
+        TargetWindowSurfaceBounds = targetWindowSurfaceBounds;
         TargetDisplayIdentity = string.IsNullOrWhiteSpace(targetDisplayIdentity) ? null : targetDisplayIdentity;
         DisplayBounds = displayBounds;
         TargetDisplayId = string.IsNullOrWhiteSpace(targetDisplayId) ? null : targetDisplayId;
@@ -83,6 +87,8 @@ public sealed class CapturePlan
     public string? TargetIdentity { get; }
     public nint WindowHandle { get; }
     public CapturePlanBounds? Bounds { get; }
+    public int? TargetWindowProcessId { get; }
+    public CapturePlanBounds? TargetWindowSurfaceBounds { get; }
     /// <summary>
     /// Internal stable display fingerprint used only for region approval
     /// binding and revalidation. Never use this as the public display ID.

@@ -526,7 +526,11 @@ public sealed class WgcContinuousAvailabilityProbe :
             return false;
         if (config.Microphone || !config.DurationSeconds.HasValue)
             return false;
-        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(config.DurationSeconds))
+        bool strictWindowSurface = config.RequireWindowSurface &&
+            string.Equals(config.SourceKind, "window", StringComparison.Ordinal);
+        if (strictWindowSurface
+                ? !WindowSurfaceDurationPolicy.IsEligibleSeconds(config.DurationSeconds)
+                : !WgcContinuousDurationPolicy.IsEligibleSeconds(config.DurationSeconds))
             return false;
         if (config.Fps is < 1 or > 60)
             return false;

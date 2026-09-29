@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Windows;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -925,6 +926,192 @@ public sealed class AvSplitLifecycleTests : IDisposable
     }
 
     [Fact]
+    public void RequiredWindowSurfaceWgc_StartFailureReleasesWorkerAndStagingArtifacts()
+    {
+        InstallWindowSurfaceTarget();
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig();
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio: null, videoFixture: null, failStart: true);
+            using var backend = new AvSplitCaptureBackend(stack, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir))
+            {
+                ApplyContinuityCheck = false
+            };
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+
+            var error = Assert.Throws<InvalidOperationException>(() => backend.StartVideo());
+
+            Assert.Contains("simulated WGC StartAsync failure", error.Message, StringComparison.Ordinal);
+            Assert.NotNull(stack.VideoWorker);
+            Assert.True(stack.VideoWorker!.HasExited);
+            Assert.False(stack.VideoWorker.HasBackendForTests);
+            Assert.Null(stack.VideoWorker.OutputPath);
+            Assert.NotNull(backend.TempVideoPath);
+            Assert.False(File.Exists(backend.TempVideoPath));
+            Assert.False(Directory.Exists(Path.Combine(_tempDir, "wgc-continuous")));
+            Assert.Equal(0, stack.Publisher.CallCount);
+            Assert.False(File.Exists(cfg.OutputPath));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public async Task RequiredWindowSurfaceWgc_NaturalFailureConvergesOnceWithoutPublishingFinalMp4()
+    {
+        InstallWindowSurfaceTarget();
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig();
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio: null, videoFixture: null);
+            using var backend = new AvSplitCaptureBackend(stack, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir))
+            {
+                ApplyContinuityCheck = false
+            };
+            var terminal = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int terminalCount = 0;
+            backend.OnNaturalExit((_, meta) =>
+            {
+                Interlocked.Increment(ref terminalCount);
+                terminal.TrySetResult(meta);
+            });
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+
+            stack.Session!.CompleteNaturalFailure();
+            var result = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(1, Volatile.Read(ref terminalCount));
+            Assert.Equal(0, stack.Publisher.CallCount);
+            Assert.False(File.Exists(cfg.OutputPath));
+            Assert.False(result.OutputFileExists);
+            Assert.False(Directory.Exists(Path.Combine(_tempDir, "wgc-continuous")));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public async Task RequiredWindowSurfaceWgc_AudioWorkerFailureStopsWgcAndConvergesOnceWithoutMuxOrFinalMp4()
+    {
+        InstallWindowSurfaceTarget();
+        string videoFixture = CreateValidVideo();
+        string audioFixture = CreateValidAudio();
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig(systemAudio: true);
+            var audio = new FakeAudioCaptureWorker(
+                raiseAudioReadyOnStart: true,
+                holdFileOpen: true,
+                holdFileOpenCopyFrom: audioFixture,
+                stderrLog: "simulated-audio-worker-failure");
+            audio.SetTerminalSummary(new AudioHelperSessionSummary
+            {
+                State = AudioHelperSessionState.Failed,
+                AudioSourceKind = "system-loopback",
+                EndpointId = cfg.SystemLoopbackEndpoint,
+                ErrorCode = "audio_endpoint_inactive"
+            });
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio, videoFixture);
+            var runner = new FakeExternalProcessRunner(outputFileToCopy: videoFixture);
+            using var backend = new AvSplitCaptureBackend(stack, runner, new TempRetentionPolicy(_tempDir))
+            {
+                ApplyContinuityCheck = false
+            };
+            var terminal = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int terminalCount = 0;
+            backend.OnNaturalExit((_, meta) =>
+            {
+                Interlocked.Increment(ref terminalCount);
+                terminal.TrySetResult(meta);
+            });
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+
+            audio.EmitNaturalExit(1, "simulated-audio-worker-failure");
+            var result = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(1, Volatile.Read(ref terminalCount));
+            Assert.True(audio.StopCalled);
+            Assert.Equal(1, stack.Session!.StopCallCount);
+            Assert.Equal(1, stack.Publisher.CallCount);
+            Assert.Equal(stack.VideoWorker!.OutputPath, stack.Publisher.LastFinalPath);
+            Assert.Equal(File.ReadAllBytes(videoFixture), stack.Publisher.LastPublishedBytes);
+            Assert.Equal(0, runner.RunCallCount);
+            Assert.Equal("audio_endpoint_inactive", result.AudioHelperErrorCode);
+            Assert.False(result.OutputFileExists);
+            Assert.False(File.Exists(cfg.OutputPath));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public void RequiredWindowSurfaceWgc_ManualStopPublishesVideoTempThroughExistingCloseout()
+    {
+        InstallWindowSurfaceTarget();
+        string videoFixture = CreateValidVideo();
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig();
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio: null, videoFixture);
+            var runner = new FakeExternalProcessRunner();
+            using var backend = new AvSplitCaptureBackend(stack, runner, new TempRetentionPolicy(_tempDir))
+            {
+                ApplyContinuityCheck = false
+            };
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+            var videoTempPath = stack.VideoWorker!.OutputPath;
+
+            var result = backend.Stop();
+
+            Assert.Equal(1, stack.Session!.StopCallCount);
+            Assert.Equal(1, stack.Publisher.CallCount);
+            Assert.Equal(videoTempPath, stack.Publisher.LastFinalPath);
+            Assert.Equal(File.ReadAllBytes(videoFixture), File.ReadAllBytes(cfg.OutputPath));
+            Assert.True(result.OutputFileExists);
+            Assert.Equal(cfg.OutputPath, result.OutputPath);
+            Assert.False(File.Exists(videoTempPath));
+            Assert.Equal(0, runner.RunCallCount);
+            Assert.False(Directory.Exists(Path.Combine(_tempDir, "wgc-continuous")));
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    private CaptureConfig CreateWindowSurfaceConfig(bool systemAudio = false) => new()
+    {
+        SourceKind = "window",
+        WindowHandle = (nint)12345,
+        WindowProcessId = 42,
+        WindowSurfaceBounds = (0, 0, 320, 240),
+        RequireWindowSurface = true,
+        Bounds = (0, 0, 320, 240),
+        DurationSeconds = 2,
+        Fps = 30,
+        AudioSourceKind = systemAudio ? AudioCaptureSourceKind.SystemLoopback : AudioCaptureSourceKind.None,
+        SystemLoopbackEndpoint = systemAudio ? "fake-render-endpoint" : null,
+        SystemLoopbackEndpointName = systemAudio ? "Fake Speakers" : null,
+        OutputPath = Path.Combine(_tempDir, $"strict-window-{Guid.NewGuid():N}.mp4")
+    };
+
+    private static void InstallWindowSurfaceTarget() =>
+        SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
+        {
+            new("window_12345", "Test Window", "test.exe", 42, true, false,
+                new SystemQuery.Bounds(0, 0, 320, 240))
+        });
+
+    [Fact]
     public void AudioWaitTimeout_BlocksFinalizer()
     {
         var validVideo = CreateValidVideo();
@@ -1478,5 +1665,188 @@ public sealed class AvSplitLifecycleTests : IDisposable
         }
         if (proc.ExitCode != 0)
             throw new InvalidOperationException("ffmpeg generation failed: " + proc.StandardError.ReadToEnd());
+    }
+
+    private sealed class WindowSurfaceAvWorkerFactory : IAvWorkerFactory
+    {
+        private readonly string _tempRoot;
+        private readonly string? _videoFixture;
+        private readonly bool _failStart;
+
+        public WindowSurfaceAvWorkerFactory(
+            string tempRoot,
+            FakeAudioCaptureWorker? audio,
+            string? videoFixture,
+            bool failStart = false)
+        {
+            _tempRoot = tempRoot;
+            AudioWorker = audio;
+            _videoFixture = videoFixture;
+            _failStart = failStart;
+        }
+
+        public FakeAudioCaptureWorker? AudioWorker { get; }
+        public FakeWgcSession? Session { get; private set; }
+        public WgcContinuousVideoCaptureWorker? VideoWorker { get; private set; }
+        public TrackingWgcPublisher Publisher { get; } = new();
+
+        public IAudioCaptureWorker CreateAudioWorker() =>
+            AudioWorker ?? throw new InvalidOperationException("Unexpected audio worker request.");
+
+        public IAudioCaptureWorker CreateAudioWorker(AudioCaptureSourceKind sourceKind) => CreateAudioWorker();
+
+        public IVideoCaptureWorker CreateVideoWorker() =>
+            throw new InvalidOperationException("Strict window-surface capture must use its proof-bound WGC worker.");
+
+        public IVideoCaptureWorker CreateVideoWorker(CaptureConfig config, CaptureAuthorizationProof authorizationProof)
+        {
+            var wgcBackend = new WgcContinuousCaptureBackend(
+                options => Session = new FakeWgcSession(options, _videoFixture, _failStart),
+                Publisher,
+                FfmpegCaptureBackend.Probe,
+                () => "fake-wgc-helper.exe",
+                _tempRoot);
+            VideoWorker = new WgcContinuousVideoCaptureWorker(
+                authorizationProof,
+                () => wgcBackend,
+                Stopwatch.GetTimestamp);
+            return VideoWorker;
+        }
+    }
+
+    private sealed class FakeWgcSession : IWgcContinuousBackendSession
+    {
+        private readonly TaskCompletionSource<WgcContinuousSessionResult> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly string? _videoFixture;
+        private readonly bool _failStart;
+        private int _stopCallCount;
+        private int _disposeCallCount;
+
+        public FakeWgcSession(WgcContinuousSessionOptions options, string? videoFixture, bool failStart)
+        {
+            Options = options;
+            _videoFixture = videoFixture;
+            _failStart = failStart;
+        }
+
+        public WgcContinuousSessionOptions Options { get; }
+        public int StopCallCount => Volatile.Read(ref _stopCallCount);
+        public int DisposeCallCount => Volatile.Read(ref _disposeCallCount);
+        public Task<WgcContinuousSessionResult> CompletionTask => _completion.Task;
+        public event Action<FirstFrameObservation>? FirstFrameObserved;
+
+        public Task StartAsync(CancellationToken cancellationToken = default)
+        {
+            if (_failStart)
+                throw new InvalidOperationException("simulated WGC StartAsync failure");
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> AuthorizeCapture(CancellationToken cancellationToken = default) => Task.FromResult(true);
+
+        public Task<bool> RequestStop(CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _stopCallCount);
+            if (!_completion.Task.IsCompleted)
+                CompleteVideo(WgcContinuousManagedSessionState.Stopped, stopRequestedByCaller: true);
+            return Task.FromResult(true);
+        }
+
+        public void CompleteNaturalFailure()
+        {
+            _completion.TrySetResult(new WgcContinuousSessionResult
+            {
+                State = WgcContinuousManagedSessionState.Failed,
+                ExitCode = 1,
+                FailurePhase = "capture",
+                FailureCategory = "simulated_wgc_failure",
+                OutputPath = Options.OutputPath,
+                StderrTail = "simulated WGC natural failure"
+            });
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref _disposeCallCount);
+            if (!_completion.Task.IsCompleted)
+            {
+                _completion.TrySetResult(new WgcContinuousSessionResult
+                {
+                    State = WgcContinuousManagedSessionState.Cancelled,
+                    ExitCode = -1,
+                    FailureCategory = "disposed",
+                    OutputPath = Options.OutputPath
+                });
+            }
+        }
+
+        private void CompleteVideo(WgcContinuousManagedSessionState state, bool stopRequestedByCaller)
+        {
+            if (string.IsNullOrWhiteSpace(_videoFixture))
+                throw new InvalidOperationException("A video fixture is required for a successful WGC terminal result.");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(Options.OutputPath)!);
+            File.Copy(_videoFixture, Options.OutputPath, overwrite: true);
+            var size = new FileInfo(Options.OutputPath).Length;
+            _completion.TrySetResult(new WgcContinuousSessionResult
+            {
+                State = state,
+                ExitCode = 0,
+                StopRequestedByCaller = stopRequestedByCaller,
+                OutputPath = Options.OutputPath,
+                OutputFileExists = true,
+                OutputFileSizeBytes = size,
+                FirstFrameObserved = true,
+                FirstFrameNumber = 1,
+                FirstFrameElapsedMs = 100,
+                Summary = new WgcContinuousSessionSummary
+                {
+                    State = state == WgcContinuousManagedSessionState.Stopped
+                        ? ContinuousSessionState.Stopped
+                        : ContinuousSessionState.Success,
+                    Width = 320,
+                    Height = 240,
+                    DurationMs = 2000,
+                    HasFileSize = true,
+                    FileSize = size,
+                    CaptureMethod = "WGC_D3D11_WINDOW_FRAME_STREAM",
+                    EncoderMode = "software",
+                    EncoderSelectionReason = "software_default"
+                }
+            });
+        }
+
+        public void EmitFirstFrame() => FirstFrameObserved?.Invoke(new FirstFrameObservation
+        {
+            EvidenceKind = "test_frame",
+            FrameNumber = 1,
+            TotalSizeBytes = 1024,
+            OutTimeUs = 0
+        });
+    }
+
+    private sealed class TrackingWgcPublisher : IStagingToFinalPublisher
+    {
+        public int CallCount { get; private set; }
+        public string? LastFinalPath { get; private set; }
+        public byte[]? LastPublishedBytes { get; private set; }
+
+        public async Task<PublishResult> PublishAsync(
+            string stagingPath,
+            string finalPath,
+            CancellationToken cancellationToken = default,
+            IFileCommitGate? commitGate = null)
+        {
+            CallCount++;
+            var result = await StagingToFinalPublisher.Instance.PublishAsync(
+                stagingPath, finalPath, cancellationToken, commitGate).ConfigureAwait(false);
+            if (result.Success)
+            {
+                LastFinalPath = finalPath;
+                LastPublishedBytes = File.ReadAllBytes(finalPath);
+            }
+            return result;
+        }
     }
 }

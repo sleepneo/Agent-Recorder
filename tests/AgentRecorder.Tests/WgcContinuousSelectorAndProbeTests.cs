@@ -482,6 +482,49 @@ public sealed class WgcContinuousAvailabilityProbeTests
         Assert.Equal(2, runner.Calls.Count);
     }
 
+    [Theory]
+    [InlineData(61)]
+    [InlineData(600)]
+    public void StrictWindowSurfaceDuration_RealProbeAcceptsLongBoundedWindowRequest(int durationSeconds)
+    {
+        var runner = HealthyRunner();
+        var config = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = (nint)0x1234,
+            Bounds = (701, 811, 1280, 720),
+            DurationSeconds = durationSeconds,
+            Fps = 30,
+            RequireWindowSurface = true
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.True(result.Available);
+        Assert.Equal(2, runner.Calls.Count);
+    }
+
+    [Fact]
+    public void StrictWindowSurface601Seconds_ProbeRejectsBeforeStartingHelper()
+    {
+        var runner = new FakeProbeProcessRunner();
+        var config = new CaptureConfig
+        {
+            SourceKind = "window",
+            WindowHandle = (nint)0x1234,
+            Bounds = (701, 811, 1280, 720),
+            DurationSeconds = 601,
+            Fps = 30,
+            RequireWindowSurface = true
+        };
+
+        var result = CreateProbe(runner).Check(config);
+
+        Assert.False(result.Available);
+        Assert.Equal("invalid_config", result.ReasonCode);
+        Assert.Empty(runner.Calls);
+    }
+
     [Fact]
     public void RegionSixtySecondDuration_RealProbePreservesDisplayAndCropChecks()
     {

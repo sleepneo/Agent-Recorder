@@ -180,21 +180,36 @@ actual HWND and reports stable lifecycle failures when the target closes,
 minimizes, or changes size. Region mode locks a stable display identity,
 revalidates current topology after approval, and crops the display texture on
 the GPU before encoding. The self-contained portable package contains one
-production helper. **WGC continuous recording is not exposed as a public API
-capability**, remains disabled by default, and cannot be selected through
-public request fields.
+production helper. The display/region WGC experiment remains internal,
+default-off, and cannot be selected through public request fields. The public
+API has a separate, explicit fixed-window contract (`required_capture_semantics`
+below): it is available only when the non-capturing WGC capability probe passes.
 
 The 1–60 second range is the current controlled acceptance boundary, not a claim
-that every GPU, driver, Windows version, or application is compatible. WGC stays
-default-off and does not support microphone or system audio; requests with audio,
-an ineligible duration, or failed capability/lifecycle checks continue through
-the existing FFmpeg (including A/V split where applicable) fallback.
+that every GPU, driver, Windows version, or application is compatible. The
+explicit window-surface contract is never silently downgraded. For that request,
+WGC supplies video and the existing WASAPI/AvSplit path may add system loopback;
+the ordinary experimental WGC display/region path remains audio-free. Legacy
+window requests without the strict field retain their current FFmpeg behavior.
 
 Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
 The `recording.audio` array is preserved for backward compatibility and now reports `["microphone", "system_audio"]`. System audio is public; requests still pass the same local confirmation, preflight, fixed-endpoint, and bounded-recovery boundaries as microphone requests.
 
 `recording.audio_capabilities.microphone` and `.system_audio` both report `supported: true` and a fresh status of `ready`, `no_devices`, or `unavailable`. No device is reported as unsupported merely because enumeration returned an empty list.
+
+`recording.window_surface` reports whether the WGC window runtime probe is
+currently ready, its reason code when unavailable, the strict-path 600-second
+maximum, and whether system loopback is currently usable. It also reports the
+1-second minimum and that each run requires local confirmation.
+`long_run_readiness="bounded_duration_only"` and
+`long_run_stress_tested=false` make clear that the capability probe does not
+certify several-minute A/V continuity for a particular window, endpoint, GPU,
+driver, or machine; a ten-minute cap is not a claim of complete livestream
+recording. The
+`system_audio_supported` value is true only when WGC window capture, a render
+endpoint, and a successful WASAPI helper protocol probe are all available.
+When no render endpoint is ready, the helper status is `not_checked`.
 
 Stop controls are reported under `interaction.stop_controls`:
 
@@ -613,6 +628,43 @@ Use this endpoint first for common natural-language intents.
 `audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the input `id` from `GET /api/v1/audio/devices`. Set `audio.system_audio.enabled=true` to capture system audio; omit its `device_id` to use the current Windows multimedia default output, or provide an exact `id` from `output_devices`. The endpoint approved in local confirmation is fixed for that recording. Changing the Windows default output does not switch capture to another endpoint; returning to the approved endpoint uses bounded same-endpoint recovery, with objectively measured gaps represented as silence and reported through continuity/recovery metrics. Microphone and system audio are mutually exclusive.
 
 The default audio capture backend is the isolated WASAPI helper. Set the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow` before starting Agent Recorder to use the FFmpeg dshow diagnostic fallback instead; any other value is rejected.
+
+### Strict WGC window-surface recording
+
+Ordinary `POST /api/v1/recordings` accepts the optional top-level
+`required_capture_semantics: "window_surface"`. When present it is a hard
+requirement: only a fixed `source.type="window"`/`window_id`, normal local
+per-run approval, video mode, and a duration stop from 1 to 600 seconds are
+accepted. Audio may be omitted or use `audio.system_audio.enabled=true`; a
+microphone is not supported. The capability must be shown as ready by
+`GET /api/v1/capabilities` (`recording.window_surface.supported=true`), and a
+usable render endpoint is also required for the system-audio variant.
+
+```json
+{
+  "required_capture_semantics": "window_surface",
+  "source": { "type": "window", "window_id": "window_123456" },
+  "stop_condition": { "type": "duration", "seconds": 300 },
+  "audio": { "system_audio": { "enabled": true } }
+}
+```
+
+The response first has `status="requires_user_confirmation"`; its summary
+must say `capture_semantics="window_surface"`,
+`planned_backend="wgc-window-av-split"`, and `selection_fallback=false` for
+the system-audio request. The local confirmation names the fixed output
+endpoint. System audio is loopback from that Windows render endpoint, not an
+audio track exclusive to the selected window. On approval, normal preparation,
+audio readiness, countdown, first-frame, stop, and finalization states apply;
+success publishes one MP4 with WGC window video and AAC loopback audio.
+
+An invalid field, ineligible request, unavailable helper/endpoint, changed HWND
+identity/size, or minimized/closed target fails explicitly. In particular,
+`WINDOW_SURFACE_UNAVAILABLE` does not fall back to `screen_rectangle`.
+`required_capture_semantics` is rejected by quick, screenshot-series, nested,
+and plan requests; omitting it preserves all legacy window behavior. See
+[Window capture semantics](#window-capture-semantics) for the distinction from
+the legacy screen rectangle.
 
 If the selected microphone is muted, the request fails immediately with `409 AUDIO_DEVICE_MUTED` before any region-selection or confirmation UI is shown. Agent Recorder does not automatically unmute the system; the user must unmute the device in Windows sound settings and retry. If the selected device is known to be inactive, the request fails with `503 AUDIO_DEVICE_NOT_AVAILABLE`. A transient CoreAudio failure that leaves the state unknown does not block recording.
 
@@ -1658,17 +1710,18 @@ approved plan; they do not expose helper paths, probe output, tokens, or native
 handles beyond the existing `window_id` contract.
 
 `window_surface` means the selected HWND content and excludes unrelated windows
-covering it. `wgc-continuous` uses this class. `screen_rectangle` means the
-composed desktop rectangle used by `ffmpeg-window-region` or its A/V split
-variant; a covering window may therefore appear. Display and region requests use
-the explicit `display_surface` and `region_rectangle` classes.
+covering it. The strict request above uses this class. `screen_rectangle` means
+the composed desktop rectangle used by legacy `ffmpeg-window-region` or its A/V
+split variant; a covering window may therefore appear. Omitting
+`required_capture_semantics` preserves that legacy choice. Display and region
+requests use the explicit `display_surface` and `region_rectangle` classes.
 
 The plan is built before confirmation without constructing or starting a backend.
 After local approval it is revalidated without pixel capture. A window identity or
 semantic change returns a terminal `capture_semantics_changed` failure before
 countdown, authorization, helper/FFmpeg start, recording controls, or output
-creation. The caller must issue a new request. WGC remains experimental and
-default-off.
+creation. The caller must issue a new request. The separate display/region WGC
+experiment remains experimental and default-off.
 
 ## Configurable pre-capture countdown
 

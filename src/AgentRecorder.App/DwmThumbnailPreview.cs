@@ -53,6 +53,122 @@ internal static class DwmThumbnailGeometry
     }
 }
 
+/// <summary>
+/// Maps a child HWND's client area into the top-level DWM destination HWND and
+/// intersects it with every ancestor client area. DWM thumbnails are composed
+/// into the destination window, not clipped by the child preview control, so
+/// the mapped rectangle must already be restricted to the actually visible
+/// preview viewport.
+/// </summary>
+internal static class DwmThumbnailDestinationGeometry
+{
+    public static bool TryGetVisibleClientBounds(
+        Control child,
+        Control destination,
+        out Rectangle visibleBounds)
+    {
+        visibleBounds = Rectangle.Empty;
+        if (child == null || destination == null || child.IsDisposed || destination.IsDisposed ||
+            !child.Visible || !destination.IsHandleCreated || !child.IsHandleCreated)
+            return false;
+
+        try
+        {
+            if (!TryMapClientRectangle(child, destination, out visibleBounds))
+                return false;
+
+            bool reachedDestination = ReferenceEquals(child, destination);
+            for (Control? ancestor = child.Parent; ancestor != null; ancestor = ancestor.Parent)
+            {
+                if (!ancestor.Visible || !ancestor.IsHandleCreated ||
+                    !TryMapClientRectangle(ancestor, destination, out var ancestorClient))
+                {
+                    visibleBounds = Rectangle.Empty;
+                    return false;
+                }
+
+                visibleBounds = Rectangle.Intersect(visibleBounds, ancestorClient);
+                if (visibleBounds.Width <= 0 || visibleBounds.Height <= 0)
+                {
+                    visibleBounds = Rectangle.Empty;
+                    return false;
+                }
+
+                if (ReferenceEquals(ancestor, destination))
+                {
+                    reachedDestination = true;
+                    break;
+                }
+            }
+
+            return reachedDestination && visibleBounds.Width > 0 && visibleBounds.Height > 0;
+        }
+        catch
+        {
+            visibleBounds = Rectangle.Empty;
+            return false;
+        }
+    }
+
+    private static bool TryMapClientRectangle(Control from, Control to, out Rectangle mapped)
+    {
+        mapped = Rectangle.Empty;
+        if (!from.IsHandleCreated || !to.IsHandleCreated ||
+            !GetClientRect(from.Handle, out var nativeRect) ||
+            nativeRect.right <= nativeRect.left || nativeRect.bottom <= nativeRect.top)
+            return false;
+
+        var topLeft = new NativePoint(nativeRect.left, nativeRect.top);
+        var bottomRight = new NativePoint(nativeRect.right, nativeRect.bottom);
+        if (!TryMapPoint(from.Handle, to.Handle, ref topLeft) ||
+            !TryMapPoint(from.Handle, to.Handle, ref bottomRight))
+            return false;
+
+        mapped = Rectangle.FromLTRB(
+            Math.Min(topLeft.x, bottomRight.x),
+            Math.Min(topLeft.y, bottomRight.y),
+            Math.Max(topLeft.x, bottomRight.x),
+            Math.Max(topLeft.y, bottomRight.y));
+        return mapped.Width > 0 && mapped.Height > 0;
+    }
+
+    private static bool TryMapPoint(nint from, nint to, ref NativePoint point)
+    {
+        Marshal.SetLastPInvokeError(0);
+        _ = MapWindowPoints(from, to, ref point, 1);
+        return Marshal.GetLastPInvokeError() == 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int x;
+        public int y;
+
+        public NativePoint(int x, int y)
+        {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(nint hWnd, out NativeRect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int MapWindowPoints(nint hWndFrom, nint hWndTo, ref NativePoint points, uint pointCount);
+}
+
 internal sealed class DwmThumbnailProvider : IDwmThumbnailProvider
 {
     public bool TryRegister(nint destinationWindow, nint sourceWindow, out IDwmThumbnail thumbnail)

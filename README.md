@@ -90,6 +90,14 @@ desktop or opt in to per-user autostart before relying on local selection.
   eligible short, silent recordings. Confirmation distinguishes the selected
   window surface from a composed screen rectangle and revalidates that meaning
   after approval before any capture starts.
+- Ordinary raw recording requests can require a fixed `window_id` with
+  `required_capture_semantics: "window_surface"`. This public strict path uses
+  WGC to capture the selected window even while another window obscures it,
+  supports no audio or an explicitly approved system-loopback endpoint, and
+  accepts a bounded 1-600 second duration. It never falls back to a desktop
+  rectangle. A 300-second PotPlayer video-and-system-audio run passed local
+  desktop acceptance; longer sessions and unattended future-window capture
+  are not yet validated.
 - Interactive selected-region UI with precise coordinates, size presets, edge/window
   snapping, click-to-pick visible windows, and resilient top-most behavior across
   multi-monitor desktops.
@@ -166,7 +174,9 @@ desktop or opt in to per-user autostart before relying on local selection.
   disconnect handling, occluded-window capture, and 60-second recording have
   passed supervised desktop acceptance on the current hardware. The self-contained portable package includes exactly one
   production `AgentRecorder.WgcHelper\wgc-native-helper.exe`. The pipeline
-  remains disabled by default and is not exposed as a public API capability.
+  remains disabled by default for those general targets. The separate strict
+  fixed-window request above is exposed through the public raw API when its
+  non-capturing capability probe succeeds.
 - Local audit log and MP4 output.
 
 ## Documentation

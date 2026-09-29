@@ -228,6 +228,33 @@ public sealed class CreationRecordingWaitTests : IDisposable
         Assert.Equal(0, tray.RequestRegionSelectionCallCount);
     }
 
+    [Theory]
+    [InlineData("{\"required_capture_semantics\":\"window_surface\",\"source\":\"not-an-object\",\"stop_condition\":{\"type\":\"duration\",\"seconds\":10}}")]
+    [InlineData("{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_1234\"},\"stop_condition\":\"not-an-object\"}")]
+    public async Task MalformedStrictWindowRequest_Is400BeforeWindowEnumerationOrConfirmation(string body)
+    {
+        var (server, _, tray, _) = CreateServer();
+        var counts = new CountingSystemProvider();
+        SystemQuery.SetWindowProvider((_, _) =>
+        {
+            Interlocked.Increment(ref counts.WindowCalls);
+            throw new InvalidOperationException("malformed strict requests must be rejected before window enumeration");
+        });
+        server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+        var response = await client.PostAsync(
+            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+            JsonContent(body));
+
+        Assert.Equal(400, (int)response.StatusCode);
+        Assert.Equal("INVALID_ARGUMENT", await ReadErrorCode(response));
+        Assert.Equal(0, Volatile.Read(ref counts.WindowCalls));
+        Assert.Equal(0, tray.RequestConfirmationCallCount);
+        Assert.Equal(0, tray.RequestRegionSelectionCallCount);
+    }
+
     [Fact]
     public async Task QuickSelectedRegionCancellation_DoesNotReturnSyntheticWait()
     {

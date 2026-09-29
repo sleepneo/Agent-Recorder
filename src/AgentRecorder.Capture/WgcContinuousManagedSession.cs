@@ -458,10 +458,18 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         if (!string.Equals(Path.GetExtension(_options.OutputPath), ".mp4", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Output path must have .mp4 extension.", nameof(_options));
 
-        if (!WgcContinuousDurationPolicy.IsEligibleMilliseconds(_options.DurationMs))
+        if (!WgcContinuousDurationPolicy.IsEligibleMilliseconds(_options.DurationMs) &&
+            (!_options.AllowExtendedWindowSurfaceDuration ||
+             _options.TargetKind != WgcContinuousTargetKind.Window ||
+             !WindowSurfaceDurationPolicy.IsEligibleMilliseconds(_options.DurationMs)))
             throw new ArgumentException(
-                $"Duration must be between {WgcContinuousDurationPolicy.MinMilliseconds} and {WgcContinuousDurationPolicy.MaxMilliseconds} ms.",
+                _options.AllowExtendedWindowSurfaceDuration
+                    ? $"Strict window-surface duration must be between {WindowSurfaceDurationPolicy.MinMilliseconds} and {WindowSurfaceDurationPolicy.MaxMilliseconds} ms and requires a window target."
+                    : $"Duration must be between {WgcContinuousDurationPolicy.MinMilliseconds} and {WgcContinuousDurationPolicy.MaxMilliseconds} ms.",
                 nameof(_options));
+
+        if (_options.AllowExtendedWindowSurfaceDuration && _options.TargetKind != WgcContinuousTargetKind.Window)
+            throw new ArgumentException("Extended duration is available only for a strict window-surface target.", nameof(_options));
 
         if (_options.Fps is < 1 or > 60)
             throw new ArgumentException("Fps must be between 1 and 60.", nameof(_options));
@@ -548,6 +556,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             _options.StopSignalPath,
             "--i-understand-this-captures-screen"
         });
+        if (_options.AllowExtendedWindowSurfaceDuration)
+            args.Add("--allow-long-window-surface-duration");
         return args;
     }
 

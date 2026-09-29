@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -329,6 +330,210 @@ public class ConfigParserWindowTests : IDisposable
         Assert.DoesNotContain(result, w => w.id == "window_1234");
 
         await RunSystemQueryCrossTestLeakageStressAsync();
+    }
+
+    public static IEnumerable<object[]> RequiredWindowSurfaceMalformedShapeCases
+    {
+        get
+        {
+            foreach (var shape in new[] { "null", "[]", "\"window\"", "17", "<missing>" })
+                yield return new object[] { "source", shape };
+            foreach (var shape in new[] { "null", "[]", "\"duration\"", "17", "<missing>" })
+                yield return new object[] { "stop_condition", shape };
+            foreach (var (path, shapes) in new[]
+            {
+                ("source.type", new[] { "null", "17", "[]", "{}", "<missing>" }),
+                ("source.window_id", new[] { "null", "17", "[]", "<missing>" }),
+                ("stop_condition.type", new[] { "null", "17", "[]", "<missing>" }),
+                ("stop_condition.seconds", new[] { "null", "\"10\"", "1.5", "true", "<missing>" })
+            })
+            {
+                foreach (var shape in shapes)
+                    yield return new object[] { path, shape };
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RequiredWindowSurfaceMalformedShapeCases))]
+    public void RequiredWindowSurface_MalformedSourceAndDurationAre400BeforeEnumerationOrOutput(
+        string path,
+        string shape)
+    {
+        int windowCalls = 0;
+        SystemQuery.SetWindowProvider((_, _) =>
+        {
+            Interlocked.Increment(ref windowCalls);
+            return new List<SystemQuery.WindowInfo>
+            {
+                new("window_1234", "Test Window", "test.exe", 123, true, false,
+                    new SystemQuery.Bounds(0, 0, 800, 600))
+            };
+        });
+
+        string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-invalid-" + Guid.NewGuid().ToString("N"));
+        string outputPath = Path.Combine(outputDirectory, "must-not-exist.mp4");
+        var request = (JsonObject)ParseJson("""
+        {
+          "required_capture_semantics": "window_surface",
+          "source": { "type": "window", "window_id": "window_1234" },
+          "stop_condition": { "type": "duration", "seconds": 10 },
+          "audio": { "system_audio": { "enabled": true } }
+        }
+        """);
+        request["output"] = new JsonObject
+        {
+            ["directory"] = outputDirectory,
+            ["filename"] = "must-not-exist.mp4"
+        };
+        ApplyMalformedShape(request, path, shape);
+
+        var microphoneProvider = new CountingMicrophoneProvider();
+        var endpointProvider = new CountingSystemAudioEndpointProvider();
+        var error = Assert.Throws<ApiException>(() => ConfigParser.Build(
+            request,
+            "test-agent",
+            out _,
+            microphoneProvider: microphoneProvider,
+            systemAudioEndpointProvider: endpointProvider));
+
+        Assert.Equal(400, error.Status);
+        Assert.Equal("INVALID_ARGUMENT", error.Code);
+        Assert.Equal(0, Volatile.Read(ref windowCalls));
+        Assert.Equal(0, microphoneProvider.CallCount);
+        Assert.Equal(0, endpointProvider.CallCount);
+        Assert.False(File.Exists(outputPath));
+        Assert.False(Directory.Exists(outputDirectory));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(60)]
+    [InlineData(61)]
+    [InlineData(600)]
+    public void RequiredWindowSurfaceApiParser_AcceptsOneThroughSixHundredSeconds(int durationSeconds)
+    {
+        string? previousTestMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
+        string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-duration-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
+        try
+        {
+            var request = (JsonObject)ParseJson("""
+            {
+              "required_capture_semantics": "window_surface",
+              "source": { "type": "window", "window_id": "window_1234" },
+              "stop_condition": { "type": "duration", "seconds": 60 }
+            }
+            """);
+            ((JsonObject)request["stop_condition"]!)["seconds"] = durationSeconds;
+            request["output"] = new JsonObject
+            {
+                ["directory"] = outputDirectory,
+                ["filename"] = $"duration-{durationSeconds}.mp4"
+            };
+
+            var recording = ConfigParser.Build(request, "test-agent", out _);
+            var config = Assert.IsType<CaptureConfig>(recording.Config);
+            Assert.True(config.RequireWindowSurface);
+            Assert.Equal(durationSeconds, config.DurationSeconds);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", previousTestMode);
+            if (Directory.Exists(outputDirectory))
+                Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RequiredWindowSurfaceApiParser_601SecondsReturns400BeforeWindowOrOutputSideEffects()
+    {
+        string? previousTestMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
+        int windowCalls = 0;
+        string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-601-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
+        SystemQuery.SetWindowProvider((_, _) =>
+        {
+            Interlocked.Increment(ref windowCalls);
+            return new List<SystemQuery.WindowInfo>
+            {
+                new("window_1234", "Test Window", "test.exe", 123, true, false,
+                    new SystemQuery.Bounds(0, 0, 800, 600))
+            };
+        });
+        try
+        {
+            var request = (JsonObject)ParseJson("""
+            {
+              "required_capture_semantics": "window_surface",
+              "source": { "type": "window", "window_id": "window_1234" },
+              "stop_condition": { "type": "duration", "seconds": 601 }
+            }
+            """);
+            request["output"] = new JsonObject
+            {
+                ["directory"] = outputDirectory,
+                ["filename"] = "must-not-exist.mp4"
+            };
+
+            var error = Assert.Throws<ApiException>(() => ConfigParser.Build(request, "test-agent", out _));
+
+            Assert.Equal(400, error.Status);
+            Assert.Equal("INVALID_ARGUMENT", error.Code);
+            Assert.Contains("600", error.Message);
+            Assert.Equal(0, Volatile.Read(ref windowCalls));
+            Assert.False(Directory.Exists(outputDirectory));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", previousTestMode);
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    private static void ApplyMalformedShape(JsonObject request, string path, string shape)
+    {
+        var parts = path.Split('.');
+        var parent = parts.Length == 1 ? request : (JsonObject)request[parts[0]]!;
+        var key = parts[^1];
+        if (shape == "<missing>")
+            parent.Remove(key);
+        else
+            parent[key] = JsonNode.Parse(shape);
+    }
+
+    private sealed class CountingMicrophoneProvider : IMicrophoneDeviceProvider
+    {
+        public int CallCount { get; private set; }
+
+        public Task<IReadOnlyList<MicrophoneDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult<IReadOnlyList<MicrophoneDeviceInfo>>(Array.Empty<MicrophoneDeviceInfo>());
+        }
+    }
+
+    private sealed class CountingSystemAudioEndpointProvider : ISystemAudioEndpointProvider
+    {
+        public int CallCount { get; private set; }
+
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(Array.Empty<SystemAudioEndpointInfo>());
+        }
+
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult<SystemAudioEndpointInfo?>(null);
+        }
+
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(string endpointId, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult<SystemAudioEndpointInfo?>(null);
+        }
     }
 
     private static async Task RunSystemQueryCrossTestLeakageStressAsync()

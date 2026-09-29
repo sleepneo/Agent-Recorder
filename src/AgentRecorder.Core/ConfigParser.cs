@@ -42,6 +42,53 @@ public static class ConfigParser
         // creation, or any other request side effect.
         int countdownSeconds = NormalizeCountdownSeconds(cfg);
         var seriesConfig = NormalizeModeAndSeries(cfg);
+        bool requireWindowSurface = ParseRequiredCaptureSemantics(cfg);
+        if (requireWindowSurface)
+        {
+            if (seriesConfig != null)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "required_capture_semantics is supported only for ordinary video recordings.",
+                    new { field = "required_capture_semantics", mode = ScreenshotSeriesConfig.ModeName });
+            if (cfg["nested"] != null)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "required_capture_semantics cannot be combined with nested recording.",
+                    new { field = "required_capture_semantics", unsupported = "nested" });
+            foreach (var unsupportedField in new[] { "target", "schedule", "plan", "lease", "authorization_mode" })
+            {
+                if (cfg[unsupportedField] != null)
+                    throw new ApiException(400, "INVALID_ARGUMENT",
+                        $"required_capture_semantics cannot be combined with '{unsupportedField}'.",
+                        new { field = unsupportedField, required_capture_semantics = "window_surface" });
+            }
+            if (cfg["source"] is not JsonObject source)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "window_surface requires source to be an object with a fixed window target.",
+                    new { field = "source", required_type = "object" });
+
+            var requestedSourceType = StrictString(source["type"], "source.type");
+            if (requestedSourceType != "window")
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "required_capture_semantics='window_surface' requires source.type='window'.",
+                    new { field = "required_capture_semantics", required_source_type = "window" });
+            _ = StrictString(source["window_id"], "source.window_id");
+            ValidateRequiredWindowSurfaceSourceAndAudio(cfg, source);
+
+            if (cfg["stop_condition"] is not JsonObject stopCondition)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "window_surface requires stop_condition to be an object with a bounded duration.",
+                    new { field = "stop_condition", required_type = "object" });
+
+            var stopType = StrictString(stopCondition["type"], "stop_condition.type");
+            if (stopType != "duration")
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    $"window_surface requires stop_condition.type='duration' with a duration from {WindowSurfaceDurationPolicy.MinSeconds} to {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
+                    new { field = "stop_condition.type", required = "duration" });
+            var seconds = StrictInt(stopCondition, "seconds");
+            if (!WindowSurfaceDurationPolicy.IsEligibleSeconds(seconds))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    $"window_surface duration must be between {WindowSurfaceDurationPolicy.MinSeconds} and {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
+                    new { field = "stop_condition.seconds", minimum = WindowSurfaceDurationPolicy.MinSeconds, maximum = WindowSurfaceDurationPolicy.MaxSeconds });
+        }
         RejectUnsupportedContinuousFeatures(cfg);
 
         // =====================================================================
@@ -81,6 +128,7 @@ public static class ConfigParser
         var src = cfg["source"] ?? throw Inv("source is required");
         var type = Str(src["type"]) ?? throw Inv("source.type is required");
         var cap = new CaptureConfig();
+        cap.RequireWindowSurface = requireWindowSurface;
         cap.Mode = seriesConfig == null ? "video" : ScreenshotSeriesConfig.ModeName;
         cap.ScreenshotSeries = seriesConfig;
         rec.CountdownSeconds = countdownSeconds;
@@ -134,10 +182,33 @@ public static class ConfigParser
                 // via the injectable SystemQuery.SetWindowProvider seam.
                 if (WindowIdParser.TryParse(wid, out var hwnd))
                     cap.WindowHandle = hwnd;
+                if (requireWindowSurface)
+                {
+                    var strictWindow = ResolveRequiredWindowSurfaceWindow(wid);
+                    PolicyEngine.CheckDenylist(strictWindow.title);
+                    PolicyEngine.CheckDenylistByProcessName(strictWindow.app_name);
+                    WindowIdParser.RejectMinimized(strictWindow.is_minimized, strictWindow.title);
+                    cap.WindowTitle = strictWindow.title;
+                    cap.WindowProcessId = strictWindow.process_id;
+                    cap.WindowSurfaceBounds = (
+                        strictWindow.bounds.x,
+                        strictWindow.bounds.y,
+                        strictWindow.bounds.width,
+                        strictWindow.bounds.height);
+                    cap.Bounds = (
+                        strictWindow.bounds.x,
+                        strictWindow.bounds.y,
+                        NormalizeDimension(strictWindow.bounds.width),
+                        NormalizeDimension(strictWindow.bounds.height));
+                    rec.SourceTitle = strictWindow.title;
+                    rec.SourceApplication = strictWindow.app_name;
+                }
             }
             else
             {
-                var w = SystemQuery.EnumWindows(true, false).FirstOrDefault(x => x.id == wid)
+                var w = requireWindowSurface
+                    ? ResolveRequiredWindowSurfaceWindow(wid)
+                    : SystemQuery.EnumWindows(true, false).FirstOrDefault(x => x.id == wid)
                         ?? throw new ApiException(404, "SOURCE_NOT_FOUND",
                             "The selected window no longer exists. Call GET /api/v1/windows to choose another.",
                             new { suggested_action = "list_windows" });
@@ -166,6 +237,8 @@ public static class ConfigParser
                 rec.SourceApplication = w.app_name;
                 cap.SourceKind = "window";
                 cap.WindowTitle = w.title;
+                cap.WindowProcessId = w.process_id;
+                cap.WindowSurfaceBounds = (w.bounds.x, w.bounds.y, w.bounds.width, w.bounds.height);
                 cap.WindowHandle = WindowIdParser.Parse(wid);
                 cap.Bounds = (capBounds.x, capBounds.y, normalizedBw, normalizedBh);
             }
@@ -459,6 +532,109 @@ public static class ConfigParser
         };
     }
 
+    private static bool ParseRequiredCaptureSemantics(JsonNode cfg)
+    {
+        if (cfg is not JsonObject obj || !obj.ContainsKey("required_capture_semantics"))
+            return false;
+
+        string value;
+        try { value = StrictString(obj["required_capture_semantics"], "required_capture_semantics"); }
+        catch (ApiException)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics must be the string 'window_surface'.",
+                new { field = "required_capture_semantics", allowed = new[] { "window_surface" } });
+        }
+
+        if (!string.Equals(value, "window_surface", StringComparison.Ordinal))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics must be 'window_surface'.",
+                new { field = "required_capture_semantics", allowed = new[] { "window_surface" } });
+        return true;
+    }
+
+    private static SystemQuery.WindowInfo ResolveRequiredWindowSurfaceWindow(string windowId)
+    {
+        try
+        {
+            return SystemQuery.EnumWindows(true, false).FirstOrDefault(window => window.id == windowId)
+                ?? throw new ApiException(404, "SOURCE_NOT_FOUND",
+                    "The selected window no longer exists. Call GET /api/v1/windows to choose another.",
+                    new { suggested_action = "list_windows" });
+        }
+        catch (ApiException)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new ApiException(503, "WINDOW_SURFACE_TARGET_UNAVAILABLE",
+                "The selected window could not be verified for strict window-surface capture.",
+                new { required_capture_semantics = "window_surface", suggested_action = "retry_after_checking_the_window" });
+        }
+    }
+
+    private static void ValidateRequiredWindowSurfaceSourceAndAudio(JsonNode cfg, JsonObject source)
+    {
+        if (source.Any(property => property.Key is not "type" and not "window_id"))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "window_surface requires only a fixed source.type and source.window_id.",
+                new { field = "source", allowed = new[] { "type", "window_id" } });
+
+        if (cfg["audio"] is not JsonObject audio)
+        {
+            if (cfg["audio"] != null)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "audio must be an object containing only microphone and system_audio intent.");
+            return;
+        }
+
+        if (audio.Any(property => property.Key is not "microphone" and not "system_audio"))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "window_surface supports only microphone and system_audio audio fields.",
+                new { field = "audio", allowed = new[] { "microphone", "system_audio" } });
+
+        if (audio["microphone"] is JsonNode microphoneNode)
+        {
+            if (microphoneNode is not JsonObject microphone ||
+                microphone.Any(property => property.Key != "enabled"))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "window_surface does not accept microphone device selections.",
+                    new { field = "audio.microphone", allowed = new[] { "enabled=false" } });
+
+            bool microphoneEnabled;
+            try { microphoneEnabled = microphone["enabled"]?.GetValue<bool>() ?? false; }
+            catch
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "audio.microphone.enabled must be a boolean when required_capture_semantics is set.");
+            }
+            if (microphoneEnabled)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "window_surface supports no audio or system_audio only; microphone capture is not supported.",
+                    new { field = "audio.microphone.enabled", allowed = false });
+        }
+
+        if (audio["system_audio"] is JsonNode systemNode)
+        {
+            if (systemNode is not JsonObject systemAudio ||
+                systemAudio.Any(property => property.Key is not "enabled" and not "device_id"))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "audio.system_audio must contain only enabled and device_id.");
+
+            bool systemEnabled;
+            try { systemEnabled = systemAudio["enabled"]?.GetValue<bool>() ?? false; }
+            catch
+            {
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "audio.system_audio.enabled must be a boolean when required_capture_semantics is set.");
+            }
+            if (!systemEnabled && systemAudio["device_id"] != null)
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "audio.system_audio.device_id cannot be supplied while system audio is disabled.");
+        }
+    }
+
     private static int StrictInt(JsonObject obj, string field)
     {
         if (!obj.ContainsKey(field) || obj[field] is not JsonValue value)
@@ -479,6 +655,8 @@ public static class ConfigParser
     {
         if (node is not JsonValue value)
             throw Inv($"{field} must be a string");
+        if (value.TryGetValue<string>(out var directString) && directString != null)
+            return directString;
         try
         {
             var element = value.GetValue<JsonElement>();

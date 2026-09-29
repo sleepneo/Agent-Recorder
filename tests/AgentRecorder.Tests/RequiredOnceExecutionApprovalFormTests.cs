@@ -112,7 +112,7 @@ public class RequiredOnceExecutionApprovalFormTests
             var audit = new CaptureAudit();
             var result = RequiredOnceExecutionApprovalForm.ShowModal(
                 Details(), cancellation.Token, "cancel-before", new FakeWindowActivator(), audit.Log,
-                () => DateTimeOffset.UtcNow, () => new[] { Primary },
+                () => Details().ScheduledStartUtc, () => new[] { Primary },
                 beforeHandleForTest: cancellation.Cancel);
 
             Assert.Equal(RequiredOnceExecutionApprovalResult.HostShutdown, result);
@@ -130,7 +130,7 @@ public class RequiredOnceExecutionApprovalFormTests
             var audit = new CaptureAudit();
             var result = RequiredOnceExecutionApprovalForm.ShowModal(
                 Details(), cancellation.Token, "cancel-after", new FakeWindowActivator(), audit.Log,
-                () => DateTimeOffset.UtcNow, () => new[] { Primary },
+                () => Details().ScheduledStartUtc, () => new[] { Primary },
                 afterHandleForTest: cancellation.Cancel);
 
             Assert.Equal(RequiredOnceExecutionApprovalResult.HostShutdown, result);

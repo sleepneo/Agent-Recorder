@@ -2806,6 +2806,140 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     }
 
     [Fact]
+    public async Task StrictWindowSurface600SecondDuration_IsAcceptedAndUsesExplicitHelperOptIn()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+            o.DurationMs = WindowSurfaceDurationPolicy.MaxMilliseconds;
+            o.AllowExtendedWindowSurfaceDuration = true;
+            o.ProcessTimeoutMs = o.DurationMs + 15000;
+        });
+        var fake = new FakeWgcContinuousProcess(Array.Empty<string>());
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+
+        Assert.NotNull(fake.CapturedArguments);
+        var args = fake.CapturedArguments!.ToList();
+        Assert.Equal("600000", args[args.IndexOf("--duration-ms") + 1]);
+        Assert.Contains("--allow-long-window-surface-duration", args);
+        session.Dispose();
+    }
+
+    [Fact]
+    public async Task StrictWindowSurface61SecondSimulatedNaturalCompletion_SucceedsWithoutWallClockWait()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        const long fileSize = 15000000L;
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+            o.DurationMs = 61000;
+            o.AllowExtendedWindowSurfaceDuration = true;
+            o.ProcessTimeoutMs = 76000;
+        });
+        var started = Started(recId, opts.OutputPath)
+            .Select(line => line.Replace(
+                "WGC_D3D11_FRAME_STREAM", "WGC_D3D11_WINDOW_FRAME_STREAM", StringComparison.Ordinal));
+        var stdout = started
+            .Concat(Progress(1830, 61000, 5000000))
+            .Concat(Ok(1830, 61000, fileSize))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout,
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        Assert.True(await session.AuthorizeCapture());
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Success, result.State);
+        Assert.Equal(61000, result.Summary!.DurationMs);
+        Assert.Equal(ContinuousSessionState.Success, result.Summary.State);
+        Assert.Empty(result.Summary.ValidationErrors);
+        Assert.True(result.OutputFileExists);
+    }
+
+    [Fact]
+    public async Task StrictWindowSurface61SecondUserStop_ReportsStoppedAndKeepsFinalizedOutput()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        const long fileSize = 7500000L;
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+            o.DurationMs = 61000;
+            o.AllowExtendedWindowSurfaceDuration = true;
+            o.StopWaitTimeoutMs = 3000;
+        });
+        var initial = Started(recId, opts.OutputPath)
+            .Select(line => line.Replace(
+                "WGC_D3D11_FRAME_STREAM", "WGC_D3D11_WINDOW_FRAME_STREAM", StringComparison.Ordinal))
+            .Concat(Progress(100, 3000, 1000000))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(initial,
+            Stopped(90, 3000, fileSize),
+            createOutputFile: true,
+            outputFileSize: fileSize,
+            outputFilePath: opts.OutputPath,
+            autoContinueOnStopSignalPath: opts.StopSignalPath,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        Assert.True(await session.AuthorizeCapture());
+        Assert.True(await session.RequestStop());
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Stopped, result.State);
+        Assert.Equal(ContinuousSessionState.Stopped, result.Summary!.State);
+        Assert.Equal(3000, result.Summary.DurationMs);
+        Assert.True(result.OutputFileExists);
+    }
+
+    [Fact]
+    public async Task StrictWindowSurface61SecondHelperFailure_RemainsFailedWithoutPublishedOutput()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId, o =>
+        {
+            o.TargetKind = WgcContinuousTargetKind.Window;
+            o.WindowHandle = (nint)0x1234;
+            o.DurationMs = 61000;
+            o.AllowExtendedWindowSurfaceDuration = true;
+        });
+        var initial = Started(recId, opts.OutputPath)
+            .Select(line => line.Replace(
+                "WGC_D3D11_FRAME_STREAM", "WGC_D3D11_WINDOW_FRAME_STREAM", StringComparison.Ordinal))
+            .Concat(Progress(1, 1000))
+            .Concat(Fail("The target window closed during capture", "window_closed"))
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(initial,
+            waitForBeginSignalPath: opts.BeginSignalPath);
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        Assert.True(await session.AuthorizeCapture());
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("window_closed", result.FailureCategory);
+        Assert.False(result.OutputFileExists);
+    }
+
+    [Fact]
     public void WindowTarget_ZeroHwndRejectedBeforeProcessStart()
     {
         var opts = CreateOptions($"rec_{Guid.NewGuid():N}", o =>

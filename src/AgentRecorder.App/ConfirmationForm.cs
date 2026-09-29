@@ -154,8 +154,10 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private Rectangle _dwmDestination;
     private bool _windowSurfacePreview;
     private bool _dwmEnsurePosted;
+    private bool _dwmUpdatePosted;
     private bool _dwmDisposed;
     private bool _restoreDwmAfterHandleCreated;
+    private bool _refreshingMonitorConstraints;
     private int _dwmHandleGeneration;
 
     private const int ForegroundVerifyDelayMs = 150;
@@ -197,6 +199,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private ConfirmationCountdownRing _countdownRing = null!;
     private Label _timeoutLabel = null!;
     private Label _warningLabel = null!;
+    private Label _lowVolumeWarningLabel = null!;
     private System.Windows.Forms.Timer _countdownTimer = null!;
     private FlowLayoutPanel _buttonPanel = null!;
     private Panel _mainContentPanel = null!;
@@ -210,6 +213,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     private FlowLayoutPanel _outputActionsPanel = null!;
     private Label _titleLabel = null!;
     private Label _queueLabel = null!;
+    private Label _systemAudioScopeLabel = null!;
     private Label _outputTitleLabel = null!;
     private bool _timeoutIsExpired;
     private bool _timeoutIsUrgent;
@@ -229,17 +233,24 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     internal string PreviewFallbackTextForTests => _previewFallbackLabel?.Text ?? "";
     internal bool WindowSurfacePreviewForTests => _windowSurfacePreview;
     internal bool DwmThumbnailActiveForTests => _dwmThumbnail != null;
+    internal FormBorderStyle FormBorderStyleForTests => FormBorderStyle;
+    internal Size MaximumSizeForTests => MaximumSize;
+    internal int DeviceDpiForTests => DeviceDpi;
     internal Rectangle DwmThumbnailDestinationForTests => _dwmDestination;
     internal nint DwmDestinationWindowForTests => IsHandleCreated ? Handle : nint.Zero;
     internal nint PreviewPanelHandleForTests =>
         _previewPanel?.IsHandleCreated == true ? _previewPanel.Handle : nint.Zero;
-    internal Rectangle PreviewPanelFormBoundsForTests => GetFormRelativeBounds(_previewPanel);
+    internal Rectangle PreviewPanelFormBoundsForTests =>
+        DwmThumbnailDestinationGeometry.TryGetVisibleClientBounds(_previewPanel, this, out var bounds)
+            ? bounds
+            : Rectangle.Empty;
     internal bool WindowSurfacePreviewSurfaceIsTransparentForTests =>
         _windowSurfacePreview && _previewPanel != null && _previewPanel.BackColor == Color.Transparent;
     internal bool WindowSurfacePreviewChildrenAreHiddenForTests =>
         _windowSurfacePreview && _previewBox != null && !_previewBox.Visible &&
         _previewFallbackLabel != null && !_previewFallbackLabel.Visible;
     internal void EnsureDwmThumbnailForTests() => EnsureWindowSurfaceThumbnail();
+    internal void RefreshWindowSurfaceThumbnailForTests() => ScheduleWindowSurfaceThumbnailUpdate();
     internal void RecreateHandleForTests() => RecreateHandle();
     internal string TimeoutTextForTests => _timeoutLabel?.Text ?? "";
     internal bool ApproveButtonEnabledForTests => _approveButton?.Enabled ?? false;
@@ -264,9 +275,18 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
     }
 
     internal Rectangle OutputPanelBoundsForTests => _outputPanel?.Bounds ?? Rectangle.Empty;
+    internal Rectangle OutputPanelFormBoundsForTests => GetFormRelativeBounds(_outputPanel);
+    internal Rectangle OutputPathFormBoundsForTests => GetFormRelativeBounds(_outputPathLabel);
+    internal Rectangle WarningLabelFormBoundsForTests => GetFormRelativeBounds(_warningLabel);
     internal Rectangle TimeoutLabelBoundsForTests => _timeoutLabel?.Bounds ?? Rectangle.Empty;
     internal Rectangle WarningLabelBoundsForTests => _warningLabel?.Bounds ?? Rectangle.Empty;
     internal string WarningTextForTests => _warningLabel?.Text ?? "";
+    internal Rectangle LowVolumeWarningLabelBoundsForTests => _lowVolumeWarningLabel?.Bounds ?? Rectangle.Empty;
+    internal string LowVolumeWarningTextForTests => _lowVolumeWarningLabel?.Text ?? "";
+    internal bool LowVolumeWarningLabelVisibleForTests => _lowVolumeWarningLabel?.Visible ?? false;
+    internal Rectangle SystemAudioScopeLabelBoundsForTests => _systemAudioScopeLabel?.Bounds ?? Rectangle.Empty;
+    internal string SystemAudioScopeTextForTests => _systemAudioScopeLabel?.Text ?? "";
+    internal bool SystemAudioScopeLabelVisibleForTests => _systemAudioScopeLabel?.Visible ?? false;
     internal Rectangle ApproveButtonBoundsForTests => GetFormRelativeBounds(_approveButton);
     internal Rectangle RejectButtonBoundsForTests => GetFormRelativeBounds(_rejectButton);
     internal string ApproveButtonTextForTests => _approveButton?.Text ?? "";
@@ -534,6 +554,10 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             : palette.SecondaryText;
         _warningLabel.BackColor = Color.Transparent;
         _warningLabel.ForeColor = palette.WarningText;
+        _lowVolumeWarningLabel.BackColor = Color.Transparent;
+        _lowVolumeWarningLabel.ForeColor = palette.WarningText;
+        _systemAudioScopeLabel.BackColor = Color.Transparent;
+        _systemAudioScopeLabel.ForeColor = palette.WarningText;
 
         ApplyThemeToButtons(palette);
         ApplyNativeSurfaceThemes();
@@ -613,7 +637,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         Text = _text.Get("Confirmation_Title");
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -646,6 +670,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         ApplyNativeSurfaceThemes();
 
         ApplyWindowLocation();
+        RefreshWindowSizeConstraints();
 
         var traceId = _item.Presentation.TraceId;
         if (!string.IsNullOrEmpty(traceId))
@@ -664,6 +689,26 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         // Safe default: put focus on reject so a stray Enter does not approve.
         _rejectButton?.Focus();
+    }
+
+    protected override void OnLocationChanged(EventArgs e)
+    {
+        base.OnLocationChanged(e);
+        RefreshWindowSizeConstraints();
+        ScheduleWindowSurfaceThumbnailUpdate();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        RefreshWindowSizeConstraints();
+        ScheduleWindowSurfaceThumbnailUpdate();
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        base.OnLayout(levent);
+        ScheduleWindowSurfaceThumbnailUpdate();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -729,6 +774,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _restoreDwmAfterHandleCreated = _windowSurfacePreview && Visible && !_dwmDisposed;
         _dwmHandleGeneration++;
         _dwmEnsurePosted = false;
+        _dwmUpdatePosted = false;
         DisposeDwmThumbnail();
         base.OnHandleDestroyed(e);
         LogAudit("confirmation.handle_destroyed", CreateLifecyclePayload("handle_destroyed"));
@@ -806,14 +852,15 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         try
         {
-            var panelScreenOrigin = _previewPanel.PointToScreen(Point.Empty);
-            var panelClientOrigin = PointToClient(panelScreenOrigin);
-            var panelClient = new Rectangle(panelClientOrigin, _previewPanel.ClientSize);
-            // PointToClient and ClientSize already use WinForms device-pixel
-            // coordinates. DWM consumes the destination in this top-level
-            // form client space; applying DeviceDpi/96 here would scale the
-            // same rectangle a second time on 150%/200% monitors.
-            var destination = DwmThumbnailGeometry.Fit(panelClient, _dwmSourceSize);
+            // DWM composes into this Form's top-level HWND, so child HWND
+            // coordinates must be mapped natively and clipped to every visible
+            // ancestor client area before being sent to DWM. A child Panel does
+            // not clip the compositor-owned thumbnail by itself.
+            if (!DwmThumbnailDestinationGeometry.TryGetVisibleClientBounds(
+                    _previewPanel, this, out var visiblePreview))
+                return false;
+
+            var destination = DwmThumbnailGeometry.Fit(visiblePreview, _dwmSourceSize);
             if (destination == Rectangle.Empty ||
                 !_dwmThumbnail.TryUpdateDestination(destination, sourceClientAreaOnly: false))
                 return false;
@@ -829,6 +876,94 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             return false;
         }
     }
+
+    private void ScheduleWindowSurfaceThumbnailUpdate()
+    {
+        if (!_windowSurfacePreview || _dwmDisposed || IsDisposed || !IsHandleCreated)
+            return;
+
+        if (_dwmThumbnail == null)
+            return;
+
+        if (!Visible || _dwmUpdatePosted)
+            return;
+
+        int generation = _dwmHandleGeneration;
+        _dwmUpdatePosted = true;
+        try
+        {
+            BeginInvoke((MethodInvoker)(() =>
+            {
+                if (generation != _dwmHandleGeneration)
+                    return;
+
+                _dwmUpdatePosted = false;
+                if (_dwmDisposed || IsDisposed || !Visible || !IsHandleCreated || _dwmThumbnail == null)
+                    return;
+
+                if (!UpdateWindowSurfaceThumbnail())
+                    DisposeDwmThumbnail();
+            }));
+        }
+        catch
+        {
+            if (generation == _dwmHandleGeneration)
+                _dwmUpdatePosted = false;
+        }
+    }
+
+    private void RefreshWindowSizeConstraints(Rectangle? workAreaOverride = null)
+    {
+        if (_refreshingMonitorConstraints || IsDisposed || !IsHandleCreated)
+            return;
+
+        Rectangle workArea;
+        try
+        {
+            workArea = workAreaOverride ?? Screen.FromHandle(Handle).WorkingArea;
+        }
+        catch
+        {
+            workArea = workAreaOverride ?? Rectangle.Empty;
+        }
+
+        if (workArea.Width <= 0 || workArea.Height <= 0)
+            return;
+
+        int dpi = Math.Max(96, DeviceDpi);
+        var scaledMinimum = new Size(
+            ScaleForDpi(MinimumClientSize.Width, dpi),
+            ScaleForDpi(MinimumClientSize.Height, dpi));
+        var minimum = new Size(
+            Math.Min(scaledMinimum.Width, workArea.Width),
+            Math.Min(scaledMinimum.Height, workArea.Height));
+        var maximum = workArea.Size;
+
+        if (minimum.Width <= 0 || minimum.Height <= 0 ||
+            maximum.Width < minimum.Width || maximum.Height < minimum.Height)
+            return;
+
+        _refreshingMonitorConstraints = true;
+        try
+        {
+            if (MaximumSize != maximum || MinimumSize != minimum)
+            {
+                // Clear the old monitor's bound before applying the new pair;
+                // otherwise a smaller monitor's cap can reject the new
+                // monitor's minimum during a cross-DPI move.
+                MaximumSize = Size.Empty;
+                MinimumSize = minimum;
+                MaximumSize = maximum;
+            }
+        }
+        finally
+        {
+            _refreshingMonitorConstraints = false;
+        }
+    }
+
+    private static int ScaleForDpi(int value, int dpi) =>
+        (int)Math.Clamp(((long)value * dpi + 48) / 96, 1, int.MaxValue);
 
     private void DisposeDwmThumbnail()
     {
@@ -930,7 +1065,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(20),
-            RowCount = 6,
+            RowCount = 8,
             ColumnCount = 1,
             AutoSize = false
         };
@@ -939,7 +1074,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 2 output
         _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 3 timeout
         _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 4 warning
-        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 5 buttons
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 5 low-volume warning
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 6 system-audio scope
+        _rootTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // 7 buttons
 
         var maxTextWidth = Math.Max(200, ClientSize.Width - _rootTable.Padding.Horizontal - 20);
 
@@ -1143,6 +1280,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         _mainContentPanel.Controls.Add(_contentTable);
         _rootTable.Controls.Add(_mainContentPanel, 0, 1);
 
+        // Child layout and scroll changes can alter or clip the visible preview
+        // viewport without changing the top-level form's size.
+        _previewPanel.Layout += (_, _) => ScheduleWindowSurfaceThumbnailUpdate();
+        _previewContainer.Layout += (_, _) => ScheduleWindowSurfaceThumbnailUpdate();
+        _contentTable.Layout += (_, _) => ScheduleWindowSurfaceThumbnailUpdate();
+        _mainContentPanel.Layout += (_, _) => ScheduleWindowSurfaceThumbnailUpdate();
+        _mainContentPanel.Scroll += (_, _) => ScheduleWindowSurfaceThumbnailUpdate();
+
         // Keep header/warning labels wrapped/ellipsed after DPI scaling or size changes.
         SizeChanged += (_, _) =>
         {
@@ -1151,10 +1296,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             _queueLabel.MaximumSize = new Size(available, 0);
             if (_warningLabel != null)
                 _warningLabel.MaximumSize = new Size(available, 0);
+            if (_lowVolumeWarningLabel != null)
+                _lowVolumeWarningLabel.MaximumSize = new Size(available, 0);
+            if (_systemAudioScopeLabel != null)
+                _systemAudioScopeLabel.MaximumSize = new Size(available, 0);
             if (_timeoutLabel != null)
                 _timeoutLabel.MaximumSize = new Size(available, 0);
-            if (_windowSurfacePreview && _dwmThumbnail != null && !UpdateWindowSurfaceThumbnail())
-                DisposeDwmThumbnail();
+            if (_windowSurfacePreview)
+                ScheduleWindowSurfaceThumbnailUpdate();
         };
 
         if (_windowSurfacePreview)
@@ -1210,18 +1359,42 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
             Font = new Font("Segoe UI", 9),
             AutoSize = true,
             MaximumSize = new Size(maxTextWidth, 0),
-            Margin = new Padding(0, 0, 0, 16)
+            Margin = new Padding(0, 0, 0, 4)
         };
 
-        // Low-volume warning: if the microphone is enabled and the volume is
-        // below 10%, show an explicit warning but do not block recording.
-        // Muted devices are rejected before the confirmation form is created.
-        if (summary.AudioVolumePercent is int volumePercent && volumePercent >= 0 && volumePercent < 10)
-        {
-            _warningLabel.Text = _text.Format("Confirmation_Warning_LowVolume", volumePercent);
-        }
-
         _rootTable.Controls.Add(_warningLabel, 0, 4);
+
+        // Keep privacy, low-volume, and system-loopback notices independent so
+        // one applicable warning can never hide another. Muted devices remain
+        // rejected before the confirmation form is created.
+        bool showLowVolumeWarning = summary.AudioVolumePercent is int volumePercent &&
+            volumePercent >= 0 && volumePercent < 10;
+        _lowVolumeWarningLabel = new Label
+        {
+            Text = showLowVolumeWarning
+                ? _text.Format("Confirmation_Warning_LowVolume", summary.AudioVolumePercent!.Value)
+                : string.Empty,
+            Font = new Font("Segoe UI", 9),
+            AutoSize = true,
+            Visible = showLowVolumeWarning,
+            MaximumSize = new Size(maxTextWidth, 0),
+            Margin = new Padding(0, 0, 0, 4)
+        };
+        _rootTable.Controls.Add(_lowVolumeWarningLabel, 0, 5);
+
+        bool showSystemAudioScope =
+            string.Equals(presentation.CaptureSemantics, "window_surface", StringComparison.Ordinal) &&
+            string.Equals(summary.AudioSourceKind, "system-loopback", StringComparison.Ordinal);
+        _systemAudioScopeLabel = new Label
+        {
+            Text = showSystemAudioScope ? _text.Get("Confirmation_Info_WindowSurfaceSystemAudioScope") : string.Empty,
+            Font = new Font("Segoe UI", 9),
+            AutoSize = true,
+            Visible = showSystemAudioScope,
+            MaximumSize = new Size(maxTextWidth, 0),
+            Margin = new Padding(0, 0, 0, 12)
+        };
+        _rootTable.Controls.Add(_systemAudioScopeLabel, 0, 6);
 
         // Buttons
         _buttonPanel = new FlowLayoutPanel
@@ -1268,7 +1441,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         // RightToLeft keeps the ring immediately to the left of Confirm while
         // leaving both command buttons as independent hit targets.
         _buttonPanel.Controls.Add(_countdownRing);
-        _rootTable.Controls.Add(_buttonPanel, 0, 5);
+        _rootTable.Controls.Add(_buttonPanel, 0, 7);
 
         Controls.Add(_rootTable);
 
@@ -1604,15 +1777,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         if (computed.Bounds != Rectangle.Empty)
         {
-            // Adjust size constraints so that the computed bounds are achievable
-            // even when the static MinimumSize (scaled by DPI) is larger than the
-            // target working area. The scrollable content area absorbs the shrink.
-            var desiredSize = computed.Bounds.Size;
-            MinimumSize = new Size(
-                Math.Min(MinimumSize.Width, desiredSize.Width),
-                Math.Min(MinimumSize.Height, desiredSize.Height));
-            MaximumSize = desiredSize;
-
+            RefreshWindowSizeConstraints(computed.WorkingArea);
             Bounds = computed.Bounds;
         }
     }

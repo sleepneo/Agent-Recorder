@@ -1,6 +1,6 @@
 # wgc-native-helper
 
-`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation H.264 编码，对单个显示器、窗口或隐藏实验性的显示器区域进行短时连续录制，输出标准 MP4。默认请求 software H.264；隐藏的 `hardware-preferred` 实验路径只有在 Sink Writer 实际 transform evidence 证明硬件编码器后才会报告 hardware selection。
+`wgc-native-helper.exe` 是一个隔离的原生 helper 进程，使用 C++/WinRT、Windows Graphics Capture（WGC）和 Media Foundation H.264 编码，对单个显示器、窗口或隐藏实验性的显示器区域进行连续录制，输出标准 MP4。常规 WGC 模式仍最多 60 秒；只有托管端为普通、逐次本地确认的严格 `window_surface` 请求显式附加 `--allow-long-window-surface-duration` 时，window 模式才可到 600 秒。此 bounded limit 不代表多分钟稳定性已经过机器/GPU/窗口/端点验收。默认请求 software H.264；隐藏的 `hardware-preferred` 实验路径只有在 Sink Writer 实际 transform evidence 证明硬件编码器后才会报告 hardware selection。
 
 本 helper 不直接对外提供 HTTP API，而是由主进程通过命令行启动并通过 stdout 上的 IPC v2 事件流监督生命周期。
 
@@ -48,7 +48,8 @@ wgc-native-helper.exe
   --window-hwnd <non-zero-64-bit-hwnd>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
-  --duration-ms <1000..60000>
+  --duration-ms <1000..60000; strict window_surface with opt-in: up to 600000>
+  --allow-long-window-surface-duration (window mode only; managed strict path)
   --fps <1..60>
   --begin-signal <absolute-path>
   --begin-token <unguessable-token>
@@ -65,7 +66,8 @@ wgc-native-helper.exe
 | `--display-bounds` | 目标显示器的完整矩形（虚拟屏幕坐标），用于精确匹配 `HMONITOR`。 |
 | `--recording-id` | 1–64 个字符，仅允许字母、数字、`-`、`_`、`.`。 |
 | `--output` | 绝对 `.mp4` 输出路径，必须位于 `.local-data\wgc-tests\` 或系统临时目录。 |
-| `--duration-ms` | 录制时长，1000–60000 毫秒（1–60 秒）。 |
+| `--duration-ms` | 常规录制时长 1000–60000 毫秒；严格窗口表面通道最多 600000 毫秒（1–600 秒）。 |
+| `--allow-long-window-surface-duration` | 托管端严格 `window_surface` 单次录制的显式 opt-in；仅能与 window 模式组合，不改变 display/region/旧窗口路径的 60 秒上限。 |
 | `--fps` | 目标帧率，1–60。 |
 | `--begin-signal` | 授权信号文件路径，必须位于 `.local-data\wgc-control\` 或系统临时目录。 |
 | `--begin-token` | 授权令牌，信号文件内容必须与之完全匹配。 |
@@ -115,7 +117,7 @@ WindowCaptureSupported: true
 
 ### 连续 window 录制模式（helper 0.3.0）
 
-托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–60 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；历史值 `AGENT_RECORDER_WINDOW_BACKEND=wgc` 仅作为兼容别名，并在进入 selector 后归一化为 `wgc-continuous`，不会再选择单帧后端。61 秒及其他不符合条件的请求会自动回退 FFmpeg。
+未声明严格语义的托管 selector 仅在隐藏环境变量 `AGENT_RECORDER_WINDOW_BACKEND=wgc-continuous`、窗口 HWND 非零且边界为正、时长为 1–60 秒、帧率为 1–60、未请求麦克风，并且 `--probe` 明确报告 `WindowCaptureSupported: true` 时选择此模式。普通 window 请求仍默认走 FFmpeg；历史值 `AGENT_RECORDER_WINDOW_BACKEND=wgc` 仅作为兼容别名，并在进入 selector 后归一化为 `wgc-continuous`，不会再选择单帧后端。61 秒及其他不符合条件的非严格请求会自动回退 FFmpeg。
 
 ```text
 wgc-native-helper.exe
@@ -123,7 +125,8 @@ wgc-native-helper.exe
   --window-hwnd <non-zero-64-bit-hwnd>
   --recording-id <safe-id>
   --output <absolute-mp4-path>
-  --duration-ms <1000..60000>
+  --duration-ms <1000..60000 normally; 1000..600000 only with strict window-surface opt-in>
+  --allow-long-window-surface-duration
   --fps <1..60>
   --encoder-mode <software|hardware-preferred>
   --begin-signal <absolute-path>
@@ -290,7 +293,7 @@ BytesWritten: <bytes>
 
 ## 已知限制
 
-- 当前 helper 共享 display、window、region 三条连续 WGC capture 路径；受控时长为 1–60 秒，region 仍是隐藏实验，受托管 selector 的显式开关、稳定显示器身份和非捕获 probe barrier 约束。WGC 默认关闭且仍不支持麦克风或系统声音；不满足条件的请求回退 FFmpeg，公共 API 仍不提供后端选择参数。60 秒只是当前验收边界，不代表所有 GPU、驱动、Windows 版本或应用都已兼容。
+- 当前 helper 共享 display、window、region 三条连续 WGC capture 路径；display、region 和旧窗口模式受控时长仍为 1–60 秒。只有显式设置 `--allow-long-window-surface-duration` 的 window helper 调用可接受至 600 秒；托管端仅对严格固定窗口、逐次本地确认路径设置此参数。region 仍是隐藏实验，受托管 selector 的显式开关、稳定显示器身份和非捕获 probe barrier 约束。WGC helper 本身不捕获麦克风或系统声音，音频仍由既有 WASAPI/A/V finalizer 路径独立处理。600 秒只是 API 的 bounded 上限，不代表完整直播或任何设备上的多分钟 A/V 稳定性验收。
 - 硬件 H.264 仍是隐藏实验。`HardwareH264Available` 和 candidate count 只是 probe 能力证据，不是硬件录制成功；只有 Sink Writer 实际 transform chain 经过分类并报告 `hardware/hardware_selected` 才算硬件选择成功。Task 200B 的自动化验证不替代真实桌面硬件验收。
 - 默认软件路径请求并验证 software H.264 transform；CPU RGB32 输入、GPU→CPU 拷贝和非 zero-copy 编码路径保持不变。
 - 显示器尺寸变化时本轮选择失败关闭，不继续写出结构损坏的 MP4。

@@ -93,7 +93,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | quick API | 已实现 | 一次请求表达常见录制意图 |
 | 有界创建等待 | 已实现 | raw/quick 创建请求可在同一 POST 中等待本地批准、准备、倒计时和可信首帧；不改变本地确认边界 |
 | 显示器录制 | 已实现 | 录制整个显示器 |
-| 窗口录制 | 已实现 | 默认解析窗口可见边界并通过 `ffmpeg-window-region` 连续录制；符合条件的短时无麦克风请求可通过本地实验开关使用 WGC continuous；确认信息会区分窗口表面与屏幕矩形，并在批准后、捕获前重新校验语义 |
+| 窗口录制 | 已实现 | 默认按窗口可见边界使用 `ffmpeg-window-region` 录制屏幕矩形；raw API 可对固定 `window_id` 明确要求 `window_surface`，以 WGC 录制被其他窗口遮挡的窗口内容，不回退屏幕矩形。严格路径支持无音频或经确认的系统声音，时长 1-600 秒；当前设备已通过 300 秒 PotPlayer 音画验收，尚不代表完整直播或未来窗口无人值守已就绪 |
 | 选区录制 | 已实现 | 支持拖拽、精确坐标、尺寸预设、边缘/窗口吸附、点击窗口选区和双屏可靠置顶 |
 | 嵌套录制 | 已实现 | 外层录制过程中可以启动内层录制 |
 | 本地确认 | 已实现 | 普通录制逐次由人类确认；麦克风、普通无音频 FFmpeg 与延迟授权 WGC 路径在批准后显示不采集画面的可配置 0-10 秒倒计时 |
@@ -115,7 +115,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退 |
 | 系统声音 | 已实现 | 隔离 WASAPI loopback、音视频分离采集、AAC 合流、确认 UI、倒计时和连续性诊断已接通；本地确认时批准的端点在本次录制中保持固定，切换 Windows 默认输出不会暗中改录其他设备，切回批准端点时采用有界同端点恢复。公开能力契约通过 `/capabilities`、`/permissions` 和 `/audio/devices.output_devices` 报告实时状态与 render endpoint |
-| WGC 连续录制 | 实验性实现 | 已支持符合条件的 1–60 秒无音频 display/window/region 目标，具备非捕获探测、短期成功缓存、可信首帧证据、窗口生命周期失败、稳定显示器身份、topology 复核、运行中显示器丢失处理、GPU 区域裁剪和 FFmpeg 自动回退；当前硬件已通过显示器断连、遮挡窗口及 60 秒真实桌面验收；默认关闭，未作为公共 API 能力开放 |
+| 通用 WGC 连续录制 | 实验性实现 | 符合条件的 1–60 秒无音频 display/window/region 路径默认关闭，具备非捕获探测、可信首帧证据、目标生命周期检查、稳定显示器身份和 GPU 区域裁剪；与上面的公开严格固定窗口路径分开，不应混用能力声明或回退语义 |
 | 代码签名 | 未实现 | 便携包可能触发 SmartScreen 提示 |
 
 计划创建状态由 `GET /api/v1/plan-setups/{id}` 查询；每次执行的持久化状态和经验证的实际媒体路径由 `GET /api/v1/plans/{plan_id}/status` 查询。`scheduled` 只表示已排期，不代表录制成功。

@@ -20,4 +20,12 @@ public interface IAvWorkerFactory
         => CreateAudioWorker();
 
     IVideoCaptureWorker CreateVideoWorker();
+
+    /// <summary>
+    /// Creates the approved video worker for a split recording. The exact
+    /// already-consumed parent proof is forwarded only to WGC's existing
+    /// proof-bearing backend when strict window-surface capture is requested.
+    /// </summary>
+    IVideoCaptureWorker CreateVideoWorker(CaptureConfig config, CaptureAuthorizationProof authorizationProof)
+        => CreateVideoWorker();
 }

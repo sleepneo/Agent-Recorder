@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
+using AgentRecorder.Api;
 using AgentRecorder.App;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
@@ -171,6 +172,232 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     }
 
     [Fact]
+    public void RequiredWindowSurface_SelectsStrictWgcAndSplitAudioWithoutFallback()
+    {
+        var noAudioConfig = RequiredWindowConfig();
+        var noAudio = CaptureBackendSelector.BuildPlan(noAudioConfig, new FakeAvailabilityProbe(true));
+        Assert.Equal("wgc-continuous", noAudio.PlannedBackend);
+        Assert.Equal("window_surface", noAudio.CaptureSemantics);
+        Assert.False(noAudio.FallbackOccurred);
+
+        var systemAudioConfig = RequiredWindowConfig();
+        systemAudioConfig.AudioSourceKind = AudioCaptureSourceKind.SystemLoopback;
+        systemAudioConfig.SystemLoopbackEndpoint = "render-endpoint";
+        systemAudioConfig.SystemLoopbackEndpointName = "Speakers";
+        var systemAudio = CaptureBackendSelector.BuildPlan(systemAudioConfig, new FakeAvailabilityProbe(true));
+        Assert.Equal("wgc-window-av-split", systemAudio.PlannedBackend);
+        Assert.Equal("window_surface", systemAudio.CaptureSemantics);
+        Assert.Equal(AudioCaptureSourceKind.SystemLoopback, systemAudio.AudioSourceKind);
+        Assert.Equal("render-endpoint", systemAudio.AudioEndpointId);
+        Assert.False(systemAudio.FallbackOccurred);
+        Assert.IsType<AvSplitCaptureBackend>(CaptureBackendSelector.CreateBackend(systemAudio.PlannedBackend));
+        var recording = new Recording
+        {
+            SourceType = "window",
+            OutputPath = systemAudioConfig.OutputPath,
+            DurationSeconds = systemAudioConfig.DurationSeconds,
+            Config = systemAudioConfig
+        };
+        var authorizationProof = CaptureAuthorizationProofIssuer.IssueForTests(recording, systemAudio);
+        using (var videoWorker = new AvWorkerFactory().CreateVideoWorker(systemAudioConfig, authorizationProof))
+            Assert.Equal("WgcContinuousVideoCaptureWorker", videoWorker.GetType().Name);
+
+        var legacyConfig = RequiredWindowConfig();
+        legacyConfig.RequireWindowSurface = false;
+        var legacy = WithWindowBackend(null, () => CaptureBackendSelector.BuildPlan(
+            legacyConfig, new FakeAvailabilityProbe(true)));
+        Assert.Equal("screen_rectangle", legacy.CaptureSemantics);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(60)]
+    [InlineData(61)]
+    [InlineData(600)]
+    public void RequiredWindowSurfaceSelector_AcceptsBoundedDurationWithoutFallback(int durationSeconds)
+    {
+        var probe = new FakeAvailabilityProbe(true);
+        var plan = CaptureBackendSelector.BuildPlan(
+            RequiredWindowConfig(durationSeconds), probe);
+
+        Assert.Equal("wgc-continuous", plan.PlannedBackend);
+        Assert.Equal("window_surface", plan.CaptureSemantics);
+        Assert.False(plan.FallbackOccurred);
+        Assert.Equal(1, probe.CallCount);
+    }
+
+    [Fact]
+    public void RequiredWindowSurfaceSelector_601SecondsIsStable400BeforeProbe()
+    {
+        var probe = new FakeAvailabilityProbe(true);
+        var error = Assert.Throws<ApiException>(() => CaptureBackendSelector.BuildPlan(
+            RequiredWindowConfig(601), probe));
+
+        Assert.Equal(400, error.Status);
+        Assert.Equal("INVALID_ARGUMENT", error.Code);
+        Assert.Contains("600", error.Message);
+        Assert.Equal(0, probe.CallCount);
+    }
+
+    [Fact]
+    public void RequiredWindowSurface_UnavailableOrUnboundTargetFailsClosedBeforeProbeOrFallback()
+    {
+        var unavailableProbe = new FakeAvailabilityProbe(false);
+        var unavailable = Assert.Throws<ApiException>(() => CaptureBackendSelector.BuildPlan(
+            RequiredWindowConfig(), unavailableProbe));
+        Assert.Equal("WINDOW_SURFACE_UNAVAILABLE", unavailable.Code);
+        Assert.Equal(1, unavailableProbe.CallCount);
+
+        var unboundConfig = RequiredWindowConfig();
+        unboundConfig.WindowProcessId = null;
+        var targetError = Assert.Throws<ApiException>(() => CaptureBackendSelector.BuildPlan(
+            unboundConfig, new FakeAvailabilityProbe(true)));
+        Assert.Equal("INVALID_ARGUMENT", targetError.Code);
+    }
+
+    [Theory]
+    [InlineData("42")]
+    [InlineData("\"screen_rectangle\"")]
+    [InlineData("null")]
+    public void RequiredWindowSurface_RejectsMalformedFieldBeforeSourceResolution(string fieldValue)
+    {
+        var request = JsonNode.Parse($"{{\"required_capture_semantics\":{fieldValue},\"source\":{{\"type\":\"display\",\"display_id\":\"missing\"}}}}")!;
+        var error = Assert.Throws<ApiException>(() => ConfigParser.Build(request, "test-agent", out _));
+        Assert.Equal(400, error.Status);
+        Assert.Equal("INVALID_ARGUMENT", error.Code);
+    }
+
+    [Fact]
+    public void RequiredWindowSurface_RejectsUnsupportedAudioModeAndAmbiguousRequestShapes()
+    {
+        var invalidRequests = new[]
+        {
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"audio\":{\"microphone\":{\"enabled\":true}}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":601}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\",\"display_id\":\"display_1\"}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"nested\":{}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"audio\":{\"desktop_audio\":{\"enabled\":true}}}"
+        };
+
+        foreach (var json in invalidRequests)
+        {
+            var error = Assert.Throws<ApiException>(() => ConfigParser.Build(
+                JsonNode.Parse(json)!, "test-agent", out _));
+            Assert.Equal(400, error.Status);
+            Assert.Equal("INVALID_ARGUMENT", error.Code);
+        }
+    }
+
+    [Fact]
+    public void RequiredWindowSurface_IsRejectedOutsideOrdinaryRecordingEndpoint()
+    {
+        var body = "{\"required_capture_semantics\":\"window_surface\",\"schedule\":{\"kind\":\"once\"}}";
+        var error = Assert.Throws<ApiException>(() =>
+            ApiServer.RejectWindowSurfaceIntentOutsideOrdinaryRecording(body));
+        Assert.Equal("INVALID_ARGUMENT", error.Code);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RequiredWindowSurface_ChangedProcessOrSizeAfterApprovalFailsBeforeBackendConstruction(bool changeSize)
+    {
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
+        InstallWindowProvider();
+        SystemQuery.SetDisplayProvider(() => new List<SystemQuery.DisplayInfo>
+        {
+            new("display_1", "Test Display", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0)
+        });
+        try
+        {
+            var tray = new TestTray { DeferConfirmation = true };
+            var engine = new RecordingEngine(new CapturingAudit())
+            {
+                CapturePlanFactoryForTests = cfg => CaptureBackendSelector.BuildPlan(cfg, new FakeAvailabilityProbe(true))
+            };
+            int backendFactoryCalls = 0;
+            engine.BackendFactory = _ =>
+            {
+                backendFactoryCalls++;
+                return (new CountingBackend(), "strict-test-backend");
+            };
+
+            var request = WindowJson("window_12345", 10, Path.Combine(_task197Root, "strict-window.mp4"));
+            request["required_capture_semantics"] = "window_surface";
+            engine.CreateRecording(request, "test-agent", tray);
+            var rec = Assert.Single(engine._recs.Values);
+
+            Assert.Equal(RecState.pending_confirmation, rec.State);
+            Assert.Equal("window_surface", tray.Summary!.CaptureSemantics);
+            Assert.Equal("wgc-continuous", tray.Summary.PlannedBackend);
+            Assert.Equal(0, backendFactoryCalls);
+            Assert.Null(rec.Backend);
+
+            SystemQuery.SetWindowProvider((_, _) => new()
+            {
+                new SystemQuery.WindowInfo(
+                    "window_12345", "Notepad", "notepad.exe", changeSize ? 42 : 99, false, false,
+                    new SystemQuery.Bounds(0, 0, changeSize ? 1024 : 1280, changeSize ? 720 : 720))
+            });
+            tray.Approve();
+
+            Assert.Equal(RecState.failed, rec.State);
+            Assert.Equal("capture_semantics_changed", rec.Error);
+            Assert.Equal(0, backendFactoryCalls);
+            Assert.Equal(0, tray.CountdownCalls);
+            Assert.False(File.Exists(rec.OutputPath));
+        }
+        finally
+        {
+            SystemQuery.SetDisplayProvider(null);
+            InstallWindowProvider();
+        }
+    }
+
+    [Fact]
+    public void RequiredWindowSurface_VideoWorkerRepeatsTargetRevalidationImmediatelyBeforeWgcStart()
+    {
+        SystemQuery.SetWindowProvider((_, _) => new()
+        {
+            new SystemQuery.WindowInfo(
+                "window_12345", "Notepad", "notepad.exe", 99, false, false,
+                new SystemQuery.Bounds(0, 0, 1280, 720))
+        });
+        try
+        {
+            var config = RequiredWindowConfig();
+            config.WindowHandle = (nint)12345;
+            var plan = CaptureBackendSelector.BuildPlan(config, new FakeAvailabilityProbe(true));
+            var recording = new Recording
+            {
+                SourceType = "window",
+                OutputPath = config.OutputPath,
+                DurationSeconds = config.DurationSeconds,
+                Config = config
+            };
+            var proof = CaptureAuthorizationProofIssuer.IssueForTests(recording, plan);
+            int backendFactoryCalls = 0;
+            using var worker = new WgcContinuousVideoCaptureWorker(
+                proof,
+                () =>
+                {
+                    backendFactoryCalls++;
+                    throw new InvalidOperationException("WGC must not start for a changed target.");
+                },
+                () => 1);
+
+            var error = Assert.Throws<InvalidOperationException>(() => worker.Start(config, config.OutputPath));
+            Assert.Contains("window_identity_changed", error.Message, StringComparison.Ordinal);
+            Assert.Equal(0, backendFactoryCalls);
+        }
+        finally
+        {
+            InstallWindowProvider();
+        }
+    }
+
+    [Fact]
     public void UnknownWindowBackendSemantics_FailsClosedWithStableApiError()
     {
         var ex = Assert.Throws<ApiException>(() =>
@@ -214,6 +441,77 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             form.CloseWithoutResult();
             form.Dispose();
             Assert.Equal(1, dwm.Thumbnail.DisposeCalls);
+        });
+    }
+
+    [Fact]
+    public void WindowSurfacePreview_ResizeKeepsNativeDestinationInsideVisibleViewport()
+    {
+        RunSta(() =>
+        {
+            var screen = new CountingScreenPreviewProvider();
+            var dwm = new FakeDwmThumbnailProvider();
+            using var form = NewForm(WindowSurfaceSummary(), screen, dwm);
+            form.Show();
+            System.Windows.Forms.Application.DoEvents();
+
+            Assert.Equal(System.Windows.Forms.FormBorderStyle.Sizable, form.FormBorderStyleForTests);
+            Assert.True(form.DwmThumbnailActiveForTests);
+            AssertPreviewCompositionIsContained(form);
+
+            var initialSize = form.Size;
+            var maximum = form.MaximumSizeForTests;
+            var minimum = form.MinimumSize;
+            var larger = new Size(
+                Math.Min(maximum.Width, initialSize.Width + 120),
+                Math.Min(maximum.Height, initialSize.Height + 80));
+            var smaller = new Size(
+                Math.Max(minimum.Width, initialSize.Width - 80),
+                Math.Max(minimum.Height, initialSize.Height - 60));
+            Assert.True(larger != initialSize || smaller != initialSize,
+                "The current monitor has room for at least one actual form resize transition");
+
+            if (larger != initialSize)
+            {
+                form.Size = larger;
+                System.Windows.Forms.Application.DoEvents();
+                form.RefreshWindowSurfaceThumbnailForTests();
+                System.Windows.Forms.Application.DoEvents();
+                Assert.Equal(larger, form.Size);
+                AssertPreviewCompositionIsContained(form);
+            }
+
+            if (smaller != form.Size)
+            {
+                form.Size = smaller;
+                System.Windows.Forms.Application.DoEvents();
+                form.RefreshWindowSurfaceThumbnailForTests();
+                System.Windows.Forms.Application.DoEvents();
+                Assert.Equal(smaller, form.Size);
+                AssertPreviewCompositionIsContained(form);
+            }
+
+            var currentScreen = System.Windows.Forms.Screen.FromHandle(form.Handle);
+            foreach (var otherScreen in System.Windows.Forms.Screen.AllScreens.Where(
+                         candidate => candidate.DeviceName != currentScreen.DeviceName &&
+                                      candidate.WorkingArea.Width >= 480 &&
+                                      candidate.WorkingArea.Height >= 360))
+            {
+                form.Location = new Point(otherScreen.WorkingArea.Left + 20, otherScreen.WorkingArea.Top + 20);
+                System.Windows.Forms.Application.DoEvents();
+                form.RefreshWindowSurfaceThumbnailForTests();
+                System.Windows.Forms.Application.DoEvents();
+
+                var actualScreen = System.Windows.Forms.Screen.FromHandle(form.Handle);
+                Assert.Equal(actualScreen.WorkingArea.Size, form.MaximumSizeForTests);
+                Assert.True(form.DeviceDpiForTests > 0);
+                AssertPreviewCompositionIsContained(form);
+            }
+
+            Assert.Equal((nint)12345, dwm.Thumbnail!.SourceWindow);
+            Assert.True(dwm.Thumbnail.UpdateCalls >= 3);
+            Assert.Equal(0, screen.Calls);
+            form.CloseWithoutResult();
         });
     }
 
@@ -404,6 +702,49 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             (long)Math.Max(sourceWidth, sourceHeight));
     }
 
+    [Theory]
+    [InlineData(96)]
+    [InlineData(120)]
+    [InlineData(144)]
+    [InlineData(192)]
+    public void DwmGeometry_DpiScaleMatrix_ConsumesNativeDevicePixelViewport(int dpi)
+    {
+        // DWM's destination rectangle is in the top-level HWND's client space.
+        // Simulate the physical viewport dimensions at common monitor DPIs;
+        // the geometry layer must not apply another dpi/96 conversion.
+        var scale = dpi / 96d;
+        var viewport = new Rectangle(
+            (int)Math.Round(16 * scale),
+            (int)Math.Round(24 * scale),
+            (int)Math.Round(640 * scale),
+            (int)Math.Round(360 * scale));
+
+        var destination = DwmThumbnailGeometry.Fit(viewport, new Size(1920, 1080));
+
+        Assert.Equal(viewport, destination);
+        Assert.True(viewport.Contains(destination));
+    }
+
+    private static void AssertPreviewCompositionIsContained(ConfirmationForm form)
+    {
+        var viewport = form.PreviewPanelFormBoundsForTests;
+        var destination = form.DwmThumbnailDestinationForTests;
+        Assert.True(viewport.Width > 0 && viewport.Height > 0, "Native visible preview viewport is empty");
+        Assert.True(destination.Width > 0 && destination.Height > 0, "DWM destination rectangle is empty");
+        Assert.True(viewport.Contains(destination),
+            $"Native DWM rect {destination} must be inside native visible preview viewport {viewport}");
+        Assert.False(destination.IntersectsWith(form.OutputPanelFormBoundsForTests),
+            "DWM thumbnail overlaps the saved-output panel");
+        Assert.False(destination.IntersectsWith(form.OutputPathFormBoundsForTests),
+            "DWM thumbnail overlaps the saved-output path");
+        Assert.False(destination.IntersectsWith(form.WarningLabelFormBoundsForTests),
+            "DWM thumbnail overlaps the privacy warning");
+        Assert.False(destination.IntersectsWith(form.ApproveButtonBoundsForTests),
+            "DWM thumbnail overlaps the approve button");
+        Assert.False(destination.IntersectsWith(form.RejectButtonBoundsForTests),
+            "DWM thumbnail overlaps the reject button");
+    }
+
     [Fact]
     public void ApprovedWindowSurfaceSemanticDrift_FailsBeforeCountdownUiBackendOrOutput()
     {
@@ -574,6 +915,37 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         Assert.True(RecordingFailureNotificationManager.IsSupportedReason("capture_semantics_changed"));
     }
 
+    [Theory]
+    [InlineData(UiLanguage.ZhCn)]
+    [InlineData(UiLanguage.EnUs)]
+    public void WindowSurfaceSystemAudioScope_PreservesPrivacyWarningAndIsVisibleAtCommonDpi(UiLanguage language)
+    {
+        RunSta(() =>
+        {
+            var screen = new CountingScreenPreviewProvider();
+            var dwm = new FakeDwmThumbnailProvider();
+            using var form = NewForm(WindowSurfaceSummary(systemAudio: true), screen, dwm, language);
+            form.ClientSize = new Size(1000, 760);
+            form.Scale(new SizeF(1.25f, 1.25f));
+
+            form.Show();
+
+            Assert.Contains(
+                new UiTextProvider(language).Get("Confirmation_Warning"),
+                form.WarningTextForTests,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                new UiTextProvider(language).Get("Confirmation_Info_WindowSurfaceSystemAudioScope"),
+                form.SystemAudioScopeTextForTests,
+                StringComparison.Ordinal);
+            Assert.True(form.SystemAudioScopeLabelVisibleForTests);
+            Assert.True(form.ClientRectangle.Contains(form.WarningLabelBoundsForTests));
+            Assert.True(form.ClientRectangle.Contains(form.SystemAudioScopeLabelBoundsForTests));
+            Assert.True(form.SystemAudioScopeLabelBoundsForTests.Width > 0);
+            Assert.True(form.SystemAudioScopeLabelBoundsForTests.Height > 0);
+        });
+    }
+
     private JsonNode WindowJson(string windowId, int duration, string? outputPath = null) =>
         new JsonObject
         {
@@ -598,6 +970,19 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         DurationSeconds = duration,
         Fps = 30,
         OutputPath = "C:\\temp\\task-197.mp4"
+    };
+
+    private static CaptureConfig RequiredWindowConfig(int durationSeconds = 15) => new()
+    {
+        SourceKind = "window",
+        WindowHandle = (nint)0x12345,
+        WindowProcessId = 42,
+        WindowSurfaceBounds = (0, 0, 1280, 720),
+        RequireWindowSurface = true,
+        Bounds = (0, 0, 1280, 720),
+        DurationSeconds = durationSeconds,
+        Fps = 30,
+        OutputPath = "C:\\temp\\task-295.mp4"
     };
 
     private static CapturePlan Plan(
@@ -633,7 +1018,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
                 : DisplayIdentityResolutionStatus.Unresolved,
             coordinateSpace: coordinateSpace);
 
-    private static object WindowSurfaceSummary() => new
+    private static object WindowSurfaceSummary(bool systemAudio = false) => new
     {
         source = "window: Notepad",
         source_type = "window",
@@ -642,6 +1027,10 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         window_id = "window_12345",
         capture_semantics = "window_surface",
         preview_semantics = "window_surface",
+        audio = systemAudio ? "System audio" : "No audio",
+        audio_source_kind = systemAudio ? "system-loopback" : "none",
+        audio_system_output_name = systemAudio ? "Speakers" : "",
+        audio_system_output_selection = "default",
         capture_bounds = new { x = 20, y = -10, width = 1280, height = 720 },
         duration = "5s",
         output = "out.mp4",
@@ -668,14 +1057,18 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         expires_at = "2026-01-01T00:00:00Z"
     };
 
-    private static ConfirmationForm NewForm(object summary, CountingScreenPreviewProvider screen, FakeDwmThumbnailProvider dwm) =>
+    private static ConfirmationForm NewForm(
+        object summary,
+        CountingScreenPreviewProvider screen,
+        FakeDwmThumbnailProvider dwm,
+        UiLanguage language = UiLanguage.ZhCn) =>
         new(
             ConfirmationPresentationTestData.CreateItem("conf_1", "rec_1", summary, _ => { }, 60),
             1,
             1,
             previewProvider: screen,
             dwmThumbnailProvider: dwm,
-            textProvider: new UiTextProvider(UiLanguage.ZhCn))
+            textProvider: new UiTextProvider(language))
         {
             EnableDelayedForegroundVerification = false
         };

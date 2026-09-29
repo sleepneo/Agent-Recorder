@@ -10,6 +10,7 @@ namespace wgc {
 
 inline constexpr int kWgcContinuousMinDurationMs = 1000;
 inline constexpr int kWgcContinuousMaxDurationMs = 60000;
+inline constexpr int kWgcWindowSurfaceMaxDurationMs = 600000;
 
 enum class CaptureMode {
     None,
@@ -39,6 +40,7 @@ struct Options {
     std::wstring recordingId;
     std::wstring outputPath;
     int durationMs = 0;
+    bool allowLongWindowSurfaceDuration = false;
     int fps = 0;
     EncoderMode encoderMode = EncoderMode::Software;
     bool hasEncoderMode = false;

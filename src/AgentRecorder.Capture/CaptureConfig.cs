@@ -38,6 +38,15 @@ public sealed class CaptureConfig
     public (int x, int y, int w, int h)? DisplayBounds;
     public string? WindowTitle;
     public nint WindowHandle;
+    /// <summary>Process that owned the selected HWND when the request was resolved.</summary>
+    public int? WindowProcessId;
+    /// <summary>Unclipped visible window bounds frozen for identity/size revalidation.</summary>
+    public (int x, int y, int w, int h)? WindowSurfaceBounds;
+    /// <summary>
+    /// Internal API intent requiring WGC window-surface semantics. Never set by
+    /// the quick, nested, screenshot-series, or unattended request paths.
+    /// </summary>
+    public bool RequireWindowSurface;
     public bool Microphone;
     public string? MicDevice;
     public string? MicDeviceName;

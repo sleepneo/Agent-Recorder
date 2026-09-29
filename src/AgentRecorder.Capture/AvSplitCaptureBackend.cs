@@ -33,6 +33,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     private readonly IExternalProcessRunner _runner;
     private readonly TempRetentionPolicy _retentionPolicy;
     private IMicrophoneStatusProvider? _microphoneStatusProvider;
+    private CaptureAuthorizationProof? _authorizationProof;
 
     private int _audioPrematureExitCode;
     private string _audioPrematureStderr = "";
@@ -109,6 +110,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         if (authorizationProof == null)
             throw new ArgumentNullException(nameof(authorizationProof));
         authorizationProof.RequireConsumed();
+        _authorizationProof = authorizationProof;
         // Normalize and validate the audio source BEFORE creating the temp
         // directory or computing any output side effects. An illegal audio
         // configuration must fail without creating directories or workers.
@@ -163,7 +165,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
     private void StartVideoInternal(CaptureConfig cfg, string tempVideoPath)
     {
-        _videoWorker = _workerFactory.CreateVideoWorker();
+        _videoWorker = _workerFactory.CreateVideoWorker(
+            cfg,
+            _authorizationProof ?? throw new InvalidOperationException("Capture authorization proof was not retained for the video worker."));
         _videoWorker.FirstFrameObserved += obs =>
         {
             if (Interlocked.Exchange(ref _firstFrameRaised, 1) != 0)

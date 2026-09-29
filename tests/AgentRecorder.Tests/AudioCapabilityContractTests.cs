@@ -177,6 +177,16 @@ public class AudioCapabilityContractTests : IDisposable
             var sys = caps.GetProperty("system_audio");
             Assert.True(sys.GetProperty("supported").GetBoolean());
             Assert.Equal("no_devices", sys.GetProperty("status").GetString());
+
+            var windowSurface = recording.GetProperty("window_surface");
+            Assert.Equal(1, windowSurface.GetProperty("min_duration_seconds").GetInt32());
+            Assert.Equal(600, windowSurface.GetProperty("max_duration_seconds").GetInt32());
+            Assert.Equal("bounded_duration_only", windowSurface.GetProperty("long_run_readiness").GetString());
+            Assert.False(windowSurface.GetProperty("long_run_stress_tested").GetBoolean());
+            Assert.False(windowSurface.GetProperty("system_audio_supported").GetBoolean());
+            Assert.Equal("no_devices", windowSurface.GetProperty("system_audio_status").GetString());
+            Assert.Equal("not_checked", windowSurface.GetProperty("system_audio_helper_status").GetString());
+            Assert.Equal(JsonValueKind.Null, windowSurface.GetProperty("system_audio_helper_reason_code").ValueKind);
         }
         finally
         {

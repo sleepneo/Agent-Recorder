@@ -1552,8 +1552,10 @@ public class ConfirmationFormTests : IDisposable
             using var form = new ConfirmationForm(item, 1, 1);
             form.Show();
 
-            Assert.Contains("5%", form.WarningTextForTests);
-            Assert.Contains("音量较低", form.WarningTextForTests);
+            Assert.Contains("只有本地确认后才会开始录制", form.WarningTextForTests);
+            Assert.Contains("5%", form.LowVolumeWarningTextForTests);
+            Assert.Contains("音量较低", form.LowVolumeWarningTextForTests);
+            Assert.True(form.LowVolumeWarningLabelVisibleForTests);
 
             form.CloseWithoutResult();
         });
@@ -1585,8 +1587,10 @@ public class ConfirmationFormTests : IDisposable
             using var form = new ConfirmationForm(item, 1, 1);
             form.Show();
 
-            Assert.DoesNotContain("音量较低", form.WarningTextForTests);
-            Assert.DoesNotContain("50%", form.WarningTextForTests);
+            Assert.Contains("只有本地确认后才会开始录制", form.WarningTextForTests);
+            Assert.DoesNotContain("音量较低", form.LowVolumeWarningTextForTests);
+            Assert.DoesNotContain("50%", form.LowVolumeWarningTextForTests);
+            Assert.False(form.LowVolumeWarningLabelVisibleForTests);
 
             form.CloseWithoutResult();
         });

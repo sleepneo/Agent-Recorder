@@ -180,8 +180,38 @@ TEST_REGISTRAR(OptionsDurationMaxAcceptedAndStored, []() {
 });
 
 TEST_REGISTRAR(OptionsDurationTooLongFails, []() {
-    auto result = ParseArgs({ L"--duration-ms", L"60001" });
+    auto result = ParseArgs({
+        L"--capture-continuous-window",
+        L"--window-hwnd", L"0x1234",
+        L"--duration-ms", L"60001"
+    });
     ASSERT_FALSE(result.error.empty());
+});
+
+TEST_REGISTRAR(OptionsStrictWindowSurfaceDurationBounds, []() {
+    auto atMaximum = ParseArgs({
+        L"--capture-continuous-window",
+        L"--window-hwnd", L"0x1234",
+        L"--duration-ms", L"600000",
+        L"--allow-long-window-surface-duration"
+    });
+    ASSERT_TRUE(atMaximum.error.empty());
+    ASSERT_EQ(atMaximum.options.durationMs, kWgcWindowSurfaceMaxDurationMs);
+
+    auto beyondMaximum = ParseArgs({
+        L"--capture-continuous-window",
+        L"--window-hwnd", L"0x1234",
+        L"--duration-ms", L"600001",
+        L"--allow-long-window-surface-duration"
+    });
+    ASSERT_FALSE(beyondMaximum.error.empty());
+
+    auto extendedDisplay = ParseArgs({
+        L"--capture-continuous-display",
+        L"--duration-ms", L"61000",
+        L"--allow-long-window-surface-duration"
+    });
+    ASSERT_FALSE(extendedDisplay.error.empty());
 });
 
 TEST_REGISTRAR(OptionsFpsTooLowFails, []() {

@@ -260,6 +260,10 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         // Microphone=true field while the product path uses AudioSourceKind.
         cfg.NormalizeAudioSource();
         ValidateConfig(cfg);
+        if (WgcWindowSurfaceTargetValidator.Validate(cfg) is string targetFailure)
+            throw new ApiException(409, "WINDOW_SURFACE_TARGET_CHANGED",
+                $"The approved window_surface target is no longer available ({targetFailure}). Capture was not started.",
+                new { required_capture_semantics = "window_surface", reason_code = targetFailure });
 
         // Atomic reservation: only one Start can leave Created.
         int previous = Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Starting, (int)LifecycleState.Created);
@@ -794,10 +798,18 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         }
 
         int duration = cfg.DurationSeconds.Value;
-        if (!WgcContinuousDurationPolicy.IsEligibleSeconds(duration))
+        bool strictWindowSurface = cfg.RequireWindowSurface && isWindow;
+        if (cfg.RequireWindowSurface && !isWindow)
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics='window_surface' requires a window target.");
+        if (strictWindowSurface
+                ? !WindowSurfaceDurationPolicy.IsEligibleSeconds(duration)
+                : !WgcContinuousDurationPolicy.IsEligibleSeconds(duration))
         {
             throw new ApiException(400, "INVALID_ARGUMENT",
-                $"WGC continuous backend DurationSeconds must be between {WgcContinuousDurationPolicy.MinSeconds} and {WgcContinuousDurationPolicy.MaxSeconds}.");
+                strictWindowSurface
+                    ? $"window_surface duration must be between {WindowSurfaceDurationPolicy.MinSeconds} and {WindowSurfaceDurationPolicy.MaxSeconds} seconds."
+                    : $"WGC continuous backend DurationSeconds must be between {WgcContinuousDurationPolicy.MinSeconds} and {WgcContinuousDurationPolicy.MaxSeconds}.");
         }
 
         if (cfg.Fps < 1 || cfg.Fps > 60)
@@ -857,7 +869,11 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         string stopSignal,
         string token)
     {
-        int durationMs = WgcContinuousDurationPolicy.ToMilliseconds(cfg.DurationSeconds!.Value);
+        bool allowExtendedWindowSurfaceDuration = cfg.RequireWindowSurface &&
+            string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal);
+        int durationMs = allowExtendedWindowSurfaceDuration
+            ? WindowSurfaceDurationPolicy.ToMilliseconds(cfg.DurationSeconds!.Value)
+            : WgcContinuousDurationPolicy.ToMilliseconds(cfg.DurationSeconds!.Value);
         return new WgcContinuousSessionOptions
         {
             HelperExePath = helperExePath,
@@ -878,6 +894,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             WindowHandle = cfg.WindowHandle,
             OutputPath = stagingOutput,
             DurationMs = durationMs,
+            AllowExtendedWindowSurfaceDuration = allowExtendedWindowSurfaceDuration,
             Fps = cfg.Fps,
             EncoderMode = WgcEncoderModePolicy.NormalizeEnvironment(),
             BeginSignalPath = beginSignal,
@@ -940,6 +957,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             options.StopSignalPath,
             "--i-understand-this-captures-screen"
         });
+        if (options.AllowExtendedWindowSurfaceDuration)
+            args.Add("--allow-long-window-surface-duration");
 
         string rendered = FfmpegCaptureBackend.RenderCommandArgs(args);
         return rendered.Replace(token, "<redacted>", StringComparison.Ordinal);
@@ -1188,7 +1207,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
         _finalizationCts.Token.ThrowIfCancellationRequested();
 
-        var validationWarnings = ValidateProbeAndSummary(probeMeta, result.Summary, stagingSize, cfg);
+        var validationWarnings = ValidateProbeAndSummary(
+            probeMeta, result.Summary, result.State, stagingSize, cfg);
         if (validationWarnings.Count > 0)
         {
             var context = CopyOutputMeta(probeMeta);
@@ -1272,6 +1292,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     private static List<string> ValidateProbeAndSummary(
         OutputMeta probe,
         WgcContinuousSessionSummary? summary,
+        WgcContinuousManagedSessionState terminalState,
         long stagingSize,
         CaptureConfig cfg)
     {
@@ -1317,9 +1338,28 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                 warnings.Add($"region_dimensions_mismatch: expected={cfg.Bounds.w}x{cfg.Bounds.h} actual={probe.Width}x{probe.Height}");
         }
 
-        if (probe.DurationSeconds <= 0)
+        if (!double.IsFinite(probe.DurationSeconds) || probe.DurationSeconds <= 0)
         {
             warnings.Add($"invalid_duration: {probe.DurationSeconds}");
+        }
+
+        if (cfg.RequireWindowSurface &&
+            terminalState == WgcContinuousManagedSessionState.Success &&
+            cfg.DurationSeconds is int requestedSeconds &&
+            WindowSurfaceDurationPolicy.IsEligibleSeconds(requestedSeconds))
+        {
+            long requestedDurationMs = WindowSurfaceDurationPolicy.ToMilliseconds(requestedSeconds);
+            double mediaDurationMs = probe.DurationSeconds * 1000d;
+            long? helperDurationMs = summary?.DurationMs;
+            bool mediaPrematureOrOverrun = !double.IsFinite(mediaDurationMs) ||
+                Math.Abs(mediaDurationMs - requestedDurationMs) > 1000d;
+            bool helperPrematureOrOverrun = helperDurationMs.HasValue &&
+                Math.Abs((double)helperDurationMs.Value - requestedDurationMs) > 1000d;
+            if (mediaPrematureOrOverrun || helperPrematureOrOverrun)
+            {
+                warnings.Add(
+                    $"requested_duration_mismatch: requested={requestedDurationMs}ms media={(double.IsFinite(mediaDurationMs) ? mediaDurationMs.ToString("F0", CultureInfo.InvariantCulture) : "non_finite")}ms helper={(helperDurationMs?.ToString(CultureInfo.InvariantCulture) ?? "missing")}ms tolerance=1000ms");
+            }
         }
 
         if (stagingSize < 512)

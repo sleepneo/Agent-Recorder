@@ -16,8 +16,8 @@ internal static class CaptureAuthorizationProofIssuer
 {
     internal const int InteractivePostApprovalStartupDeadlineSeconds = 30;
 
-    private const string CapturePlanDigestSchema = "capture-plan/v1";
-    private const string CaptureScopeDigestSchema = "capture-scope/v1";
+    private const string CapturePlanDigestSchema = "capture-plan/v2";
+    private const string CaptureScopeDigestSchema = "capture-scope/v2";
     private const string StandingLeaseUsePlanDigestSchema = "standing-lease-use-plan/v1";
     private const string RecurringLeaseUsePlanDigestSchema = "recurring-lease-use-plan/v1";
     private const string RecurringLeaseUseScopeDigestSchema = "recurring-lease-use-scope/v1";
@@ -604,6 +604,8 @@ internal static class CaptureAuthorizationProofIssuer
             Field(builder, "source_kind", plan.SourceKind);
             Field(builder, "target_identity", plan.TargetIdentity);
             Field(builder, "window_handle", StableInt64(plan.WindowHandle.ToInt64()));
+            Field(builder, "target_window_process_id", StableNullableInt32(plan.TargetWindowProcessId));
+            Bounds(builder, "target_window_surface_bounds", plan.TargetWindowSurfaceBounds);
             Bounds(builder, "bounds", plan.Bounds);
             Field(builder, "target_display_identity", plan.TargetDisplayIdentity);
             Field(builder, "target_display_identity_status", StableEnum(plan.TargetDisplayIdentityStatus));
@@ -636,6 +638,9 @@ internal static class CaptureAuthorizationProofIssuer
             Field(builder, "display_identity_status", StableEnum(cfg.DisplayIdentityStatus));
             Bounds(builder, "display_bounds", cfg.DisplayBounds);
             Field(builder, "window_handle", StableInt64(cfg.WindowHandle.ToInt64()));
+            Field(builder, "require_window_surface", StableBool(cfg.RequireWindowSurface));
+            Field(builder, "window_process_id", StableNullableInt32(cfg.WindowProcessId));
+            Bounds(builder, "window_surface_bounds", cfg.WindowSurfaceBounds);
             Bounds(builder, "capture_bounds", cfg.Bounds);
             Field(builder, "microphone", StableBool(cfg.Microphone));
             Field(builder, "mic_device", cfg.MicDevice);

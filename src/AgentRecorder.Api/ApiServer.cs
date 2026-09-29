@@ -529,6 +529,7 @@ public sealed class ApiServer
 
     private string CreatePlan(HttpRequest req, string reqBody, string reqId, ref int status)
     {
+        RejectWindowSurfaceIntentOutsideOrdinaryRecording(reqBody);
         var idempotencyKey = StandingPlanApiRequestParser.NormalizeIdempotencyKey(
             req.Headers.GetValueOrDefault("Idempotency-Key"));
 
@@ -609,6 +610,9 @@ public sealed class ApiServer
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 throw new ApiException(400, "INVALID_ARGUMENT", "request must be a JSON object.");
+            if (root.TryGetProperty("required_capture_semantics", out _))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "required_capture_semantics is supported only by POST /api/v1/recordings.");
             var scheduleCount = 0;
             JsonElement schedule = default;
             foreach (var property in root.EnumerateObject())
@@ -1265,6 +1269,7 @@ public sealed class ApiServer
         // audio is rejected here, before any target side effect.
         try
         {
+            RejectWindowSurfaceIntentOutsideOrdinaryRecording(body);
             ConfigParser.RejectQuickScreenshotSeriesStopFields(body);
             ConfigParser.NormalizeModeAndSeries(body);
         }
@@ -1590,6 +1595,27 @@ public sealed class ApiServer
                 _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
             throw;
         }
+    }
+
+    internal static void RejectWindowSurfaceIntentOutsideOrdinaryRecording(string requestBody)
+    {
+        JsonDocument document;
+        try { document = JsonDocument.Parse(requestBody); }
+        catch { return; }
+        using (document)
+        {
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("required_capture_semantics", out _))
+                throw new ApiException(400, "INVALID_ARGUMENT",
+                    "required_capture_semantics is supported only by POST /api/v1/recordings.");
+        }
+    }
+
+    private static void RejectWindowSurfaceIntentOutsideOrdinaryRecording(JsonNode body)
+    {
+        if (body is JsonObject obj && obj.ContainsKey("required_capture_semantics"))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                "required_capture_semantics is supported only by POST /api/v1/recordings.");
     }
 
     private void ConsumeEnsureContextAndAssociate(HttpRequest req, string traceId)
@@ -1963,6 +1989,12 @@ public sealed class ApiServer
         SelectedRegionState? lastRegion;
         lock (_regionLock) { lastRegion = _lastSelectedRegion; }
         bool hasLastRegion = lastRegion != null;
+        var windowSurfaceProbe = CaptureBackendSelector.ProbeWindowSurfaceAvailability();
+        var systemAudioAvailability = GetFreshSystemAudioAvailability();
+        bool systemAudioHelperChecked = systemAudioAvailability == "ready";
+        var systemAudioHelperAvailability = systemAudioHelperChecked
+            ? RecordingPreflightChecker.ProbeSystemAudioHelperAvailability()
+            : (Available: false, ReasonCode: (string?)"system_audio_endpoint_unavailable");
         var reliableWindowsDisplayNumbers = displaysContext.DisplaySnapshot
             .Where(display => display.windows_display_number is int number && number > 0)
             .Select(display => display.windows_display_number!.Value)
@@ -2010,7 +2042,32 @@ public sealed class ApiServer
                 audio_capabilities = new
                 {
                     microphone = new { supported = true, status = GetFreshMicrophoneAvailability() },
-                    system_audio = new { supported = true, status = GetFreshSystemAudioAvailability() }
+                    system_audio = new { supported = true, status = systemAudioAvailability }
+                },
+                window_surface = new
+                {
+                    supported = windowSurfaceProbe.Available,
+                    status = windowSurfaceProbe.Available ? "ready" : "unavailable",
+                    reason_code = windowSurfaceProbe.Available ? null : windowSurfaceProbe.ReasonCode,
+                    source_type = "window",
+                    capture_semantics = "window_surface",
+                    obscuring_windows_excluded = true,
+                    audio = new[] { "none", "system_audio" },
+                    system_audio_supported = windowSurfaceProbe.Available && systemAudioAvailability == "ready"
+                        && systemAudioHelperAvailability.Available,
+                    system_audio_status = systemAudioAvailability,
+                    system_audio_helper_status = !systemAudioHelperChecked
+                        ? "not_checked"
+                        : systemAudioHelperAvailability.Available ? "ready" : "unavailable",
+                    system_audio_helper_reason_code = !systemAudioHelperChecked || systemAudioHelperAvailability.Available
+                        ? null
+                        : systemAudioHelperAvailability.ReasonCode,
+                    system_audio_scope = "selected_render_endpoint_loopback_not_window_exclusive",
+                    requires_local_confirmation = true,
+                    min_duration_seconds = 1,
+                    max_duration_seconds = 600,
+                    long_run_readiness = "bounded_duration_only",
+                    long_run_stress_tested = false
                 },
                 containers = new[] { "mp4" },
                 screenshot_series = new
