@@ -17,7 +17,14 @@ public static class AudioHelperExePathResolver
     public const string ExeName = "AgentRecorder.AudioHelper.exe";
     public const string PortableRelativeDir = "AgentRecorder.AudioHelper";
 
-    public static string Resolve()
+    public static string Resolve() => ResolveFromBaseDirectory(AppContext.BaseDirectory, allowDevelopmentFallback: true);
+
+    /// <summary>
+    /// Resolves against an explicit application directory. The fallback switch is
+    /// intentionally narrow: portable-package checks must prove the packaged
+    /// layout without accidentally finding a repository build output.
+    /// </summary>
+    internal static string ResolveFromBaseDirectory(string? baseDirectory, bool allowDevelopmentFallback)
     {
         var fromEnv = Environment.GetEnvironmentVariable(EnvVarName)?.Trim();
         if (!string.IsNullOrEmpty(fromEnv))
@@ -31,7 +38,7 @@ public static class AudioHelperExePathResolver
                 fromEnv);
         }
 
-        var baseDir = AppContext.BaseDirectory;
+        var baseDir = baseDirectory;
         if (!string.IsNullOrEmpty(baseDir))
         {
             var portable = Path.Combine(baseDir, PortableRelativeDir, ExeName);
@@ -48,7 +55,8 @@ public static class AudioHelperExePathResolver
             // Portable layout: App/Headless/Cli each live in their own subdirectory
             // under the package root, with a single shared AgentRecorder.AudioHelper
             // directory next to them.
-            var parentDir = Path.GetDirectoryName(baseDir);
+            var normalizedBaseDir = Path.TrimEndingDirectorySeparator(baseDir);
+            var parentDir = Directory.GetParent(normalizedBaseDir)?.FullName;
             if (!string.IsNullOrEmpty(parentDir))
             {
                 var sharedPortable = Path.Combine(parentDir, PortableRelativeDir, ExeName);
@@ -60,7 +68,7 @@ public static class AudioHelperExePathResolver
 
         // Development/workspace fallback: walk up from BaseDirectory looking for
         // the repository root marker (AgentRecorder.sln) and then the project output.
-        var repoRoot = FindRepositoryRoot(baseDir);
+        var repoRoot = allowDevelopmentFallback ? FindRepositoryRoot(baseDir) : null;
         if (!string.IsNullOrEmpty(repoRoot))
         {
             var projectOutput = Path.Combine(repoRoot, "tools", "AgentRecorder.AudioHelper", "bin", "Release", "net8.0-windows10.0.19041.0", ExeName);
@@ -85,10 +93,13 @@ public static class AudioHelperExePathResolver
     /// Test seam: attempts to resolve without throwing and returns null if not found.
     /// </summary>
     public static string? TryResolve()
+        => TryResolveFromBaseDirectory(AppContext.BaseDirectory, allowDevelopmentFallback: true);
+
+    internal static string? TryResolveFromBaseDirectory(string? baseDirectory, bool allowDevelopmentFallback)
     {
         try
         {
-            return Resolve();
+            return ResolveFromBaseDirectory(baseDirectory, allowDevelopmentFallback);
         }
         catch
         {

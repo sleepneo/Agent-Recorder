@@ -1646,6 +1646,58 @@ if ($helperMissing) {
     exit 1
 }
 
+# Verify the executable that will actually be packaged. Do not consult the
+# resolver environment override or a repository build output for this check.
+$audioHelperExe = Join-Path $audioHelperPublishDir "AgentRecorder.AudioHelper.exe"
+$audioHelperInfo = Get-Item -LiteralPath $audioHelperExe -Force
+if (($audioHelperInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $audioHelperInfo.PSIsContainer) {
+    throw "Published AudioHelper must be a regular non-reparse-point executable: $audioHelperExe"
+}
+$savedAudioHelperOverride = [Environment]::GetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", "Process")
+try {
+    [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $null, "Process")
+    Write-Host "[8/11] Running bounded packaged AudioHelper --version protocol check..." -ForegroundColor Yellow
+    $audioVersionResult = Invoke-BoundedProcess `
+        -FileName $audioHelperExe `
+        -Arguments @("--version") `
+        -TimeoutMs 10000 `
+        -DisplayName "packaged AudioHelper --version smoke"
+} finally {
+    [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $savedAudioHelperOverride, "Process")
+}
+$audioVersionLines = @($audioVersionResult.StandardOutput -split "`r?`n" | Where-Object { $_ -ne "" })
+if ($audioVersionResult.ExitCode -ne 0 -or
+    $audioVersionLines.Count -ne 3 -or
+    $audioVersionLines[0] -notmatch '^AgentRecorder\.AudioHelper ' -or
+    $audioVersionLines[1] -cne 'Protocol: audio-helper-v1' -or
+    $audioVersionLines[2] -cne 'TimestampFrequency: 10000000') {
+    throw "Packaged AudioHelper --version failed or returned an incompatible protocol/timestamp contract. ExitCode=$($audioVersionResult.ExitCode); Output=$($audioVersionResult.StandardOutput); Error=$($audioVersionResult.StandardError)"
+}
+
+# Exercise the synthetic portable-layout tests as a packaging gate. These tests
+# disable the development fallback and never inspect tools/bin for a helper.
+Write-Host "[8/11] Running isolated portable AudioHelper resolver tests..." -ForegroundColor Yellow
+$resolverTestPath = Join-Path $ProjectRoot "tests\AgentRecorder.Tests\AgentRecorder.Tests.csproj"
+$resolverTestArgs = @(
+    "test", $resolverTestPath,
+    "--filter", "FullyQualifiedName~AudioHelperExePathResolverTests",
+    "--logger", "console;verbosity=minimal"
+)
+Push-Location $ProjectRoot
+try {
+    $resolverTestResult = Invoke-BoundedProcess `
+        -FileName (Get-Command dotnet -ErrorAction Stop).Source `
+        -Arguments $resolverTestArgs `
+        -TimeoutMs 600000 `
+        -DisplayName "isolated AudioHelper resolver tests"
+} finally {
+    Pop-Location
+}
+if ($resolverTestResult.ExitCode -ne 0) {
+    throw "Isolated AudioHelper resolver packaging gate failed: $($resolverTestResult.StandardOutput) $($resolverTestResult.StandardError)"
+}
+Write-Host "[OK] Packaged AudioHelper protocol and isolated resolver gate passed" -ForegroundColor Green
+
 $wgcArtifacts = @(Get-ChildItem -LiteralPath $wgcHelperPublishDir -Force)
 if ($wgcArtifacts.Count -ne 1 -or $wgcArtifacts[0].Name -ne "wgc-native-helper.exe" -or $wgcArtifacts[0].PSIsContainer) {
     throw "Portable WGC helper directory must contain only wgc-native-helper.exe."
