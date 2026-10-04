@@ -1224,9 +1224,10 @@ CaptureOutcome CaptureSession::Run() {
                     firstFramePublished = true;
                     const int64_t firstFrameElapsedMs = std::max<int64_t>(
                         0, SteadyMs(std::chrono::steady_clock::now()) - beginTimeMs);
-                    writer_.FirstFrame(1, firstFrameElapsedMs);
+                    writer_.FirstFrame(WideToUtf8(options_.recordingId), 1,
+                                       firstFrameElapsedMs, qf.systemRelativeTimeHns);
                     if (hooks_.onFirstFrame) {
-                        hooks_.onFirstFrame(1, firstFrameElapsedMs);
+                        hooks_.onFirstFrame(1, firstFrameElapsedMs, qf.systemRelativeTimeHns);
                     }
                 }
 

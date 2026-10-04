@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using AgentRecorder.Capture;
 using AgentRecorder.Core.Automation;
+using AgentRecorder.Windows;
 namespace AgentRecorder.Core;
 public sealed class Recording
 {
@@ -34,6 +35,9 @@ public sealed class Recording
     public string? SystemAudioEndpointName { get; set; }
     public bool? SystemAudioEndpointIsDefault { get; set; }
     public string OutputPath { get; set; } = "";
+    internal ProfileRef? FixedRegionProfileReference { get; set; }
+    internal Func<string?>? FixedRegionProfileEnvironmentValidator { get; set; }
+    internal bool FixedRegionProfileStrictOutputConflict { get; set; }
     public DateTime StartedAtUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }
 
@@ -212,6 +216,24 @@ public sealed class Recording
 
     /// <summary>True only for a committed, locally approved required-once Run.</summary>
     internal bool IsRequiredOnceExecution { get; set; }
+
+    /// <summary>True only for the trusted, locally approved one-shot future-window path.</summary>
+    internal bool IsFutureWindowOneShotExecution { get; set; }
+
+    internal FutureWindowOneShotExecutionTicket? FutureWindowOneShotTicket { get; set; }
+
+    internal FutureWindowIdentityHold? FutureWindowIdentityHold { get; set; }
+
+    /// <summary>
+    /// Monotonic end of the approved future-window run, anchored immediately
+    /// before the final physical Backend.Start call. Wall-clock changes after
+    /// this point cannot extend the capture.
+    /// </summary>
+    internal long? FutureWindowMonotonicDeadlineTicks { get; set; }
+
+    internal long FutureWindowMonotonicFrequency { get; set; }
+
+    internal int DeadlineWatchdogStarted;
 
     internal RequiredOnceCaptureExecutionSpecification? RequiredOnceSpecification { get; set; }
 

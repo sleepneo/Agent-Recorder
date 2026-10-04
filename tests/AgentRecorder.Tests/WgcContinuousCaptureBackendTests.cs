@@ -471,7 +471,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
     }
 
     [Fact]
-    public void Start_StrictWindowSurface600Seconds_UsesIsolatedLongRunHelperContract()
+    public void Start_StrictWindowSurface1800Seconds_UsesIsolatedLongRunHelperContract()
     {
         SystemQuery.SetWindowProvider((_, _) => new List<SystemQuery.WindowInfo>
         {
@@ -489,7 +489,7 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
                 return session;
             }, out _, out _);
             var cfg = CreateValidConfig(
-                outputPath: Path.Combine(_finalDir, "strict-window-600.mp4"),
+                outputPath: Path.Combine(_finalDir, "strict-window-1800.mp4"),
                 durationSeconds: WindowSurfaceDurationPolicy.MaxSeconds,
                 bounds: (0, 0, 1280, 720));
             cfg.SourceKind = "window";
@@ -501,10 +501,10 @@ public sealed class WgcContinuousCaptureBackendTests : IDisposable
             CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
 
             Assert.NotNull(options);
-            Assert.Equal(600000, options!.DurationMs);
+            Assert.Equal(1800000, options!.DurationMs);
             Assert.True(options.AllowExtendedWindowSurfaceDuration);
             Assert.Equal(WgcContinuousTargetKind.Window, options.TargetKind);
-            Assert.Equal(615000, options.ProcessTimeoutMs);
+            Assert.Equal(1815000, options.ProcessTimeoutMs);
             Assert.Contains("--allow-long-window-surface-duration", cfg.CommandArgs, StringComparison.Ordinal);
             backend.Dispose();
         }

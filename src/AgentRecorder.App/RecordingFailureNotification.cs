@@ -241,6 +241,7 @@ internal sealed class RecordingFailureNotificationManager : IDisposable
     }
 
     internal static bool IsSupportedReason(string? reasonCode) => reasonCode is
+        "storage_space_low" or "storage_capacity_unavailable" or
         "display_unavailable" or "window_closed" or "window_minimized" or "size_changed" or "capture_semantics_changed" or
         "audio_capture_discontinuous";
 
@@ -386,6 +387,8 @@ internal sealed class RecordingFailureNotificationForm : Form
         string title = textProvider.Get("Tray_RecordingFailure_Title");
         string body = textProvider.Get(request.ReasonCode switch
         {
+            "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
+            "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
             "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
             "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
             "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
@@ -611,6 +614,8 @@ internal static class RecordingFailureNotificationLayout
     {
         string bodyKey = reasonCode switch
         {
+            "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
+            "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
             "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
             "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
             "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",

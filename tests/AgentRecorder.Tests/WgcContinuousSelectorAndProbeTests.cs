@@ -10,6 +10,28 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-WindowBackend")]
 public sealed class WgcContinuousSelectorTests
 {
+    [Theory]
+    [InlineData(1, 1000)]
+    [InlineData(600, 600000)]
+    [InlineData(601, 601000)]
+    [InlineData(1800, 1800000)]
+    public void StrictWindowSurfaceDurationPolicyAcceptsBoundariesAndConvertsToMilliseconds(int seconds, int milliseconds)
+    {
+        Assert.True(WindowSurfaceDurationPolicy.IsEligibleSeconds(seconds));
+        Assert.True(WindowSurfaceDurationPolicy.IsEligibleMilliseconds(milliseconds));
+        Assert.Equal(milliseconds, WindowSurfaceDurationPolicy.ToMilliseconds(seconds));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1801)]
+    [InlineData(int.MaxValue)]
+    public void StrictWindowSurfaceDurationPolicyRejectsOutOfRangeAndOverflowingValues(int seconds)
+    {
+        Assert.False(WindowSurfaceDurationPolicy.IsEligibleSeconds(seconds));
+        Assert.Throws<ArgumentOutOfRangeException>(() => WindowSurfaceDurationPolicy.ToMilliseconds(seconds));
+    }
+
     [Fact]
     public void DisplayFlagUnset_UsesFfmpeg_WithoutProbe()
     {
@@ -427,7 +449,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.3.0\n",
+                StandardOutput = "wgc-native-helper 0.4.0\n",
             },
             new WgcHelperProcessResult
             {
@@ -485,6 +507,8 @@ public sealed class WgcContinuousAvailabilityProbeTests
     [Theory]
     [InlineData(61)]
     [InlineData(600)]
+    [InlineData(601)]
+    [InlineData(1800)]
     public void StrictWindowSurfaceDuration_RealProbeAcceptsLongBoundedWindowRequest(int durationSeconds)
     {
         var runner = HealthyRunner();
@@ -505,7 +529,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     }
 
     [Fact]
-    public void StrictWindowSurface601Seconds_ProbeRejectsBeforeStartingHelper()
+    public void StrictWindowSurface1801Seconds_ProbeRejectsBeforeStartingHelper()
     {
         var runner = new FakeProbeProcessRunner();
         var config = new CaptureConfig
@@ -513,7 +537,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             SourceKind = "window",
             WindowHandle = (nint)0x1234,
             Bounds = (701, 811, 1280, 720),
-            DurationSeconds = 601,
+            DurationSeconds = 1801,
             Fps = 30,
             RequireWindowSurface = true
         };
@@ -625,7 +649,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
         foreach (string output in malformedOutputs)
         {
             var runner = new FakeProbeProcessRunner(
-                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
                 new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
             var result = CreateProbe(runner).Check(EligibleConfig());
@@ -648,7 +672,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
         foreach (string output in malformedOutputs)
         {
             var runner = new FakeProbeProcessRunner(
-                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+                new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
                 new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
             var result = CreateProbe(runner).Check(EligibleConfig());
@@ -661,7 +685,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             .Replace("HardwareH264Available: false", "HardwareH264Available: true", StringComparison.Ordinal)
             .Replace("HardwareH264CandidateCount: 0", "HardwareH264CandidateCount: 2", StringComparison.Ordinal);
         var availableRunner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = availableOutput });
 
         var available = CreateProbe(availableRunner).Check(EligibleConfig());
@@ -678,7 +702,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.3.0\n",
+                StandardOutput = "wgc-native-helper 0.4.0\n",
             },
             new WgcHelperProcessResult
             {
@@ -708,7 +732,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             "WindowCaptureSupported: false",
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
         var config = new CaptureConfig
         {
@@ -733,7 +757,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             "WindowCaptureSupported: false",
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -764,7 +788,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     {
         WgcHelperProcessResult version = expectedReason switch
         {
-            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            "version_nonzero_exit" => new() { ExitCode = 1, StandardOutput = "wgc-native-helper 0.4.0\n" },
             "version_timeout" => new() { ExitCode = -1, TimedOut = true },
             _ => new() { ExitCode = 0, StandardOutputTruncated = true },
         };
@@ -807,7 +831,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             _ => new WgcHelperProcessResult { ExitCode = 0, StandardOutput = HealthyProbeOutput((0, 0, 800, 600)) },
         };
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
             probeResult);
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -832,7 +856,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
             field + ": " + value,
             StringComparison.Ordinal);
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" },
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" },
             new WgcHelperProcessResult { ExitCode = 0, StandardOutput = output });
 
         var result = CreateProbe(runner).Check(EligibleConfig());
@@ -845,7 +869,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
     public void RunnerException_IsolatedAsUnavailableWithoutLeakingException()
     {
         var runner = new FakeProbeProcessRunner(
-            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.3.0\n" })
+            new WgcHelperProcessResult { ExitCode = 0, StandardOutput = "wgc-native-helper 0.4.0\n" })
         {
             ThrowOnCall = 2,
         };
@@ -867,7 +891,7 @@ public sealed class WgcContinuousAvailabilityProbeTests
         new WgcHelperProcessResult
         {
             ExitCode = 0,
-            StandardOutput = "wgc-native-helper 0.3.0\n",
+                StandardOutput = "wgc-native-helper 0.4.0\n",
         },
         new WgcHelperProcessResult
         {

@@ -60,7 +60,10 @@ public class QuickRecordingApiTests
         public void ShowError(string text) { }
     }
 
-    private static ApiServer CreateServer(ControllableTray tray, out string dataDir)
+    private static ApiServer CreateServer(
+        ControllableTray tray,
+        out string dataDir,
+        IFutureWindowOneShotGateway? futureWindowGateway = null)
     {
         dataDir = Path.Combine(Path.GetTempPath(), $"quick-api-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dataDir);
@@ -70,7 +73,7 @@ public class QuickRecordingApiTests
         var audit = new AuditLogger();
         var engine = new RecordingEngine(audit);
         engine.SetTray(tray);
-        return new ApiServer(engine, audit, tray);
+        return new ApiServer(engine, audit, tray, futureWindowOneShotGateway: futureWindowGateway);
     }
 
     private static void Cleanup(string dataDir)
@@ -1001,7 +1004,7 @@ public class QuickRecordingApiTests
             var data = doc.RootElement.GetProperty("data");
             var interaction = data.GetProperty("interaction");
 
-            Assert.Equal("0.1.12", data.GetProperty("app").GetProperty("version").GetString());
+            Assert.Equal("0.1.15", data.GetProperty("app").GetProperty("version").GetString());
 
             Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
@@ -1024,6 +1027,132 @@ public class QuickRecordingApiTests
             server.Stop();
             Cleanup(dataDir);
         }
+    }
+
+    [Fact]
+    public async Task FutureWindowRoutesRequireAuthValidateBeforeCapabilityAndExposePendingRunAndRevoke()
+    {
+        var tray = new ControllableTray();
+        var gateway = new FakeFutureWindowGateway();
+        var server = CreateServer(tray, out var dataDir, gateway);
+        try
+        {
+            server.Start();
+            using var client = CreateClient();
+            var createUri = $"http://127.0.0.1:{ApiServer.Port}/api/v1/future-window-authorizations";
+            const string validBody = "{\"executable_path\":\"C:\\\\Player\\\\player.exe\",\"audio\":{\"mode\":\"none\"},\"maximum_duration_seconds\":30,\"validity_seconds\":60,\"output_directory\":\"D:\\\\Recordings\"}";
+
+            var unauthenticated = await client.PostAsync(createUri, JsonContent(validBody));
+            Assert.Equal(401, (int)unauthenticated.StatusCode);
+            Assert.Equal(0, gateway.CreateCount);
+
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            client.DefaultRequestHeaders.Add("Idempotency-Key", "future-window-route-test");
+            var invalid = await client.PostAsync(createUri, JsonContent("{\"executable_path\":\"C:\\\\Player\\\\player.exe\"}"));
+            Assert.Equal(400, (int)invalid.StatusCode);
+            Assert.Equal(0, gateway.CreateCount);
+
+            var created = await client.PostAsync(createUri, JsonContent(validBody));
+            Assert.Equal(202, (int)created.StatusCode);
+            using var createdJson = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+            var authorizationId = createdJson.RootElement.GetProperty("data").GetProperty("authorization")
+                .GetProperty("authorization_id").GetString()!;
+            Assert.Equal("pending", createdJson.RootElement.GetProperty("data").GetProperty("authorization")
+                .GetProperty("status").GetString());
+            Assert.Equal(1, gateway.CreateCount);
+
+            var invalidStart = await client.PostAsync(
+                $"{createUri}/{authorizationId}/runs", JsonContent("{\"window_id\":\"not-a-window\"}"));
+            Assert.Equal(400, (int)invalidStart.StatusCode);
+            Assert.Equal(0, gateway.StartCount);
+
+            var unavailableStart = await client.PostAsync(
+                $"{createUri}/{authorizationId}/runs", JsonContent("{\"window_id\":\"window_12345\"}"));
+            Assert.Equal(503, (int)unavailableStart.StatusCode);
+            Assert.Equal(0, gateway.StartCount);
+
+            gateway.IsExecutionSupported = true;
+            var start = await client.PostAsync(
+                $"{createUri}/{authorizationId}/runs", JsonContent("{\"window_id\":\"window_12345\"}"));
+            Assert.Equal(202, (int)start.StatusCode);
+            Assert.Equal(1, gateway.StartCount);
+
+            var active = await client.GetAsync($"{createUri}/{authorizationId}");
+            Assert.Equal(200, (int)active.StatusCode);
+            using var activeJson = JsonDocument.Parse(await active.Content.ReadAsStringAsync());
+            var activeAuthorization = activeJson.RootElement.GetProperty("data");
+            var latestStart = activeAuthorization.GetProperty("latest_permissible_start_at_utc").GetDateTimeOffset();
+            var authorizationEnd = activeAuthorization.GetProperty("expires_at_utc").GetDateTimeOffset();
+            Assert.Equal(TimeSpan.FromSeconds(30), authorizationEnd - latestStart);
+
+            var revoke = await client.PostAsync($"{createUri}/{authorizationId}/revoke", JsonContent("{}"));
+            Assert.Equal(200, (int)revoke.StatusCode);
+            using var revokedJson = JsonDocument.Parse(await revoke.Content.ReadAsStringAsync());
+            Assert.True(revokedJson.RootElement.GetProperty("data").GetProperty("revocation_accepted").GetBoolean());
+            Assert.Equal(1, gateway.RevokeCount);
+
+            var capabilities = await client.GetAsync("http://127.0.0.1:" + ApiServer.Port + "/api/v1/capabilities");
+            Assert.Equal(200, (int)capabilities.StatusCode);
+            using var capabilityJson = JsonDocument.Parse(await capabilities.Content.ReadAsStringAsync());
+            Assert.True(capabilityJson.RootElement.GetProperty("data").GetProperty("future_window_one_shot")
+                .GetProperty("local_approval_required").GetBoolean());
+            Assert.Equal(1800, capabilityJson.RootElement.GetProperty("data").GetProperty("future_window_one_shot")
+                .GetProperty("run_duration_max_seconds").GetInt32());
+        }
+        finally
+        {
+            server.Stop();
+            Cleanup(dataDir);
+        }
+    }
+
+    private sealed class FakeFutureWindowGateway : IFutureWindowOneShotGateway
+    {
+        private FutureWindowAuthorizationState _state = new(
+            "fwa_0123456789abcdef0123456789abcdef", "pending", null,
+            @"C:\\Player\\player.exe", "00AB12CD:0000000000000042", new string('a', 64),
+            null, null, "none", null, null, 30, 60, @"D:\\Recordings\\future.mp4",
+            DateTimeOffset.UtcNow, null, null, null, null, null, null, null, null, null, 0);
+
+        public bool IsSetupSupported => true;
+        public bool IsExecutionSupported { get; set; }
+        public bool IsInteractiveDesktopAvailable => true;
+        public int CreateCount { get; private set; }
+        public int StartCount { get; private set; }
+        public int RevokeCount { get; private set; }
+
+        public FutureWindowAuthorizationCreateResponse CreateOrGet(FutureWindowOneShotCreateRequest request)
+        {
+            CreateCount++;
+            return new FutureWindowAuthorizationCreateResponse("created", _state);
+        }
+
+        public FutureWindowAuthorizationState? Get(string authorizationId) =>
+            authorizationId == _state.AuthorizationId ? _state : null;
+
+        public FutureWindowAuthorizationStartResult Start(string authorizationId, string windowId)
+        {
+            StartCount++;
+            var now = DateTimeOffset.UtcNow;
+            var expiry = now.AddSeconds(60);
+            _state = _state with
+            {
+                Status = "active",
+                ApprovedAtUtc = now,
+                ExpiresAtUtc = expiry,
+                LatestPermissibleStartAtUtc = expiry.AddSeconds(-_state.MaximumDurationSeconds),
+            };
+            return new FutureWindowAuthorizationStartResult(true, "rec_0123456789ab", null);
+        }
+
+        public FutureWindowAuthorizationState? Revoke(string authorizationId)
+        {
+            RevokeCount++;
+            _state = _state with { Status = "revoked", ReasonCode = "locally_revoked" };
+            return _state;
+        }
+
+        public IReadOnlyList<FutureWindowAuthorizationState> ListForSafetyCenter() => new[] { _state };
     }
 
     [Fact]

@@ -201,7 +201,7 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             if (!ParseInt(TrimWide(value), opts.durationMs) ||
                 opts.durationMs < kWgcContinuousMinDurationMs ||
                 opts.durationMs > kWgcWindowSurfaceMaxDurationMs) {
-                result.error = "Invalid duration-ms; expected 1000..600000";
+                result.error = "Invalid duration-ms; expected 1000..1800000";
                 return result;
             }
         } else if (EqualsArg(arg, L"allow-long-window-surface-duration")) {
@@ -257,7 +257,7 @@ ParseResult ParseArguments(int argc, wchar_t* argv[]) {
             : kWgcContinuousMaxDurationMs;
         if (opts.durationMs != 0 && opts.durationMs > maxDurationMs) {
             result.error = opts.allowLongWindowSurfaceDuration
-                ? "Invalid strict window-surface duration-ms; expected 1000..600000"
+                ? "Invalid strict window-surface duration-ms; expected 1000..1800000"
                 : "Invalid duration-ms; expected 1000..60000";
             return result;
         }

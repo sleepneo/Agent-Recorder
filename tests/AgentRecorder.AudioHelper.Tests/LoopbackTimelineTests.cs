@@ -335,6 +335,8 @@ public sealed class LoopbackTimelineTests
 
         Assert.True(recovered.QpcOutlierAccepted);
         Assert.Equal(1, timeline.QpcOutlierCount);
+        Assert.Equal(0, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(0, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
         var expected = Enumerable.Repeat((byte)0x11, 960)
             .Concat(new byte[960])
             .Concat(Enumerable.Repeat((byte)0x22, 960))
@@ -342,6 +344,301 @@ public sealed class LoopbackTimelineTests
             .ToArray();
         Assert.Equal(expected, output.ToArray());
         Assert.Equal(expected.Length, timeline.MediaBytes);
+    }
+
+    [Fact]
+    public void FortyEightKhz_ContiguousPacketsConfirmBoundedQpcPhaseAndPreserveEverySample()
+    {
+        var format = new WaveFormat(48_000, 16, 1);
+        const long frequency = 10_000_000;
+        // The incident's second packet implied a 118,960-tick candidate offset;
+        // the next packet was 68 ticks after its preceding packet end, yielding
+        // the observed 119,028-tick drift against the trusted baseline.
+        const long qpcPhaseShift = 118_960;
+        var timeline = new LoopbackTimeline(format, frequency, TimeSpan.FromMilliseconds(100));
+        var output = new List<byte>();
+        const long anchor = 10_000_000;
+        timeline.Start(anchor);
+
+        void Append(byte value, long devicePosition, long qpc)
+        {
+            var packet = Enumerable.Repeat(value, 960).ToArray();
+            timeline.AppendPacket(packet, packet.Length, 480, devicePosition, qpc, true,
+                (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+                (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+        }
+
+        // Controlled history; it does not claim that the omitted real prehistory is known.
+        var onePacket = AudioPacketPositionMath.FramesToTimestampTicks(480, 48_000, frequency);
+        var twoPackets = AudioPacketPositionMath.FramesToTimestampTicks(960, 48_000, frequency);
+        Assert.Equal(208, timeline.QpcJitterToleranceTicks);
+        Assert.True(qpcPhaseShift > timeline.QpcJitterToleranceTicks);
+        Assert.True(qpcPhaseShift < AudioPacketPositionMath.FramesToTimestampTicks(4_800, 48_000, frequency));
+
+        Append(0x11, 0, anchor);
+        Append(0x22, 480, anchor + onePacket + qpcPhaseShift);
+        Append(0x33, 960, anchor + twoPackets + qpcPhaseShift + 68);
+        Append(0x44, 1_440, anchor + twoPackets + onePacket + qpcPhaseShift + 68);
+
+        var expected = Enumerable.Repeat((byte)0x11, 960)
+            .Concat(Enumerable.Repeat((byte)0x22, 960))
+            .Concat(Enumerable.Repeat((byte)0x33, 960))
+            .Concat(Enumerable.Repeat((byte)0x44, 960))
+            .ToArray();
+        Assert.Equal(expected, output.ToArray());
+        Assert.Equal(expected.Length, timeline.MediaBytes);
+        Assert.Equal(1, timeline.QpcOutlierCount);
+        Assert.Equal(1, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(qpcPhaseShift, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.True(timeline.ContinuityDegraded);
+    }
+
+    [Fact]
+    public void FortyEightKhz_PendingPhaseThatReturnsToOriginalTrackDoesNotSpendBudget()
+    {
+        var timeline = new LoopbackTimeline(new WaveFormat(48_000, 16, 1),
+            10_000_000, TimeSpan.FromMilliseconds(100));
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        const long candidatePhaseTicks = 118_960;
+        var output = new List<byte>();
+        timeline.Start(anchor);
+
+        void Append(byte value, long position, long timestamp)
+        {
+            var packet = Enumerable.Repeat(value, 960).ToArray();
+            timeline.AppendPacket(packet, packet.Length, 480, position, timestamp, true,
+                (buffer, offset, count) => output.AddRange(buffer.AsSpan(offset, count).ToArray()),
+                (buffer, count) => output.AddRange(buffer.AsSpan(0, count).ToArray()));
+        }
+
+        Append(0x11, 0, anchor);
+        Append(0x22, 480, anchor + packetTicks + candidatePhaseTicks);
+        Append(0x33, 960, anchor + 2 * packetTicks); // Immediate successor returns to original track.
+
+        Assert.Equal(0, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(0, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(0, timeline.CurrentQpcPhaseOffsetTicks);
+        Assert.Equal(2_880, timeline.MediaBytes);
+        Assert.Equal(Enumerable.Repeat((byte)0x11, 960)
+            .Concat(Enumerable.Repeat((byte)0x22, 960))
+            .Concat(Enumerable.Repeat((byte)0x33, 960))
+            .ToArray(), output.ToArray());
+    }
+
+    [Theory]
+    [InlineData(961)] // one missing device frame
+    [InlineData(959)] // one-frame overlap
+    public void FortyEightKhz_PhaseCandidateDoesNotAcceptDeviceGapOrOverlap(long nextDevicePosition)
+    {
+        var format = new WaveFormat(48_000, 16, 1);
+        const long frequency = 10_000_000;
+        const long qpcPhaseShift = 118_960;
+        const long anchor = 10_000_000;
+        var timeline = new LoopbackTimeline(format, frequency, TimeSpan.FromMilliseconds(100));
+        timeline.Start(anchor);
+        timeline.AppendPacket(new byte[960], 960, 480, 0, anchor, true,
+            (_, _, _) => { }, (_, _) => { });
+        timeline.AppendPacket(new byte[960], 960, 480, 480,
+            anchor + 100_000 + qpcPhaseShift, true,
+            (_, _, _) => { }, (_, _) => { });
+
+        var nextDeltaFrames = nextDevicePosition - 480;
+        var nextQpc = anchor + 100_000 + qpcPhaseShift +
+            AudioPacketPositionMath.FramesToTimestampTicks(nextDeltaFrames, 48_000, frequency);
+        var ex = Assert.Throws<LoopbackTimelineException>(() => timeline.AppendPacket(
+            new byte[960], 960, 480, nextDevicePosition, nextQpc, true,
+            (_, _, _) => { }, (_, _) => { }));
+
+        Assert.Contains("QPC/device position conflict", ex.Message);
+        Assert.Equal(1, timeline.QpcOutlierCount);
+        Assert.Equal(1_920, timeline.MediaBytes);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public void CodexRepeatedConfirmedPhaseStepsMustNotHideUnboundedClockDrift(int direction)
+    {
+        var format = new WaveFormat(48_000, 16, 1);
+        const long frequency = 10_000_000;
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        var timeline = new LoopbackTimeline(format, frequency, TimeSpan.FromMilliseconds(100));
+        timeline.Start(anchor);
+
+        void Append(long packetIndex, long phaseTicks)
+            => timeline.AppendPacket(new byte[960], 960, 480, packetIndex * 480,
+                anchor + packetIndex * packetTicks + phaseTicks, true,
+                (_, _, _) => { }, (_, _) => { });
+
+        Append(0, 0);
+        // Every two packets confirm a new locally stable 10-ms phase. Device
+        // frames are continuous, but cumulative clock divergence exceeds the
+        // 100-ms envelope unless the policy also bounds repeated rebases.
+        var failure = Record.Exception(() =>
+        {
+            for (var step = 1; step <= 12; step++)
+            {
+                long phaseTicks = direction * step * packetTicks;
+                Append(step * 2 - 1, phaseTicks);
+                Append(step * 2, phaseTicks);
+            }
+        });
+
+        Assert.True(failure is LoopbackTimelineException,
+            $"Repeated phase steps accepted 120 ms cumulative drift without failure; " +
+            $"outliers={timeline.QpcOutlierCount}, media_bytes={timeline.MediaBytes}, direction={direction}");
+    }
+
+    [Fact]
+    public void ConfirmedQpcPhaseRebases_ExactCountBoundaryAcceptedAndNextRejected()
+    {
+        var timeline = new LoopbackTimeline(new WaveFormat(48_000, 16, 1),
+            10_000_000, TimeSpan.FromMilliseconds(100));
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        timeline.Start(anchor);
+
+        void AppendPacket(long index, long phaseTicks)
+            => timeline.AppendPacket(new byte[960], 960, 480, index * 480,
+                anchor + index * packetTicks + phaseTicks, true,
+                (_, _, _) => { }, (_, _) => { });
+
+        void AppendConfirmedPhase(int step, long phaseTicks)
+        {
+            AppendPacket(step * 2L - 1, phaseTicks);
+            AppendPacket(step * 2L, phaseTicks);
+        }
+
+        AppendPacket(0, 0);
+        for (var step = 1; step <= timeline.MaxConfirmedQpcPhaseRebases; step++)
+            AppendConfirmedPhase(step, step * 100_000L);
+
+        Assert.Equal(4, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(400_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(400_000, timeline.CurrentQpcPhaseOffsetTicks);
+
+        var exception = Assert.Throws<LoopbackTimelineException>(
+            () => AppendConfirmedPhase(5, 500_000));
+        Assert.Contains("phase_budget_exceeded=True", exception.Message);
+        Assert.Contains("confirmed_phase_rebases=4", exception.Message);
+        Assert.Contains("max_confirmed_phase_rebases=4", exception.Message);
+        Assert.Equal(4, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(400_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(9_600, timeline.MediaBytes);
+    }
+
+    [Fact]
+    public void ConfirmedQpcPhaseAdjustments_ExactAbsoluteBudgetAcceptedEvenWhenNetReturnsToZero()
+    {
+        var timeline = new LoopbackTimeline(new WaveFormat(48_000, 16, 1),
+            10_000_000, TimeSpan.FromMilliseconds(100));
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        timeline.Start(anchor);
+
+        void AppendPacket(long index, long phaseTicks)
+            => timeline.AppendPacket(new byte[960], 960, 480, index * 480,
+                anchor + index * packetTicks + phaseTicks, true,
+                (_, _, _) => { }, (_, _) => { });
+
+        void AppendConfirmedPhase(int step, long phaseTicks)
+        {
+            AppendPacket(step * 2L - 1, phaseTicks);
+            AppendPacket(step * 2L, phaseTicks);
+        }
+
+        AppendPacket(0, 0);
+        AppendConfirmedPhase(1, 500_000); // +50 ms
+        AppendConfirmedPhase(2, 0);       // -50 ms; net offset is zero
+
+        Assert.Equal(2, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(timeline.MaxCumulativeAbsoluteQpcPhaseAdjustmentTicks,
+            timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(0, timeline.CurrentQpcPhaseOffsetTicks);
+
+        var exception = Assert.Throws<LoopbackTimelineException>(
+            () => AppendConfirmedPhase(3, 10_000)); // Another +1 ms exceeds absolute budget.
+        Assert.Contains("phase_budget_exceeded=True", exception.Message);
+        Assert.Contains("cumulative_absolute_phase_adjustment_ticks=1000000", exception.Message);
+        Assert.Contains("proposed_absolute_phase_adjustment_ticks=10000", exception.Message);
+        Assert.Equal(2, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(1_000_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(5_760, timeline.MediaBytes);
+    }
+
+    [Fact]
+    public void ConfirmedQpcPhaseStepsWithAlternatingSignCannotEvadeBudgetByNettingToZero()
+    {
+        var timeline = new LoopbackTimeline(new WaveFormat(48_000, 16, 1),
+            10_000_000, TimeSpan.FromMilliseconds(100));
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        timeline.Start(anchor);
+
+        void AppendPacket(long index, long phaseTicks)
+            => timeline.AppendPacket(new byte[960], 960, 480, index * 480,
+                anchor + index * packetTicks + phaseTicks, true,
+                (_, _, _) => { }, (_, _) => { });
+
+        void AppendConfirmedPhase(int step, long phaseTicks)
+        {
+            AppendPacket(step * 2L - 1, phaseTicks);
+            AppendPacket(step * 2L, phaseTicks);
+        }
+
+        AppendPacket(0, 0);
+        AppendConfirmedPhase(1, 100_000);  // +10 ms
+        AppendConfirmedPhase(2, -100_000); // -20 ms
+        AppendConfirmedPhase(3, 100_000);  // +20 ms
+        AppendConfirmedPhase(4, 0);        // -10 ms; net returns exactly to zero.
+
+        Assert.Equal(4, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(600_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(0, timeline.CurrentQpcPhaseOffsetTicks);
+
+        var exception = Assert.Throws<LoopbackTimelineException>(
+            () => AppendConfirmedPhase(5, 100_000));
+        Assert.Contains("phase_budget_exceeded=True", exception.Message);
+        Assert.Contains("confirmed_phase_rebases=4", exception.Message);
+        Assert.Equal(4, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(600_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+    }
+
+    [Fact]
+    public void EpochRebaseResetsOnlyEpochReferenceNotLifetimeQpcPhaseBudget()
+    {
+        var timeline = new LoopbackTimeline(new WaveFormat(48_000, 16, 1),
+            10_000_000, TimeSpan.FromMilliseconds(100));
+        const long anchor = 10_000_000;
+        const long packetTicks = 100_000;
+        timeline.Start(anchor);
+
+        void AppendPacket(long index, long phaseTicks)
+            => timeline.AppendPacket(new byte[960], 960, 480, index * 480,
+                anchor + index * packetTicks + phaseTicks, true,
+                (_, _, _) => { }, (_, _) => { });
+
+        AppendPacket(0, 0);
+        AppendPacket(1, 100_000);
+        AppendPacket(2, 100_000);
+        Assert.Equal(1, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(100_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+
+        timeline.RebaseAfterEpochReset(0, 100_000_000);
+        Assert.Equal(1, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(100_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
+        Assert.Equal(0, timeline.CurrentQpcPhaseOffsetTicks);
+
+        timeline.AppendPacket(new byte[960], 960, 480, 0, 100_000_000, true,
+            (_, _, _) => { }, (_, _) => { });
+        timeline.AppendPacket(new byte[960], 960, 480, 480, 100_200_000, true,
+            (_, _, _) => { }, (_, _) => { });
+        timeline.AppendPacket(new byte[960], 960, 480, 960, 100_300_000, true,
+            (_, _, _) => { }, (_, _) => { });
+        Assert.Equal(2, timeline.ConfirmedQpcPhaseRebaseCount);
+        Assert.Equal(200_000, timeline.CumulativeAbsoluteQpcPhaseAdjustmentTicks);
     }
 
     [Fact]

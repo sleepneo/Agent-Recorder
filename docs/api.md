@@ -45,6 +45,48 @@ When started through the portable CLI, `ensure-running` defaults `data_dir` to
 the app or headless host is launched directly without `AGENT_RECORDER_DATA_DIR`,
 the default data directory is `%LOCALAPPDATA%\AgentRecorder`.
 
+### Agent-initiated interactive cold start
+
+`AgentRecorder.Cli.exe ensure-running --json` distinguishes API readiness from
+the tray App's active-user interactive desktop proof. Successful tray results
+include `desktop_status: "interactive"` and `launch_path` (`direct`,
+`task_scheduler_interactive_token`, or `reuse`). The App refuses to acquire its
+single-instance mutex or bind the API from an unverified desktop. Recorder
+supports direct start/reuse in the current user's verified desktop and a
+same-user, explicitly configured task for advanced recovery. It does not
+dispatch across Windows account boundaries.
+
+Before calling `ensure-running`, the agent should check whether its host offers
+an authorized user-desktop command execution surface. If so, invoke the fixed
+CLI command through that host surface. Codex may provide tool-authorized
+execution for a specific command; that is a host invocation mechanism, not a
+Recorder CLI option, and does not imply that other agents or hosts have the
+same capability. Recorder cannot escape a sandbox or obtain another account's
+permissions. If no suitable authorized surface exists, startup remains
+fail-closed; a successful API response or an existing process alone does not
+prove that the tray UI is visible.
+
+Only when the host has no suitable surface and the isolated process belongs to
+the **same Windows user** as the active desktop may an administrator/user
+consider the one-time advanced recovery setup:
+
+```text
+AgentRecorder.Cli.exe interactive-launch setup --json --app "<full AgentRecorder.App.exe path>" --data-dir "<same data directory used by ensure-running>"
+```
+
+Run setup once from that unlocked user's desktop, without elevation. `status`
+and `remove` are scoped to the same user. This mechanism does not support
+`--agent-sid`; legacy cross-account options and schema-v2 registrations return
+`INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED`, and the CLI does not alter legacy
+Task Scheduler tasks.
+
+Locked/no-session, wrong-user/session, stale-binary, and mismatched-task states
+return errors rather than `ok: true`. A known cross-account caller receives
+`INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED` before the CLI reads or changes the
+requested data directory. Optional session/desktop details are available only
+with `--diagnostics` or the explicit `interactive-launch diagnose` command;
+diagnostics exclude window titles, screen content, and API-key material.
+
 Agents should use the returned `api_key_file` field instead of assuming a fixed
 path.
 
@@ -199,14 +241,14 @@ The `recording.audio` array is preserved for backward compatibility and now repo
 `recording.audio_capabilities.microphone` and `.system_audio` both report `supported: true` and a fresh status of `ready`, `no_devices`, or `unavailable`. No device is reported as unsupported merely because enumeration returned an empty list.
 
 `recording.window_surface` reports whether the WGC window runtime probe is
-currently ready, its reason code when unavailable, the strict-path 600-second
+currently ready, its reason code when unavailable, the strict-path 1800-second
 maximum, and whether system loopback is currently usable. It also reports the
 1-second minimum and that each run requires local confirmation.
 `long_run_readiness="bounded_duration_only"` and
 `long_run_stress_tested=false` make clear that the capability probe does not
-certify several-minute A/V continuity for a particular window, endpoint, GPU,
-driver, or machine; a ten-minute cap is not a claim of complete livestream
-recording. The
+certify 30-minute A/V continuity for a particular window, endpoint, GPU,
+driver, or machine; the configured maximum is not a claim of completed long-run
+acceptance or complete livestream recording. The
 `system_audio_supported` value is true only when WGC window capture, a render
 endpoint, and a successful WASAPI helper protocol probe are all available.
 When no render endpoint is ready, the helper status is `not_checked`.
@@ -634,7 +676,7 @@ The default audio capture backend is the isolated WASAPI helper. Set the environ
 Ordinary `POST /api/v1/recordings` accepts the optional top-level
 `required_capture_semantics: "window_surface"`. When present it is a hard
 requirement: only a fixed `source.type="window"`/`window_id`, normal local
-per-run approval, video mode, and a duration stop from 1 to 600 seconds are
+per-run approval, video mode, and a duration stop from 1 to 1800 seconds are
 accepted. Audio may be omitted or use `audio.system_audio.enabled=true`; a
 microphone is not supported. The capability must be shown as ready by
 `GET /api/v1/capabilities` (`recording.window_surface.supported=true`), and a
@@ -657,6 +699,28 @@ endpoint. System audio is loopback from that Windows render endpoint, not an
 audio track exclusive to the selected window. On approval, normal preparation,
 audio readiness, countdown, first-frame, stop, and finalization states apply;
 success publishes one MP4 with WGC window video and AAC loopback audio.
+
+Strict window recording (including future-window one-shot execution) checks the
+actual local fixed volumes behind the frozen output directory, WGC temporary
+root, and, with loopback, the A/V temporary directory. Directory mounts and
+reparse targets are resolved to volume identities; unsupported or unverifiable
+storage fails closed. Admission sums simultaneous video, PCM, mux partial and
+publication-copy estimates per volume, using the existing conservative video
+estimate (at least 100 MiB or 2 MiB/second) for each video and PCM component
+(with 4 KiB WAV header allowance), plus a 256 MiB safety margin per volume. This is
+an estimate, not a reservation or quota. Checks repeat before capture helpers
+start, including the future authorization execution boundary.
+
+Through capture, mux and final publication, an internal monitor samples about
+every five seconds. Any monitored volume below 256 MiB aborts with
+`storage_space_low`; exactly 256 MiB is allowed. An unavailable, changed or
+unverifiable volume, invalid capacity, or timed-out query uses
+`storage_capacity_unavailable`. A query has a two-second deadline. Trusted
+storage aborts settle as `failed`, with the reason in `stop_reason`, and publish
+no final media. A late sample cannot change a successfully committed run. There
+are no API controls to disable the monitor or choose its paths/threshold. No
+automatic relocation, deletion of other recordings, retry or authorization
+reuse occurs; legacy display/region behavior is unchanged.
 
 An invalid field, ineligible request, unavailable helper/endpoint, changed HWND
 identity/size, or minimized/closed target fails explicitly. In particular,
@@ -1172,7 +1236,20 @@ GET /windows?include_minimized=false&include_system_windows=false
 GET /windows/active
 ```
 
-Returns window IDs, titles, process names, active/minimized state, and bounds.
+Returns window IDs, titles, process names, active/minimized state, bounds, and
+`capture_eligibility_reason_code`. An empty reason means the HWND is a
+structurally selectable content surface; otherwise the reason identifies why
+the strict window-surface path excludes it (for example, owned auxiliary,
+tool, non-activating transient, title-less, zero-area, or off-display). This is
+a safe structural diagnostic and does not expose window pixels or additional
+window text. Test/injected enumerators may return `not_evaluated`.
+
+The future-window authorization validator applies this same surface rule to
+every top-level HWND, then additionally binds the exact approved executable
+image, post-approval process creation, current user/session, and candidate-set
+uniqueness. The `/windows` endpoint is an inventory and may include ineligible
+rows; agents should choose only rows whose eligibility reason is empty. A
+multiple-eligible-window result remains an intentional fail-closed ambiguity.
 Window bounds prefer DWM visible-frame bounds and fall back to `GetWindowRect`
 when DWM data is unavailable.
 
@@ -1765,3 +1842,236 @@ first valid PNG atomic submission is the `t=0` anchor. In `series.json`,
 claim lateness excluding the frame's own capture/encode time, and
 `capture_duration_ms` is the monotonic claim-to-valid-submit duration. These
 are truthful diagnostics, not a fixed desktop-latency or real-time guarantee.
+
+## Future-window one-shot authorization
+
+Capability discovery is under `/capabilities.future_window_one_shot`. Both
+`setup_supported` and `execution_supported` must be true before an agent offers
+this flow. All routes require `X-Agent-Recorder-Key`.
+
+Create a pending scope with `POST /api/v1/future-window-authorizations` and an
+`Idempotency-Key` header:
+
+```json
+{
+  "executable_path": "C:\\Program Files\\Player\\player.exe",
+  "audio": { "mode": "none" },
+  "maximum_duration_seconds": 300,
+  "validity_seconds": 900,
+  "output_directory": "D:\\Recordings"
+}
+```
+
+`audio` must explicitly be `none` or `system_loopback` with one exact render
+`endpoint_id`. Limits are 1–1800 seconds per run and 1–3600 seconds of grant
+validity, and the requested maximum run duration must not exceed validity.
+After local approval, the authorization end is `expires_at_utc`; the latest
+permissible start is `latest_permissible_start_at_utc`, computed as expiry
+minus the complete maximum run duration. Equality is allowed only when the
+entire run ends at the authorization boundary. The server verifies and freezes
+the local executable identity and output target. The 202 response includes
+`data.result` (`created`/`existing`)
+and `data.authorization` (initially `pending`). Only explicit local desktop
+approval activates the grant. An idempotent retry returns the original setup;
+reusing its key for a different normalized scope returns 409.
+
+Read with `GET /api/v1/future-window-authorizations/{authorization_id}`. After
+local approval, the agent may request the sole run with
+`POST /api/v1/future-window-authorizations/{authorization_id}/runs` and
+`{"window_id":"window_123456"}`. That ID must be obtained locally from the
+window inventory; the Recorder verifies the unique visible, non-minimized
+top-level window and its post-approval process/executable identity. No client
+PID/hash claims, title matching, alternate window, rectangle fallback, or
+automatic retry is accepted. A successful 202 response provides `run_id` and
+`status_url`; poll the recording route and the authorization GET for terminal
+output evidence. A crash after the atomic consume may leave
+`run_status=started_unknown`, which must not be retried.
+
+Users can inspect/revoke grants in the local safety control center; an
+authenticated agent may also call
+`POST /api/v1/future-window-authorizations/{authorization_id}/revoke` with an
+empty body or `{}`. Revocation blocks any new start and requests stop of the
+bound active recording without reporting a normal duration completion. System
+loopback captures all sound sent to the selected render endpoint, not only
+sound from the selected program window.
+The local Stop All action revokes all pending, active, or consumed future-window
+grants for the current Windows SID/session. Disabling unattended mode also
+revokes those grants and requests a stop for an active future-window run;
+reenabling never restores them. Both actions are enforced again at the final
+backend gate. A grant that cannot cover its full approved run before expiry is
+rejected, never duration-truncated.
+This API does not launch players, recognize livestreams, inspect browser tabs,
+or provide recurring schedules, wake, microphone capture, or fallback capture
+semantics.
+
+## Fixed-region profile management
+
+The authenticated `/api/v1/profiles` routes manage reusable configuration only.
+This slice supports fixed-region, `exact_match_only`, `ffmpeg-region`, and no
+audio. Copying an exact immutable version does not select new geometry or
+validate current display availability. Fresh creation uses the local-selection
+reference described below. Management alone cannot authorize capture or attach
+a profile to a plan; ordinary recording reuse has its own local-confirmation
+contract below.
+Saving a profile never opens a confirmation dialog, starts a worker, issues a
+proof, reserves lease quota, creates an output directory, or creates media.
+
+Create by copying an exact version:
+
+```http
+POST /api/v1/profiles
+X-Agent-Recorder-Key: <key>
+Idempotency-Key: <stable-client-key>
+Content-Type: application/json
+
+{
+  "name": "Lesson capture",
+  "source_profile_ref": {
+    "id": "profile-id-from-list",
+    "version": 1,
+    "digest": "recurring-fixed-region-profile/v1:<64 lowercase hex characters>"
+  },
+  "changes": {
+    "duration_seconds": 30,
+    "countdown_seconds": 3,
+    "output_directory": "D:\\AgentRecorder\\.local-data\\Videos",
+    "filename_prefix": "lesson"
+  }
+}
+```
+
+`name` is required (1–80 readable characters). `source_profile_ref` requires
+exactly `id`, positive `version`, and `digest`. `changes` is optional; its only
+fields are `duration_seconds` (1–600), `countdown_seconds` (0–60),
+`output_directory`, and `filename_prefix`. Omitted values copy from that exact
+version. Unknown or duplicate JSON properties, non-integer numbers, traversal
+segments, invalid prefixes, and authorization/selection/audio/target fields are
+rejected. A missing source returns 404; no default full-screen profile is
+created. The server assigns a new profile ID and version 1.
+
+`GET /api/v1/profiles` is keyset-paginated in stable profile-ID order (default
+20, maximum 100); use its opaque `next_cursor` as `cursor`. Legacy immutable
+profiles are included with a deterministic fallback name. Deleted profiles are
+hidden unless `include_deleted=true`. Detail returns the name, exact current
+`profile_ref`, specification, deletion state, and strong ETag. Use
+`GET /api/v1/profiles/{profile_id}/versions?limit=...&cursor=...` to page
+immutable versions, and `/versions/{version}` to read one exact version.
+Cursors are opaque, bounded, and scoped to their resource.
+
+`PATCH /api/v1/profiles/{profile_id}` accepts a non-empty JSON object containing
+only `name` and/or the four `changes` fields above. Every accepted PATCH creates
+one new immutable version; prior version digests and existing plan bindings do
+not change. `DELETE /api/v1/profiles/{profile_id}` is a logical tombstone and
+preserves all versions. Both require exactly one current strong `If-Match`
+header copied from the ETag response header; missing is 428, stale or
+cross-profile is 412, and weak, wildcard, or multiple values are 400. A
+successful mutation returns the new ETag both as the HTTP `ETag` header and in
+the JSON data envelope. Concurrent same-tag PATCH requests have one winner;
+the other must GET before trying again.
+
+Delete checks references to **any** historical version in the same SQLite write
+transaction as the tombstone. Referenced profiles return 409 `PROFILE_IN_USE`
+with a bounded plan-reference summary; no plan or authorization is changed.
+The initial plan-binding transaction also rejects a tombstoned profile, while
+an exact existing binding replay remains readable. A tombstone blocks future
+edit, copy, and initial binding; historical reads remain available.
+
+POST requires `Idempotency-Key`. The key is atomically bound to the normalized
+method, path, and request. An exact retry—including after process restart—returns
+the original version-1 result and ETag; reuse with a different request returns
+409. The immutable version, directory entry, and idempotency result commit in
+one transaction. `/capabilities.profile_management` lists `list`, `get`,
+`list_versions`, `get_version`, `copy_existing_version`, `patch`, and `delete`,
+and conditionally `create_from_local_selection`;
+it explicitly reports `supported_targets=[fixed_region]`; interactive selector
+hosts also report `create_from_local_selection` in operations and
+`creation_modes`. Headless hosts advertise copy only. The compatibility
+field `recording_or_plan_profile_ref_supported=false` remains false because
+Plan profile refs are unsupported; the split fields report
+`ordinary_recording_profile_ref_supported` and
+`ordinary_recording_execution_supported` separately from
+`plan_profile_ref_supported=false`. Management routes are not an approval
+channel.
+
+#### Create the first profile from a local selection
+
+On an interactive host, `POST /api/v1/regions/select` with
+`{"purpose":"profile"}` opens the existing local region selector. The older
+`POST /api/v1/region-selections` route remains available for ordinary recording
+selection and keeps its established behavior. A successful profile-purpose
+selection returns the exact virtual-screen bounds plus an opaque
+`selection_ref` and `expires_at`; the reference is process-local and valid for
+five minutes. Cancellation, timeout, ordinary recording selection, and saved
+last-region state do not produce a usable profile reference. Profile selection
+does not approve or start a recording.
+
+Create a named version 1 with the returned reference:
+
+```http
+POST /api/v1/profiles
+Idempotency-Key: <new stable key>
+Content-Type: application/json
+
+{"name":"Lesson","source_selection_ref":"sel_<opaque>","changes":{"duration_seconds":30,"countdown_seconds":3,"filename_prefix":"lesson"}}
+```
+
+`changes.duration_seconds` is required (1–600); countdown defaults to 3 and is
+limited to 0–10; filename prefix defaults to `recording`; omitted output
+directory freezes the effective configured default at creation. The profile
+request rejects stale references, changed/incomplete display topology, odd or
+small geometry, and selections crossing display bounds; it never clips or
+rewrites the geometry. Exact retries return the original immutable creation
+snapshot before checking the ephemeral reference, including after expiry or
+restart. Conflicting reuse of an idempotency key returns 409. Profile creation
+does not create the output directory, probe/write output, start capture, or
+issue recording authorization. Headless hosts do not advertise interactive
+selection creation in `creation_modes`.
+
+### Interactive recording from a fixed-region profile
+
+`POST /api/v1/recordings` also accepts the exclusive body
+`{"profile_ref":{"id":"...","version":1,"digest":"..."}}`.
+All fields are required and bind one immutable version; names, `latest`, raw
+capture overrides, Plan/Lease/proof fields, unknown fields, and duplicate JSON
+properties are rejected. The authenticated request reads the exact version and
+directory tombstone from one SQLite snapshot. A deleted profile, missing
+version, digest mismatch, unavailable gateway, or changed display environment
+returns an explicit error and never falls back to raw/default capture settings.
+
+Only fixed-region, exact-match, `ffmpeg-region`, no-audio profiles are accepted.
+Duration must be a whole 1–600 seconds; incompatible sub-second values and
+odd/small geometry are rejected without rounding or rewriting the profile.
+The profile's absolute output directory, filename prefix, and `fail_if_exists`
+policy apply to an ordinary run filename containing the recording ID. Local
+confirmation remains mandatory for every run. The user may change the output
+directory for that run; the effective path is used without writing back to the
+profile. Profile configuration is not capture authorization. This POST has no
+idempotency contract and must not be blindly retried after an ambiguous
+response. Plan profile references remain unsupported.
+
+An environment rejection found while processing the request is returned
+synchronously in the HTTP response. Once the request has been accepted with
+HTTP 200 and is awaiting local confirmation, a later environment change does
+not retroactively change that response to HTTP 409. The recording instead
+settles as failed with `stop_reason` and `error` set to
+`PROFILE_ENVIRONMENT_CHANGED`; query the recording or its status-wait endpoint
+to observe the terminal result.
+
+Profile requests use the standard error envelope with `details.field` and
+`details.reason_code`: malformed/mixed bodies return 400
+`INVALID_PROFILE_RECORDING_REQUEST`; a missing exact version returns 404
+`PROFILE_VERSION_NOT_FOUND`; digest mismatch, tombstone, environment drift, or
+backend mismatch return 409 (`PROFILE_REF_MISMATCH`, `PROFILE_DELETED`,
+`PROFILE_ENVIRONMENT_CHANGED`, or `PROFILE_BACKEND_UNAVAILABLE`); unsupported
+duration/geometry/policy returns 422 `PROFILE_NOT_EXECUTABLE`; unavailable
+snapshot infrastructure returns 503 `PROFILE_EXECUTION_UNAVAILABLE`.
+
+The directory list, version page, and exact-version response each derive
+directory name/deletion state, current profile_ref, is_current, and response
+ETag from one SQLite read snapshot. Read specifications use canonical policy
+codes such as physical_virtual_screen, landscape_flipped, fail_if_exists,
+natural_wake_only, and interactive_desktop_required. Duration reads preserve
+precision: duration_seconds is an exact JSON number (integer for whole seconds,
+fractional for sub-second values), and duration_ms is the exact integer
+millisecond value. Whole-second responses remain integer-valued. POST/PATCH
+inputs still accept only integer duration_seconds from 1 through 600.

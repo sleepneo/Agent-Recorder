@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Security.Principal;
 using System.Windows.Forms;
+using AgentRecorder.Api;
 using AgentRecorder.Capture;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
@@ -16,20 +17,30 @@ internal interface IUnattendedSafetyControlGateway
     StandingLeaseSafetyControlResult StopAll(string operationId);
     StandingLeaseSafetyControlResult Disable(string operationId);
     StandingLeaseSafetyControlResult Enable(string operationId);
+    IReadOnlyList<FutureWindowAuthorizationState> ListFutureWindowAuthorizations();
+    FutureWindowAuthorizationState? RevokeFutureWindowAuthorization(string authorizationId);
+}
+
+internal interface IFutureWindowGlobalSafetyRevocationObserver
+{
+    void CancelGloballyRevokedPendingApprovals(string userSid, string sessionBinding);
 }
 
 internal sealed class StandingLeaseSafetyControlGateway : IUnattendedSafetyControlGateway
 {
     private readonly StandingLeaseSafetyControlService _service;
+    private readonly IFutureWindowOneShotGateway? _futureWindowGateway;
     private readonly Func<string?> _currentUserSid;
     private readonly Func<string?> _currentSessionBinding;
 
     internal StandingLeaseSafetyControlGateway(
         StandingLeaseSafetyControlService service,
         Func<string?>? currentUserSidForTest = null,
-        Func<string?>? currentSessionBindingForTest = null)
+        Func<string?>? currentSessionBindingForTest = null,
+        IFutureWindowOneShotGateway? futureWindowGateway = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
+        _futureWindowGateway = futureWindowGateway;
         _currentUserSid = currentUserSidForTest ?? GetCurrentUserSid;
         _currentSessionBinding = currentSessionBindingForTest ?? (() => CaptureAuthorizationSessionBinding.Current);
     }
@@ -43,14 +54,54 @@ internal sealed class StandingLeaseSafetyControlGateway : IUnattendedSafetyContr
     public StandingLeaseSafetyControlResult RevokeRecurringLease(string leaseId, string operationId) =>
         _service.RevokeRecurringLease(leaseId, operationId, "control_center_user");
 
-    public StandingLeaseSafetyControlResult StopAll(string operationId) =>
-        _service.StopAllAndRevokeAll(operationId, "control_center_user");
+    public StandingLeaseSafetyControlResult StopAll(string operationId)
+    {
+        var hasFutureWindowScope = TryGetFutureWindowScope(out var sid, out var session);
+        var result = _service.StopAllAndRevokeAll(operationId, "control_center_user",
+            hasFutureWindowScope ? sid : null, hasFutureWindowScope ? session : null);
+        if (hasFutureWindowScope) NotifyGlobalRevocationAfterCommit(result, sid, session);
+        return result;
+    }
 
-    public StandingLeaseSafetyControlResult Disable(string operationId) =>
-        _service.DisableUnattended(operationId, "control_center_user");
+    public StandingLeaseSafetyControlResult Disable(string operationId)
+    {
+        var hasFutureWindowScope = TryGetFutureWindowScope(out var sid, out var session);
+        var result = _service.DisableUnattended(operationId, "control_center_user",
+            hasFutureWindowScope ? sid : null, hasFutureWindowScope ? session : null);
+        if (hasFutureWindowScope) NotifyGlobalRevocationAfterCommit(result, sid, session);
+        return result;
+    }
 
     public StandingLeaseSafetyControlResult Enable(string operationId) =>
         _service.EnableUnattended(operationId, "control_center_user");
+
+    public IReadOnlyList<FutureWindowAuthorizationState> ListFutureWindowAuthorizations() =>
+        _futureWindowGateway?.ListForSafetyCenter() ?? Array.Empty<FutureWindowAuthorizationState>();
+
+    public FutureWindowAuthorizationState? RevokeFutureWindowAuthorization(string authorizationId) =>
+        _futureWindowGateway?.Revoke(authorizationId);
+
+    private bool TryGetFutureWindowScope(out string sid, out string session)
+    {
+        sid = _currentUserSid() ?? string.Empty;
+        session = _currentSessionBinding() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(sid) && !string.IsNullOrWhiteSpace(session);
+    }
+
+    private void NotifyGlobalRevocationAfterCommit(
+        StandingLeaseSafetyControlResult result,
+        string sid,
+        string session)
+    {
+        var committedSafetyDecision = result.DurableOperationCommitted &&
+            (result.Status is StandingLeaseSafetyControlResultStatus.Changed or StandingLeaseSafetyControlResultStatus.AlreadyApplied ||
+             result.PhysicalStopFailed);
+        if (!committedSafetyDecision || _futureWindowGateway is not IFutureWindowGlobalSafetyRevocationObserver observer)
+            return;
+
+        try { observer.CancelGloballyRevokedPendingApprovals(sid, session); }
+        catch { /* UI cleanup must not rewrite the durable safety result. */ }
+    }
 
     private static string? GetCurrentUserSid() =>
         WindowsIdentity.GetCurrent().User?.Value;
@@ -89,6 +140,7 @@ internal sealed class UnattendedSafetyControlForm : Form
     private readonly TableLayoutPanel _leaseLists;
     private readonly FlowLayoutPanel _leasePanel;
     private readonly FlowLayoutPanel _recurringPanel;
+    private readonly FlowLayoutPanel _futureWindowPanel;
     private bool _busy;
     private bool _allowClose;
 
@@ -140,7 +192,7 @@ internal sealed class UnattendedSafetyControlForm : Form
             AutoSize = false,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             Margin = new Padding(0, 0, 0, 8),
         };
         statusPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -192,13 +244,24 @@ internal sealed class UnattendedSafetyControlForm : Form
         };
         _leasePanel = CreateLeaseListPanel();
         _recurringPanel = CreateLeaseListPanel();
+        _futureWindowPanel = CreateLeaseListPanel();
         oneShotGroup.Controls.Add(_leasePanel);
         recurringGroup.Controls.Add(_recurringPanel);
+        var futureWindowGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8),
+            Text = "Future-window grants / 未来窗口授权",
+            Tag = "future_window_heading",
+        };
+        futureWindowGroup.Controls.Add(_futureWindowPanel);
         _leaseLists.Controls.Add(oneShotGroup, 0, 0);
         _leaseLists.Controls.Add(recurringGroup, 0, 1);
-        SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0);
+        _leaseLists.Controls.Add(futureWindowGroup, 0, 2);
+        SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0, futureWindowCount: 0);
         _leasePanel.Resize += (_, _) => ResizeCards();
         _recurringPanel.Resize += (_, _) => ResizeCards();
+        _futureWindowPanel.Resize += (_, _) => ResizeCards();
         root.Controls.Add(_leaseLists, 0, 3);
 
         var footer = new TableLayoutPanel
@@ -253,9 +316,11 @@ internal sealed class UnattendedSafetyControlForm : Form
 
     internal int LeaseCardCountForTests => _leasePanel.Controls.Cast<Control>().Count(IsLeaseCard);
     internal int RecurringLeaseCardCountForTests => _recurringPanel.Controls.Cast<Control>().Count(IsLeaseCard);
+    internal int FutureWindowCardCountForTests => _futureWindowPanel.Controls.Cast<Control>().Count(IsFutureWindowCard);
     internal TableLayoutPanel LeaseListsForTests => _leaseLists;
     internal string GlobalStatusTextForTests => _globalStatusLabel.Text;
     internal string ResultTextForTests => _resultLabel.Text;
+    internal Color ResultColorForTests => _resultLabel.ForeColor;
     internal bool BusyForTests => _busy;
     internal Button StopAllButtonForTests => _stopAllButton;
     internal Button DisableButtonForTests => _disableButton;
@@ -331,6 +396,7 @@ internal sealed class UnattendedSafetyControlForm : Form
                     "close" => _text.Get("UnattendedSafety_Close"),
                     "one_shot_heading" => _text.Get("UnattendedSafety_OneShotHeading"),
                     "recurring_heading" => _text.Get("UnattendedSafety_RecurringHeading"),
+                    "future_window_heading" => "Future-window grants / 未来窗口授权",
                     _ => control.Text,
                 };
             }
@@ -426,6 +492,13 @@ internal sealed class UnattendedSafetyControlForm : Form
                     ? "UnattendedSafety_RecurringStopNoOp"
                     : "UnattendedSafety_RecurringStopRequested");
         }
+        else if (operationKind is "stop_all" or "disable" &&
+                 result.RequiresActiveRunStop && result.DurableOperationCommitted)
+        {
+            note += " " + _text.Get(result.PhysicalStopFailed
+                ? "UnattendedSafety_GlobalStopFailed"
+                : "UnattendedSafety_GlobalStopRequested");
+        }
         return _text.Format("UnattendedSafety_Result", status, reason, result.Reason) + note;
     }
 
@@ -456,7 +529,8 @@ internal sealed class UnattendedSafetyControlForm : Form
             _recurringPanel.Controls.Clear();
             SetEmptyState(_leasePanel, "UnattendedSafety_CategoryUnavailable", "empty_state_one_shot");
             SetEmptyState(_recurringPanel, "UnattendedSafety_CategoryUnavailable", "empty_state_recurring");
-            SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0);
+            var futureCount = RefreshFutureWindowCards();
+            SetLeaseSectionRows(oneShotCount: 0, recurringCount: 0, futureCount);
             _stopAllButton.Enabled = false;
             _disableButton.Enabled = false;
             _enableButton.Enabled = false;
@@ -478,6 +552,7 @@ internal sealed class UnattendedSafetyControlForm : Form
 
         _leasePanel.SuspendLayout();
         _recurringPanel.SuspendLayout();
+        _futureWindowPanel.SuspendLayout();
         _leasePanel.Controls.Clear();
         _recurringPanel.Controls.Clear();
         foreach (var item in state.Items)
@@ -488,9 +563,11 @@ internal sealed class UnattendedSafetyControlForm : Form
             SetEmptyState(_leasePanel, "UnattendedSafety_EmptyOneShot", "empty_state_one_shot");
         if (state.RecurringItems.Count == 0)
             SetEmptyState(_recurringPanel, "UnattendedSafety_EmptyRecurring", "empty_state_recurring");
-        SetLeaseSectionRows(state.Items.Count, state.RecurringItems.Count);
+        var futureWindowCount = RefreshFutureWindowCards();
+        SetLeaseSectionRows(state.Items.Count, state.RecurringItems.Count, futureWindowCount);
         _leasePanel.ResumeLayout();
         _recurringPanel.ResumeLayout();
+        _futureWindowPanel.ResumeLayout();
         ResizeCards();
         _disableButton.Enabled = !_busy && state.UnattendedMode == UnattendedModeStatus.Enabled;
         _enableButton.Enabled = !_busy && state.UnattendedMode == UnattendedModeStatus.Disabled;
@@ -522,29 +599,20 @@ internal sealed class UnattendedSafetyControlForm : Form
         panel.Controls.Add(emptyState);
     }
 
-    private void SetLeaseSectionRows(int oneShotCount, int recurringCount)
+    private void SetLeaseSectionRows(int oneShotCount, int recurringCount, int futureWindowCount)
     {
         _leaseLists.RowStyles.Clear();
-        if (oneShotCount == 0 && recurringCount == 0)
-        {
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_leasePanel, 0)));
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_recurringPanel, 1)));
-        }
-        else if (oneShotCount == 0)
-        {
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_leasePanel, 0)));
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        }
-        else if (recurringCount == 0)
-        {
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_recurringPanel, 1)));
-        }
-        else
-        {
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            _leaseLists.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        }
+        if (_leaseLists.GetControlFromPosition(0, 2) is { } futureGroup)
+            futureGroup.Visible = futureWindowCount > 0;
+        var nonempty = (oneShotCount > 0 ? 1 : 0) + (recurringCount > 0 ? 1 : 0);
+        var percent = 100f / Math.Max(1, nonempty);
+        _leaseLists.RowStyles.Add(oneShotCount == 0
+            ? new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_leasePanel, 0))
+            : new RowStyle(SizeType.Percent, percent));
+        _leaseLists.RowStyles.Add(recurringCount == 0
+            ? new RowStyle(SizeType.Absolute, CompactEmptySectionHeight(_recurringPanel, 1))
+            : new RowStyle(SizeType.Percent, percent));
+        _leaseLists.RowStyles.Add(new RowStyle(SizeType.Absolute, futureWindowCount == 0 ? 0 : 185));
     }
 
     private float CompactEmptySectionHeight(FlowLayoutPanel list, int row)
@@ -561,6 +629,89 @@ internal sealed class UnattendedSafetyControlForm : Form
     private static bool IsLeaseCard(Control control) =>
         !string.Equals(control.Tag as string, "empty_state_one_shot", StringComparison.Ordinal) &&
         !string.Equals(control.Tag as string, "empty_state_recurring", StringComparison.Ordinal);
+
+    private static bool IsFutureWindowCard(Control control) =>
+        !string.Equals(control.Tag as string, "empty_state_future_window", StringComparison.Ordinal);
+
+    private int RefreshFutureWindowCards()
+    {
+        IReadOnlyList<FutureWindowAuthorizationState> grants;
+        try { grants = _gateway.ListFutureWindowAuthorizations(); }
+        catch { grants = Array.Empty<FutureWindowAuthorizationState>(); }
+        _futureWindowPanel.Controls.Clear();
+        foreach (var grant in grants)
+            _futureWindowPanel.Controls.Add(CreateFutureWindowCard(grant));
+        if (grants.Count == 0)
+            SetEmptyState(_futureWindowPanel, "No future-window grants / 暂无授权", "empty_state_future_window");
+        return grants.Count;
+    }
+
+    private Control CreateFutureWindowCard(FutureWindowAuthorizationState item)
+    {
+        var card = new Panel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BorderStyle = BorderStyle.FixedSingle,
+            Padding = new Padding(8),
+            Margin = new Padding(0, 0, 0, 8),
+            Tag = "future:" + item.AuthorizationId,
+        };
+        var layout = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var latestStart = item.LatestPermissibleStartAtUtc ??
+            item.ExpiresAtUtc?.AddSeconds(-item.MaximumDurationSeconds);
+        var windowText = item.ExpiresAtUtc is { } expiresAt && latestStart is { } latest
+            ? $"validity {item.ValiditySeconds}s; latest permissible start {latest:u}; authorization end {expiresAt:u}"
+            : $"validity {item.ValiditySeconds}s from local approval; latest start is authorization end minus the full run duration";
+        var details = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(760, 0),
+            Text = $"{item.Status} — {item.AuthorizationId}\r\n{item.ExecutablePath}\r\nSHA-256: {item.ExecutableSha256}\r\n" +
+                   $"Audio: {item.AudioMode}{(item.SystemAudioEndpointName is null ? "" : " — " + item.SystemAudioEndpointName)}; " +
+                   $"maximum {item.MaximumDurationSeconds}s; {windowText}\r\n" +
+                   $"Output: {item.OutputPath}\r\nRun: {item.RunId ?? "none"} ({item.RunStatus ?? "none"}); reason: {item.ReasonCode ?? "none"}",
+            Margin = new Padding(0, 0, 10, 0),
+        };
+        var revoke = new Button
+        {
+            AutoSize = true,
+            Text = _text.Get("UnattendedSafety_Revoke"),
+            AccessibleName = _text.Get("UnattendedSafety_Revoke"),
+            Tag = item.AuthorizationId,
+            Enabled = item.Status is "pending" or "active" or "used",
+        };
+        revoke.Click += (_, _) => ConfirmAndRevokeFutureWindow(item);
+        layout.Controls.Add(details, 0, 0);
+        layout.Controls.Add(revoke, 1, 0);
+        card.Controls.Add(layout);
+        return card;
+    }
+
+    private void ConfirmAndRevokeFutureWindow(FutureWindowAuthorizationState item)
+    {
+        if (_busy) return;
+        if (!_confirmation.Confirm(this, _text.Get("UnattendedSafety_ConfirmTitle"),
+                $"Revoke future-window grant {item.AuthorizationId}? An active run will be stopped.\r\n{item.ExecutablePath}"))
+            return;
+        SetBusy(true);
+        try
+        {
+            var revoked = _gateway.RevokeFutureWindowAuthorization(item.AuthorizationId);
+            _resultLabel.ForeColor = revoked?.Status == "revoked" ? Color.DarkGreen : Color.DarkRed;
+            _resultLabel.Text = revoked?.Status == "revoked"
+                ? "Future-window grant revoked; any active run was asked to stop."
+                : "Future-window grant could not be revoked.";
+        }
+        catch (Exception exception)
+        {
+            _resultLabel.ForeColor = Color.DarkRed;
+            _resultLabel.Text = $"Future-window revoke failed ({exception.GetType().Name}).";
+        }
+        finally { SetBusy(false); RefreshState(); }
+    }
 
     private Control CreateLeaseCard(StandingLeaseControlCenterLeaseSummary item)
     {
@@ -792,6 +943,7 @@ internal sealed class UnattendedSafetyControlForm : Form
     {
         ResizeCards(_leasePanel);
         ResizeCards(_recurringPanel);
+        ResizeCards(_futureWindowPanel);
     }
 
     private static void ResizeCards(FlowLayoutPanel list)
@@ -831,6 +983,11 @@ internal sealed class UnattendedSafetyControlForm : Form
                 SetChildButtonsEnabled(child, !busy);
         }
         foreach (Control card in _recurringPanel.Controls)
+        {
+            foreach (Control child in card.Controls)
+                SetChildButtonsEnabled(child, !busy);
+        }
+        foreach (Control card in _futureWindowPanel.Controls)
         {
             foreach (Control child in card.Controls)
                 SetChildButtonsEnabled(child, !busy);

@@ -11,7 +11,7 @@
     .local-data/release-candidates/.
 
 .PARAMETER Version
-    Version string for the zip name. Default: v0.1.14
+    Version string for the zip name. Default: v0.1.15
 
 .PARAMETER PublishMode
     "self-contained" (default) or "framework-dependent".
@@ -27,7 +27,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.14",
+    [string]$Version = "v0.1.15",
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
@@ -1439,10 +1439,10 @@ $versionResult = Invoke-BoundedProcess `
     -TimeoutMs 10000 `
     -DisplayName "WGC helper --version smoke"
 $normalizedVersion = $versionResult.StandardOutput.Replace("`r`n", "`n").Replace("`r", "`n")
-if ($versionResult.ExitCode -ne 0 -or $normalizedVersion -cne "wgc-native-helper 0.3.0`n") {
+if ($versionResult.ExitCode -ne 0 -or $normalizedVersion -cne "wgc-native-helper 0.4.0`n") {
     throw "WGC helper --version smoke failed or returned an incompatible contract."
 }
-Write-Host "[OK] Native tests passed and helper version is wgc-native-helper 0.3.0" -ForegroundColor Green
+Write-Host "[OK] Native tests passed and helper version is wgc-native-helper 0.4.0" -ForegroundColor Green
 
 # ReadyToRun: enabled by default for self-contained, disabled for framework-dependent or when explicitly requested.
 $enableR2R = ($PublishMode -eq "self-contained") -and -not $DisableReadyToRun

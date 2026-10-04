@@ -34,7 +34,7 @@ void PrintHelp() {
         "  --region-bounds <region-x,region-y,region-width,region-height>\n"
         "  --recording-id <safe-id>\n"
         "  --output <absolute-mp4-path>\n"
-        "  --duration-ms <1000..60000; strict window_surface: up to 600000>\n"
+        "  --duration-ms <1000..60000; strict window_surface: up to 1800000>\n"
         "  --allow-long-window-surface-duration (window mode only; strict path)\n"
         "  --fps <1..60>\n"
         "  --encoder-mode <software|hardware-preferred>\n"
@@ -51,7 +51,7 @@ void PrintHelp() {
 }
 
 void PrintVersion() {
-    std::cout << "wgc-native-helper 0.3.0\n";
+    std::cout << "wgc-native-helper 0.4.0\n";
 }
 
 void PrintProbeResult(const ProbeResult& result) {
@@ -152,7 +152,7 @@ bool ValidateContinuousOptions(const Options& opts, std::string& error) {
     if (opts.durationMs < kWgcContinuousMinDurationMs ||
         opts.durationMs > maxDurationMs) {
         error = opts.allowLongWindowSurfaceDuration
-            ? "Invalid strict window-surface duration-ms; expected 1000..600000"
+            ? "Invalid strict window-surface duration-ms; expected 1000..1800000"
             : "Invalid duration-ms; expected 1000..60000";
         return false;
     }

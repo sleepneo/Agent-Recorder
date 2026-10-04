@@ -1,6 +1,7 @@
 using System;
 using AgentRecorder.Capture;
 using AgentRecorder.Core.Automation;
+using AgentRecorder.Windows;
 
 namespace AgentRecorder.Core;
 
@@ -129,6 +130,133 @@ internal static class CaptureAuthorizationGate
         }
         if (!requireConsumed && !proof.CheckAvailableAt(nowUtc, out failureReason))
             return false;
+        failureReason = string.Empty;
+        return true;
+    }
+
+    internal static bool TryConsumeFutureWindowOneShot(
+        CaptureAuthorizationProof? proof,
+        FutureWindowOneShotExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        int currentSessionId,
+        DateTimeOffset nowUtc,
+        out string failureReason) =>
+        TryValidateFutureWindowOneShot(
+            proof, ticket, recording, currentPlan, currentUserSid, currentSessionBinding,
+            currentSessionId, nowUtc, requireConsumed: false, out failureReason);
+
+    internal static bool TryValidateConsumedFutureWindowOneShot(
+        CaptureAuthorizationProof? proof,
+        FutureWindowOneShotExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        int currentSessionId,
+        DateTimeOffset nowUtc,
+        out string failureReason) =>
+        TryValidateFutureWindowOneShot(
+            proof, ticket, recording, currentPlan, currentUserSid, currentSessionBinding,
+            currentSessionId, nowUtc, requireConsumed: true, out failureReason);
+
+    private static bool TryValidateFutureWindowOneShot(
+        CaptureAuthorizationProof? proof,
+        FutureWindowOneShotExecutionTicket? ticket,
+        Recording recording,
+        CapturePlan? currentPlan,
+        string currentUserSid,
+        string currentSessionBinding,
+        int currentSessionId,
+        DateTimeOffset nowUtc,
+        bool requireConsumed,
+        out string failureReason)
+    {
+        failureReason = "future_window_proof_missing";
+        if (proof is not FutureWindowOneShotProof future || ticket is null ||
+            recording is null || currentPlan is null)
+            return false;
+
+        var receipt = ticket.Receipt;
+        var authorization = receipt.Authorization;
+        var process = receipt.Process;
+        if (nowUtc.Offset != TimeSpan.Zero || receipt.CommittedAtUtc.Offset != TimeSpan.Zero ||
+            authorization.ApprovedAtUtc is not { } approvedAt || authorization.ExpiresAtUtc is not { } expiresAt ||
+            authorization.StatusCode != "used" ||
+            !string.Equals(authorization.RunId, receipt.RunId, StringComparison.Ordinal) ||
+            !recording.IsFutureWindowOneShotExecution ||
+            !ReferenceEquals(ticket, recording.FutureWindowOneShotTicket) ||
+            !ReferenceEquals(proof, recording.AuthorizationProof) ||
+            !ReferenceEquals(proof, ticket.Proof) ||
+            !string.Equals(recording.Id, receipt.RunId, StringComparison.Ordinal) ||
+            !string.Equals(future.RunId, receipt.RunId, StringComparison.Ordinal) ||
+            !string.Equals(future.AuthorizationId, authorization.AuthorizationId, StringComparison.Ordinal) ||
+            !string.Equals(future.AuthorizationSourceId,
+                "future-window-authorization:" + authorization.AuthorizationId, StringComparison.Ordinal) ||
+            !string.Equals(future.WindowId, process.WindowId, StringComparison.Ordinal) ||
+            future.ProcessId != process.ProcessId ||
+            future.ProcessCreationFileTimeUtc != process.ProcessCreationFileTimeUtc ||
+            !string.Equals(future.ExecutableIdentityDigest,
+                CaptureAuthorizationProofIssuer.ComputeFutureWindowExecutableIdentityDigest(authorization.ExecutableIdentity),
+                StringComparison.Ordinal) ||
+            !string.Equals(currentUserSid, authorization.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(currentSessionBinding, authorization.SessionBinding, StringComparison.Ordinal) ||
+            currentSessionId != process.SessionId ||
+            !string.Equals(future.UserSessionBinding,
+                authorization.CurrentUserSid + "|" + authorization.SessionBinding, StringComparison.Ordinal) ||
+            future.IssuedAtUtc != receipt.CommittedAtUtc || future.ExpiresAtUtc != expiresAt ||
+            nowUtc < receipt.CommittedAtUtc || nowUtc >= expiresAt ||
+            process.ProcessCreationFileTimeUtc <= approvedAt.UtcDateTime.ToFileTimeUtc() ||
+            future.MaxDuration != TimeSpan.FromSeconds(authorization.MaximumDurationSeconds))
+        {
+            failureReason = "future_window_proof_binding_invalid";
+            return false;
+        }
+
+        var config = recording.Config;
+        var correctAudio = authorization.HasSystemAudio
+            ? config.AudioRequested && !config.Microphone && config.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback &&
+              string.Equals(config.SystemLoopbackEndpoint, authorization.SystemAudioEndpointId, StringComparison.Ordinal) &&
+              currentPlan.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback &&
+              string.Equals(currentPlan.AudioEndpointId, authorization.SystemAudioEndpointId, StringComparison.Ordinal)
+            : !config.AudioRequested && !config.Microphone && config.AudioSourceKind == AudioCaptureSourceKind.None &&
+              currentPlan.AudioSourceKind == AudioCaptureSourceKind.None;
+
+        if (recording.DurationSeconds != authorization.MaximumDurationSeconds ||
+            config.DurationSeconds != authorization.MaximumDurationSeconds ||
+            recording.CountdownSeconds != 0 || config.CountdownSeconds != 0 ||
+            !config.RequireWindowSurface || config.SourceKind != "window" ||
+            config.WindowHandle != process.WindowHandle || config.WindowProcessId != process.ProcessId ||
+            recording.OutputPath != authorization.OutputFilePath || config.OutputPath != authorization.OutputFilePath ||
+            config.OutputConflictPolicy != "fail_if_exists" || config.IsScreenshotSeries ||
+            !correctAudio || currentPlan.FallbackOccurred || currentPlan.CaptureSemantics != "window_surface" ||
+            currentPlan.SourceKind != "window" || currentPlan.WindowHandle != process.WindowHandle ||
+            currentPlan.TargetWindowProcessId != process.ProcessId || currentPlan.TargetIdentity != process.WindowId ||
+            !string.Equals(future.CapturePlanDigest,
+                CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(currentPlan), StringComparison.Ordinal) ||
+            !string.Equals(future.ScopeDigest,
+                CaptureAuthorizationProofIssuer.ComputeFutureWindowProofScopeDigest(
+                    authorization, process, recording, currentPlan), StringComparison.Ordinal))
+        {
+            failureReason = "future_window_capture_binding_invalid";
+            return false;
+        }
+
+        if (requireConsumed)
+        {
+            if (!future.IsConsumed)
+            {
+                failureReason = "future_window_proof_not_consumed";
+                return false;
+            }
+        }
+        else if (!future.TryConsume(nowUtc, out failureReason))
+        {
+            return false;
+        }
+
         failureReason = string.Empty;
         return true;
     }

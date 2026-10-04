@@ -18,28 +18,76 @@ namespace AgentRecorder.App;
 internal static class Program
 {
     [STAThread]
-    private static void Main(string[] args)
+    private static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--internal-storage-capacity-probe")
+            return WindowsStorageCapacityProbe.Run();
+        InteractiveLaunchRequest? launchRequest = null;
+        var launchDataDir = string.Empty;
         try
         {
 #if DEBUG
             if (ConfirmationThemePreviewHost.TryRun(args))
-                return;
+                return 0;
             if (RegionSelectionStylePreviewHost.TryRun(args))
-                return;
+                return 0;
             if (RecordingStatusStylePreviewHost.TryRun(args))
-                return;
+                return 0;
 #endif
-            Run();
+
+            if (!InteractiveLaunchProtocol.TryParseAppArguments(args, out launchRequest, out _))
+                return 64;
+
+            if (launchRequest is { IsBrokered: true })
+            {
+                if (!InteractiveLaunchRegistrationStore.TryValidateForCurrentProcess(
+                        launchRequest.RegistrationId, out var registration, out _) ||
+                    registration is null)
+                {
+                    return 65;
+                }
+                DataDirResolver.SetOverride(registration.DataDir);
+            }
+
+            launchDataDir = DataDirResolver.Resolve();
+            var desktop = InteractiveDesktopRuntime.ObserveCurrent();
+            var started = TryStartRuntimeOnlyOnVerifiedDesktop(desktop, () =>
+            {
+                if (launchRequest is not null)
+                    _ = InteractiveLaunchResultStore.TryWrite(launchDataDir, launchRequest.RequestId, "desktop_ready");
+                Run(desktop, launchRequest);
+            });
+            if (!started)
+            {
+                if (launchRequest is not null)
+                    _ = InteractiveLaunchResultStore.TryWrite(launchDataDir, launchRequest.RequestId, "rejected",
+                        desktop.FailureCode.Length == 0 ? "INTERACTIVE_DESKTOP_REQUIRED" : desktop.FailureCode);
+                return 70;
+            }
+            return 0;
         }
         catch (Exception ex)
         {
+            if (launchRequest is not null && launchDataDir.Length > 0)
+                _ = InteractiveLaunchResultStore.TryWrite(launchDataDir, launchRequest.RequestId, "failed", "APP_START_FAILED");
             LogStartupError(ex);
-            throw;
+            return 1;
         }
     }
 
-    private static void Run()
+    internal static bool TryStartRuntimeOnlyOnVerifiedDesktop(
+        InteractiveDesktopObservation observation,
+        Action startRuntime)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(startRuntime);
+        if (!observation.IsOnInteractiveDesktop)
+            return false;
+        startRuntime();
+        return true;
+    }
+
+    private static void Run(InteractiveDesktopObservation desktopObservation, InteractiveLaunchRequest? launchRequest)
     {
         // Normalize the hidden encoder policy once at process startup. Empty
         // means software; invalid values fail before WGC warmup or recording.
@@ -49,7 +97,7 @@ internal static class Program
             EnvironmentVariableTarget.Process);
 
         // Start timing as early as possible.
-        var readiness = new RuntimeReadiness("tray", ApiServer.Port);
+        var readiness = new RuntimeReadiness("tray", ApiServer.Port, desktopObservation);
 
         // Single-instance guard BEFORE ready-file cleanup.
         // If another instance already holds the mutex, we must NOT delete
@@ -72,6 +120,9 @@ internal static class Program
                 ready_file = existingSnapshot?.ReadyFile ?? readiness.ReadyFilePath,
                 note = "second instance exiting without binding port or deleting ready file"
             });
+            if (launchRequest is not null)
+                _ = InteractiveLaunchResultStore.TryWrite(
+                    readiness.DataDir, launchRequest.RequestId, "instance_exists");
             instanceGuard.Dispose();
             return;
         }
@@ -150,6 +201,7 @@ internal static class Program
         var standingStartSafetyInterlock = new StandingLeaseStartSafetyInterlock();
         var recurringCurrentSafetyValidator = new SqliteRecurringLeaseCurrentSafetyValidator(operationalStore);
         StandingLeaseSafetyControlService? unattendedSafetyService = null;
+        FutureWindowOneShotAuthorizationCoordinator? futureWindowCoordinator = null;
         var engine = new RecordingEngine(
             audit,
             perfTracer,
@@ -164,7 +216,11 @@ internal static class Program
                 : unattendedSafetyService.ValidateStandingStart(ticket, nowUtc),
             recurringStartSafetyInterlock: standingStartSafetyInterlock,
             recurringStartSafetyValidator: recurringCurrentSafetyValidator.Validate,
-            recurringEnvironmentProvider: SystemQueryRecurringOccurrenceEnvironmentProvider.Instance);
+            recurringEnvironmentProvider: SystemQueryRecurringOccurrenceEnvironmentProvider.Instance,
+            futureWindowStartSafetyInterlock: standingStartSafetyInterlock,
+            futureWindowStartSafetyValidator: (ticket, nowUtc) => futureWindowCoordinator is null
+                ? "future_window_start_safety_unavailable"
+                : futureWindowCoordinator.ValidateBackendStart(ticket, nowUtc));
         unattendedSafetyService = new StandingLeaseSafetyControlService(
             operationalStore,
             utcNowForTest: null,
@@ -177,6 +233,24 @@ internal static class Program
             tracer: perfTracer,
             unattendedSafetyService: unattendedSafetyService);
         engine.SetTray(tray);
+        try
+        {
+            futureWindowCoordinator = new FutureWindowOneShotAuthorizationCoordinator(
+                operationalStore, engine, tray, audit, standingStartSafetyInterlock,
+                approvalTextProvider: () => tray.CurrentUiTextProvider);
+            tray.SetFutureWindowOneShotGateway(futureWindowCoordinator);
+        }
+        catch (Exception exception)
+        {
+            futureWindowCoordinator?.Dispose();
+            futureWindowCoordinator = null;
+            audit.Log("future_window_authorization.runtime_blocked", new
+            {
+                reason_code = "future_window_runtime_composition_failed",
+                exception_type = exception.GetType().Name,
+                execution_supported = false,
+            });
+        }
         StandingLeaseNaturalWakeRuntime? standingNaturalWakeRuntime = null;
         standingNaturalWakeRuntime = new StandingLeaseNaturalWakeRuntime(
             operationalStore,
@@ -323,7 +397,9 @@ internal static class Program
             standingPlanSetupCoordinator,
             recurringPlanSetupCoordinator,
             planExecutionStatusGateway,
-            requiredOncePlanSetupCoordinator);
+            requiredOncePlanSetupCoordinator,
+            futureWindowCoordinator,
+            new SqliteFixedRegionProfileManagementGateway(operationalStore));
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -392,6 +468,7 @@ internal static class Program
             SafeShutdownStep("required_once_setup_wait", () => requiredOncePlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
             SafeShutdownStep("standing_setup", () => standingPlanSetupCoordinator?.Dispose());
             SafeShutdownStep("standing_setup_wait", () => standingPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
+            SafeShutdownStep("future_window_authorization", () => futureWindowCoordinator?.Dispose());
             SafeShutdownStep("recurring_runtime", () => recurringNaturalWakeRuntime?.Dispose());
             SafeShutdownStep("standing_runtime", () => standingNaturalWakeRuntime?.Dispose());
             SafeShutdownStep("recordings", () => engine.StopAllSync(reason));

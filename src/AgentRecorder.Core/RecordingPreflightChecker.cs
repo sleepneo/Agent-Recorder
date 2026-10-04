@@ -70,6 +70,7 @@ internal static class RecordingPreflightChecker
     /// be determined, with the value in <paramref name="freeBytes"/>.
     /// </summary>
     public static TryGetFreeSpace FreeSpaceProvider { get; set; } = DefaultFreeSpaceProvider;
+    internal static IStorageCapacityProvider StorageCapacityProvider { get; set; } = new ProcessStorageCapacityProvider();
 
     /// <summary>
     /// Injectable encoder-path provider for tests. Avoids touching the static
@@ -202,6 +203,26 @@ internal static class RecordingPreflightChecker
 
     private static RecordingPreflightResult CheckDiskSpace(Recording rec, List<string> warnings)
     {
+        if (rec.Config.RequireWindowSurface)
+        {
+            try
+            {
+                rec.Config.WritePaths ??= CaptureWritePaths.Freeze(rec.Config);
+                rec.Config.WritePaths.ValidateOutputPath(rec.Config);
+                using var safety = new WindowStorageSafety(rec.Config.WritePaths,
+                    rec.Config.DurationSeconds ?? 0, StorageCapacityProvider);
+                safety.EnsureAdmission();
+                return Pass(warnings);
+            }
+            catch (StorageSafetyException ex)
+            {
+                return Fail(ex.Code, ex.Code == WindowStorageSafety.LowSpaceCode
+                    ? "Insufficient storage capacity for window recording and temporary media."
+                    : "Storage capacity could not be verified for window recording.", "check_storage_capacity");
+            }
+            catch { return Fail(WindowStorageSafety.UnavailableCode,
+                "Storage capacity could not be verified for window recording.", "check_storage_capacity"); }
+        }
         var dir = Path.GetDirectoryName(rec.OutputPath);
         if (string.IsNullOrWhiteSpace(dir))
             return Pass(warnings);
@@ -229,18 +250,7 @@ internal static class RecordingPreflightChecker
 
     internal static long RequiredFreeSpaceBytes(TimeSpan duration)
     {
-        long thresholdBytes = 100L * 1024 * 1024; // default 100 MB
-        if (duration > TimeSpan.Zero)
-        {
-            long seconds = (long)duration.TotalSeconds;
-            if (seconds > 0)
-            {
-                long estimated = checked(seconds * 2 * 1024 * 1024); // 2 MB/s
-                thresholdBytes = Math.Max(thresholdBytes, estimated);
-            }
-        }
-
-        return thresholdBytes;
+        return WindowStorageSafety.VideoEstimate((long)duration.TotalSeconds);
     }
 
     private static RecordingPreflightResult CheckEncoderAvailable()

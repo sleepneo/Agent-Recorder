@@ -411,7 +411,9 @@ public class ConfigParserWindowTests : IDisposable
     [InlineData(60)]
     [InlineData(61)]
     [InlineData(600)]
-    public void RequiredWindowSurfaceApiParser_AcceptsOneThroughSixHundredSeconds(int durationSeconds)
+    [InlineData(601)]
+    [InlineData(1800)]
+    public void RequiredWindowSurfaceApiParser_AcceptsOneThroughEighteenHundredSeconds(int durationSeconds)
     {
         string? previousTestMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
         string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-duration-" + Guid.NewGuid().ToString("N"));
@@ -446,11 +448,11 @@ public class ConfigParserWindowTests : IDisposable
     }
 
     [Fact]
-    public void RequiredWindowSurfaceApiParser_601SecondsReturns400BeforeWindowOrOutputSideEffects()
+    public void RequiredWindowSurfaceApiParser_1801SecondsReturns400BeforeWindowOrOutputSideEffects()
     {
         string? previousTestMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
         int windowCalls = 0;
-        string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-601-" + Guid.NewGuid().ToString("N"));
+        string outputDirectory = Path.Combine(Path.GetTempPath(), "strict-window-1801-" + Guid.NewGuid().ToString("N"));
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
         SystemQuery.SetWindowProvider((_, _) =>
         {
@@ -467,7 +469,7 @@ public class ConfigParserWindowTests : IDisposable
             {
               "required_capture_semantics": "window_surface",
               "source": { "type": "window", "window_id": "window_1234" },
-              "stop_condition": { "type": "duration", "seconds": 601 }
+              "stop_condition": { "type": "duration", "seconds": 1801 }
             }
             """);
             request["output"] = new JsonObject
@@ -480,7 +482,7 @@ public class ConfigParserWindowTests : IDisposable
 
             Assert.Equal(400, error.Status);
             Assert.Equal("INVALID_ARGUMENT", error.Code);
-            Assert.Contains("600", error.Message);
+            Assert.Contains("1800", error.Message);
             Assert.Equal(0, Volatile.Read(ref windowCalls));
             Assert.False(Directory.Exists(outputDirectory));
         }

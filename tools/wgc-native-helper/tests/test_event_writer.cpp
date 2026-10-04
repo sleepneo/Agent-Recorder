@@ -146,13 +146,15 @@ TEST_REGISTRAR(EventWriterBlocksAreBlankLineDelimited, []() {
 TEST_REGISTRAR(EventWriterFirstFrameContainsRequiredFields, []() {
     StdoutCapture capture;
     EventWriter writer;
-    writer.FirstFrame(1, 42);
+    writer.FirstFrame("rec-1", 1, 42, 123456789);
 
     std::string output = capture.Get();
     ASSERT_NE(output.find("RESULT: FIRST_FRAME"), std::string::npos);
     ASSERT_NE(output.find("Stage: Capturing"), std::string::npos);
     ASSERT_NE(output.find("FrameNumber: 1"), std::string::npos);
     ASSERT_NE(output.find("ElapsedMs: 42"), std::string::npos);
+    ASSERT_NE(output.find("RecordingId: rec-1"), std::string::npos);
+    ASSERT_NE(output.find("SourceTimeHns: 123456789"), std::string::npos);
     // A FIRST_FRAME block must not carry encoded-output fields.
     ASSERT_EQ(output.find("FramesCaptured"), std::string::npos);
 });
@@ -170,7 +172,7 @@ TEST_REGISTRAR(EventWriterConcurrentBlocksDoNotInterleave, []() {
             for (int i = 0; i < kIterations; ++i) {
                 switch ((t + i) % 3) {
                     case 0:
-                        writer.FirstFrame(1, i);
+                        writer.FirstFrame("rec-test", 1, i, i * 10000);
                         break;
                     case 1:
                         writer.Progress(i, 0, i, i * 100);

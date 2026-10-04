@@ -942,6 +942,36 @@ public class CliEnsureRunningTests : IDisposable
     }
 
     [Fact]
+    public void EnsureRunningCore_CrossAccountFailsBeforeTouchingReadyOrDataFiles()
+    {
+        var dataDir = Path.Combine(_testDir, "cross-account-unsupported");
+        var sessionId = Process.GetCurrentProcess().SessionId;
+        var desktop = new InteractiveDesktopObservation(
+            Environment.ProcessId,
+            sessionId,
+            "S-1-5-21-101-202-303-1002",
+            sessionId,
+            "S-1-5-21-101-202-303-1003",
+            "WinSta0",
+            "CodexSandboxDesktop",
+            "Default",
+            "INTERACTIVE_USER_MISMATCH");
+        var opts = new CliOptions
+        {
+            PackageRoot = _testDir,
+            DataDir = dataDir,
+            AppPath = Path.Combine(_testDir, "AgentRecorder.App.exe")
+        };
+
+        var result = Program.EnsureRunningCore(opts, desktop);
+
+        Assert.False(result.Ok);
+        Assert.Equal("INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED", result.Code);
+        Assert.Equal("none", result.LaunchPath);
+        Assert.False(Directory.Exists(dataDir));
+    }
+
+    [Fact]
     public void EnsureRunningCore_ReadyTimeout_DoesNotCreateEnsureContext()
     {
         var dataDir = Path.Combine(_testDir, "error-timeout-no-context");

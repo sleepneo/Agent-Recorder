@@ -283,12 +283,13 @@ public sealed class RecurringPlanProfileBindingTests
     {
         using var database = new TestDatabase();
         database.Store.Initialize();
-        Assert.Equal(18L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal("schema_v10_recurring_plan_profile_bindings", ScalarString(database.Store.DatabasePath, "SELECT name FROM schema_migrations WHERE version = 10;"));
         Assert.Equal("3ed33a8d8176dc56b35fa035f45a5bc2dd6ef95c70979065b73a399adee4e727", ScalarString(database.Store.DatabasePath, "SELECT definition_checksum FROM schema_migrations WHERE version = 10;"));
         Assert.Equal(0L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recurring_plan_profile_bindings;"));
         Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_recurring_plan_profile_bindings_profile_ref_plan_id';"));
-        Assert.Equal(4L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'recurring_plan_profile_bindings';"));
+        Assert.Equal(5L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'recurring_plan_profile_bindings';"));
+        Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_recurring_plan_profile_bindings_reject_deleted_profile';"));
 
         Execute(database.Store.DatabasePath, "DROP INDEX idx_recurring_plan_profile_bindings_profile_ref_plan_id;");
         var exception = Assert.Throws<SqliteOperationalStoreException>(() => database.Store.Initialize());
@@ -423,7 +424,7 @@ public sealed class RecurringPlanProfileBindingTests
 
         database.Store.Initialize();
 
-        Assert.Equal(18L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM plans WHERE id = 'v9-periodic-plan';"));
         Assert.Equal(1L, Scalar(database.Store.DatabasePath, "SELECT COUNT(*) FROM recurring_schedule_versions WHERE plan_id = 'v9-periodic-plan' AND schedule_revision = 1;"));
         Assert.Equal(schedule.CanonicalDigest, ScalarString(database.Store.DatabasePath, "SELECT schedule_digest FROM recurring_schedule_versions WHERE plan_id = 'v9-periodic-plan' AND schedule_revision = 1;"));

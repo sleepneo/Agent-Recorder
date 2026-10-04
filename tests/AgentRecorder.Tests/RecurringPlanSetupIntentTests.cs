@@ -455,7 +455,7 @@ public sealed class RecurringPlanSetupIntentTests
 
         database.Store.Initialize();
 
-        Assert.Equal(18L, Scalar(database.Store, "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, Scalar(database.Store, "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal("standing_once_fixed_region", Text(database.Store, "SELECT intent_kind_code FROM setup_intents WHERE intent_id = 'v13-standing';"));
         Assert.Equal("v13-key", Text(database.Store, "SELECT idempotency_key FROM setup_intents WHERE intent_id = 'v13-standing';"));
         Assert.Equal("S-1-5-21-v13", Text(database.Store, "SELECT current_user_sid FROM setup_intents WHERE intent_id = 'v13-standing';"));

@@ -45,13 +45,17 @@ void EventWriter::Started(const std::string& recordingId,
     EndBlock();
 }
 
-void EventWriter::FirstFrame(int64_t frameNumber,
-                             int64_t elapsedMs) {
+void EventWriter::FirstFrame(const std::string& recordingId,
+                             int64_t frameNumber,
+                             int64_t elapsedMs,
+                             int64_t sourceTimeHns) {
     std::lock_guard<std::mutex> lock(writeMutex_);
     WriteLine("RESULT", "FIRST_FRAME");
     WriteLine("Stage", "Capturing");
+    WriteLine("RecordingId", recordingId);
     WriteLine("FrameNumber", frameNumber);
     WriteLine("ElapsedMs", elapsedMs);
+    WriteLine("SourceTimeHns", sourceTimeHns);
     EndBlock();
 }
 

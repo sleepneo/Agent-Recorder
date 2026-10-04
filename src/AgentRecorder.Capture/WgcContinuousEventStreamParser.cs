@@ -20,7 +20,7 @@ public static class WgcContinuousEventStreamParser
     {
         "RESULT", "Stage", "RecordingId", "Output", "Container", "Codec", "Fps",
         "Width", "Height", "FramesCaptured", "FrameNumber", "FramesDropped", "ElapsedMs",
-        "DurationMs", "BytesWritten", "FileSize", "StopReason", "CaptureMethod",
+        "DurationMs", "SourceTimeHns", "BytesWritten", "FileSize", "StopReason", "CaptureMethod",
         "EncoderMode", "EncoderSelectionReason", "HRESULT", "Reason", "ErrorCode",
         "PartialOutputPath"
     };
@@ -176,6 +176,12 @@ public static class WgcContinuousEventStreamParser
                         evt.ElapsedMs = em;
                     else
                         evt.ElapsedMsParseFailed = true;
+                    break;
+                case "SourceTimeHns":
+                    if (long.TryParse(value, out var sourceTimeHns))
+                        evt.SourceTimeHns = sourceTimeHns;
+                    else
+                        evt.SourceTimeHnsParseFailed = true;
                     break;
                 case "DurationMs":
                     if (long.TryParse(value, out var dm))
@@ -440,6 +446,11 @@ public static class WgcContinuousEventStreamParser
                         hasMalformedSequence = true;
                         summary.ValidationErrors.Add("Duplicate FIRST_FRAME event");
                     }
+                    if (!string.Equals(evt.RecordingId, firstRecordingId, StringComparison.Ordinal))
+                    {
+                        hasMalformedSequence = true;
+                        summary.ValidationErrors.Add("FIRST_FRAME RecordingId does not match STARTED session identity");
+                    }
 
                     // Required FIRST_FRAME fields: FrameNumber (positive), ElapsedMs (non-negative)
                     if (evt.FrameNumberParseFailed)
@@ -454,9 +465,16 @@ public static class WgcContinuousEventStreamParser
                     else if (evt.ElapsedMs < 0)
                         summary.ValidationErrors.Add("FIRST_FRAME event ElapsedMs must be non-negative");
 
+                    if (evt.SourceTimeHnsParseFailed)
+                        summary.ValidationErrors.Add("FIRST_FRAME event failed to parse SourceTimeHns");
+                    else if (!evt.SourceTimeHns.HasValue || evt.SourceTimeHns < 0)
+                        summary.ValidationErrors.Add("FIRST_FRAME event missing or invalid SourceTimeHns (WGC SystemRelativeTime, 100-ns units)");
+
                     if (!seenFirstFrame && seenStarted && !seenTerminalEvent
                         && evt.FrameNumber.HasValue && evt.FrameNumber > 0
-                        && evt.ElapsedMs.HasValue && evt.ElapsedMs >= 0)
+                        && evt.ElapsedMs.HasValue && evt.ElapsedMs >= 0
+                        && evt.SourceTimeHns.HasValue && evt.SourceTimeHns >= 0
+                        && string.Equals(evt.RecordingId, firstRecordingId, StringComparison.Ordinal))
                     {
                         summary.FirstFrameObserved = true;
                         summary.FirstFrameNumber = evt.FrameNumber;

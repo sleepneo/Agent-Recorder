@@ -7,7 +7,9 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public enum CaptureAbortReason
 {
-    DisplayUnavailable = 1
+    DisplayUnavailable = 1,
+    StorageSpaceLow = 2,
+    StorageCapacityUnavailable = 3
 }
 
 public static class CaptureAbortReasonCodes
@@ -15,6 +17,8 @@ public static class CaptureAbortReasonCodes
     public static string ToCode(CaptureAbortReason reason) => reason switch
     {
         CaptureAbortReason.DisplayUnavailable => "display_unavailable",
+        CaptureAbortReason.StorageSpaceLow => "storage_space_low",
+        CaptureAbortReason.StorageCapacityUnavailable => "storage_capacity_unavailable",
         _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, "Unknown capture abort reason.")
     };
 }

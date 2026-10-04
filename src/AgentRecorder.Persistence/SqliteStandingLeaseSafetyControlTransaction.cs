@@ -661,7 +661,9 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
     internal StandingLeaseSafetyControlResult StopAllAndRevokeAll(
         string operationId,
         string reasonCode,
-        DateTimeOffset nowUtc)
+        DateTimeOffset nowUtc,
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null)
     {
         using var connection = OpenBusinessConnection();
         SqliteTransaction? transaction = null;
@@ -776,8 +778,13 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 UpdateRecurringLease(connection, transaction, lease, expectedVersion, expectedStatus);
             }
 
+            var futureWindowRevocation = RevokeFutureWindowGrants(
+                connection, transaction, futureWindowUserSid, futureWindowSessionBinding, nowUtc, "stop_all_applied");
+            requiresActiveRunStop |= futureWindowRevocation.RequiresActiveRunStop;
+
             // Stop All is linearized by this write transaction: every lease
-            // visible here is revoked before the history summary is updated.
+            // and future-window grant in scope visible here is revoked before
+            // the history summary is updated.
             // The summary is intentionally not consulted as a future global
             // gate; a later, fully approved authorization gets its own lease
             // boundary and may execute while unattended mode is enabled.
@@ -822,7 +829,9 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
         string operationId,
         bool enabled,
         string reasonCode,
-        DateTimeOffset nowUtc)
+        DateTimeOffset nowUtc,
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null)
     {
         using var connection = OpenBusinessConnection();
         SqliteTransaction? transaction = null;
@@ -843,16 +852,34 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                         StandingLeaseSafetyControlResult.Rejected(operationId, identityFailure));
                 }
 
-                var replayRequiresActiveRunStop = !enabled && HasAnyActiveRuns(connection, transaction);
+                var replayRequiresActiveRunStop = !enabled && HasAnyActiveRuns(
+                    connection, transaction, futureWindowUserSid, futureWindowSessionBinding);
                 transaction.Commit();
                 return ExistingOperationResult(existing, replayRequiresActiveRunStop);
             }
 
             var globalState = ReadGlobalState(connection, transaction);
             var targetMode = enabled ? UnattendedModeStatus.Enabled : UnattendedModeStatus.Disabled;
-            var requiresActiveRunStop = !enabled && HasAnyActiveRuns(connection, transaction);
+            var futureWindowRevocation = !enabled
+                ? RevokeFutureWindowGrants(
+                    connection, transaction, futureWindowUserSid, futureWindowSessionBinding, nowUtc, "unattended_disabled")
+                : (RevokedCount: 0, RequiresActiveRunStop: false);
+            var requiresActiveRunStop = !enabled &&
+                (HasAnyActiveRuns(connection, transaction, futureWindowUserSid, futureWindowSessionBinding) ||
+                 futureWindowRevocation.RequiresActiveRunStop);
             if (globalState.UnattendedMode == targetMode)
             {
+                if (!enabled && futureWindowRevocation.RevokedCount > 0)
+                {
+                    var revokedResult = StandingLeaseSafetyControlResult.ChangedResult(
+                        operationId, StandingLeaseSafetyReasonCodes.UnattendedDisabled, requiresActiveRunStop);
+                    InsertOperation(
+                        connection, transaction, operationId, operationKind, null, null, nowUtc,
+                        reasonCode, StoredResultCode(revokedResult), changed: true, requiresActiveRunStop, nowUtc);
+                    _beforeCommitForTest?.Invoke(connection, transaction);
+                    return CommitResult(transaction, revokedResult);
+                }
+
                 var idempotentResult = StandingLeaseSafetyControlResult.AlreadyAppliedResult(
                     operationId,
                     enabled ? StandingLeaseSafetyReasonCodes.UnattendedAlreadyEnabled : StandingLeaseSafetyReasonCodes.UnattendedDisabled,
@@ -1465,12 +1492,97 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
         return reader.Read() ? ReadLeaseUseSnapshot(reader) : null;
     }
 
-    private static bool HasAnyActiveRuns(SqliteConnection connection, SqliteTransaction transaction)
+    private static bool HasAnyActiveRuns(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS(SELECT 1 FROM recording_runs WHERE status_code NOT IN ('settled', 'started_unknown', 'session_interrupted', 'failed'));";
+        command.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM recording_runs
+                WHERE status_code NOT IN ('settled', 'started_unknown', 'session_interrupted', 'failed'))
+            OR ($sid IS NOT NULL AND $session IS NOT NULL AND EXISTS(
+                SELECT 1 FROM future_window_authorizations
+                WHERE current_user_sid = $sid AND session_binding = $session
+                  AND run_status IN ('start_committed', 'started_unknown', 'recording', 'finalizing')));
+            """;
+        Add(command, "$sid", futureWindowUserSid);
+        Add(command, "$session", futureWindowSessionBinding);
         return Convert.ToInt64(command.ExecuteScalar()) == 1;
+    }
+
+    private static (int RevokedCount, bool RequiresActiveRunStop) RevokeFutureWindowGrants(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string? currentUserSid,
+        string? currentSessionBinding,
+        DateTimeOffset nowUtc,
+        string reasonCode)
+    {
+        if (string.IsNullOrWhiteSpace(currentUserSid) || string.IsNullOrWhiteSpace(currentSessionBinding))
+        {
+            using var unscoped = connection.CreateCommand();
+            unscoped.Transaction = transaction;
+            unscoped.CommandText = "SELECT EXISTS(SELECT 1 FROM future_window_authorizations WHERE status_code IN ('pending', 'active', 'used'));";
+            if (Convert.ToInt64(unscoped.ExecuteScalar()) == 1)
+                throw new Phase3PersistenceException(
+                    "future_window_scope_unavailable", "Global safety cannot claim success without the current future-window user/session scope.");
+            return (0, false);
+        }
+
+        using var count = connection.CreateCommand();
+        count.Transaction = transaction;
+        count.CommandText = """
+            SELECT COUNT(*),
+                   COALESCE(MAX(CASE WHEN run_status IN ('start_committed', 'started_unknown', 'recording', 'finalizing')
+                                     THEN 1 ELSE 0 END), 0),
+                   COALESCE(MAX(CASE WHEN version = 9223372036854775807 THEN 1 ELSE 0 END), 0)
+            FROM future_window_authorizations
+            WHERE current_user_sid = $sid AND session_binding = $session
+              AND status_code IN ('pending', 'active', 'used');
+            """;
+        Add(count, "$sid", currentUserSid);
+        Add(count, "$session", currentSessionBinding);
+        int countToRevoke;
+        bool requiresStop;
+        bool versionExhausted;
+        using (var reader = count.ExecuteReader())
+        {
+            if (!reader.Read())
+                throw new PersistedSnapshotException("Future-window grants could not be counted for safety revocation.");
+            countToRevoke = checked((int)reader.GetInt64(0));
+            requiresStop = reader.GetInt64(1) == 1;
+            versionExhausted = reader.GetInt64(2) == 1;
+        }
+
+        if (versionExhausted)
+            throw new Phase3PersistenceException(
+                "future_window_version_exhausted", "A future-window grant cannot be advanced safely during global revocation.");
+        if (countToRevoke == 0)
+            return (0, false);
+
+        using var revoke = connection.CreateCommand();
+        revoke.Transaction = transaction;
+        revoke.CommandText = """
+            UPDATE future_window_authorizations
+            SET status_code = 'revoked', reason_code = $reason,
+                updated_at_utc = MAX(updated_at_utc, $now), version = version + 1
+            WHERE current_user_sid = $sid AND session_binding = $session
+              AND status_code IN ('pending', 'active', 'used')
+              AND version < 9223372036854775807;
+            """;
+        Add(revoke, "$reason", reasonCode);
+        Add(revoke, "$now", nowUtc.ToUniversalTime().ToUnixTimeMilliseconds());
+        Add(revoke, "$sid", currentUserSid);
+        Add(revoke, "$session", currentSessionBinding);
+        var changed = revoke.ExecuteNonQuery();
+        if (changed != countToRevoke)
+            throw new Phase3PersistenceException(
+                "future_window_revoke_incomplete", "Not every in-scope future-window grant was durably revoked.");
+        return (changed, requiresStop);
     }
 
     private static IReadOnlyList<RecordingRun> LoadRunsByOccurrence(SqliteConnection connection, SqliteTransaction transaction, string occurrenceId)

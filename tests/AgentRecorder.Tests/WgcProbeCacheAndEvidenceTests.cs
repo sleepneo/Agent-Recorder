@@ -599,7 +599,7 @@ public sealed class WgcContinuousProbeCacheAndEvidenceTests
             new WgcHelperProcessResult
             {
                 ExitCode = 0,
-                StandardOutput = "wgc-native-helper 0.3.0\n"
+                StandardOutput = "wgc-native-helper 0.4.0\n"
             },
             new WgcHelperProcessResult
             {

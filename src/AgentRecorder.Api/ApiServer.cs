@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
 using AgentRecorder.Core;
+using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
 using AgentRecorder.Windows;
@@ -44,6 +45,10 @@ public sealed class ApiServer
     private readonly IRecurringPlanSetupGateway? _recurringPlanSetupGateway;
     private readonly IPlanExecutionStatusGateway? _planExecutionStatusGateway;
     private readonly IRequiredOncePlanSetupGateway? _requiredOncePlanSetupGateway;
+    private readonly IFutureWindowOneShotGateway? _futureWindowOneShotGateway;
+    private readonly IFixedRegionProfileManagementGateway? _profileManagementGateway;
+    private readonly IFixedRegionProfileDisplayEnvironmentProvider _profileDisplayEnvironmentProvider;
+    private readonly FixedRegionProfileSelectionCache _profileSelectionCache = new();
     private CancellationTokenSource _cts = new();
     private Task? _loopTask;
     private int _started;
@@ -66,10 +71,13 @@ public sealed class ApiServer
         IStandingPlanSetupGateway? standingPlanSetupGateway = null,
         IRecurringPlanSetupGateway? recurringPlanSetupGateway = null,
         IPlanExecutionStatusGateway? planExecutionStatusGateway = null,
-        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null)
+        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null,
+        IFutureWindowOneShotGateway? futureWindowOneShotGateway = null,
+        IFixedRegionProfileManagementGateway? profileManagementGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
-            planExecutionStatusGateway, Port, requiredOncePlanSetupGateway)
+            planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
+            profileManagementGateway, null)
     {
     }
 
@@ -84,7 +92,10 @@ public sealed class ApiServer
         IRecurringPlanSetupGateway? recurringPlanSetupGateway,
         IPlanExecutionStatusGateway? planExecutionStatusGateway,
         int listenPort,
-        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null)
+        IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null,
+        IFutureWindowOneShotGateway? futureWindowOneShotGateway = null,
+        IFixedRegionProfileManagementGateway? profileManagementGateway = null,
+        IFixedRegionProfileDisplayEnvironmentProvider? profileDisplayEnvironmentProvider = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -100,6 +111,10 @@ public sealed class ApiServer
         _recurringPlanSetupGateway = recurringPlanSetupGateway;
         _planExecutionStatusGateway = planExecutionStatusGateway;
         _requiredOncePlanSetupGateway = requiredOncePlanSetupGateway;
+        _futureWindowOneShotGateway = futureWindowOneShotGateway;
+        _profileManagementGateway = profileManagementGateway;
+        _profileDisplayEnvironmentProvider = profileDisplayEnvironmentProvider ??
+            SystemQueryFixedRegionProfileDisplayEnvironmentProvider.Instance;
         _lastSelectedRegion = RegionSelectionStateStore.Load();
     }
 
@@ -229,8 +244,8 @@ public sealed class ApiServer
                     ApiKeyAuth.ValidateHeader(request.Headers.GetValueOrDefault("x-agent-recorder-key"));
                 }
 
-                var responseBody = Route(method, path, request, body, reqId, out int status);
-                await WriteJson(stream, status, responseBody);
+                var responseBody = Route(method, path, request, body, reqId, out int status, out var responseHeaders);
+                await WriteJson(stream, status, responseBody, responseHeaders);
             }
             catch (ApiException ex)
             {
@@ -247,10 +262,13 @@ public sealed class ApiServer
         }
     }
 
-    private static async Task WriteJson(Stream stream, int status, string body)
+    private static async Task WriteJson(Stream stream, int status, string body, IReadOnlyDictionary<string, string>? responseHeaders = null)
     {
         var buf = Encoding.UTF8.GetBytes(body);
-        var headers = $"HTTP/1.1 {status} {StatusText(status)}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {buf.Length}\r\nConnection: close\r\n\r\n";
+        var extraHeaders = responseHeaders is null
+            ? string.Empty
+            : string.Concat(responseHeaders.Select(header => $"{header.Key}: {header.Value}\r\n"));
+        var headers = $"HTTP/1.1 {status} {StatusText(status)}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {buf.Length}\r\nConnection: close\r\n{extraHeaders}\r\n";
         var responseBytes = Encoding.UTF8.GetBytes(headers);
         await stream.WriteAsync(responseBytes);
         await stream.WriteAsync(buf);
@@ -260,12 +278,15 @@ public sealed class ApiServer
     private static string StatusText(int status) => status switch
     {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        412 => "Precondition Failed",
+        428 => "Precondition Required",
         202 => "Accepted",
         500 => "Internal Server Error",
         _ => "Unknown"
@@ -302,6 +323,7 @@ public sealed class ApiServer
         var rawPath = requestLine[1];
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var duplicateHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 1; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -309,7 +331,13 @@ public sealed class ApiServer
             if (idx <= 0) continue;
             var name = line[..idx].Trim();
             var value = line[(idx + 1)..].Trim();
-            headers[name] = value;
+            if (!headers.TryAdd(name, value))
+            {
+                if (name.Equals("If-Match", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("Idempotency-Key", StringComparison.OrdinalIgnoreCase))
+                    duplicateHeaders.Add(name);
+                headers[name] = value;
+            }
         }
 
         int contentLength = 0;
@@ -339,7 +367,7 @@ public sealed class ApiServer
         }
 
         var body = StripBom(Encoding.UTF8.GetString(bodyBytes));
-        return new HttpRequest(method, rawPath, headers, body);
+        return new HttpRequest(method, rawPath, headers, body, duplicateHeaders);
     }
 
     private static string StripBom(string s)
@@ -361,17 +389,19 @@ public sealed class ApiServer
 
     private static bool RequiresAuth(string method, string path)
     {
-        if (method == "POST" || method == "PUT" || method == "DELETE")
+        if (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE")
             return true;
 
-        var sensitivePaths = new[] { "/api/v1/recordings", "/api/v1/confirmations", "/api/v1/plan-setups", "/api/v1/plans" };
+        var sensitivePaths = new[] { "/api/v1/recordings", "/api/v1/confirmations", "/api/v1/plan-setups", "/api/v1/plans", "/api/v1/future-window-authorizations", "/api/v1/profiles" };
         return sensitivePaths.Any(p => path.StartsWith(p));
     }
 
     private string Route(string method, string path, HttpRequest req,
-                         string reqBody, string reqId, out int status)
+                         string reqBody, string reqId, out int status,
+                         out Dictionary<string, string> responseHeaders)
     {
         status = 200;
+        responseHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!path.StartsWith(Prefix))
             throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint");
         var sub = path[Prefix.Length..];
@@ -405,6 +435,7 @@ public sealed class ApiServer
                 return CreateQuickRecording(req, reqBody, reqId);
 
             case ("POST", "/region-selections"):
+            case ("POST", "/regions/select"):
                 return CreateRegionSelection(req, reqBody, reqId);
 
             case ("POST", "/plans"):
@@ -414,12 +445,90 @@ public sealed class ApiServer
                 return ApiResponse.Ok(new { recordings = _engine.List() }, reqId);
         }
 
+        if (TryRouteFixedRegionProfiles(sub, method, req, reqBody, reqId, ref status, responseHeaders, out var profileResponse))
+            return profileResponse;
+
         var seg = sub.Trim('/').Split('/');
 
         if (seg.Length >= 1 && seg[0] == "plan-setups" && method == "GET")
         {
             if (seg.Length != 2) throw PlanSetupNotFound();
             return GetPlanSetup(seg[1], req, reqId);
+        }
+
+        if (seg.Length >= 1 && seg[0] == "future-window-authorizations")
+        {
+            var gateway = _futureWindowOneShotGateway;
+
+            if (seg.Length == 1 && method == "POST")
+            {
+                var create = FutureWindowOneShotApiRequestParser.ParseCreate(
+                    reqBody, req.Headers.GetValueOrDefault("Idempotency-Key"));
+                if (gateway is null || !gateway.IsSetupSupported)
+                    throw new ApiException(503, "FUTURE_WINDOW_AUTHORIZATION_UNAVAILABLE",
+                        "The local future-window authorization host is unavailable.",
+                        new { reason_code = "future_window_runtime_unavailable" });
+                FutureWindowAuthorizationCreateResponse result;
+                try { result = gateway.CreateOrGet(create); }
+                catch (ApiException) { throw; }
+                catch (Exception exception)
+                {
+                    _audit.Log("future_window_authorization.api_create_failed", new
+                    { reason_code = "setup_persistence_failed", exception_type = exception.GetType().Name });
+                    throw new ApiException(500, "FUTURE_WINDOW_SETUP_FAILED", "The authorization setup could not be persisted.");
+                }
+                if (result.Result == "conflict")
+                    throw new ApiException(409, "IDEMPOTENCY_KEY_REUSED",
+                        "The Idempotency-Key is already bound to a different normalized request.",
+                        new { authorization_id = result.Authorization.AuthorizationId, reason_code = "idempotency_key_reused" });
+                status = 202;
+                return ApiResponse.Ok(result, reqId);
+            }
+
+            if (seg.Length == 2 && method == "GET")
+            {
+                if (gateway is null || !gateway.IsSetupSupported)
+                    throw new ApiException(503, "FUTURE_WINDOW_AUTHORIZATION_UNAVAILABLE",
+                        "The local future-window authorization host is unavailable.",
+                        new { reason_code = "future_window_runtime_unavailable" });
+                var state = gateway.Get(seg[1]);
+                if (state is null) throw FutureWindowNotFound();
+                return ApiResponse.Ok(state, reqId);
+            }
+
+            if (seg.Length == 3 && seg[2] == "runs" && method == "POST")
+            {
+                var windowId = FutureWindowOneShotApiRequestParser.ParseStartWindowId(reqBody);
+                if (gateway is null || !gateway.IsExecutionSupported)
+                    throw new ApiException(503, "FUTURE_WINDOW_EXECUTION_UNAVAILABLE",
+                        "The future-window run host is unavailable.",
+                        new { reason_code = gateway is null ? "future_window_runtime_unavailable" : "future_window_execution_unavailable" });
+                var result = gateway.Start(seg[1], windowId);
+                if (!result.Accepted || string.IsNullOrWhiteSpace(result.RunId))
+                    throw FutureWindowStartRejected(result.ReasonCode ?? "future_window_start_rejected");
+                status = 202;
+                return ApiResponse.Ok(new FutureWindowAuthorizationRunResponse(
+                    "start_committed", result.RunId, $"{Prefix}/recordings/{Uri.EscapeDataString(result.RunId)}"), reqId);
+            }
+
+            if (seg.Length == 3 && seg[2] == "revoke" && method == "POST")
+            {
+                if (reqBody.Length > 0 && reqBody.Trim() != "{}")
+                    throw new ApiException(400, "INVALID_ARGUMENT", "Revoke request body must be empty or {}.");
+                if (gateway is null || !gateway.IsSetupSupported)
+                    throw new ApiException(503, "FUTURE_WINDOW_AUTHORIZATION_UNAVAILABLE",
+                        "The local future-window authorization host is unavailable.",
+                        new { reason_code = "future_window_runtime_unavailable" });
+                var state = gateway.Revoke(seg[1]);
+                if (state is null) throw FutureWindowNotFound();
+                return ApiResponse.Ok(new FutureWindowAuthorizationRevokeResponse(
+                    state.Status == "revoked", state), reqId);
+            }
+
+            if (gateway is null || !gateway.IsSetupSupported)
+                throw new ApiException(503, "FUTURE_WINDOW_AUTHORIZATION_UNAVAILABLE",
+                    "The local future-window authorization host is unavailable.",
+                    new { reason_code = "future_window_runtime_unavailable" });
         }
 
         if (seg.Length >= 1 && seg[0] == "plans" && method == "GET")
@@ -471,6 +580,19 @@ public sealed class ApiServer
 
         throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint: " + sub);
     }
+
+    private static ApiException FutureWindowNotFound() =>
+        new(404, "FUTURE_WINDOW_AUTHORIZATION_NOT_FOUND", "The future-window authorization was not found.");
+
+    private static ApiException FutureWindowStartRejected(string reason) => reason switch
+    {
+        "future_window_not_found" => FutureWindowNotFound(),
+        "future_window_not_active" => new ApiException(409, "FUTURE_WINDOW_NOT_ACTIVE", "The authorization is not active.", new { reason_code = reason }),
+        "future_window_expired" => new ApiException(409, "FUTURE_WINDOW_EXPIRED", "The authorization has expired.", new { reason_code = reason }),
+        "multiple_eligible_windows" => new ApiException(409, "FUTURE_WINDOW_AMBIGUOUS", "More than one eligible window belongs to the approved executable.", new { reason_code = reason }),
+        "recording_conflict" => new ApiException(409, "RECORDING_CONFLICT", "Another recording is active.", new { reason_code = reason }),
+        _ => new ApiException(409, "FUTURE_WINDOW_START_REJECTED", "The exact future-window target did not pass the start gate.", new { reason_code = reason })
+    };
 
     private string GetPlanExecutionStatus(string planId, string requestId)
     {
@@ -1128,24 +1250,75 @@ public sealed class ApiServer
         ConsumeEnsureContextAndAssociate(req, traceId);
         _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
 
+        bool isProfileRequest = ContainsProfileRefProperty(reqBody);
         JsonNode cfg;
-        try
+        if (isProfileRequest)
         {
-            cfg = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
-                  ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+            // The profile parser below uses JsonDocument so duplicate properties
+            // remain observable instead of being collapsed by JsonNode.
+            cfg = new JsonObject();
         }
-        catch
+        else
         {
-            // Entry-level failure: no recording was created. Record the intent-level
-            // validation failure and surface a stable 400 without leaking raw input.
-            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
-            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body");
+            try
+            {
+                cfg = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
+                      ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+            }
+            catch
+            {
+                _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "INVALID_ARGUMENT");
+                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body");
+            }
         }
 
         object result;
         try
         {
-            result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+            if (isProfileRequest)
+            {
+                var profileRef = FixedRegionProfileRecordingRequest.Parse(reqBody);
+                var gateway = _profileManagementGateway ?? throw new ApiException(503,
+                    "PROFILE_EXECUTION_UNAVAILABLE", "Fixed-region profile execution is unavailable.",
+                    new { field = "profile_ref", reason_code = "profile_gateway_unavailable" });
+                FixedRegionProfileExactVersionSnapshot? snapshot;
+                try { snapshot = gateway.ReadExactVersionSnapshot(profileRef.ProfileId, profileRef.ProfileVersion); }
+                catch (Exception ex)
+                {
+                    _audit.Log("recording.profile_snapshot_read_failed", new
+                    {
+                        profile_id = profileRef.ProfileId,
+                        profile_version = profileRef.ProfileVersion,
+                        exception_type = ex.GetType().Name
+                    });
+                    throw new ApiException(503, "PROFILE_EXECUTION_UNAVAILABLE",
+                        "The exact fixed-region profile snapshot could not be read.",
+                        new { field = "profile_ref", reason_code = "profile_snapshot_unavailable" });
+                }
+                if (snapshot?.Version is null)
+                    throw new ApiException(404, "PROFILE_VERSION_NOT_FOUND",
+                        "The referenced fixed-region profile version does not exist.",
+                        new { field = "profile_ref", reason_code = "profile_version_not_found" });
+                if (snapshot.Directory.IsDeleted)
+                    throw new ApiException(409, "PROFILE_DELETED",
+                        "The fixed-region profile has been deleted.",
+                        new { field = "profile_ref", reason_code = "profile_deleted" });
+                if (!profileRef.Matches(snapshot.Version))
+                    throw new ApiException(409, "PROFILE_REF_MISMATCH",
+                        "The supplied profile reference does not match the immutable profile version.",
+                        new { field = "profile_ref.digest", reason_code = "profile_digest_mismatch" });
+
+                var profile = snapshot.Version;
+                ValidateInteractiveProfile(profile);
+                string? ValidateEnvironment() => ValidateProfileEnvironment(profile, _profileDisplayEnvironmentProvider);
+                var config = BuildInteractiveProfileConfig(profile);
+                result = _engine.CreateRecordingFromFixedRegionProfile(
+                    config, agent, _tray, profileRef, ValidateEnvironment, traceId, endpoint);
+            }
+            else
+            {
+                result = _engine.CreateRecording(cfg, agent, _tray, traceId, endpoint);
+            }
         }
         catch (ApiException ex)
         {
@@ -1159,14 +1332,160 @@ public sealed class ApiServer
         return ApiResponse.Ok(ApplyCreationWait(result, creationWaitMs), reqId);
     }
 
+    private static bool ContainsProfileRefProperty(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+            return document.RootElement.ValueKind == JsonValueKind.Object &&
+                   document.RootElement.EnumerateObject().Any(property => property.Name == "profile_ref");
+        }
+        catch { return false; }
+    }
+
+    private static void ValidateInteractiveProfile(RecurringFixedRegionProfileVersion profile)
+    {
+        if (Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE") == "1")
+            throw new ApiException(503, "PROFILE_EXECUTION_UNAVAILABLE",
+                "Fixed-region profile execution is disabled in test mode.",
+                new { field = "profile_ref", reason_code = "test_mode_forbidden" });
+        if (profile.TargetType != AuthorizedScopeTargetType.FixedRegion ||
+            profile.RebindPolicy != RecurringFixedRegionRebindPolicy.ExactMatchOnly ||
+            profile.CaptureSemantics != AuthorizedCaptureSemantics.DesktopRegion ||
+            profile.CoordinateSpace != AuthorizedCoordinateSpace.PhysicalVirtualScreen ||
+            profile.DisplayIdentityStatus != AuthorizedDisplayIdentityStatus.Resolved ||
+            profile.Backend != AuthorizedCaptureBackend.FfmpegRegion ||
+            profile.AudioMode != AuthorizedAudioMode.None ||
+            profile.OutputConflictPolicy != AuthorizedOutputConflictPolicy.FailIfExists)
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The selected profile contains settings unsupported for interactive recording.",
+                new { field = "profile_ref", reason_code = "unsupported_profile_policy" });
+
+        if (profile.Duration.Ticks % TimeSpan.TicksPerSecond != 0 ||
+            profile.Duration.TotalSeconds is < 1 or > 600)
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The profile duration must be a whole number of seconds from 1 through 600.",
+                new { field = "profile_ref.duration", reason_code = "unsupported_duration_precision" });
+        if (profile.CountdownSeconds is < 0 or > 10)
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The profile countdown is outside the supported interactive range.",
+                new { field = "profile_ref.countdown_seconds", reason_code = "unsupported_countdown" });
+        if ((profile.RegionWithinDisplay.Width & 1) != 0 || (profile.RegionWithinDisplay.Height & 1) != 0 ||
+            profile.RegionWithinDisplay.Width < 32 || profile.RegionWithinDisplay.Height < 32)
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The fixed region must have even coordinates and dimensions and be at least 32 by 32 pixels.",
+                new { field = "profile_ref.region", reason_code = "unsupported_region_geometry" });
+        if (!Path.IsPathFullyQualified(profile.OutputDirectory))
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The profile output directory must be absolute.",
+                new { field = "profile_ref.output_directory", reason_code = "absolute_path_required" });
+        try { _ = profile.VirtualScreenRegion; }
+        catch (Phase3DomainException)
+        {
+            throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
+                "The fixed-region coordinates overflow the physical desktop coordinate range.",
+                new { field = "profile_ref.region", reason_code = "region_coordinate_overflow" });
+        }
+    }
+
+    private static string? ValidateProfileEnvironment(
+        RecurringFixedRegionProfileVersion profile,
+        IFixedRegionProfileDisplayEnvironmentProvider provider)
+    {
+        IReadOnlyList<StandingLeaseDisplayMetadata> displays;
+        try { displays = provider.GetExecutionMetadata(); }
+        catch { return "display_topology_unavailable"; }
+        if (!StandingLeaseDisplayTopologyDigest.TryCompute(displays, out var digest))
+            return "display_topology_incomplete";
+        if (!string.Equals(digest, profile.TopologyDigest, StringComparison.Ordinal))
+            return "display_topology_changed";
+        var matches = displays.Where(display => string.Equals(
+            display.StableDisplayFingerprint, profile.StableDisplayFingerprint, StringComparison.Ordinal)).ToArray();
+        if (matches.Length != 1) return "display_identity_not_unique";
+        var current = matches[0];
+        if (current.IdentityStatus != DisplayIdentityResolutionStatus.Resolved || current.PhysicalBounds is null ||
+            current.DpiX != profile.DpiX || current.DpiY != profile.DpiY ||
+            current.PhysicalWidth != profile.PhysicalWidth || current.PhysicalHeight != profile.PhysicalHeight ||
+            current.Orientation != profile.Orientation)
+            return "display_metadata_changed";
+        var expectedBounds = profile.DisplayBounds;
+        if (current.PhysicalBounds.Value != expectedBounds) return "display_bounds_changed";
+        var region = profile.RegionWithinDisplay;
+        long right, bottom, displayRight, displayBottom;
+        try
+        {
+            right = checked((long)region.X + region.Width);
+            bottom = checked((long)region.Y + region.Height);
+            displayRight = checked((long)expectedBounds.Width);
+            displayBottom = checked((long)expectedBounds.Height);
+        }
+        catch (OverflowException) { return "region_coordinate_overflow"; }
+        if (region.X < 0 || region.Y < 0 || right > displayRight || bottom > displayBottom)
+            return "region_outside_display";
+        try { _ = profile.VirtualScreenRegion; }
+        catch (Phase3DomainException) { return "region_coordinate_overflow"; }
+        return null;
+    }
+
+    private JsonNode BuildInteractiveProfileConfig(RecurringFixedRegionProfileVersion profile)
+    {
+        var bounds = profile.VirtualScreenRegion;
+        DisplayTopologySnapshot display;
+        try
+        {
+            var matches = _profileDisplayEnvironmentProvider.GetTopology()
+                .Where(item => string.Equals(item.StableIdentity, profile.StableDisplayFingerprint, StringComparison.Ordinal)).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException("Display identity is not unique.");
+            display = matches[0];
+        }
+        catch
+        {
+            throw new ApiException(409, "PROFILE_ENVIRONMENT_CHANGED",
+                "The profile display is no longer uniquely available.",
+                new { field = "profile_ref", reason_code = "display_identity_not_unique" });
+        }
+        if (string.IsNullOrWhiteSpace(display.PublicId))
+            throw new ApiException(409, "PROFILE_ENVIRONMENT_CHANGED",
+                "The profile display is no longer uniquely available.",
+                new { field = "profile_ref", reason_code = "display_identity_not_unique" });
+        return new JsonObject
+        {
+            ["source"] = new JsonObject
+            {
+                ["type"] = "region", ["display_id"] = display.PublicId,
+                ["coordinate_space"] = "virtual_screen",
+                ["bounds"] = new JsonObject
+                {
+                    ["x"] = bounds.X, ["y"] = bounds.Y,
+                    ["width"] = bounds.Width, ["height"] = bounds.Height
+                }
+            },
+            ["countdown_seconds"] = profile.CountdownSeconds,
+            ["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = (int)profile.Duration.TotalSeconds },
+            ["output"] = new JsonObject
+            {
+                ["directory"] = profile.OutputDirectory,
+                ["filename_template"] = profile.FilenamePrefix + "-{datetime}-{id}",
+                ["conflict_policy"] = "fail"
+            },
+            ["video"] = new JsonObject { ["fps"] = 30, ["quality"] = "medium" }
+        };
+    }
+
     private string CreateRegionSelection(HttpRequest req, string reqBody, string reqId)
     {
         JsonNode body = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
                         ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
 
         var purpose = body["purpose"]?.GetValue<string>() ?? "recording";
-        if (purpose != "recording")
+        if (purpose is not ("recording" or "profile"))
             throw new ApiException(400, "INVALID_ARGUMENT", $"purpose '{purpose}' not supported");
+        var profilePurpose = purpose == "profile";
+        if (profilePurpose && (_profileManagementGateway is not IFixedRegionProfileSelectionCreationGateway ||
+                               !_tray.SupportsRegionSelectionUi))
+            throw new ApiException(503, "PROFILE_SELECTION_UNAVAILABLE",
+                "Interactive profile selection is unavailable on this host.",
+                new { reason_code = "interactive_selector_unavailable", suggested_action = "use_an_interactive_desktop" });
 
         var timeoutSeconds = body["timeout_seconds"]?.GetValue<int?>() ?? 120;
         if (timeoutSeconds < 10 || timeoutSeconds > 600)
@@ -1179,7 +1498,7 @@ public sealed class ApiServer
         _tray.RequestRegionSelection(timeoutSeconds, (status, x, y, w, h, displayId, coordSpace) =>
         {
             tcs.TrySetResult((status, x, y, w, h, displayId, coordSpace));
-        });
+        }, purpose);
 
         // 等待结果（带整体超时保护）
         var timeoutTask = Task.Delay((timeoutSeconds + 10) * 1000);
@@ -1192,6 +1511,26 @@ public sealed class ApiServer
 
         if (result.status == "selected")
         {
+            if (profilePurpose)
+            {
+                if (!TrySnapshotProfileSelection(result.x, result.y, result.w, result.h, result.coordSpace,
+                        out var snapshot, out var reason))
+                    throw new ApiException(422, "PROFILE_SELECTION_NOT_EXECUTABLE",
+                        "The selected region is not a supported fixed-display profile region.",
+                        new { reason_code = reason, suggested_action = "reselect_a_single_display_even_sized_region" });
+                snapshot = snapshot with { ExpiresAtUtc = DateTimeOffset.UtcNow + FixedRegionProfileSelectionCache.Lifetime };
+                if (!_profileSelectionCache.TryAdd(snapshot, out var selectionRef))
+                    throw new ApiException(429, "PROFILE_SELECTION_CACHE_FULL",
+                        "Too many unexpired profile selections are pending.",
+                        new { reason_code = "selection_cache_full", suggested_action = "create_a_profile_or_wait_for_expiry" });
+                return ApiResponse.Ok(new
+                {
+                    status = "selected", display_id = result.displayId, coordinate_space = result.coordSpace,
+                    bounds = new { x = result.x, y = result.y, width = result.w, height = result.h },
+                    selection_ref = selectionRef, expires_at = snapshot.ExpiresAtUtc
+                }, reqId);
+            }
+
             var state = new SelectedRegionState(
                 Available: true,
                 DisplayId: result.displayId,
@@ -1240,6 +1579,91 @@ public sealed class ApiServer
         };
 
         return ApiResponse.Ok(response, reqId);
+    }
+
+    private bool TrySnapshotProfileSelection(int x, int y, int width, int height, string coordinateSpace,
+        out FixedRegionProfileSelectionSnapshot snapshot, out string reason)
+    {
+        snapshot = null!;
+        reason = "selection_environment_unavailable";
+        if (!string.Equals(coordinateSpace, "virtual_screen", StringComparison.Ordinal) ||
+            width < 32 || height < 32 || (width & 1) != 0 || (height & 1) != 0)
+        {
+            reason = "selection_geometry_invalid";
+            return false;
+        }
+
+        IReadOnlyList<StandingLeaseDisplayMetadata> displays;
+        try { displays = _profileDisplayEnvironmentProvider.GetExecutionMetadata(); }
+        catch { return false; }
+        if (!StandingLeaseDisplayTopologyDigest.TryCompute(displays, out var topologyDigest))
+        {
+            reason = "display_topology_incomplete";
+            return false;
+        }
+
+        AuthorizedPhysicalRectangle selected;
+        try { selected = new AuthorizedPhysicalRectangle(x, y, width, height); }
+        catch (ArgumentException) { reason = "selection_geometry_invalid"; return false; }
+        var matches = displays.Where(item => item.PhysicalBounds is { } bounds && Contains(bounds, selected)).ToArray();
+        if (matches.Length != 1)
+        {
+            reason = matches.Length == 0 ? "selection_crosses_display_or_outside" : "display_identity_not_unique";
+            return false;
+        }
+        var display = matches[0];
+        if (display.IdentityStatus != DisplayIdentityResolutionStatus.Resolved ||
+            string.IsNullOrWhiteSpace(display.StableDisplayFingerprint) || display.PhysicalBounds is null ||
+            display.DpiX is not > 0 || display.DpiY is not > 0 || display.PhysicalWidth is not > 0 ||
+            display.PhysicalHeight is not > 0 || display.Orientation is null)
+        {
+            reason = "display_identity_unresolved";
+            return false;
+        }
+        try
+        {
+            var bounds = display.PhysicalBounds.Value;
+            var relativeX = checked((long)x - bounds.X);
+            var relativeY = checked((long)y - bounds.Y);
+            if (relativeX < 0 || relativeY < 0 || relativeX > int.MaxValue || relativeY > int.MaxValue ||
+                relativeX + width > bounds.Width || relativeY + height > bounds.Height)
+            {
+                reason = "selection_crosses_display_or_outside";
+                return false;
+            }
+            snapshot = new FixedRegionProfileSelectionSnapshot(selected, display.StableDisplayFingerprint,
+                bounds, display.DpiX.Value, display.DpiY.Value, display.PhysicalWidth.Value,
+                display.PhysicalHeight.Value, display.Orientation.Value, topologyDigest, DateTimeOffset.MinValue);
+            return true;
+        }
+        catch (OverflowException) { reason = "selection_geometry_overflow"; return false; }
+    }
+
+    private static bool Contains(AuthorizedPhysicalRectangle outer, AuthorizedPhysicalRectangle inner)
+    {
+        var right = (long)inner.X + inner.Width;
+        var bottom = (long)inner.Y + inner.Height;
+        return inner.X >= outer.X && inner.Y >= outer.Y &&
+               right <= (long)outer.X + outer.Width && bottom <= (long)outer.Y + outer.Height;
+    }
+
+    private string? ValidateSelectionSnapshot(FixedRegionProfileSelectionSnapshot snapshot)
+    {
+        IReadOnlyList<StandingLeaseDisplayMetadata> displays;
+        try { displays = _profileDisplayEnvironmentProvider.GetExecutionMetadata(); }
+        catch { return "display_topology_unavailable"; }
+        if (!StandingLeaseDisplayTopologyDigest.TryCompute(displays, out var digest)) return "display_topology_incomplete";
+        if (!string.Equals(digest, snapshot.TopologyDigest, StringComparison.Ordinal)) return "display_topology_changed";
+        var matches = displays.Where(item => string.Equals(item.StableDisplayFingerprint,
+            snapshot.StableDisplayFingerprint, StringComparison.Ordinal)).ToArray();
+        if (matches.Length != 1) return "display_identity_not_unique";
+        var display = matches[0];
+        if (display.IdentityStatus != DisplayIdentityResolutionStatus.Resolved ||
+            display.PhysicalBounds != snapshot.DisplayBounds || display.DpiX != snapshot.DpiX ||
+            display.DpiY != snapshot.DpiY || display.PhysicalWidth != snapshot.PhysicalWidth ||
+            display.PhysicalHeight != snapshot.PhysicalHeight || display.Orientation != snapshot.Orientation)
+            return "display_metadata_changed";
+        return Contains(snapshot.DisplayBounds, snapshot.VirtualBounds) ? null : "selection_outside_display";
     }
 
     private string CreateQuickRecording(HttpRequest req, string reqBody, string reqId)
@@ -1946,6 +2370,426 @@ public sealed class ApiServer
         catch { return false; }
     }
 
+    private bool TryRouteFixedRegionProfiles(
+        string sub,
+        string method,
+        HttpRequest request,
+        string body,
+        string requestId,
+        ref int status,
+        Dictionary<string, string> responseHeaders,
+        out string response)
+    {
+        response = string.Empty;
+        var gateway = _profileManagementGateway;
+        if (sub == "/profiles" && method == "POST")
+        {
+            if (request.HasDuplicateHeader("Idempotency-Key"))
+                throw ProfileInvalid("Exactly one Idempotency-Key header is required.");
+            var parsed = FixedRegionProfileApiRequestParser.ParseCreate(body,
+                request.Headers.GetValueOrDefault("Idempotency-Key"));
+            if (gateway is null) throw ProfileManagementUnavailable();
+            try
+            {
+                FixedRegionProfileCreateResult created;
+                if (parsed.SourceRef is { } sourceRef)
+                {
+                    created = gateway.CreateFromExisting(parsed.IdempotencyKey, parsed.RequestHash,
+                        sourceRef, parsed.Name, parsed.Changes, DateTimeOffset.UtcNow);
+                }
+                else
+                {
+                    var selectionGateway = gateway as IFixedRegionProfileSelectionCreationGateway;
+                    if (selectionGateway is null)
+                        throw new ApiException(503, "PROFILE_SELECTION_UNAVAILABLE",
+                            "Selection-based profile creation is unavailable.",
+                            new { reason_code = "selection_creation_unavailable", suggested_action = "use_an_interactive_desktop" });
+
+                    // Replays are resolved before checking the ephemeral selection or current desktop.
+                    var replay = selectionGateway.ReadCreateReplay(parsed.IdempotencyKey, parsed.RequestHash);
+                    if (replay is not null)
+                        created = replay;
+                    else if (parsed.SourceSelectionRef is null ||
+                             !_profileSelectionCache.TryGet(parsed.SourceSelectionRef, out var selection))
+                        throw new ApiException(409, "PROFILE_SELECTION_INVALID",
+                            "The profile selection reference is unknown or expired.",
+                            new { reason_code = "selection_ref_invalid_or_expired", suggested_action = "select_the_region_again" });
+                    else
+                    {
+                        var environmentFailure = ValidateSelectionSnapshot(selection);
+                        if (environmentFailure is not null)
+                            throw new ApiException(409, "PROFILE_SELECTION_ENVIRONMENT_CHANGED",
+                                "The display environment changed after selection.",
+                                new { reason_code = environmentFailure, suggested_action = "select_the_region_again" });
+                        var outputDirectory = parsed.SelectionOutputDirectory ?? OutputSettingsStore.GetEffectiveDefaultOutputDir();
+                        outputDirectory = AuthorizedFixedRegionScope.NormalizeOutputDirectoryForAuthorization(outputDirectory);
+                        var virtualBounds = selection.VirtualBounds;
+                        var relativeX = checked((long)virtualBounds.X - selection.DisplayBounds.X);
+                        var relativeY = checked((long)virtualBounds.Y - selection.DisplayBounds.Y);
+                        if (relativeX < 0 || relativeY < 0 || relativeX > int.MaxValue || relativeY > int.MaxValue)
+                            throw new ApiException(422, "PROFILE_SELECTION_NOT_EXECUTABLE",
+                                "The selected region is outside the target display.",
+                                new { reason_code = "selection_geometry_invalid", suggested_action = "select_the_region_again" });
+                        var specification = new RecurringFixedRegionProfileSpecification(
+                            AuthorizedScopeTargetType.FixedRegion,
+                            RecurringFixedRegionRebindPolicy.ExactMatchOnly,
+                            AuthorizedCaptureSemantics.DesktopRegion,
+                            AuthorizedCoordinateSpace.PhysicalVirtualScreen,
+                            AuthorizedDisplayIdentityStatus.Resolved,
+                            selection.StableDisplayFingerprint,
+                            selection.DisplayBounds,
+                            new AuthorizedPhysicalRectangle((int)relativeX, (int)relativeY,
+                                virtualBounds.Width, virtualBounds.Height),
+                            selection.DpiX, selection.DpiY, selection.PhysicalWidth, selection.PhysicalHeight,
+                            selection.Orientation, selection.TopologyDigest,
+                            AuthorizedCaptureBackend.FfmpegRegion, AuthorizedAudioMode.None,
+                            TimeSpan.FromSeconds(parsed.SelectionDurationSeconds!.Value),
+                            parsed.SelectionCountdownSeconds ?? 3, outputDirectory,
+                            parsed.SelectionFilenamePrefix ?? "recording",
+                            AuthorizedOutputConflictPolicy.FailIfExists, AuthorizedWakePolicy.NaturalWakeOnly,
+                            AuthorizedDesktopRequirement.InteractiveDesktopRequired);
+                        created = selectionGateway.CreateFromSelection(parsed.IdempotencyKey, parsed.RequestHash,
+                            parsed.Name, specification, DateTimeOffset.UtcNow);
+                    }
+                }
+                var etag = created.ETag;
+                responseHeaders["ETag"] = etag;
+                status = 201;
+                if (!created.Replayed)
+                    _audit.Log("profile.created", new { profile_id = created.Profile.ProfileId,
+                        profile_version = created.Profile.CurrentVersion.ProfileVersion,
+                        profile_digest = created.Profile.CurrentVersion.ProfileDigest });
+                response = ApiResponse.Ok(new
+                {
+                    profile = ProfileEntry(created.Profile),
+                    etag,
+                    idempotent_replay = created.Replayed
+                }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (sub == "/profiles" && method == "GET")
+        {
+            if (gateway is null) throw ProfileManagementUnavailable();
+            EnsureOnlyQuery(request, "limit", "cursor", "include_deleted");
+            var limit = ParseLimit(request.Query.GetValueOrDefault("limit"));
+            var cursor = DecodeProfileCursor(request.Query.GetValueOrDefault("cursor"));
+            var includeDeleted = ParseOptionalBoolean(request.Query.GetValueOrDefault("include_deleted"), "include_deleted");
+            try
+            {
+                var page = gateway.List(limit, cursor, includeDeleted);
+                response = ApiResponse.Ok(new
+                {
+                    profiles = page.Items.Select(ProfileEntry).ToArray(),
+                    limit,
+                    next_cursor = page.NextCursor is null ? null : EncodeCursor("p1", page.NextCursor),
+                    include_deleted = includeDeleted
+                }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (!sub.StartsWith("/profiles/", StringComparison.Ordinal)) return false;
+        if (gateway is null) throw ProfileManagementUnavailable();
+        var segments = sub.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length is < 2 or > 4 || segments[0] != "profiles") return false;
+        var profileId = DecodeProfileId(segments[1]);
+
+        if (segments.Length == 2 && method == "GET")
+        {
+            EnsureOnlyQuery(request);
+            try
+            {
+                var profile = gateway.Get(profileId) ?? throw ProfileNotFound();
+                var etag = FixedRegionProfileETag.Compute(profile);
+                responseHeaders["ETag"] = etag;
+                response = ApiResponse.Ok(new { profile = ProfileEntry(profile), etag }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (segments.Length == 3 && segments[2] == "versions" && method == "GET")
+        {
+            EnsureOnlyQuery(request, "limit", "cursor");
+            var limit = ParseLimit(request.Query.GetValueOrDefault("limit"));
+            var beforeVersion = DecodeVersionCursor(request.Query.GetValueOrDefault("cursor"), profileId);
+            try
+            {
+                var snapshot = gateway.ReadVersionPageSnapshot(profileId, limit, beforeVersion)
+                    ?? throw ProfileNotFound();
+                var page = snapshot.Page;
+                var directory = snapshot.Directory;
+                var etag = FixedRegionProfileETag.Compute(directory);
+                responseHeaders["ETag"] = etag;
+                response = ApiResponse.Ok(new
+                {
+                    profile_id = profileId,
+                    is_deleted = directory.IsDeleted,
+                    versions = page.Items.Select(version => VersionEntry(version, directory.Name, directory.IsDeleted,
+                        directory.CurrentVersion.ProfileVersion)).ToArray(),
+                    limit,
+                    next_cursor = page.NextCursor is null ? null : EncodeCursor("v1", profileId, page.NextCursor)
+                }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (segments.Length == 4 && segments[2] == "versions" && method == "GET")
+        {
+            EnsureOnlyQuery(request);
+            if (!long.TryParse(segments[3], NumberStyles.None, CultureInfo.InvariantCulture, out var versionNumber) || versionNumber <= 0)
+                throw ProfileInvalid("The exact profile version must be a positive integer.");
+            try
+            {
+                var snapshot = gateway.ReadExactVersionSnapshot(profileId, versionNumber)
+                    ?? throw ProfileNotFound();
+                var directory = snapshot.Directory;
+                var version = snapshot.Version ?? throw ProfileVersionNotFound();
+                var etag = FixedRegionProfileETag.Compute(directory);
+                responseHeaders["ETag"] = etag;
+                response = ApiResponse.Ok(new
+                {
+                    version = VersionEntry(version, directory.Name, directory.IsDeleted,
+                        directory.CurrentVersion.ProfileVersion),
+                    etag
+                }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (segments.Length == 2 && method == "PATCH")
+        {
+            if (request.HasDuplicateHeader("If-Match"))
+                throw ProfileInvalid("If-Match must contain exactly one strong entity tag.");
+            var ifMatch = ParseIfMatch(request.Headers.GetValueOrDefault("If-Match"));
+            var patch = FixedRegionProfileApiRequestParser.ParsePatch(body);
+            try
+            {
+                var updated = gateway.Patch(profileId, ifMatch, patch.Name, patch.Changes, DateTimeOffset.UtcNow);
+                var etag = FixedRegionProfileETag.Compute(updated);
+                responseHeaders["ETag"] = etag;
+                _audit.Log("profile.updated", new { profile_id = updated.ProfileId,
+                    profile_version = updated.CurrentVersion.ProfileVersion,
+                    profile_digest = updated.CurrentVersion.ProfileDigest });
+                response = ApiResponse.Ok(new { profile = ProfileEntry(updated), etag }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (segments.Length == 2 && method == "DELETE")
+        {
+            if (request.HasDuplicateHeader("If-Match"))
+                throw ProfileInvalid("If-Match must contain exactly one strong entity tag.");
+            var ifMatch = ParseIfMatch(request.Headers.GetValueOrDefault("If-Match"));
+            try
+            {
+                gateway.Delete(profileId, ifMatch, DateTimeOffset.UtcNow);
+                var deleted = gateway.Get(profileId) ?? throw ProfileNotFound();
+                var etag = FixedRegionProfileETag.Compute(deleted);
+                responseHeaders["ETag"] = etag;
+                _audit.Log("profile.deleted", new { profile_id = deleted.ProfileId,
+                    profile_version = deleted.CurrentVersion.ProfileVersion,
+                    profile_digest = deleted.CurrentVersion.ProfileDigest });
+                response = ApiResponse.Ok(new { profile = ProfileEntry(deleted), etag }, requestId);
+                return true;
+            }
+            catch (Exception exception) { throw MapProfileException(exception); }
+        }
+
+        if (method is "GET" or "PATCH" or "DELETE" or "POST")
+            throw new ApiException(404, "PROFILE_NOT_FOUND", "Unknown profile endpoint.");
+        return false;
+    }
+
+    private static object ProfileEntry(FixedRegionProfileDirectoryRecord profile) => new
+    {
+        name = profile.Name,
+        profile_ref = new
+        {
+            id = profile.ProfileId,
+            version = profile.CurrentVersion.ProfileVersion,
+            digest = profile.CurrentVersion.ProfileDigest
+        },
+        specification = ProfileSpecification(profile.CurrentVersion),
+        is_deleted = profile.IsDeleted,
+        created_at_utc = profile.CreatedAtUtc,
+        updated_at_utc = profile.UpdatedAtUtc,
+        deleted_at_utc = profile.DeletedAtUtc,
+        etag = FixedRegionProfileETag.Compute(profile)
+    };
+
+    private static object VersionEntry(RecurringFixedRegionProfileVersion version, string name,
+        bool isDeleted, long currentVersion) => new
+    {
+        name,
+        profile_ref = new { id = version.ProfileId, version = version.ProfileVersion, digest = version.ProfileDigest },
+        specification = ProfileSpecification(version),
+        created_at_utc = version.CreatedAtUtc,
+        is_current = version.ProfileVersion == currentVersion,
+        is_deleted = isDeleted
+    };
+
+    private static object ProfileSpecification(RecurringFixedRegionProfileVersion profile) => new
+    {
+        target_policy = new
+        {
+            type = RecurringFixedRegionProfileCode.ToCode(profile.TargetType),
+            rebind_policy = RecurringFixedRegionProfileCode.ToCode(profile.RebindPolicy),
+            coordinate_space = RecurringFixedRegionProfileCode.ToCode(profile.CoordinateSpace),
+            display_identity_status = RecurringFixedRegionProfileCode.ToCode(profile.DisplayIdentityStatus),
+            stable_display_fingerprint = profile.StableDisplayFingerprint,
+            display_bounds = Rectangle(profile.DisplayBounds),
+            region_within_display = Rectangle(profile.RegionWithinDisplay),
+            dpi = new { x = profile.DpiX, y = profile.DpiY },
+            physical_width = profile.PhysicalWidth,
+            physical_height = profile.PhysicalHeight,
+            orientation = RecurringFixedRegionProfileCode.ToCode(profile.Orientation),
+            topology_digest = profile.TopologyDigest
+        },
+        capture = new
+        {
+            semantics = RecurringFixedRegionProfileCode.ToCode(profile.CaptureSemantics),
+            backend = RecurringFixedRegionProfileCode.ToCode(profile.Backend)
+        },
+        audio = new { mode = RecurringFixedRegionProfileCode.ToCode(profile.AudioMode) },
+        duration_seconds = DurationSeconds(profile.Duration),
+        duration_ms = profile.Duration.Ticks / TimeSpan.TicksPerMillisecond,
+        countdown_seconds = profile.CountdownSeconds,
+        output = new
+        {
+            directory = profile.OutputDirectory,
+            filename_prefix = profile.FilenamePrefix,
+            filename_template = profile.FilenameTemplate,
+            conflict_policy = RecurringFixedRegionProfileCode.ToCode(profile.OutputConflictPolicy)
+        },
+        wake_policy = RecurringFixedRegionProfileCode.ToCode(profile.WakePolicy),
+        desktop_requirement = RecurringFixedRegionProfileCode.ToCode(profile.DesktopRequirement)
+    };
+
+    private static object DurationSeconds(TimeSpan duration)
+    {
+        var exactSeconds = duration.Ticks / (decimal)TimeSpan.TicksPerSecond;
+        return duration.Ticks % TimeSpan.TicksPerSecond == 0
+            ? (object)(long)(duration.Ticks / TimeSpan.TicksPerSecond)
+            : exactSeconds;
+    }
+
+    private static object Rectangle(AuthorizedPhysicalRectangle rectangle) => new
+    {
+        x = rectangle.X, y = rectangle.Y, width = rectangle.Width, height = rectangle.Height
+    };
+
+    private static string ParseIfMatch(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ApiException(428, "IF_MATCH_REQUIRED", "A current strong If-Match token is required.",
+                new { reason_code = "if_match_required" });
+        if (!value.StartsWith("\"profile-v1-", StringComparison.Ordinal) || !value.EndsWith('"') ||
+            value.Length != 77 || value[12..^1].Length != 64 || value[12..^1].Any(character => !Uri.IsHexDigit(character)) ||
+            value.Contains(',') || value.Contains('*') || value.StartsWith("W/", StringComparison.OrdinalIgnoreCase))
+            throw ProfileInvalid("If-Match must contain exactly one supported strong profile ETag.");
+        return value;
+    }
+
+    private static string DecodeProfileId(string segment)
+    {
+        string id;
+        try { id = Uri.UnescapeDataString(segment); }
+        catch (UriFormatException) { throw ProfileInvalid("The profile identifier is malformed."); }
+        try { return new ProfileRef(id, 1, RecurringFixedRegionProfileVersion.DigestPrefix + new string('0', 64)).ProfileId; }
+        catch (Exception exception) when (exception is ArgumentException or Phase3DomainException)
+        { throw ProfileNotFound(); }
+    }
+
+    private static int ParseLimit(string? value)
+    {
+        if (value is null) return 20;
+        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var limit) || limit is < 1 or > 100)
+            throw ProfileInvalid("limit must be an integer between 1 and 100.");
+        return limit;
+    }
+
+    private static bool ParseOptionalBoolean(string? value, string name) => value switch
+    {
+        null or "false" => false,
+        "true" => true,
+        _ => throw ProfileInvalid($"{name} must be true or false.")
+    };
+
+    private static void EnsureOnlyQuery(HttpRequest request, params string[] allowed)
+    {
+        var permitted = new HashSet<string>(allowed, StringComparer.OrdinalIgnoreCase);
+        if (request.Query.Keys.Any(key => !permitted.Contains(key)))
+            throw ProfileInvalid("The request contains an unsupported query parameter.");
+    }
+
+    private static string? DecodeProfileCursor(string? cursor)
+    {
+        if (cursor is null) return null;
+        var decoded = DecodeCursor(cursor);
+        if (!decoded.StartsWith("p1\n", StringComparison.Ordinal) || decoded.Length <= 3)
+            throw ProfileInvalid("The profile cursor is invalid.");
+        var id = decoded[3..];
+        try { return new ProfileRef(id, 1, RecurringFixedRegionProfileVersion.DigestPrefix + new string('0', 64)).ProfileId; }
+        catch (Exception exception) when (exception is ArgumentException or Phase3DomainException)
+        { throw ProfileInvalid("The profile cursor is invalid."); }
+    }
+
+    private static long? DecodeVersionCursor(string? cursor, string profileId)
+    {
+        if (cursor is null) return null;
+        var decoded = DecodeCursor(cursor);
+        var parts = decoded.Split('\n');
+        if (parts.Length != 3 || parts[0] != "v1" || !string.Equals(parts[1], profileId, StringComparison.Ordinal) ||
+            !long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var version) || version <= 0)
+            throw ProfileInvalid("The profile version cursor is malformed or belongs to another profile.");
+        return version;
+    }
+
+    private static string EncodeCursor(params string[] parts) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join('\n', parts)))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static string DecodeCursor(string cursor)
+    {
+        if (cursor.Length is < 1 or > 512 || cursor.Any(character =>
+            !(character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_')))
+            throw ProfileInvalid("The profile cursor is malformed.");
+        try
+        {
+            var base64 = cursor.Replace('-', '+').Replace('_', '/');
+            base64 += new string('=', (4 - base64.Length % 4) % 4);
+            return new UTF8Encoding(false, true).GetString(Convert.FromBase64String(base64));
+        }
+        catch (Exception exception) when (exception is FormatException or DecoderFallbackException)
+        { throw ProfileInvalid("The profile cursor is malformed."); }
+    }
+
+    private static ApiException MapProfileException(Exception exception)
+    {
+        if (exception is ApiException apiException) return apiException;
+        if (exception is ArgumentException or Phase3DomainException)
+            return ProfileInvalid("The profile request contains an invalid value.");
+        return new ApiException(500, "PROFILE_OPERATION_FAILED", "The profile operation could not be completed.",
+            new { reason_code = "profile_operation_failed" });
+    }
+
+    private static ApiException ProfileManagementUnavailable() => new(503,
+        "PROFILE_MANAGEMENT_UNAVAILABLE", "The durable profile management store is unavailable.",
+        new { reason_code = "profile_management_unavailable" });
+
+    private static ApiException ProfileNotFound() => new(404, "PROFILE_NOT_FOUND", "The profile was not found.");
+    private static ApiException ProfileVersionNotFound() => new(404, "PROFILE_VERSION_NOT_FOUND", "The exact profile version was not found.");
+    private static ApiException ProfileInvalid(string message) => new(400, "INVALID_ARGUMENT", message,
+        new { reason_code = "profile_request_invalid" });
+
     private bool RecurringExecutionSupported()
     {
         try { return _recurringPlanSetupGateway?.IsExecutionSupported == true; }
@@ -2065,7 +2909,7 @@ public sealed class ApiServer
                     system_audio_scope = "selected_render_endpoint_loopback_not_window_exclusive",
                     requires_local_confirmation = true,
                     min_duration_seconds = 1,
-                    max_duration_seconds = 600,
+                    max_duration_seconds = 1800,
                     long_run_readiness = "bounded_duration_only",
                     long_run_stress_tested = false
                 },
@@ -2196,6 +3040,35 @@ public sealed class ApiServer
                     execution_status_endpoint = "/api/v1/plans/{plan_id}/status"
                 }
             },
+            profile_management = new
+            {
+                supported = _profileManagementGateway is not null,
+                supported_operations = _profileManagementGateway is IFixedRegionProfileSelectionCreationGateway && _tray.SupportsRegionSelectionUi
+                    ? new[] { "list", "get", "list_versions", "get_version", "copy_existing_version", "create_from_local_selection", "patch", "delete" }
+                    : new[] { "list", "get", "list_versions", "get_version", "copy_existing_version", "patch", "delete" },
+                endpoints = new[]
+                {
+                    "/api/v1/profiles", "/api/v1/profiles/{profile_id}",
+                    "/api/v1/profiles/{profile_id}/versions", "/api/v1/profiles/{profile_id}/versions/{version}"
+                },
+                supported_targets = new[] { "fixed_region" },
+                creation_modes = _profileManagementGateway is IFixedRegionProfileSelectionCreationGateway && _tray.SupportsRegionSelectionUi
+                    ? new[] { "copy_existing_version", "create_from_local_selection" }
+                    : new[] { "copy_existing_version" },
+                interactive_selection_supported = _profileManagementGateway is IFixedRegionProfileSelectionCreationGateway &&
+                    _tray.SupportsRegionSelectionUi,
+                selection_endpoint = "/api/v1/regions/select",
+                selection_purpose_profile_supported = _profileManagementGateway is IFixedRegionProfileSelectionCreationGateway &&
+                    _tray.SupportsRegionSelectionUi,
+                selection_reference_ttl_seconds = (int)FixedRegionProfileSelectionCache.Lifetime.TotalSeconds,
+                audio_allowed = false,
+                recording_or_plan_profile_ref_supported = false,
+                ordinary_recording_profile_ref_supported = _profileManagementGateway is not null,
+                plan_profile_ref_supported = false,
+                execution_supported = false,
+                ordinary_recording_execution_supported = _profileManagementGateway is not null &&
+                    !string.Equals(_tray.HostMode, "headless", StringComparison.OrdinalIgnoreCase)
+            },
             required_once_plan = new
             {
                 setup_supported = _requiredOncePlanSetupGateway is not null && RequiredOnceInteractiveDesktopAvailable(),
@@ -2209,6 +3082,26 @@ public sealed class ApiServer
                 create_endpoint = "/api/v1/plans",
                 status_endpoint = "/api/v1/plan-setups/{setup_intent_id}",
                 execution_status_endpoint = "/api/v1/plans/{plan_id}/status",
+            },
+            future_window_one_shot = new
+            {
+                setup_supported = _futureWindowOneShotGateway?.IsSetupSupported == true &&
+                    _futureWindowOneShotGateway.IsInteractiveDesktopAvailable,
+                execution_supported = _futureWindowOneShotGateway?.IsExecutionSupported == true,
+                local_approval_required = true,
+                authorization_validity_max_seconds = 3600,
+                run_duration_max_seconds = 1800,
+                one_run_only = true,
+                supported_audio_modes = new[] { "none", "system_loopback" },
+                supported_target = "one_exact_top_level_window",
+                no_fallback = true,
+                create_endpoint = "/api/v1/future-window-authorizations",
+                status_endpoint = "/api/v1/future-window-authorizations/{authorization_id}",
+                run_endpoint = "/api/v1/future-window-authorizations/{authorization_id}/runs",
+                revoke_endpoint = "/api/v1/future-window-authorizations/{authorization_id}/revoke",
+                unavailable_reason = _futureWindowOneShotGateway is null ? "future_window_runtime_unavailable" :
+                    !_futureWindowOneShotGateway.IsInteractiveDesktopAvailable ? "interactive_desktop_required" :
+                    !_futureWindowOneShotGateway.IsExecutionSupported ? "future_window_execution_unavailable" : null,
             },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
             readiness = _readiness?.ToCapabilitiesObject(),
@@ -2699,12 +3592,15 @@ internal sealed class HttpRequest
     public Dictionary<string, string> Query { get; }
     public Dictionary<string, string> Headers { get; }
     public string Body { get; }
+    private readonly HashSet<string> _duplicateHeaders;
 
-    public HttpRequest(string method, string rawPath, Dictionary<string, string> headers, string body)
+    public HttpRequest(string method, string rawPath, Dictionary<string, string> headers, string body,
+        HashSet<string>? duplicateHeaders = null)
     {
         Method = method;
         Headers = headers;
         Body = body;
+        _duplicateHeaders = duplicateHeaders ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var qidx = rawPath.IndexOf('?');
         if (qidx >= 0)
@@ -2719,19 +3615,24 @@ internal sealed class HttpRequest
         }
     }
 
+    public bool HasDuplicateHeader(string name) => _duplicateHeaders.Contains(name);
+
     private static Dictionary<string, string> ParseQuery(string query)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var part in query.Split('&'))
         {
             var eq = part.IndexOf('=');
-            if (eq < 0)
+            try
             {
-                result[Uri.UnescapeDataString(part)] = "";
+                var key = Uri.UnescapeDataString(eq < 0 ? part : part[..eq]);
+                var value = eq < 0 ? "" : Uri.UnescapeDataString(part[(eq + 1)..]);
+                if (key.Length == 0 || !result.TryAdd(key, value))
+                    throw new ApiException(400, "INVALID_ARGUMENT", "The request contains an empty or duplicate query parameter.");
             }
-            else
+            catch (UriFormatException)
             {
-                result[Uri.UnescapeDataString(part[..eq])] = Uri.UnescapeDataString(part[(eq + 1)..]);
+                throw new ApiException(400, "INVALID_ARGUMENT", "The request contains malformed query encoding.");
             }
         }
         return result;

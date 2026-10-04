@@ -60,6 +60,9 @@ public sealed class OutputMeta
     /// </summary>
     public long? AudioLostAtMs;
 
+    /// <summary>Audio media-zero timestamp in the Stopwatch/QPC clock domain used for A/V trim diagnostics.</summary>
+    public long? AudioMediaStartAnchorTicks;
+
     /// <summary>
     /// Best-effort continuity classification for the final media:
     /// not_checked, continuous, degraded.
@@ -71,6 +74,15 @@ public sealed class OutputMeta
 
     /// <summary>Monotonic FFmpeg process-start anchor used for A/V alignment.</summary>
     public long? VideoLaunchAnchorTicks;
+
+    /// <summary>Stopwatch/QPC ticks corresponding to output video PTS zero, when source-clock evidence exists.</summary>
+    public long? VideoMediaZeroAnchorTicks;
+
+    /// <summary>Raw source media zero in WGC SystemRelativeTime 100-ns units.</summary>
+    public long? VideoMediaZeroSystemRelativeTimeHns;
+
+    /// <summary>Bounded anchor source label: launch, wgc_system_relative_time, or wgc_media_anchor_missing.</summary>
+    public string? VideoAnchorSource;
 
     /// <summary>Diagnostic anchor estimated from FFmpeg progress delivery.</summary>
     public long? VideoProgressAnchorTicks;

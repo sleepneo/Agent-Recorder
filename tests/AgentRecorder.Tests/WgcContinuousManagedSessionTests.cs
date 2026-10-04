@@ -634,11 +634,13 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         private Stream? _stderrStream;
 
         private readonly string _outputPath;
+        private readonly string _recordingId;
 
-        public HugeStderrProcess(long stderrByteLength, string outputPath)
+        public HugeStderrProcess(long stderrByteLength, string outputPath, string recordingId)
         {
             _stderrByteLength = stderrByteLength;
             _outputPath = outputPath;
+            _recordingId = recordingId;
         }
 
         public int Id => 4242;
@@ -650,7 +652,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         public void Start(string fileName, IReadOnlyList<string> argumentList)
         {
-            var stdoutText = $"RESULT: STARTED\nRecordingId: r\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n\nRESULT: OK\nEncoderMode: software\nEncoderSelectionReason: software_default\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
+            var stdoutText = $"RESULT: STARTED\nRecordingId: {_recordingId}\nOutput: {_outputPath}\nContainer: mp4\nCodec: h264\nFps: 30\nWidth: 1920\nHeight: 1080\nCaptureMethod: WGC_D3D11_FRAME_STREAM\nEncoderMode: software\nEncoderSelectionReason: software_default\n\nRESULT: OK\nEncoderMode: software\nEncoderSelectionReason: software_default\nFramesCaptured: 1\nDurationMs: 1000\nFileSize: 100 bytes\nWidth: 1920\nHeight: 1080\n\n";
             var stdout = new MemoryStream(Encoding.UTF8.GetBytes(stdoutText));
             var stderr = new RepeatingByteStream(_stderrByteLength, (byte)'y');
 
@@ -2527,7 +2529,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     {
         var recId = $"rec_{Guid.NewGuid():N}";
         var opts = CreateOptions(recId);
-        var fake = new HugeStderrProcess(5L * 1024 * 1024, opts.OutputPath)
+        var fake = new HugeStderrProcess(5L * 1024 * 1024, opts.OutputPath, recId)
         {
             WaitForBeginSignalPath = opts.BeginSignalPath
         };
@@ -2806,7 +2808,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     }
 
     [Fact]
-    public async Task StrictWindowSurface600SecondDuration_IsAcceptedAndUsesExplicitHelperOptIn()
+    public async Task StrictWindowSurface1800SecondDuration_IsAcceptedAndUsesExplicitHelperOptIn()
     {
         var recId = $"rec_{Guid.NewGuid():N}";
         var opts = CreateOptions(recId, o =>
@@ -2825,7 +2827,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         Assert.NotNull(fake.CapturedArguments);
         var args = fake.CapturedArguments!.ToList();
-        Assert.Equal("600000", args[args.IndexOf("--duration-ms") + 1]);
+        Assert.Equal("1800000", args[args.IndexOf("--duration-ms") + 1]);
         Assert.Contains("--allow-long-window-surface-duration", args);
         session.Dispose();
     }
@@ -3121,12 +3123,14 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     // Explicit FIRST_FRAME event tests
     // -----------------------------------------------------------------
 
-    private static string[] FirstFrame(long frameNumber, long elapsedMs) => new[]
+    private static string[] FirstFrame(string recordingId, long frameNumber, long elapsedMs) => new[]
     {
         "RESULT: FIRST_FRAME",
         "Stage: Capturing",
+        $"RecordingId: {recordingId}",
         $"FrameNumber: {frameNumber}",
         $"ElapsedMs: {elapsedMs}",
+        "SourceTimeHns: 123456789",
         "" // blank-line event separator
     };
 
@@ -3137,7 +3141,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var opts = CreateOptions(recId);
         var fileSize = 15000000L;
         var stdout = Started(recId, opts.OutputPath)
-            .Concat(FirstFrame(1, 17))
+            .Concat(FirstFrame(recId, 1, 17))
             .Concat(Progress(1, 100, 50000))
             .Concat(Progress(150, 2500, 7500000))
             .Concat(Ok(300, 5000, fileSize))
@@ -3171,6 +3175,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         Assert.Equal("wgc_continuous_first_frame", observed!.EvidenceKind);
         Assert.Equal(1, observed.FrameNumber);
         Assert.Equal(17_000, observed.OutTimeUs);
+        Assert.Equal(123456789, observed.MediaStartSystemRelativeTimeHns);
         Assert.Equal(0, observed.TotalSizeBytes);
         Assert.NotNull(result.Summary);
         Assert.True(result.Summary!.FirstFrameObserved);
@@ -3178,6 +3183,32 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         Assert.Equal(17, result.Summary.FirstFrameElapsedMs);
         // The explicit event must not change encoded frame counts.
         Assert.Equal(300, result.Summary.FramesCaptured);
+    }
+
+    [Fact]
+    public async Task ExplicitFirstFrame_RecordingIdentityMismatchFailsClosed()
+    {
+        var recId = $"rec_{Guid.NewGuid():N}";
+        var opts = CreateOptions(recId);
+        var stdout = Started(recId, opts.OutputPath)
+            .Concat(FirstFrameRaw(
+                "Stage: Capturing", "RecordingId: rec_other", "FrameNumber: 1",
+                "ElapsedMs: 10", "SourceTimeHns: 123456789"))
+            .Concat(Progress(1, 100, 50000))
+            .Concat(Ok())
+            .ToArray();
+        var fake = new FakeWgcContinuousProcess(stdout);
+        fake.WaitForBeginSignalPath = opts.BeginSignalPath;
+        using var session = new WgcContinuousManagedSession(opts, fake);
+        _disposables.Add(session);
+
+        await session.StartAsync();
+        await session.AuthorizeCapture();
+        var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);
+        Assert.Equal("first_frame_identity_mismatch", result.FailureCategory);
+        Assert.False(result.FirstFrameObserved);
     }
 
     [Fact]
@@ -3189,7 +3220,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var opts = CreateOptions(recId);
         var fileSize = 900000L;
         var stdout = Started(recId, opts.OutputPath)
-            .Concat(FirstFrame(1, 0))
+            .Concat(FirstFrame(recId, 1, 0))
             .Concat(Ok(1, 10000, fileSize))
             .ToArray();
         var fake = new FakeWgcContinuousProcess(stdout,
@@ -3258,7 +3289,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var recId = $"rec_{Guid.NewGuid():N}";
         var opts = CreateOptions(recId);
         var stdout = Started(recId, opts.OutputPath)
-            .Concat(FirstFrame(1, 5))
+            .Concat(FirstFrame(recId, 1, 5))
             .Concat(Ok())
             .ToArray();
 
@@ -3298,6 +3329,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
     [InlineData("zero_frame_number", new[] { "Stage: Capturing", "FrameNumber: 0", "ElapsedMs: 10" })]
     [InlineData("negative_frame_number", new[] { "Stage: Capturing", "FrameNumber: -1", "ElapsedMs: 10" })]
     [InlineData("missing_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1" })]
+    [InlineData("missing_source_time", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: 10" })]
+    [InlineData("nonnumeric_source_time", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: 10", "SourceTimeHns: qpc" })]
     [InlineData("nonnumeric_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: soon" })]
     [InlineData("negative_elapsed", new[] { "Stage: Capturing", "FrameNumber: 1", "ElapsedMs: -5" })]
     [InlineData("invalid_stage", new[] { "Stage: Finalizing", "FrameNumber: 1", "ElapsedMs: 10" })]
@@ -3342,7 +3375,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var recId = $"rec_{Guid.NewGuid():N}";
         var opts = CreateOptions(recId);
         // FIRST_FRAME arrives after authorization but before STARTED.
-        var stdout = FirstFrame(1, 5)
+        var stdout = FirstFrame(recId, 1, 5)
             .Concat(Started(recId, opts.OutputPath))
             .Concat(Ok())
             .ToArray();
@@ -3372,11 +3405,11 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var opts = CreateOptions(recId);
         var fileSize = 15000000L;
         var stdout = Started(recId, opts.OutputPath)
-            .Concat(FirstFrame(1, 10))
+            .Concat(FirstFrame(recId, 1, 10))
             .Concat(Ok(300, 5000, fileSize))
             // A FIRST_FRAME after the terminal event must be rejected, and the
             // already-published evidence must not be re-published.
-            .Concat(FirstFrame(2, 4000))
+            .Concat(FirstFrame(recId, 2, 4000))
             .ToArray();
         var fake = new FakeWgcContinuousProcess(stdout,
             createOutputFile: true,
@@ -3407,8 +3440,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         var recId = $"rec_{Guid.NewGuid():N}";
         var opts = CreateOptions(recId);
         var stdout = Started(recId, opts.OutputPath)
-            .Concat(FirstFrame(1, 10))
-            .Concat(FirstFrame(2, 20))
+            .Concat(FirstFrame(recId, 1, 10))
+            .Concat(FirstFrame(recId, 2, 20))
             .Concat(Ok())
             .ToArray();
         var fake = new FakeWgcContinuousProcess(stdout);

@@ -80,6 +80,10 @@ public interface ITrayContext
     /// </summary>
     void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback);
 
+    /// <summary>Purpose-aware selector entry point; older hosts keep recording behavior by default.</summary>
+    void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback, string purpose) =>
+        RequestRegionSelection(timeoutSeconds, callback);
+
     void SetRecording(RecordingUiPresentation presentation);
     /// <summary>
     /// Notifies the local host that a recording entered stopping before capture

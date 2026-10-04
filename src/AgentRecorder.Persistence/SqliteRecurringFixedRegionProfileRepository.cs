@@ -280,6 +280,34 @@ public sealed class SqliteRecurringFixedRegionProfileRepository : SqliteReposito
         RecurringFixedRegionProfileVersion profile) =>
         Insert(connection, transaction, profile);
 
+    internal static RecurringFixedRegionProfileVersion? ReadLatestWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string profileId) =>
+        ReadLatest(connection, transaction, profileId);
+
+    internal static IReadOnlyList<RecurringFixedRegionProfileVersion> ListVersionsWithinTransaction(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string profileId,
+        long? beforeVersionExclusive,
+        int limit)
+    {
+        if (limit is < 1 or > 101)
+            throw Failure(RecurringFixedRegionProfilePersistenceReasonCodes.ProfileListLimitInvalid,
+                "The internal profile version page limit must be between 1 and 101.");
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"SELECT {Columns} FROM {TableName} WHERE profile_id = $profileId AND ($beforeVersionExclusive IS NULL OR profile_version < $beforeVersionExclusive) ORDER BY profile_version DESC LIMIT $limit;";
+        AddProfileParameter(command, "$profileId", profileId);
+        AddProfileParameter(command, "$beforeVersionExclusive", beforeVersionExclusive.HasValue ? beforeVersionExclusive.Value : DBNull.Value);
+        AddProfileParameter(command, "$limit", limit);
+        using var reader = command.ExecuteReader();
+        var profiles = new List<RecurringFixedRegionProfileVersion>();
+        while (reader.Read()) profiles.Add(ReadProfile(reader));
+        return profiles;
+    }
+
     public RecurringFixedRegionProfileVersion GetLatest(string profileId)
     {
         ValidateProfileId(profileId);

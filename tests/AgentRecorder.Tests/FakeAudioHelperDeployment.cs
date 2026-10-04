@@ -23,20 +23,30 @@ internal sealed class FakeAudioHelperDeployment : IDisposable
         if (string.IsNullOrWhiteSpace(ownerDirectory))
             throw new ArgumentException("An owner directory is required.", nameof(ownerDirectory));
 
-        var outputConfiguration = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name;
-        var targetFramework = new DirectoryInfo(AppContext.BaseDirectory).Name;
+        var testOutputDirectory = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var outputConfiguration = testOutputDirectory.Parent?.Name;
+        var targetFramework = testOutputDirectory.Name;
         if (string.IsNullOrWhiteSpace(outputConfiguration) || string.IsNullOrWhiteSpace(targetFramework))
             throw new InvalidOperationException($"Cannot resolve test output configuration from '{AppContext.BaseDirectory}'.");
 
-        _sourceDirectory = Path.Combine(
+        var artifactOutputRoot = testOutputDirectory.Parent?.Parent;
+        var artifactDirectory = artifactOutputRoot is null
+            ? null
+            : Path.Combine(artifactOutputRoot.FullName, "AgentRecorder.AudioHelper.Fake", targetFramework);
+        var projectDirectory = Path.Combine(
             TestHelper.ProjectRoot,
             "tests",
             "AgentRecorder.AudioHelper.Fake",
             "bin",
             outputConfiguration,
             targetFramework);
+        _sourceDirectory = artifactDirectory is not null && Directory.Exists(artifactDirectory)
+            ? artifactDirectory
+            : projectDirectory;
         if (!Directory.Exists(_sourceDirectory))
-            throw new DirectoryNotFoundException($"Fake AudioHelper build output not found: {_sourceDirectory}");
+            throw new DirectoryNotFoundException(
+                $"Fake AudioHelper build output not found. Checked '{artifactDirectory}' and '{projectDirectory}'.");
 
         Root = Path.Combine(ownerDirectory, "fake-audio-helper");
         Directory.CreateDirectory(Root);

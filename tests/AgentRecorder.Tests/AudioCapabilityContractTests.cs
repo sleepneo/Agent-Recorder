@@ -180,7 +180,7 @@ public class AudioCapabilityContractTests : IDisposable
 
             var windowSurface = recording.GetProperty("window_surface");
             Assert.Equal(1, windowSurface.GetProperty("min_duration_seconds").GetInt32());
-            Assert.Equal(600, windowSurface.GetProperty("max_duration_seconds").GetInt32());
+            Assert.Equal(1800, windowSurface.GetProperty("max_duration_seconds").GetInt32());
             Assert.Equal("bounded_duration_only", windowSurface.GetProperty("long_run_readiness").GetString());
             Assert.False(windowSurface.GetProperty("long_run_stress_tested").GetBoolean());
             Assert.False(windowSurface.GetProperty("system_audio_supported").GetBoolean());

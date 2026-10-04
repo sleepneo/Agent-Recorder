@@ -140,7 +140,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             StagingToFinalPublisher.Instance,
             FfmpegCaptureBackend.Probe,
             WgcHelperExePathResolver.Resolve,
-            GetDefaultTempRoot())
+            CaptureWritePaths.ResolveWgcTempRoot())
     {
     }
 
@@ -198,6 +198,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             return;
         }
 
+        _cfg?.StorageSafety?.EnsureAdmission();
         _authorizeTask = AuthorizeSessionWithNotificationAsync(session);
     }
 
@@ -285,7 +286,9 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         {
             helperExePath = _helperPathResolver();
 
-            stagingDir = CreateStagingDirectory();
+            cfg.WritePaths?.ValidateOutputPath(cfg);
+            cfg.StorageSafety?.EnsureAdmission();
+            stagingDir = CreateStagingDirectory(cfg.WritePaths?.WgcTempRoot ?? _tempRoot);
 
             stagingOutput = Path.Combine(stagingDir, "capture.mp4");
             beginSignal = Path.Combine(stagingDir, "begin.signal");
@@ -744,13 +747,6 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         return meta;
     }
 
-    private static string GetDefaultTempRoot()
-    {
-        return Path.Combine(
-            Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(),
-            "AgentRecorder");
-    }
-
     private static void ValidateConfig(CaptureConfig cfg)
     {
         bool isDisplay = string.Equals(cfg.SourceKind, "display", StringComparison.Ordinal);
@@ -846,11 +842,11 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         }
     }
 
-    private string CreateStagingDirectory()
+    private string CreateStagingDirectory(string tempRoot)
     {
         try
         {
-            string dir = Path.Combine(_tempRoot, "wgc-continuous", Guid.NewGuid().ToString("N"));
+            string dir = Path.Combine(tempRoot, "wgc-continuous", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             return dir;
         }
@@ -1222,7 +1218,11 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         PublishResult publish;
         try
         {
-            publish = _publisher.PublishAsync(stagingOutput, cfg.OutputPath, _finalizationCts.Token, _commitGate)
+            cfg.StorageSafety?.EnsureRuntimeCapacity();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                _finalizationCts.Token, cfg.StorageSafety?.AbortToken ?? CancellationToken.None);
+            var gate = cfg.StorageSafety?.CreateCommitGate(_commitGate, !cfg.StorageIntermediatePublication) ?? _commitGate;
+            publish = _publisher.PublishAsync(stagingOutput, cfg.OutputPath, linked.Token, gate)
                 .GetAwaiter().GetResult();
         }
         catch (Exception ex)

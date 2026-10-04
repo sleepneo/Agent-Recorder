@@ -174,13 +174,13 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     [Fact]
     public void RequiredWindowSurface_SelectsStrictWgcAndSplitAudioWithoutFallback()
     {
-        var noAudioConfig = RequiredWindowConfig();
+        var noAudioConfig = RequiredWindowConfig(1800);
         var noAudio = CaptureBackendSelector.BuildPlan(noAudioConfig, new FakeAvailabilityProbe(true));
         Assert.Equal("wgc-continuous", noAudio.PlannedBackend);
         Assert.Equal("window_surface", noAudio.CaptureSemantics);
         Assert.False(noAudio.FallbackOccurred);
 
-        var systemAudioConfig = RequiredWindowConfig();
+        var systemAudioConfig = RequiredWindowConfig(1800);
         systemAudioConfig.AudioSourceKind = AudioCaptureSourceKind.SystemLoopback;
         systemAudioConfig.SystemLoopbackEndpoint = "render-endpoint";
         systemAudioConfig.SystemLoopbackEndpointName = "Speakers";
@@ -214,6 +214,8 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     [InlineData(60)]
     [InlineData(61)]
     [InlineData(600)]
+    [InlineData(601)]
+    [InlineData(1800)]
     public void RequiredWindowSurfaceSelector_AcceptsBoundedDurationWithoutFallback(int durationSeconds)
     {
         var probe = new FakeAvailabilityProbe(true);
@@ -227,15 +229,15 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
     }
 
     [Fact]
-    public void RequiredWindowSurfaceSelector_601SecondsIsStable400BeforeProbe()
+    public void RequiredWindowSurfaceSelector_1801SecondsIsStable400BeforeProbe()
     {
         var probe = new FakeAvailabilityProbe(true);
         var error = Assert.Throws<ApiException>(() => CaptureBackendSelector.BuildPlan(
-            RequiredWindowConfig(601), probe));
+            RequiredWindowConfig(1801), probe));
 
         Assert.Equal(400, error.Status);
         Assert.Equal("INVALID_ARGUMENT", error.Code);
-        Assert.Contains("600", error.Message);
+        Assert.Contains("1800", error.Message);
         Assert.Equal(0, probe.CallCount);
     }
 
@@ -274,7 +276,7 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         {
             "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"}}",
             "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"audio\":{\"microphone\":{\"enabled\":true}}}",
-            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":601}}",
+            "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":1801}}",
             "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\",\"display_id\":\"display_1\"}}",
             "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"nested\":{}}",
             "{\"required_capture_semantics\":\"window_surface\",\"source\":{\"type\":\"window\",\"window_id\":\"window_12345\"},\"audio\":{\"desktop_audio\":{\"enabled\":true}}}"

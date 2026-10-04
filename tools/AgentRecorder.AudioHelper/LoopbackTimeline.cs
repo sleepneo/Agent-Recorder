@@ -67,12 +67,18 @@ internal sealed class LoopbackTimelineException : InvalidOperationException
 internal sealed class LoopbackTimeline
 {
     private const int MaxZeroChunkBytes = 65536;
+    // A single startup phase correction is expected; a few more tolerate
+    // transient clock settling, while repeated rebases indicate an unstable
+    // timestamp source. The separate 100-ms absolute budget prevents small or
+    // alternating steps from evading the count bound's purpose.
+    private const int MaxConfirmedQpcPhaseRebasesPerSession = 4;
 
     private readonly WaveFormat _format;
     private readonly long _timestampFrequency;
     private readonly long _frameTimestampTicks;
     private readonly long _qpcJitterToleranceTicks;
     private readonly long _maxDeviceGapFrames;
+    private readonly long _maxQpcPhaseShiftTicks;
     private readonly long _epochResetQpcDriftThresholdTicks;
     private long _anchorTimestamp;
     private long _anchorDevicePosition = -1;
@@ -84,6 +90,12 @@ internal sealed class LoopbackTimeline
     private long _lastPacketEndTimestamp = -1;
     private long _lastTrustedQpcTimestamp = -1;
     private long _lastTrustedDeviceStart = -1;
+    private long _phaseBudgetReferenceQpcTimestamp = -1;
+    private long _phaseBudgetReferenceDeviceStart = -1;
+    private long _pendingQpcPhaseTimestamp = -1;
+    private long _pendingQpcPhaseDeviceStart = -1;
+    private long _confirmedQpcPhaseRebaseCount;
+    private long _cumulativeAbsoluteQpcPhaseAdjustmentTicks;
     private long _qpcOutlierCount;
     private int _consecutiveQpcOutliers;
     private int _continuityDegraded;
@@ -113,6 +125,12 @@ internal sealed class LoopbackTimeline
         if (maxDeviceGap > long.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(paddingTolerance));
         _maxDeviceGapFrames = Math.Max(0L, (long)Math.Floor(maxDeviceGap));
+        // A small QPC phase change is considered only when it is bounded by
+        // the configured packet-position continuity envelope, then confirmed
+        // by the immediately following packet. This is not added to per-packet
+        // jitter tolerance.
+        _maxQpcPhaseShiftTicks = AudioPacketPositionMath.FramesToTimestampTicks(
+            _maxDeviceGapFrames, _format.SampleRate, _timestampFrequency);
     }
 
     public bool IsStarted => Interlocked.Read(ref _anchorTimestamp) != 0;
@@ -123,6 +141,25 @@ internal sealed class LoopbackTimeline
     public bool ContinuityDegraded => Volatile.Read(ref _continuityDegraded) != 0;
     internal long QpcJitterToleranceTicks => _qpcJitterToleranceTicks;
     internal long MaxDeviceGapFrames => _maxDeviceGapFrames;
+    internal int ConfirmedQpcPhaseRebaseCount
+        => checked((int)Interlocked.Read(ref _confirmedQpcPhaseRebaseCount));
+    internal long CumulativeAbsoluteQpcPhaseAdjustmentTicks
+        => Interlocked.Read(ref _cumulativeAbsoluteQpcPhaseAdjustmentTicks);
+    internal int MaxConfirmedQpcPhaseRebases => MaxConfirmedQpcPhaseRebasesPerSession;
+    internal long MaxCumulativeAbsoluteQpcPhaseAdjustmentTicks => _maxQpcPhaseShiftTicks;
+    internal long CurrentQpcPhaseOffsetTicks
+    {
+        get
+        {
+            long trustedQpc = Interlocked.Read(ref _lastTrustedQpcTimestamp);
+            long trustedDevice = Interlocked.Read(ref _lastTrustedDeviceStart);
+            long referenceQpc = Interlocked.Read(ref _phaseBudgetReferenceQpcTimestamp);
+            long referenceDevice = Interlocked.Read(ref _phaseBudgetReferenceDeviceStart);
+            return trustedQpc < 0 || referenceQpc < 0
+                ? 0
+                : GetQpcDrift(trustedQpc, trustedDevice, referenceQpc, referenceDevice).DriftTicks;
+        }
+    }
 
     public void Start(long anchorTimestamp)
     {
@@ -156,6 +193,12 @@ internal sealed class LoopbackTimeline
         Interlocked.Exchange(ref _lastPacketEndTimestamp, packetStartTimestampTicks);
         Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
         Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+        // A real epoch recovery establishes a new within-epoch reference, but
+        // lifetime phase-rebase count and absolute adjustment budget survive.
+        Interlocked.Exchange(ref _phaseBudgetReferenceQpcTimestamp, packetStartTimestampTicks);
+        Interlocked.Exchange(ref _phaseBudgetReferenceDeviceStart, devicePosition);
+        Interlocked.Exchange(ref _pendingQpcPhaseTimestamp, -1);
+        Interlocked.Exchange(ref _pendingQpcPhaseDeviceStart, -1);
         Volatile.Write(ref _consecutiveQpcOutliers, 0);
         Volatile.Write(ref _continuityDegraded, 1);
     }
@@ -239,13 +282,110 @@ internal sealed class LoopbackTimeline
         bool qpcOutlierAccepted = false;
         if (trustedQpc >= 0)
         {
-            long deviceDeltaFrames = checked(devicePosition - trustedDeviceStart);
-            long expectedQpcDeltaTicks = AudioPacketPositionMath.FramesToTimestampTicks(
-                deviceDeltaFrames, _format.SampleRate, _timestampFrequency);
-            long qpcDeltaTicks = checked(packetStartTimestampTicks - trustedQpc);
-            long qpcDriftTicks = checked(qpcDeltaTicks - expectedQpcDeltaTicks);
-            if (qpcDriftTicks > _qpcJitterToleranceTicks ||
-                qpcDriftTicks < -_qpcJitterToleranceTicks)
+            var trustedDrift = GetQpcDrift(packetStartTimestampTicks, devicePosition,
+                trustedQpc, trustedDeviceStart);
+            long pendingPhaseQpc = Interlocked.Read(ref _pendingQpcPhaseTimestamp);
+            long pendingPhaseDevice = Interlocked.Read(ref _pendingQpcPhaseDeviceStart);
+
+            if (pendingPhaseQpc > 0)
+            {
+                // A candidate phase is accepted only when the immediately next
+                // packet is exactly contiguous in device frames and its QPC
+                // delta follows that same device-frame delta within one frame
+                // of timestamp quantization. Otherwise the old trusted track
+                // must resume; a second unexplained point still fails closed.
+                bool candidateDeviceContinuous = !dataDiscontinuity &&
+                    !deviceGapOutOfBounds && previousDeviceEnd >= 0 &&
+                    devicePosition == previousDeviceEnd &&
+                    devicePosition >= pendingPhaseDevice;
+                var phaseDrift = candidateDeviceContinuous
+                    ? GetQpcDrift(packetStartTimestampTicks, devicePosition,
+                        pendingPhaseQpc, pendingPhaseDevice)
+                    : default;
+                bool phaseTrajectoryMatches = candidateDeviceContinuous &&
+                    IsWithinQpcJitter(phaseDrift.DriftTicks);
+                bool originalTrajectoryMatches = IsWithinQpcJitter(trustedDrift.DriftTicks);
+                if (!phaseTrajectoryMatches && !originalTrajectoryMatches)
+                {
+                    throw CreateQpcConflictException(
+                        trustedDrift.QpcDeltaTicks,
+                        trustedDrift.ExpectedQpcDeltaTicks,
+                        trustedDrift.DriftTicks,
+                        trustedDrift.DeviceDeltaFrames,
+                        currentDeviceGap,
+                        deviceGapOutOfBounds,
+                        packetStartTimestampTicks,
+                        previousPacketEnd,
+                        framesRecorded,
+                        positionValid,
+                        dataDiscontinuity,
+                        trustedQpc,
+                        trustedDeviceStart);
+                }
+
+                bool confirmsNewPhase = phaseTrajectoryMatches && !originalTrajectoryMatches;
+                if (confirmsNewPhase)
+                {
+                    long phaseReferenceQpc = Interlocked.Read(ref _phaseBudgetReferenceQpcTimestamp);
+                    long phaseReferenceDevice = Interlocked.Read(ref _phaseBudgetReferenceDeviceStart);
+                    var candidateStep = GetQpcDrift(pendingPhaseQpc, pendingPhaseDevice,
+                        trustedQpc, trustedDeviceStart);
+                    var candidateReferenceOffset = GetQpcDrift(pendingPhaseQpc, pendingPhaseDevice,
+                        phaseReferenceQpc, phaseReferenceDevice);
+                    long absoluteStepTicks = AbsoluteValue(candidateStep.DriftTicks);
+                    long cumulativeTicks = Interlocked.Read(ref _cumulativeAbsoluteQpcPhaseAdjustmentTicks);
+                    long rebaseCount = Interlocked.Read(ref _confirmedQpcPhaseRebaseCount);
+                    bool phaseBudgetExceeded =
+                        rebaseCount >= MaxConfirmedQpcPhaseRebasesPerSession ||
+                        AbsoluteValue(candidateReferenceOffset.DriftTicks) > _maxQpcPhaseShiftTicks ||
+                        absoluteStepTicks > _maxQpcPhaseShiftTicks - cumulativeTicks;
+                    if (phaseBudgetExceeded)
+                    {
+                        string budgetDiagnostics =
+                            $"; phase_budget_exceeded=True; confirmed_phase_rebases={rebaseCount}; " +
+                            $"max_confirmed_phase_rebases={MaxConfirmedQpcPhaseRebasesPerSession}; " +
+                            $"cumulative_absolute_phase_adjustment_ticks={cumulativeTicks}; " +
+                            $"proposed_absolute_phase_adjustment_ticks={absoluteStepTicks}; " +
+                            $"max_cumulative_absolute_phase_adjustment_ticks={_maxQpcPhaseShiftTicks}; " +
+                            $"phase_reference_offset_ticks={candidateReferenceOffset.DriftTicks}";
+                        throw CreateQpcConflictException(
+                            trustedDrift.QpcDeltaTicks,
+                            trustedDrift.ExpectedQpcDeltaTicks,
+                            trustedDrift.DriftTicks,
+                            trustedDrift.DeviceDeltaFrames,
+                            currentDeviceGap,
+                            deviceGapOutOfBounds,
+                            packetStartTimestampTicks,
+                            previousPacketEnd,
+                            framesRecorded,
+                            positionValid,
+                            dataDiscontinuity,
+                            trustedQpc,
+                            trustedDeviceStart,
+                            additionalDiagnostics: budgetDiagnostics);
+                    }
+
+                    Interlocked.Add(ref _cumulativeAbsoluteQpcPhaseAdjustmentTicks, absoluteStepTicks);
+                    Interlocked.Increment(ref _confirmedQpcPhaseRebaseCount);
+                }
+
+                // The immediate successor confirmed either this bounded phase
+                // or a return to the current trusted track. Only a genuinely
+                // new phase spends lifetime budget. The device-frame media map
+                // and the packet samples themselves are not altered.
+                Interlocked.Exchange(ref _pendingQpcPhaseTimestamp, -1);
+                Interlocked.Exchange(ref _pendingQpcPhaseDeviceStart, -1);
+                Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
+                Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+                Volatile.Write(ref _consecutiveQpcOutliers, 0);
+            }
+            else if (IsWithinQpcJitter(trustedDrift.DriftTicks))
+            {
+                Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
+                Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+                Volatile.Write(ref _consecutiveQpcOutliers, 0);
+            }
+            else
             {
                 // A first, very large QPC jump with otherwise usable device
                 // evidence is an endpoint epoch-reset candidate. Do not write
@@ -256,18 +396,18 @@ internal sealed class LoopbackTimeline
                     _consecutiveQpcOutliers == 0 &&
                     !dataDiscontinuity &&
                     !deviceGapOutOfBounds &&
-                    (qpcDriftTicks >= _epochResetQpcDriftThresholdTicks ||
-                     qpcDriftTicks <= -_epochResetQpcDriftThresholdTicks);
+                    (trustedDrift.DriftTicks >= _epochResetQpcDriftThresholdTicks ||
+                     trustedDrift.DriftTicks <= -_epochResetQpcDriftThresholdTicks);
                 if (epochResetCandidate)
                 {
                     Interlocked.Increment(ref _qpcOutlierCount);
                     Volatile.Write(ref _consecutiveQpcOutliers, 1);
                     Volatile.Write(ref _continuityDegraded, 1);
                     throw CreateQpcConflictException(
-                        qpcDeltaTicks,
-                        expectedQpcDeltaTicks,
-                        qpcDriftTicks,
-                        deviceDeltaFrames,
+                        trustedDrift.QpcDeltaTicks,
+                        trustedDrift.ExpectedQpcDeltaTicks,
+                        trustedDrift.DriftTicks,
+                        trustedDrift.DeviceDeltaFrames,
                         currentDeviceGap,
                         deviceGapOutOfBounds,
                         packetStartTimestampTicks,
@@ -280,22 +420,30 @@ internal sealed class LoopbackTimeline
                         epochResetCandidate: true);
                 }
 
-                if (_consecutiveQpcOutliers == 0 &&
-                    !dataDiscontinuity &&
+                if (_consecutiveQpcOutliers == 0 && !dataDiscontinuity &&
                     !deviceGapOutOfBounds)
                 {
                     qpcOutlierAccepted = true;
                     Interlocked.Increment(ref _qpcOutlierCount);
                     Volatile.Write(ref _consecutiveQpcOutliers, 1);
                     Volatile.Write(ref _continuityDegraded, 1);
+
+                    bool exactDeviceContinuity = previousDeviceEnd >= 0 &&
+                        devicePosition == previousDeviceEnd;
+                    if (exactDeviceContinuity &&
+                        AbsoluteValue(trustedDrift.DriftTicks) <= _maxQpcPhaseShiftTicks)
+                    {
+                        Interlocked.Exchange(ref _pendingQpcPhaseTimestamp, packetStartTimestampTicks);
+                        Interlocked.Exchange(ref _pendingQpcPhaseDeviceStart, devicePosition);
+                    }
                 }
                 else
                 {
                     throw CreateQpcConflictException(
-                        qpcDeltaTicks,
-                        expectedQpcDeltaTicks,
-                        qpcDriftTicks,
-                        deviceDeltaFrames,
+                        trustedDrift.QpcDeltaTicks,
+                        trustedDrift.ExpectedQpcDeltaTicks,
+                        trustedDrift.DriftTicks,
+                        trustedDrift.DeviceDeltaFrames,
                         currentDeviceGap,
                         deviceGapOutOfBounds,
                         packetStartTimestampTicks,
@@ -306,15 +454,6 @@ internal sealed class LoopbackTimeline
                         trustedQpc,
                         trustedDeviceStart);
                 }
-            }
-            else
-            {
-                // Recovery is complete only after a packet returns to the last
-                // trusted QPC/device trajectory. The outlier itself never moves
-                // this baseline.
-                Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
-                Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
-                Volatile.Write(ref _consecutiveQpcOutliers, 0);
             }
         }
 
@@ -389,11 +528,31 @@ internal sealed class LoopbackTimeline
         {
             Interlocked.Exchange(ref _lastTrustedQpcTimestamp, packetStartTimestampTicks);
             Interlocked.Exchange(ref _lastTrustedDeviceStart, devicePosition);
+            Interlocked.CompareExchange(ref _phaseBudgetReferenceQpcTimestamp, packetStartTimestampTicks, -1);
+            Interlocked.CompareExchange(ref _phaseBudgetReferenceDeviceStart, devicePosition, -1);
             Volatile.Write(ref _consecutiveQpcOutliers, 0);
         }
 
         return new LoopbackPacketAppendResult(zeroBytes, writeCount, overlapBytes, qpcOutlierAccepted);
     }
+
+    private (long DeviceDeltaFrames, long QpcDeltaTicks, long ExpectedQpcDeltaTicks, long DriftTicks)
+        GetQpcDrift(long packetStartTimestamp, long devicePosition,
+            long referenceQpcTimestamp, long referenceDevicePosition)
+    {
+        long deviceDeltaFrames = checked(devicePosition - referenceDevicePosition);
+        long expectedQpcDeltaTicks = AudioPacketPositionMath.FramesToTimestampTicks(
+            deviceDeltaFrames, _format.SampleRate, _timestampFrequency);
+        long qpcDeltaTicks = checked(packetStartTimestamp - referenceQpcTimestamp);
+        return (deviceDeltaFrames, qpcDeltaTicks, expectedQpcDeltaTicks,
+            checked(qpcDeltaTicks - expectedQpcDeltaTicks));
+    }
+
+    private bool IsWithinQpcJitter(long driftTicks)
+        => driftTicks >= -_qpcJitterToleranceTicks && driftTicks <= _qpcJitterToleranceTicks;
+
+    private static long AbsoluteValue(long value)
+        => value == long.MinValue ? long.MaxValue : Math.Abs(value);
 
     private LoopbackTimelineException CreateQpcConflictException(
         long qpcDeltaTicks,
@@ -409,10 +568,11 @@ internal sealed class LoopbackTimeline
         bool dataDiscontinuity,
         long trustedQpc,
         long trustedDeviceStart,
-        bool epochResetCandidate = false)
+        bool epochResetCandidate = false,
+        string additionalDiagnostics = "")
     {
         return LoopbackTimelineException.QpcDevicePositionConflict(
-            $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; current_device_gap_frames={currentDeviceGap}; max_device_gap_frames={_maxDeviceGapFrames}; device_gap_out_of_bounds={deviceGapOutOfBounds}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}; consecutive_qpc_outliers={_consecutiveQpcOutliers}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; last_written_device_start={Interlocked.Read(ref _lastDeviceStart)}; last_written_device_end={Interlocked.Read(ref _lastDeviceEnd)}",
+            $"WASAPI loopback QPC/device position conflict: qpc_delta_ticks={qpcDeltaTicks}; expected_qpc_delta_ticks={expectedQpcDeltaTicks}; qpc_drift_ticks={qpcDriftTicks}; qpc_jitter_tolerance_ticks={_qpcJitterToleranceTicks}; previous_packet_end_ticks={previousPacketEnd}; packet_start_ticks={packetStartTimestampTicks}; device_delta_frames={deviceDeltaFrames}; current_device_gap_frames={currentDeviceGap}; max_device_gap_frames={_maxDeviceGapFrames}; device_gap_out_of_bounds={deviceGapOutOfBounds}; packet_frames={framesRecorded}; position_valid={positionValid}; data_discontinuity={dataDiscontinuity}; qpc_outlier_count={QpcOutlierCount}; consecutive_qpc_outliers={_consecutiveQpcOutliers}; last_trusted_qpc_ticks={trustedQpc}; last_trusted_device_start={trustedDeviceStart}; last_written_device_start={Interlocked.Read(ref _lastDeviceStart)}; last_written_device_end={Interlocked.Read(ref _lastDeviceEnd)}{additionalDiagnostics}",
             qpcDriftTicks,
             currentDeviceGap,
             deviceGapOutOfBounds,

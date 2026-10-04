@@ -11,6 +11,7 @@ public static class RecurringPlanProfileBindingPersistenceReasonCodes
     public const string PlanNotPeriodic = "plan_not_periodic";
     public const string PlanNotDraft = "plan_not_draft";
     public const string ProfileNotFound = "profile_not_found";
+    public const string ProfileDeleted = "profile_deleted";
     public const string ProfileRefMismatch = "profile_ref_mismatch";
     public const string BoundToOtherProfile = "binding_bound_to_other_profile";
     public const string PersistedDataInvalid = "binding_persisted_data_invalid";
@@ -70,6 +71,7 @@ public sealed class SqliteRecurringPlanProfileBindingRepository : SqliteReposito
                 return existing;
             }
 
+            EnsureProfileNotDeleted(connection, transaction, profileRef.ProfileId);
             ReadProfileForInitialBinding(connection, transaction, profileRef);
             if (plan.IsOneTime)
             {
@@ -459,6 +461,23 @@ public sealed class SqliteRecurringPlanProfileBindingRepository : SqliteReposito
                     "The exact recurring profile version could not be read.",
                     exception),
             };
+        }
+    }
+
+    private static void EnsureProfileNotDeleted(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string profileId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT deleted_at_utc FROM fixed_region_profile_directory WHERE profile_id = $profileId LIMIT 1;";
+        command.Parameters.AddWithValue("$profileId", profileId);
+        var value = command.ExecuteScalar();
+        if (value is not null && value != DBNull.Value)
+        {
+            throw Failure(RecurringPlanProfileBindingPersistenceReasonCodes.ProfileDeleted,
+                "A deleted fixed-region profile cannot be newly bound to a plan.");
         }
     }
 

@@ -17,4 +17,7 @@ public sealed class FirstFrameObservation
 
     /// <summary>Reported output time in microseconds, if available.</summary>
     public long? OutTimeUs { get; init; }
+
+    /// <summary>WGC SystemRelativeTime of the first timeline-accepted frame, in 100-ns units.</summary>
+    public long? MediaStartSystemRelativeTimeHns { get; init; }
 }

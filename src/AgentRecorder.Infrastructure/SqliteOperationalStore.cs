@@ -12,7 +12,7 @@ namespace AgentRecorder.Infrastructure;
 /// </summary>
 public sealed class SqliteOperationalStore
 {
-    public const int CurrentSchemaVersion = 18;
+    public const int CurrentSchemaVersion = 21;
     public const int BusyTimeoutMilliseconds = 5_000;
     public const string DatabaseFileName = "agent-recorder.db";
     public const string StateDirectoryName = "state";
@@ -89,6 +89,9 @@ public sealed class SqliteOperationalStore
                 : new Dictionary<int, AppliedMigration>();
 
             ValidateMigrationHistory(applied, migrations);
+
+            if (applied.ContainsKey(19) && !applied.ContainsKey(20))
+                ValidateLegacyFutureWindowAuthorizationSchema(connection, transaction);
 
             foreach (var migration in migrations)
             {
@@ -483,6 +486,32 @@ public sealed class SqliteOperationalStore
             throw new SqliteOperationalStoreException(
                 "sqlite_corrupt",
                 "SQLite schema metadata contains invalid values.",
+                exception);
+        }
+    }
+
+    private static void ValidateLegacyFutureWindowAuthorizationSchema(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        try
+        {
+            var table = SqliteSchemaV19.Tables.Single(item => item.Name == "future_window_authorizations");
+            ValidateColumns(connection, transaction, table);
+            foreach (var index in SqliteSchemaV19.Indexes) ValidateExplicitIndex(connection, transaction, index);
+            foreach (var unique in SqliteSchemaV19.UniqueConstraints) ValidateUniqueConstraint(connection, transaction, unique);
+            foreach (var check in SqliteSchemaV19.CheckConstraints) ValidateCheckConstraint(connection, transaction, check);
+            foreach (var trigger in SqliteSchemaV19.Triggers) ValidateTrigger(connection, transaction, trigger);
+        }
+        catch (SqliteOperationalStoreException)
+        {
+            throw;
+        }
+        catch (SqliteException exception)
+        {
+            throw new SqliteOperationalStoreException(
+                "sqlite_corrupt",
+                "The legacy future-window authorization schema could not be validated before migration.",
                 exception);
         }
     }
@@ -2546,26 +2575,26 @@ internal static class SqliteSchemaV10
 internal static class SqliteSchemaCatalog
 {
     public static IReadOnlyList<SqliteMigrationDefinition> Migrations { get; } =
-        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).ToArray();
+        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).Concat(SqliteSchemaV19.Migrations).Concat(SqliteSchemaV20.Migrations).Concat(SqliteSchemaV21.Migrations).ToArray();
 
     public static IReadOnlyList<SqliteTableDefinition> Tables { get; } =
-        SqliteSchemaV1.Tables.Concat(SqliteSchemaV2.Tables).Concat(SqliteSchemaV3.Tables.Where(table => table.Name != "setup_intents")).Concat(SqliteSchemaV5.Tables).Concat(SqliteSchemaV7.Tables).Concat(SqliteSchemaV8.Tables).Concat(SqliteSchemaV9.Tables).Concat(SqliteSchemaV10.Tables).Concat(SqliteSchemaV11.Tables).Concat(SqliteSchemaV12.Tables).Concat(SqliteSchemaV13.Tables).Concat(SqliteSchemaV14.Tables).Concat(SqliteSchemaV15.Tables).Concat(SqliteSchemaV16.Tables).Concat(SqliteSchemaV17.Tables).Concat(SqliteSchemaV18.Tables).ToArray();
+        SqliteSchemaV1.Tables.Concat(SqliteSchemaV2.Tables).Concat(SqliteSchemaV3.Tables.Where(table => table.Name != "setup_intents")).Concat(SqliteSchemaV5.Tables).Concat(SqliteSchemaV7.Tables).Concat(SqliteSchemaV8.Tables).Concat(SqliteSchemaV9.Tables).Concat(SqliteSchemaV10.Tables).Concat(SqliteSchemaV11.Tables).Concat(SqliteSchemaV12.Tables).Concat(SqliteSchemaV13.Tables).Concat(SqliteSchemaV14.Tables).Concat(SqliteSchemaV15.Tables).Concat(SqliteSchemaV16.Tables).Concat(SqliteSchemaV17.Tables).Concat(SqliteSchemaV18.Tables).Concat(SqliteSchemaV19.Tables).Concat(SqliteSchemaV21.Tables).ToArray();
 
     public static IReadOnlyList<SqliteIndexDefinition> Indexes { get; } =
-        SqliteSchemaV1.Indexes.Concat(SqliteSchemaV2.Indexes).Concat(SqliteSchemaV3.Indexes).Concat(SqliteSchemaV5.Indexes).Concat(SqliteSchemaV7.Indexes).Concat(SqliteSchemaV8.Indexes).Concat(SqliteSchemaV9.Indexes).Concat(SqliteSchemaV10.Indexes).Concat(SqliteSchemaV11.Indexes).Concat(SqliteSchemaV12.Indexes).Concat(SqliteSchemaV13.Indexes).Concat(SqliteSchemaV14.Indexes).Concat(SqliteSchemaV15.Indexes).Concat(SqliteSchemaV16.Indexes).Concat(SqliteSchemaV17.Indexes).Concat(SqliteSchemaV18.Indexes).ToArray();
+        SqliteSchemaV1.Indexes.Concat(SqliteSchemaV2.Indexes).Concat(SqliteSchemaV3.Indexes).Concat(SqliteSchemaV5.Indexes).Concat(SqliteSchemaV7.Indexes).Concat(SqliteSchemaV8.Indexes).Concat(SqliteSchemaV9.Indexes).Concat(SqliteSchemaV10.Indexes).Concat(SqliteSchemaV11.Indexes).Concat(SqliteSchemaV12.Indexes).Concat(SqliteSchemaV13.Indexes).Concat(SqliteSchemaV14.Indexes).Concat(SqliteSchemaV15.Indexes).Concat(SqliteSchemaV16.Indexes).Concat(SqliteSchemaV17.Indexes).Concat(SqliteSchemaV18.Indexes).Concat(SqliteSchemaV19.Indexes).Concat(SqliteSchemaV21.Indexes).ToArray();
 
     public static IReadOnlyList<SqliteUniqueConstraintDefinition> UniqueConstraints { get; } =
-        SqliteSchemaV1.UniqueConstraints.Concat(SqliteSchemaV2.UniqueConstraints).Concat(SqliteSchemaV3.UniqueConstraints.Where(unique => unique.TableName != "setup_intents")).Concat(SqliteSchemaV5.UniqueConstraints).Concat(SqliteSchemaV7.UniqueConstraints).Concat(SqliteSchemaV8.UniqueConstraints).Concat(SqliteSchemaV9.UniqueConstraints).Concat(SqliteSchemaV10.UniqueConstraints).Concat(SqliteSchemaV11.UniqueConstraints).Concat(SqliteSchemaV12.UniqueConstraints).Concat(SqliteSchemaV13.UniqueConstraints).Concat(SqliteSchemaV14.UniqueConstraints).Concat(SqliteSchemaV15.UniqueConstraints).Concat(SqliteSchemaV16.UniqueConstraints).Concat(SqliteSchemaV17.UniqueConstraints).Concat(SqliteSchemaV18.UniqueConstraints).ToArray();
+        SqliteSchemaV1.UniqueConstraints.Concat(SqliteSchemaV2.UniqueConstraints).Concat(SqliteSchemaV3.UniqueConstraints.Where(unique => unique.TableName != "setup_intents")).Concat(SqliteSchemaV5.UniqueConstraints).Concat(SqliteSchemaV7.UniqueConstraints).Concat(SqliteSchemaV8.UniqueConstraints).Concat(SqliteSchemaV9.UniqueConstraints).Concat(SqliteSchemaV10.UniqueConstraints).Concat(SqliteSchemaV11.UniqueConstraints).Concat(SqliteSchemaV12.UniqueConstraints).Concat(SqliteSchemaV13.UniqueConstraints).Concat(SqliteSchemaV14.UniqueConstraints).Concat(SqliteSchemaV15.UniqueConstraints).Concat(SqliteSchemaV16.UniqueConstraints).Concat(SqliteSchemaV17.UniqueConstraints).Concat(SqliteSchemaV18.UniqueConstraints).Concat(SqliteSchemaV19.UniqueConstraints).ToArray();
 
     public static IReadOnlyList<SqliteForeignKeyDefinition> ForeignKeys { get; } =
-        SqliteSchemaV1.ForeignKeys.Concat(SqliteSchemaV2.ForeignKeys).Concat(SqliteSchemaV3.ForeignKeys).Concat(SqliteSchemaV5.ForeignKeys).Concat(SqliteSchemaV7.ForeignKeys).Concat(SqliteSchemaV8.ForeignKeys).Concat(SqliteSchemaV9.ForeignKeys).Concat(SqliteSchemaV10.ForeignKeys).Concat(SqliteSchemaV11.ForeignKeys).Concat(SqliteSchemaV12.ForeignKeys).Concat(SqliteSchemaV13.ForeignKeys).Concat(SqliteSchemaV15.ForeignKeys).Concat(SqliteSchemaV16.ForeignKeys).Concat(SqliteSchemaV17.ForeignKeys).Concat(SqliteSchemaV18.ForeignKeys).ToArray();
+        SqliteSchemaV1.ForeignKeys.Concat(SqliteSchemaV2.ForeignKeys).Concat(SqliteSchemaV3.ForeignKeys).Concat(SqliteSchemaV5.ForeignKeys).Concat(SqliteSchemaV7.ForeignKeys).Concat(SqliteSchemaV8.ForeignKeys).Concat(SqliteSchemaV9.ForeignKeys).Concat(SqliteSchemaV10.ForeignKeys).Concat(SqliteSchemaV11.ForeignKeys).Concat(SqliteSchemaV12.ForeignKeys).Concat(SqliteSchemaV13.ForeignKeys).Concat(SqliteSchemaV15.ForeignKeys).Concat(SqliteSchemaV16.ForeignKeys).Concat(SqliteSchemaV17.ForeignKeys).Concat(SqliteSchemaV18.ForeignKeys).Concat(SqliteSchemaV19.ForeignKeys).ToArray();
 
     public static IReadOnlyList<SqliteDeferredForeignKeyDefinition> DeferredForeignKeys { get; } =
-        SqliteSchemaV1.DeferredForeignKeys.Concat(SqliteSchemaV2.DeferredForeignKeys).Concat(SqliteSchemaV3.DeferredForeignKeys).Concat(SqliteSchemaV5.DeferredForeignKeys).Concat(SqliteSchemaV7.DeferredForeignKeys).Concat(SqliteSchemaV8.DeferredForeignKeys).Concat(SqliteSchemaV9.DeferredForeignKeys).Concat(SqliteSchemaV10.DeferredForeignKeys).Concat(SqliteSchemaV11.DeferredForeignKeys).Concat(SqliteSchemaV12.DeferredForeignKeys).Concat(SqliteSchemaV13.DeferredForeignKeys).Concat(SqliteSchemaV15.DeferredForeignKeys).Concat(SqliteSchemaV16.DeferredForeignKeys).Concat(SqliteSchemaV17.DeferredForeignKeys).Concat(SqliteSchemaV18.DeferredForeignKeys).ToArray();
+        SqliteSchemaV1.DeferredForeignKeys.Concat(SqliteSchemaV2.DeferredForeignKeys).Concat(SqliteSchemaV3.DeferredForeignKeys).Concat(SqliteSchemaV5.DeferredForeignKeys).Concat(SqliteSchemaV7.DeferredForeignKeys).Concat(SqliteSchemaV8.DeferredForeignKeys).Concat(SqliteSchemaV9.DeferredForeignKeys).Concat(SqliteSchemaV10.DeferredForeignKeys).Concat(SqliteSchemaV11.DeferredForeignKeys).Concat(SqliteSchemaV12.DeferredForeignKeys).Concat(SqliteSchemaV13.DeferredForeignKeys).Concat(SqliteSchemaV15.DeferredForeignKeys).Concat(SqliteSchemaV16.DeferredForeignKeys).Concat(SqliteSchemaV17.DeferredForeignKeys).Concat(SqliteSchemaV18.DeferredForeignKeys).Concat(SqliteSchemaV19.DeferredForeignKeys).ToArray();
 
     public static IReadOnlyList<SqliteCheckConstraintDefinition> CheckConstraints =>
-        SqliteSchemaV2.CheckConstraints.Concat(SqliteSchemaV3.CheckConstraints.Where(check => check.TableName != "setup_intents")).Concat(SqliteSchemaV4.CheckConstraints.Where(check => check.TableName != "setup_intents")).Concat(SqliteSchemaV5.CheckConstraints).Concat(SqliteSchemaV7.CheckConstraints).Concat(SqliteSchemaV8.CheckConstraints).Concat(SqliteSchemaV9.CheckConstraints).Concat(SqliteSchemaV10.CheckConstraints).Concat(SqliteSchemaV11.CheckConstraints).Concat(SqliteSchemaV12.CheckConstraints).Concat(SqliteSchemaV13.CheckConstraints).Concat(SqliteSchemaV14.CheckConstraints).Concat(SqliteSchemaV15.CheckConstraints).Concat(SqliteSchemaV16.CheckConstraints).Concat(SqliteSchemaV17.CheckConstraints).Concat(SqliteSchemaV18.CheckConstraints).ToArray();
+        SqliteSchemaV2.CheckConstraints.Concat(SqliteSchemaV3.CheckConstraints.Where(check => check.TableName != "setup_intents")).Concat(SqliteSchemaV4.CheckConstraints.Where(check => check.TableName != "setup_intents")).Concat(SqliteSchemaV5.CheckConstraints).Concat(SqliteSchemaV7.CheckConstraints).Concat(SqliteSchemaV8.CheckConstraints).Concat(SqliteSchemaV9.CheckConstraints).Concat(SqliteSchemaV10.CheckConstraints).Concat(SqliteSchemaV11.CheckConstraints).Concat(SqliteSchemaV12.CheckConstraints).Concat(SqliteSchemaV13.CheckConstraints).Concat(SqliteSchemaV14.CheckConstraints).Concat(SqliteSchemaV15.CheckConstraints).Concat(SqliteSchemaV16.CheckConstraints).Concat(SqliteSchemaV17.CheckConstraints).Concat(SqliteSchemaV18.CheckConstraints).Concat(SqliteSchemaV19.CheckConstraints.Where(check => check.TableName != "future_window_authorizations")).Concat(SqliteSchemaV20.CheckConstraints).Concat(SqliteSchemaV21.CheckConstraints).ToArray();
 
     public static IReadOnlyList<SqliteTriggerDefinition> Triggers { get; } =
-        SqliteSchemaV9.Triggers.Concat(SqliteSchemaV10.Triggers).Concat(SqliteSchemaV11.Triggers).Concat(SqliteSchemaV12.Triggers).Concat(SqliteSchemaV13.Triggers).Concat(SqliteSchemaV15.Triggers).Concat(SqliteSchemaV16.Triggers).Concat(SqliteSchemaV17.Triggers).Concat(SqliteSchemaV18.Triggers).ToArray();
+        SqliteSchemaV9.Triggers.Concat(SqliteSchemaV10.Triggers).Concat(SqliteSchemaV11.Triggers).Concat(SqliteSchemaV12.Triggers).Concat(SqliteSchemaV13.Triggers).Concat(SqliteSchemaV15.Triggers).Concat(SqliteSchemaV16.Triggers).Concat(SqliteSchemaV17.Triggers).Concat(SqliteSchemaV18.Triggers).Concat(SqliteSchemaV19.Triggers).Concat(SqliteSchemaV21.Triggers).ToArray();
 }

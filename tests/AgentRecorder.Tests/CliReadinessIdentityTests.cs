@@ -41,7 +41,8 @@ public class CliReadinessIdentityTests
             ["api_version"] = apiVersion,
             ["startup_elapsed_ms"] = 850,
             ["named_event"] = @"Local\AgentRecorderReady",
-            ["data_dir"] = dataDir
+            ["data_dir"] = dataDir,
+            ["interactive_desktop"] = new { ready = true }
         };
         if (includePid) readinessObj["pid"] = pid;
         if (includePort) readinessObj["port"] = port;
@@ -89,7 +90,11 @@ public class CliReadinessIdentityTests
             ApiKeyFile = apiKeyFile ?? @"C:\data\config\api-key.txt",
             AuditLogPath = @"C:\data\logs\audit.jsonl",
             ReadyFile = readyFile ?? @"C:\data\runtime\ready.json",
-            NamedEvent = @"Local\AgentRecorderReady"
+            NamedEvent = @"Local\AgentRecorderReady",
+            InteractiveDesktopReady = true,
+            SessionId = 1,
+            WindowStation = "WinSta0",
+            Desktop = "Default"
         };
     }
 
@@ -104,6 +109,22 @@ public class CliReadinessIdentityTests
 
         Assert.True(result.Valid);
         Assert.Equal("v1", result.ApiVersion);
+    }
+
+    [Fact]
+    public void ApiReadyWithoutInteractiveDesktopProofIsRejected()
+    {
+        var snap = MakeSnapshot();
+        snap.InteractiveDesktopReady = false;
+        snap.WindowStation = "WinSta0";
+        snap.Desktop = "CodexSandboxDesktop";
+        var json = MakeCapabilitiesJson(pid: snap.Pid, port: snap.Port, mode: snap.Mode,
+            readyFile: snap.ReadyFile, apiKeyFile: snap.ApiKeyFile);
+
+        var result = Program.ValidateReadySnapshotAgainstCapabilitiesJson(snap, json);
+
+        Assert.False(result.Valid);
+        Assert.Equal("INTERACTIVE_DESKTOP_REQUIRED", result.ErrorCode);
     }
 
     [Fact]

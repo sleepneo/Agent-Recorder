@@ -67,6 +67,7 @@ public sealed class RecordingEngine : IDisposable
 
     private readonly ConcurrentDictionary<string, DisplayRuntimeMonitorOperation> _displayRuntimeMonitors = new();
     internal int ActiveDisplayRuntimeMonitorCountForTests => _displayRuntimeMonitors.Count;
+    internal Func<TimeSpan, CancellationToken, Task> StorageMonitorDelay { get; set; } = Task.Delay;
 
     /// <summary>
     /// Diagnostic seam for resource-lifecycle tests: number of countdown
@@ -84,6 +85,8 @@ public sealed class RecordingEngine : IDisposable
     private readonly Func<StandingLeaseCaptureExecutionTicket, DateTimeOffset, string?>? _standingStartSafetyValidator;
     private readonly StandingLeaseStartSafetyInterlock? _recurringStartSafetyInterlock;
     private readonly Func<RecurringLeaseCaptureExecutionTicket, DateTimeOffset, RecurringLeaseCurrentSafetyDecision>? _recurringStartSafetyValidator;
+    private readonly StandingLeaseStartSafetyInterlock? _futureWindowStartSafetyInterlock;
+    private readonly Func<FutureWindowOneShotExecutionTicket, DateTimeOffset, string?>? _futureWindowStartSafetyValidator;
     private readonly IRecurringOccurrenceEnvironmentProvider? _recurringEnvironmentProvider;
     private bool _usesDefaultBackendFactory = true;
     private Func<CaptureConfig, CapturePlan>? _capturePlanFactory =
@@ -218,6 +221,17 @@ public sealed class RecordingEngine : IDisposable
 
     internal Action<Recording>? BeforeRequiredOnceBackendFinalGateForTests { get; set; }
 
+    internal Action<Recording>? BeforeFutureWindowBackendFinalGateForTests { get; set; }
+
+    internal Func<(string CurrentUserSid, string SessionBinding, int SessionId)> FutureWindowIdentityForTests { get; set; } = () =>
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Current,
+            FutureWindowProcessIdentity.GetCurrentSessionId() ?? -1);
+    };
+
+    internal Func<FutureWindowOneShotExecutionTicket, string?>? FutureWindowEnvironmentValidatorForTests { get; set; }
+
     /// <summary>
     /// Deterministic creation-wait race seams. The snapshot callback runs after
     /// the wait signal returns and immediately before the coherent snapshot is
@@ -313,7 +327,9 @@ public sealed class RecordingEngine : IDisposable
             standingStartSafetyValidator: null,
             recurringStartSafetyInterlock: null,
             recurringStartSafetyValidator: null,
-            recurringEnvironmentProvider: null)
+            recurringEnvironmentProvider: null,
+            futureWindowStartSafetyInterlock: null,
+            futureWindowStartSafetyValidator: null)
     {
     }
 
@@ -327,7 +343,9 @@ public sealed class RecordingEngine : IDisposable
         Func<StandingLeaseCaptureExecutionTicket, DateTimeOffset, string?>? standingStartSafetyValidator = null,
         StandingLeaseStartSafetyInterlock? recurringStartSafetyInterlock = null,
         Func<RecurringLeaseCaptureExecutionTicket, DateTimeOffset, RecurringLeaseCurrentSafetyDecision>? recurringStartSafetyValidator = null,
-        IRecurringOccurrenceEnvironmentProvider? recurringEnvironmentProvider = null)
+        IRecurringOccurrenceEnvironmentProvider? recurringEnvironmentProvider = null,
+        StandingLeaseStartSafetyInterlock? futureWindowStartSafetyInterlock = null,
+        Func<FutureWindowOneShotExecutionTicket, DateTimeOffset, string?>? futureWindowStartSafetyValidator = null)
     {
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
@@ -341,6 +359,8 @@ public sealed class RecordingEngine : IDisposable
         _recurringStartSafetyInterlock = recurringStartSafetyInterlock;
         _recurringStartSafetyValidator = recurringStartSafetyValidator;
         _recurringEnvironmentProvider = recurringEnvironmentProvider;
+        _futureWindowStartSafetyInterlock = futureWindowStartSafetyInterlock;
+        _futureWindowStartSafetyValidator = futureWindowStartSafetyValidator;
     }
 
     /// <summary>
@@ -364,6 +384,18 @@ public sealed class RecordingEngine : IDisposable
 
     internal bool HasRecording(string recordingId) =>
         !string.IsNullOrWhiteSpace(recordingId) && _recs.ContainsKey(recordingId);
+
+    // Durable future-window settlement must not infer a trusted failure from
+    // an arbitrary Stop(reason) string. Only the run's storage arbiter can
+    // supply these finite reasons after terminal classification.
+    internal string? GetTrustedStorageFailureReason(string recordingId)
+    {
+        if (!_recs.TryGetValue(recordingId, out var rec)) return null;
+        lock (rec)
+            return rec.IsFinalized && rec.State == RecState.failed &&
+                rec.TrustedLifecycleAbortReason is CaptureAbortReason.StorageSpaceLow or CaptureAbortReason.StorageCapacityUnavailable
+                ? rec.Config.StorageSafety?.FailureCode : null;
+    }
 
     /// <summary>
     /// Read-only active-recording predicate for unattended natural-wake
@@ -706,6 +738,30 @@ public sealed class RecordingEngine : IDisposable
         string? traceId = null,
         string? endpoint = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
+        => CreateRecordingCore(cfg, agent, tray, traceId, endpoint, preResolvedSystemAudioEndpoint, null);
+
+    internal object CreateRecordingFromFixedRegionProfile(
+        JsonNode cfg,
+        string agent,
+        ITrayContext tray,
+        ProfileRef profileRef,
+        Func<string?> environmentValidator,
+        string? traceId = null,
+        string? endpoint = null)
+    {
+        ArgumentNullException.ThrowIfNull(environmentValidator);
+        return CreateRecordingCore(cfg, agent, tray, traceId, endpoint, null,
+            new FixedRegionProfileExecution(profileRef, environmentValidator));
+    }
+
+    private object CreateRecordingCore(
+        JsonNode cfg,
+        string agent,
+        ITrayContext tray,
+        string? traceId,
+        string? endpoint,
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint,
+        FixedRegionProfileExecution? fixedRegionProfile)
     {
         traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
         endpoint ??= "recordings";
@@ -791,6 +847,8 @@ public sealed class RecordingEngine : IDisposable
         RecordingRequestSummary summary;
         try
         {
+            if (fixedRegionProfile is not null)
+                EnsureFixedRegionProfileEnvironment(fixedRegionProfile.EnvironmentValidator, "before_configuration");
             rec = ConfigParser.Build(
                 cfg,
                 agent,
@@ -799,6 +857,12 @@ public sealed class RecordingEngine : IDisposable
                 _microphoneStatusProvider,
                 _systemAudioEndpointProvider,
                 preResolvedSystemAudioEndpoint);
+            if (fixedRegionProfile is not null)
+            {
+                rec.FixedRegionProfileReference = fixedRegionProfile.ProfileRef;
+                rec.FixedRegionProfileEnvironmentValidator = fixedRegionProfile.EnvironmentValidator;
+                rec.FixedRegionProfileStrictOutputConflict = true;
+            }
         }
         catch (ApiException ex)
         {
@@ -842,6 +906,10 @@ public sealed class RecordingEngine : IDisposable
         // confirmation is queued. Capability probing is allowed here; backend
         // construction and all pixel-producing work remain approval-gated.
         var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+        if (fixedRegionProfile is not null && capturePlan.PlannedBackend != "ffmpeg-region")
+            throw new ApiException(409, "PROFILE_BACKEND_UNAVAILABLE",
+                "Fixed-region profile execution requires the ffmpeg-region backend.",
+                new { field = "profile_ref", reason_code = "profile_backend_unavailable" });
         if (rec.IsScreenshotSeries)
             ValidateScreenshotSeriesPlan(capturePlan, rec.Config);
         rec.ApprovedCapturePlan = capturePlan;
@@ -927,6 +995,10 @@ public sealed class RecordingEngine : IDisposable
         _audit.Log("recording.requested", new
         {
             recording_id = rec.Id,
+            profile_ref = rec.FixedRegionProfileReference is { } profileRef
+                ? new { id = profileRef.ProfileId, version = profileRef.ProfileVersion, digest = profileRef.ProfileDigest }
+                : null,
+            output_path = rec.OutputPath,
             agent, source_type = rec.SourceType,
             mode = rec.Mode,
             series_interval_ms = rec.ScreenshotSeries?.IntervalMs,
@@ -1043,6 +1115,7 @@ public sealed class RecordingEngine : IDisposable
             {
                 status = "requires_user_confirmation",
                 recording_id = rec.Id,
+                profile_ref = ProfileRefObject(rec),
                 confirmation_id = conf.Id,
                 summary = summaryWithMeta,
                 bundle = BundleObj(rec),
@@ -1055,6 +1128,7 @@ public sealed class RecordingEngine : IDisposable
             return new
             {
                 recording_id = rec.Id,
+                profile_ref = ProfileRefObject(rec),
                 status = "failed",
                 error = rec.Error,
                 expected_output = rec.OutputPath,
@@ -1067,6 +1141,7 @@ public sealed class RecordingEngine : IDisposable
             return new
             {
                 recording_id = rec.Id, mode = rec.Mode,
+                profile_ref = ProfileRefObject(rec),
                 status = rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : "recording",
                 started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
                 config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
@@ -1078,22 +1153,45 @@ public sealed class RecordingEngine : IDisposable
 
     private bool ApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId)
     {
-        if (string.IsNullOrWhiteSpace(decision.OutputDirectory))
-        {
-            // No override requested: still honor "remember default" if a directory is somehow absent.
-            return true;
-        }
-
         try
         {
-            PolicyEngine.ValidateDirectory(decision.OutputDirectory);
-            Directory.CreateDirectory(decision.OutputDirectory);
-            var newPath = rec.IsScreenshotSeries
-                ? OutputPathResolver.MoveScreenshotSeriesToDirectory(rec.OutputPath, decision.OutputDirectory, rec)
-                : OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory);
-            rec.OutputPath = newPath;
-            if (rec.Config != null)
+            lock (rec)
+            {
+                // This private entry is called after the local decision was
+                // claimed and before issuing its proof. It cannot rewrite an
+                // execution ticket, an issued proof, or a started/terminal Run.
+                if (!decision.Approved || rec.IsFinalized || rec.BackendStartAttempted ||
+                    rec.StartedAtUtc != default || rec.AuthorizationProof is not null ||
+                    rec.State is not (RecState.created or RecState.pending_confirmation) ||
+                    rec.IsFutureWindowOneShotExecution || rec.IsRequiredOnceExecution || rec.IsUnattendedLeaseExecution)
+                    return false;
+
+                var newPath = rec.OutputPath;
+                if (!string.IsNullOrWhiteSpace(decision.OutputDirectory))
+                {
+                    PolicyEngine.ValidateDirectory(decision.OutputDirectory);
+                    Directory.CreateDirectory(decision.OutputDirectory);
+                    newPath = rec.IsScreenshotSeries
+                        ? OutputPathResolver.MoveScreenshotSeriesToDirectory(rec.OutputPath, decision.OutputDirectory, rec)
+                        : OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory,
+                            rec.FixedRegionProfileStrictOutputConflict ? "fail" : "rename");
+                }
+
+                // The confirmation-preflight snapshot is tentative. Only this
+                // owned local approval establishes the final write specification.
+                // Never rebuild on a backend/preflight path-mismatch exception.
+                var paths = rec.Config.RequireWindowSurface ? CaptureWritePaths.Freeze(rec.Config, newPath) : null;
+                if (paths is not null)
+                {
+                    rec.Config.StorageSafety?.Dispose();
+                    rec.Config.StorageSafety = null;
+                    rec.Config.WritePaths = paths;
+                }
+                rec.OutputPath = newPath;
                 rec.Config.OutputPath = newPath;
+            }
+
+            if (string.IsNullOrWhiteSpace(decision.OutputDirectory)) return true;
 
             _audit.Log("confirmation.output_directory_selected", new
             {
@@ -1183,6 +1281,8 @@ public sealed class RecordingEngine : IDisposable
 
     private bool TryRevalidateCapturePlan(Recording rec, string traceId, ITrayContext tray)
     {
+        if (!TryEnsureFixedRegionProfileEnvironment(rec, "after_confirmation", tray))
+            return false;
         var approved = rec.ApprovedCapturePlan;
         if (approved == null)
             return true;
@@ -1393,6 +1493,78 @@ public sealed class RecordingEngine : IDisposable
         TrySetIdleOnAllDone(tray);
         return false;
     }
+
+    private static void EnsureFixedRegionProfileEnvironment(Func<string?> validator, string stage)
+    {
+        string? reason;
+        try { reason = validator(); }
+        catch { reason = "profile_environment_unavailable"; }
+        if (!string.IsNullOrWhiteSpace(reason))
+            throw new FixedRegionProfileEnvironmentChangedException(reason, stage);
+    }
+
+    private static void EnsureFixedRegionProfileEnvironment(Recording rec, string stage)
+    {
+        if (rec.FixedRegionProfileEnvironmentValidator is { } validator)
+            EnsureFixedRegionProfileEnvironment(validator, stage);
+    }
+
+    private bool TryEnsureFixedRegionProfileEnvironment(Recording rec, string stage, ITrayContext tray)
+    {
+        try
+        {
+            EnsureFixedRegionProfileEnvironment(rec, stage);
+            return true;
+        }
+        catch (FixedRegionProfileEnvironmentChangedException ex)
+        {
+            FailFixedRegionProfileEnvironment(rec, ex, GetTraceIdForRecording(rec.Id), tray);
+            return false;
+        }
+    }
+
+    private bool FailFixedRegionProfileEnvironment(
+        Recording rec,
+        FixedRegionProfileEnvironmentChangedException failure,
+        string? traceId,
+        ITrayContext tray)
+    {
+        const string code = "PROFILE_ENVIRONMENT_CHANGED";
+        var ownership = TryClaimStartFailure(rec, code,
+            $"{code}:{failure.ReasonCode}", code);
+        if (ownership != StartFailureOwnership.Failed)
+            return false;
+
+        try { _audit.Log("recording.profile_environment_changed", new
+        {
+            recording_id = rec.Id,
+            profile_ref = rec.FixedRegionProfileReference is { } reference
+                ? new { id = reference.ProfileId, version = reference.ProfileVersion, digest = reference.ProfileDigest }
+                : null,
+            stage = failure.Stage,
+            reason_code = failure.ReasonCode
+        }); } catch { }
+        _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id,
+            status: "failed", stopReason: code, errorCode: code);
+        tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+        if (tray is IRecordingFailureNotifier notifier)
+            notifier.ShowRecordingFailure(rec.Id, code);
+        else
+            tray.ShowError("The fixed-region profile no longer matches the connected display. / 固定区域配置与当前显示环境不匹配。");
+        TrySetIdleOnAllDone(tray);
+        return true;
+    }
+
+    private sealed class FixedRegionProfileEnvironmentChangedException(string reasonCode, string stage)
+        : ApiException(409, "PROFILE_ENVIRONMENT_CHANGED",
+            "The display environment no longer matches the selected fixed-region profile.",
+            new { field = "profile_ref", reason_code = reasonCode, stage })
+    {
+        public string ReasonCode { get; } = reasonCode;
+        public string Stage { get; } = stage;
+    }
+
+    private sealed record FixedRegionProfileExecution(ProfileRef ProfileRef, Func<string?> EnvironmentValidator);
 
     private bool TryValidateApprovedRegionTopology(
         CapturePlan approved,
@@ -1789,7 +1961,12 @@ public sealed class RecordingEngine : IDisposable
         lock (rec)
         {
             MarkBundleNotApplicable(rec);
-            rec.Error = preflight.Message;
+            rec.Error = rec.Config.RequireWindowSurface && preflight.ErrorCode is
+                WindowStorageSafety.LowSpaceCode or WindowStorageSafety.UnavailableCode
+                ? preflight.ErrorCode : preflight.Message;
+            if (rec.Config.RequireWindowSurface && preflight.ErrorCode is
+                WindowStorageSafety.LowSpaceCode or WindowStorageSafety.UnavailableCode)
+                rec.StopReason = preflight.ErrorCode;
             rec.Warnings.Add($"preflight_failed: {preflight.ErrorCode}");
             rec.State = RecState.failed;
             BumpStateVersion();
@@ -1805,12 +1982,18 @@ public sealed class RecordingEngine : IDisposable
             message = preflight.Message,
             suggested_action = preflight.SuggestedAction
         });
-        tray.ShowError(preflight.Message!);
+        bool storageFailure = rec.Config.RequireWindowSurface && preflight.ErrorCode is
+            WindowStorageSafety.LowSpaceCode or WindowStorageSafety.UnavailableCode;
+        if (!storageFailure || tray is not IRecordingFailureNotifier)
+            tray.ShowError(preflight.Message!);
 
         if (conf != null)
             TrySetIdleOnAllDone(tray);
         else
             tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+
+        if (storageFailure && tray is IRecordingFailureNotifier storageNotifier)
+            storageNotifier.ShowRecordingFailure(rec.Id, preflight.ErrorCode!);
 
         return false;
     }
@@ -2186,6 +2369,110 @@ public sealed class RecordingEngine : IDisposable
     }
 
     /// <summary>
+    /// Starts one exact future-window Run after the durable authorization
+    /// consumption transaction. It uses the normal capture lifecycle and
+    /// retains the verified process/image handles through the physical start.
+    /// </summary>
+    internal FutureWindowCaptureStartResult StartFutureWindowCapture(
+        FutureWindowStartCommitReceipt receipt,
+        CaptureConfig config,
+        CapturePlan plan,
+        FutureWindowIdentityHold identityHold,
+        ITrayContext tray)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(identityHold);
+        ArgumentNullException.ThrowIfNull(tray);
+        _tray = tray;
+
+        var authorization = receipt.Authorization;
+        var process = receipt.Process;
+        if (identityHold.Snapshot.ProcessId != process.ProcessId ||
+            identityHold.Snapshot.ProcessCreationFileTimeUtc != process.ProcessCreationFileTimeUtc ||
+            identityHold.Snapshot.WindowHandle != process.WindowHandle ||
+            !string.Equals(identityHold.Snapshot.WindowId, process.WindowId, StringComparison.Ordinal))
+        {
+            identityHold.Dispose();
+            return new FutureWindowCaptureStartResult(false, receipt.RunId, "future_window_identity_hold_mismatch");
+        }
+        var recording = new Recording(receipt.RunId)
+        {
+            State = RecState.created,
+            Agent = "future_window_one_shot",
+            SourceType = "window",
+            SourceTitle = config.WindowTitle ?? "Approved future program window",
+            SourceApplication = Path.GetFileName(authorization.ExecutableIdentity.CanonicalPath),
+            OutputPath = authorization.OutputFilePath,
+            Config = config,
+            DurationSeconds = authorization.MaximumDurationSeconds,
+            CountdownSeconds = 0,
+            ApprovedCapturePlan = plan,
+            IsFutureWindowOneShotExecution = true,
+            FutureWindowIdentityHold = identityHold,
+            BackendType = plan.PlannedBackend,
+        };
+
+        FutureWindowOneShotExecutionTicket ticket;
+        try
+        {
+            var proof = CaptureAuthorizationProofIssuer.IssueFutureWindowOneShot(receipt, recording, plan);
+            ticket = new FutureWindowOneShotExecutionTicket(receipt, proof);
+            if (!ticket.TryClaim())
+            {
+                identityHold.Dispose();
+                return new FutureWindowCaptureStartResult(false, null, "future_window_execution_ticket_claim_failed");
+            }
+            recording.FutureWindowOneShotTicket = ticket;
+            recording.AuthorizationProof = proof;
+        }
+        catch
+        {
+            identityHold.Dispose();
+            return new FutureWindowCaptureStartResult(false, null, "future_window_proof_issue_failed");
+        }
+
+        lock (_lock)
+        {
+            if (_recs.Values.Any(IsActiveRecordingState))
+            {
+                identityHold.Dispose();
+                return new FutureWindowCaptureStartResult(false, receipt.RunId, "recording_conflict");
+            }
+            if (!_recs.TryAdd(recording.Id, recording))
+            {
+                identityHold.Dispose();
+                return new FutureWindowCaptureStartResult(false, receipt.RunId, "future_window_recording_identity_conflict");
+            }
+        }
+
+        var traceId = "future_window_" + Guid.NewGuid().ToString("N")[..16];
+        try
+        {
+            _tracer.IntentAccepted(traceId, "future-window-one-shot");
+            _tracer.CorrelationSet(traceId, recording.Id, null, recording.SourceType);
+            StartCapture(recording, traceId, tray);
+            if (recording.State is RecState.failed or RecState.rejected or RecState.cancelled ||
+                recording.IsFinalized && recording.State != RecState.completed)
+                return new FutureWindowCaptureStartResult(false, recording.Id,
+                    recording.Error ?? "future_window_backend_not_started");
+            return new FutureWindowCaptureStartResult(true, recording.Id, null);
+        }
+        catch
+        {
+            if (_recs.TryGetValue(recording.Id, out var registered) && ReferenceEquals(registered, recording))
+                _recs.TryRemove(recording.Id, out _);
+            return new FutureWindowCaptureStartResult(false, recording.Id, "future_window_engine_start_failed");
+        }
+        finally
+        {
+            identityHold.Dispose();
+            recording.FutureWindowIdentityHold = null;
+        }
+    }
+
+    /// <summary>
     /// Starts the exact fixed-region Run that has already crossed the
     /// required-once atomic start-commit. Its proof is consumed by the shared
     /// capture authorization gate immediately before backend construction.
@@ -2388,6 +2675,33 @@ public sealed class RecordingEngine : IDisposable
         lock (rec)
         {
             var proof = rec.AuthorizationProof;
+            if (rec.IsFutureWindowOneShotExecution)
+            {
+                DateTimeOffset nowUtc;
+                (string CurrentUserSid, string SessionBinding, int SessionId) identity;
+                try
+                {
+                    nowUtc = new DateTimeOffset(DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                    identity = FutureWindowIdentityForTests();
+                }
+                catch
+                {
+                    throw new CaptureAuthorizationStartException("future_window_execution_identity_unavailable");
+                }
+
+                if (!CaptureAuthorizationGate.TryConsumeFutureWindowOneShot(
+                        proof,
+                        rec.FutureWindowOneShotTicket,
+                        rec,
+                        rec.ApprovedCapturePlan,
+                        identity.CurrentUserSid,
+                        identity.SessionBinding,
+                        identity.SessionId,
+                        nowUtc,
+                        out var futureFailure))
+                    throw new CaptureAuthorizationStartException(futureFailure);
+                return proof!;
+            }
             if (rec.IsRequiredOnceExecution)
             {
                 DateTimeOffset nowUtc;
@@ -2538,6 +2852,71 @@ public sealed class RecordingEngine : IDisposable
             !string.Equals(output.Snapshot.FrozenOutputFilePath, specification.FrozenOutputFilePath, StringComparison.OrdinalIgnoreCase))
             throw new CaptureAuthorizationStartException(
                 string.IsNullOrWhiteSpace(output.ReasonCode) ? "required_once_output_changed" : output.ReasonCode);
+    }
+
+    private void ValidateFutureWindowEnvironmentAtBackendBoundary(
+        Recording recording,
+        FutureWindowOneShotExecutionTicket ticket)
+    {
+        EnsureWindowStorageAtBackendBoundary(recording);
+        var authorization = ticket.Authorization;
+        var approvedAt = authorization.ApprovedAtUtc;
+        var hold = recording.FutureWindowIdentityHold;
+        if (!FutureWindowProcessIdentity.IsInteractiveDesktopAvailable())
+            throw new CaptureAuthorizationStartException("future_window_interactive_desktop_unavailable");
+        var outputFailure = FutureWindowOutputPolicy.ValidateAndProbe(
+            authorization.OutputDirectory, authorization.OutputFilePath);
+        if (!recording.IsFutureWindowOneShotExecution || approvedAt is null || hold is null ||
+            !ReferenceEquals(ticket, recording.FutureWindowOneShotTicket) ||
+            !string.Equals(recording.OutputPath, authorization.OutputFilePath, StringComparison.Ordinal) ||
+            !string.Equals(recording.Config.OutputPath, authorization.OutputFilePath, StringComparison.Ordinal) ||
+            outputFailure is not null)
+            throw new CaptureAuthorizationStartException(outputFailure ?? "future_window_output_environment_changed");
+
+        (string CurrentUserSid, string SessionBinding, int SessionId) identity;
+        try { identity = FutureWindowIdentityForTests(); }
+        catch { throw new CaptureAuthorizationStartException("future_window_identity_unavailable"); }
+        if (!string.Equals(identity.CurrentUserSid, authorization.CurrentUserSid, StringComparison.Ordinal) ||
+            !string.Equals(identity.SessionBinding, authorization.SessionBinding, StringComparison.Ordinal) ||
+            identity.SessionId != ticket.Process.SessionId)
+            throw new CaptureAuthorizationStartException("future_window_user_session_changed");
+
+        if (FutureWindowEnvironmentValidatorForTests?.Invoke(ticket) is { Length: > 0 } injectedFailure)
+            throw new CaptureAuthorizationStartException(injectedFailure);
+
+        if (!FutureWindowProcessIdentity.RevalidatePinnedTarget(
+                hold,
+                authorization.ExecutableIdentity,
+                approvedAt.Value,
+                identity.CurrentUserSid,
+                identity.SessionId,
+                out var identityFailure))
+            throw new CaptureAuthorizationStartException(identityFailure);
+
+        if (authorization.HasSystemAudio)
+        {
+            SystemAudioEndpointInfo? endpoint;
+            try
+            {
+                endpoint = _systemAudioEndpointProvider.GetEndpointAsync(
+                    authorization.SystemAudioEndpointId!).GetAwaiter().GetResult();
+            }
+            catch
+            {
+                throw new CaptureAuthorizationStartException("future_window_audio_endpoint_unavailable");
+            }
+
+            if (FutureWindowAudioEndpointPolicy.Validate(
+                    authorization.SystemAudioEndpointId,
+                    authorization.SystemAudioEndpointName,
+                    endpoint,
+                    out var endpointFailure) is null)
+                throw new CaptureAuthorizationStartException(endpointFailure ?? "future_window_audio_endpoint_changed");
+        }
+        else if (recording.Config.AudioRequested || recording.Config.Microphone)
+        {
+            throw new CaptureAuthorizationStartException("future_window_audio_scope_invalid");
+        }
     }
 
     private static StandingLeaseCaptureExecutionTicket BuildStandingTicketForBackendBoundary(Recording rec) =>
@@ -3201,8 +3580,10 @@ public sealed class RecordingEngine : IDisposable
         // countdown reaches zero, so nothing is captured during the countdown.
         // The authorization completion is pure audit; failures surface through
         // the normal first-frame timeout / natural-exit paths.
-        bool useDeferredCountdown = !rec.Config.AudioRequested && rec.Backend is IDeferredCaptureStartBackend;
-        bool useOrdinaryFfmpegCountdown = !rec.IsStandingLeaseExecution &&
+        bool useDeferredCountdown = !rec.IsFutureWindowOneShotExecution &&
+            !rec.Config.AudioRequested && rec.Backend is IDeferredCaptureStartBackend;
+        bool useOrdinaryFfmpegCountdown = !rec.IsFutureWindowOneShotExecution &&
+            !rec.IsStandingLeaseExecution &&
             !rec.IsRecurringLeaseExecution &&
             !rec.Config.AudioRequested &&
             !useDeferredCountdown &&
@@ -3345,12 +3726,141 @@ public sealed class RecordingEngine : IDisposable
                         ValidateRequiredOnceEnvironmentAtBackendBoundary(rec);
                         authorizationProof = RequireCaptureAuthorization(rec);
                     }
+                    else if (rec.IsFutureWindowOneShotExecution)
+                    {
+                        var futureTicket = rec.FutureWindowOneShotTicket ??
+                            throw new CaptureAuthorizationStartException("future_window_execution_ticket_missing");
+                        if (_futureWindowStartSafetyInterlock is null || _futureWindowStartSafetyValidator is null)
+                            throw new CaptureAuthorizationStartException("future_window_start_safety_unavailable");
 
-                    rec.BackendStartAtUtc = DateTime.UtcNow;
+                        DateTimeOffset futureNowUtc;
+                        try
+                        {
+                            futureNowUtc = new DateTimeOffset(
+                                DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                        }
+                        catch
+                        {
+                            throw new CaptureAuthorizationStartException("future_window_execution_clock_unavailable");
+                        }
+
+                        string? durableFailure;
+                        try { durableFailure = _futureWindowStartSafetyValidator(futureTicket, futureNowUtc); }
+                        catch { throw new CaptureAuthorizationStartException("future_window_start_safety_unavailable"); }
+                        if (!string.IsNullOrWhiteSpace(durableFailure))
+                            throw new CaptureAuthorizationStartException(durableFailure);
+
+                        ValidateFutureWindowEnvironmentAtBackendBoundary(rec, futureTicket);
+                        var identity = FutureWindowIdentityForTests();
+                        if (!CaptureAuthorizationGate.TryValidateConsumedFutureWindowOneShot(
+                                rec.AuthorizationProof,
+                                futureTicket,
+                                rec,
+                                rec.ApprovedCapturePlan,
+                                identity.CurrentUserSid,
+                                identity.SessionBinding,
+                                identity.SessionId,
+                                futureNowUtc,
+                                out var futureFailure))
+                            throw new CaptureAuthorizationStartException(futureFailure);
+                        authorizationProof = rec.AuthorizationProof;
+                    }
+
+                    if (rec.IsFutureWindowOneShotExecution)
+                    {
+                        var futureTicket = rec.FutureWindowOneShotTicket ??
+                            throw new CaptureAuthorizationStartException("future_window_execution_ticket_missing");
+                        var futureProof = rec.AuthorizationProof;
+                        var authorization = futureTicket.Authorization;
+                        if (_futureWindowStartSafetyValidator is null)
+                            throw new CaptureAuthorizationStartException("future_window_start_safety_unavailable");
+
+                        // Repeat the durable check after all environment work,
+                        // then take a fresh UTC/monotonic pair directly before
+                        // Backend.Start. This closes expiry during DB, output,
+                        // endpoint and window revalidation without shortening
+                        // the approved maximum duration.
+                        DateTimeOffset validationNowUtc;
+                        try
+                        {
+                            validationNowUtc = new DateTimeOffset(
+                                DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                        }
+                        catch
+                        {
+                            throw new CaptureAuthorizationStartException("future_window_execution_clock_unavailable");
+                        }
+                        string? latestDurableFailure;
+                        try { latestDurableFailure = _futureWindowStartSafetyValidator(futureTicket, validationNowUtc); }
+                        catch { throw new CaptureAuthorizationStartException("future_window_start_safety_unavailable"); }
+                        if (!string.IsNullOrWhiteSpace(latestDurableFailure))
+                            throw new CaptureAuthorizationStartException(latestDurableFailure);
+
+                        long monotonicStartTicks;
+                        long monotonicFrequency;
+                        DateTimeOffset finalStartUtc;
+                        try
+                        {
+                            monotonicStartTicks = MonotonicTimestampProviderForTests();
+                            monotonicFrequency = MonotonicFrequencyForTests;
+                            finalStartUtc = new DateTimeOffset(
+                                DateTime.SpecifyKind(UtcNowForTests(), DateTimeKind.Utc));
+                        }
+                        catch
+                        {
+                            throw new CaptureAuthorizationStartException("future_window_execution_clock_unavailable");
+                        }
+
+                        if (monotonicStartTicks < 0 || monotonicFrequency <= 0 ||
+                            authorization.ExpiresAtUtc is not { } expiryUtc ||
+                            authorization.ApprovedAtUtc is not { } approvedAtUtc ||
+                            finalStartUtc < futureTicket.CommittedAtUtc ||
+                            finalStartUtc < approvedAtUtc || finalStartUtc >= expiryUtc ||
+                            finalStartUtc.AddSeconds(authorization.MaximumDurationSeconds) > expiryUtc)
+                            throw new CaptureAuthorizationStartException(
+                                finalStartUtc < futureTicket.CommittedAtUtc
+                                    ? "future_window_clock_rollback_detected"
+                                    : "future_window_run_would_exceed_expiry");
+
+                        var finalIdentity = FutureWindowIdentityForTests();
+                        if (!CaptureAuthorizationGate.TryValidateConsumedFutureWindowOneShot(
+                                futureProof,
+                                futureTicket,
+                                rec,
+                                rec.ApprovedCapturePlan,
+                                finalIdentity.CurrentUserSid,
+                                finalIdentity.SessionBinding,
+                                finalIdentity.SessionId,
+                                finalStartUtc,
+                                out var finalProofFailure))
+                            throw new CaptureAuthorizationStartException(finalProofFailure);
+
+                        try
+                        {
+                            rec.FutureWindowMonotonicDeadlineTicks = checked(
+                                monotonicStartTicks + checked((long)authorization.MaximumDurationSeconds * monotonicFrequency));
+                            rec.FutureWindowMonotonicFrequency = monotonicFrequency;
+                        }
+                        catch (OverflowException)
+                        {
+                            throw new CaptureAuthorizationStartException("future_window_monotonic_deadline_invalid");
+                        }
+
+                        rec.BackendStartAtUtc = finalStartUtc.UtcDateTime;
+                    }
+                    else
+                    {
+                        rec.BackendStartAtUtc = DateTime.UtcNow;
+                    }
+                    EnsureWindowStorageAtBackendBoundary(rec);
                     rec.BackendStartAttempted = true;
                     _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                    var storage = rec.Config.StorageSafety;
+                    storage?.Start(code => HandleStorageFailure(rec, storage, code, traceId, tray));
                     rec.Backend.Start(rec.Config, authorizationProof!);
                     _tracer.CaptureBackendStartReturned(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
+                    if (rec.IsFutureWindowOneShotExecution)
+                        StartDeadlineWatchdog(rec, traceId, tray);
                 }
             }
 
@@ -3360,8 +3870,12 @@ public sealed class RecordingEngine : IDisposable
                 BeforeRecurringBackendFinalGateForTests?.Invoke(rec);
             else if (rec.IsRequiredOnceExecution)
                 BeforeRequiredOnceBackendFinalGateForTests?.Invoke(rec);
+            else if (rec.IsFutureWindowOneShotExecution)
+                BeforeFutureWindowBackendFinalGateForTests?.Invoke(rec);
 
-            if (rec.IsStandingLeaseExecution && _standingStartSafetyInterlock is not null)
+            if (rec.IsFutureWindowOneShotExecution && _futureWindowStartSafetyInterlock is not null)
+                _futureWindowStartSafetyInterlock.Execute("future_window_backend_start", StartBackendAtFinalBoundary);
+            else if (rec.IsStandingLeaseExecution && _standingStartSafetyInterlock is not null)
                 _standingStartSafetyInterlock.Execute("standing_backend_start", StartBackendAtFinalBoundary);
             else if (rec.IsRecurringLeaseExecution && _recurringStartSafetyInterlock is not null)
                 _recurringStartSafetyInterlock.Execute("recurring_backend_start", StartBackendAtFinalBoundary);
@@ -3371,6 +3885,7 @@ public sealed class RecordingEngine : IDisposable
             _audit.Log("recording.started", new
             {
                 recording_id = rec.Id,
+                profile_ref = ProfileRefObject(rec),
                 output_path = rec.OutputPath,
                 backend = rec.BackendType,
                 ffmpeg_args = rec.Config.CommandArgs ?? ""
@@ -3476,13 +3991,13 @@ public sealed class RecordingEngine : IDisposable
             bool recurringStartFailure = rec.IsRecurringLeaseExecution;
             var stableStartFailure = recurringStartFailure
                 ? "recurring_execution_backend_start_failed"
-                : ex.Message;
+                : ex is StorageSafetyException storageException ? storageException.Code : ex.Message;
             var startFailureWarning = recurringStartFailure
                 ? "recurring_start_failed: " + stableStartFailure
                 : "launch_error: " + ex.Message;
             var startFailureStopReason = recurringStartFailure
                 ? stableStartFailure
-                : "unexpected_exit";
+                : ex is StorageSafetyException ? stableStartFailure : "unexpected_exit";
             var ownership = TryClaimStartFailure(
                 rec,
                 error: stableStartFailure,
@@ -4062,6 +4577,40 @@ public sealed class RecordingEngine : IDisposable
         StartDisplayRuntimeMonitor(rec, traceId, tray);
     }
 
+    private void EnsureWindowStorageAtBackendBoundary(Recording rec)
+    {
+        if (!rec.Config.RequireWindowSurface) return;
+        rec.Config.WritePaths ??= CaptureWritePaths.Freeze(rec.Config);
+        rec.Config.WritePaths.ValidateOutputPath(rec.Config);
+        rec.Config.StorageSafety ??= new WindowStorageSafety(rec.Config.WritePaths,
+            rec.Config.DurationSeconds ?? 0, RecordingPreflightChecker.StorageCapacityProvider)
+            { Delay = StorageMonitorDelay };
+        rec.Config.StorageSafety.EnsureAdmission();
+    }
+
+    private static CaptureAbortReason StorageAbortReason(string code) => code == WindowStorageSafety.LowSpaceCode
+        ? CaptureAbortReason.StorageSpaceLow : CaptureAbortReason.StorageCapacityUnavailable;
+
+    private void HandleStorageFailure(Recording rec, WindowStorageSafety storage, string code, string? traceId, ITrayContext tray)
+    {
+        lock (rec)
+        {
+            if (rec.IsFinalized || !ReferenceEquals(rec.Config.StorageSafety, storage) || storage.FailureCode != code) return;
+            rec.TrustedLifecycleAbortReason = StorageAbortReason(code);
+        }
+        try { _audit.Log("recording.storage_abort", new { recording_id = rec.Id, reason_code = code, phase = rec.State.ToString() }); }
+        catch { }
+        try { TryRecordCaptureEnded(rec, DateTime.UtcNow, -1, code, traceId, tray); }
+        catch { } // Diagnostics/UI transition must not prevent physical worker shutdown.
+        OutputMeta meta;
+        try { meta = rec.Backend?.Abort(StorageAbortReason(code)) ?? new OutputMeta(); }
+        catch (Exception ex) { meta = new OutputMeta { StderrLog = "storage_abort_failed: " + ex.GetType().Name }; }
+        meta.StopReason = code;
+        meta.OutputFileExists = false;
+        meta.SizeBytes = 0;
+        FinalizeRecording(rec, meta, rec.Backend?.ExitCode ?? -1, natural: true, stopReason: code, tray);
+    }
+
     private void StartDisplayRuntimeMonitor(Recording rec, string? traceId, ITrayContext tray)
     {
         var plan = rec.ApprovedCapturePlan;
@@ -4217,16 +4766,37 @@ public sealed class RecordingEngine : IDisposable
         var duration = rec.DurationSeconds;
         if (DisableDeadlineWatchdogForTests || duration == null || duration <= 0)
             return;
+        if (Interlocked.CompareExchange(ref rec.DeadlineWatchdogStarted, 1, 0) != 0)
+            return;
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(duration.Value)).ConfigureAwait(false);
+                if (rec.FutureWindowMonotonicDeadlineTicks is { } monotonicDeadline &&
+                    rec.FutureWindowMonotonicFrequency > 0)
+                {
+                    var nowTicks = MonotonicTimestampProviderForTests();
+                    var remainingSeconds = Math.Max(
+                        0d,
+                        (monotonicDeadline - nowTicks) / (double)rec.FutureWindowMonotonicFrequency);
+                    if (remainingSeconds > 0)
+                        await Task.Delay(TimeSpan.FromSeconds(remainingSeconds)).ConfigureAwait(false);
+                }
+                else
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(duration.Value)).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
                 return;
+            }
+            catch
+            {
+                // If the monotonic provider or delay fails, prefer an
+                // immediate stop over leaving an authorized unattended Run
+                // without its bounded deadline.
             }
 
             // CaptureEndedAtUtc is the exactly-once gate: the first caller records
@@ -4519,6 +5089,7 @@ public sealed class RecordingEngine : IDisposable
 
             return TryClaimAndRunStartAction(rec, op, () =>
             {
+                EnsureFixedRegionProfileEnvironment(rec, "countdown_complete");
                 var authorizationProof = RequireCaptureAuthorization(rec);
                 rec.BackendStartAtUtc = DateTime.UtcNow;
                 _tracer.CaptureStartRequested(traceId ?? "trace_unknown", rec.Id, rec.BackendType ?? "unknown");
@@ -4529,6 +5100,9 @@ public sealed class RecordingEngine : IDisposable
                 _audit.Log("recording.started", new
                 {
                     recording_id = rec.Id,
+                    profile_ref = rec.FixedRegionProfileReference is { } profileRef
+                        ? new { id = profileRef.ProfileId, version = profileRef.ProfileVersion, digest = profileRef.ProfileDigest }
+                        : null,
                     output_path = rec.OutputPath,
                     backend = rec.BackendType,
                     ffmpeg_args = rec.Config.CommandArgs ?? ""
@@ -4537,6 +5111,13 @@ public sealed class RecordingEngine : IDisposable
         }
         catch (Exception ex)
         {
+            if (ex is FixedRegionProfileEnvironmentChangedException profileFailure)
+            {
+                BeforeStartFailureForTests?.Invoke(rec, "countdown.backend.start");
+                FailFixedRegionProfileEnvironment(rec, profileFailure, traceId, tray);
+                return false;
+            }
+
             if (ex is CaptureAuthorizationStartException authorizationFailure)
             {
                 FailCaptureAuthorizationStart(rec, traceId, tray, authorizationFailure);
@@ -4653,10 +5234,14 @@ public sealed class RecordingEngine : IDisposable
             rec.CompletedAtUtc = DateTime.UtcNow;
             rec.StopReason = stopReason;
             rec.Error = error;
+            if (rec.Config.StorageSafety?.FailureCode == stopReason && stopReason is
+                WindowStorageSafety.LowSpaceCode or WindowStorageSafety.UnavailableCode)
+                rec.TrustedLifecycleAbortReason = StorageAbortReason(stopReason);
             rec.Warnings.Add(warning);
             rec.State = RecState.failed;
             BumpStateVersion();
             rec.PublishFinalized();
+            rec.Config.StorageSafety?.Dispose();
             return StartFailureOwnership.Failed;
         }
     }
@@ -4681,10 +5266,15 @@ public sealed class RecordingEngine : IDisposable
             recording_id = rec.Id,
             backend = rec.BackendType,
             error,
+            reason_code = stopReason,
             stage = stage ?? ""
         });
         tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
-        tray.ShowError(error);
+        if (rec.TrustedLifecycleAbortReason is CaptureAbortReason.StorageSpaceLow or CaptureAbortReason.StorageCapacityUnavailable &&
+            tray is IRecordingFailureNotifier storageNotifier)
+            storageNotifier.ShowRecordingFailure(rec.Id, stopReason);
+        else
+            tray.ShowError(error);
     }
 
     /// <summary>
@@ -4805,6 +5395,8 @@ public sealed class RecordingEngine : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    if (ex is StorageSafetyException && rec.Config.StorageSafety?.FailureCode is not null)
+                        return; // The guard's single abort observer owns worker teardown and terminal publication.
                     var error = "Failed to start video capture: " + ex.Message;
                     BeforeStartFailureForTests?.Invoke(rec, "countdown.start_video");
                     var ownership = TryClaimStartFailure(
@@ -4859,6 +5451,8 @@ public sealed class RecordingEngine : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    if (ex is StorageSafetyException && rec.Config.StorageSafety?.FailureCode is not null)
+                        return;
                     var error = "Failed to authorize capture start: " + ex.Message;
                     BeforeStartFailureForTests?.Invoke(rec, "countdown.start_capture");
                     var ownership = TryClaimStartFailure(
@@ -5108,6 +5702,14 @@ public sealed class RecordingEngine : IDisposable
             if (rec.IsFinalized)
                 return;
 
+            if (rec.Config.StorageSafety?.FailureCode is { } storageCode)
+            {
+                rec.TrustedLifecycleAbortReason = StorageAbortReason(storageCode);
+                meta.OutputFileExists = false;
+                meta.SizeBytes = 0;
+            }
+            rec.Config.StorageSafety?.Dispose();
+
             rec.AudioContinuityStatus = meta.AudioContinuityStatus;
 
             var trustedLifecycleAbortCode = rec.TrustedLifecycleAbortReason.HasValue
@@ -5133,7 +5735,7 @@ public sealed class RecordingEngine : IDisposable
 
             if (!natural)
             {
-                rec.StopReason = NormalizeStopReason(stopReason);
+                rec.StopReason = trustedLifecycleAbortCode ?? NormalizeStopReason(stopReason);
                 _audit.Log("recording.stopped", new
                 {
                     recording_id = rec.Id,
@@ -5393,7 +5995,7 @@ public sealed class RecordingEngine : IDisposable
         // notifier then applies the tray host's language and bubble policy,
         // producing exactly one local message for native lifecycle failures.
         bool trustedDisplayLifecycleFailure =
-            rec.TrustedLifecycleAbortReason == CaptureAbortReason.DisplayUnavailable ||
+            rec.TrustedLifecycleAbortReason.HasValue ||
             (IsWgcContinuousBackend(rec.BackendType) &&
              IsWgcLifecycleFailure(rec.StopReason) &&
              string.Equals(rec.StopReason, meta.StopReason, StringComparison.Ordinal));
@@ -5413,6 +6015,7 @@ public sealed class RecordingEngine : IDisposable
             natural &&
             rec.StartedAtUtc != default &&
             rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback &&
+            !rec.TrustedLifecycleAbortReason.HasValue &&
             !(IsWgcContinuousBackend(rec.BackendType) && IsWgcLifecycleFailure(rec.StopReason)) &&
             IsTerminalSystemAudioFailure(meta.AudioHelperErrorCode))
         {
@@ -5694,6 +6297,7 @@ public sealed class RecordingEngine : IDisposable
         bool standingCancelledBeforeFirstFrame = false;
         bool recurringCancelledBeforeFirstFrame = false;
         bool requiredOnceCancelledBeforeFirstFrame = false;
+        bool cancelUnstartedBackend = false;
 
         lock (rec)
         {
@@ -5716,8 +6320,9 @@ public sealed class RecordingEngine : IDisposable
             // If the recording has not reached active capture yet, cancel it instead
             // of finalizing. This avoids starting a video worker or producing output
             // for a recording that never really began.
-            if (rec.State is RecState.preparing or RecState.countdown)
+            if (rec.State is RecState.pending_confirmation or RecState.preparing or RecState.countdown)
             {
+                cancelUnstartedBackend = rec.State is RecState.preparing or RecState.countdown;
                 if (rec.IsStandingLeaseExecution)
                 {
                     // Durable standing termination owns this branch. Keep the
@@ -5923,7 +6528,7 @@ public sealed class RecordingEngine : IDisposable
                     _ = requiredDriver.StopForEngine(rec.StopReason);
                 else if (rec.StandingLifecycleSession is IStandingLeaseCaptureLifecycleDriver standingDriver)
                     _ = standingDriver.StopForEngine(rec.StopReason);
-                else
+                else if (rec.BackendStartAttempted || cancelUnstartedBackend)
                     rec.Backend?.Cancel();
             }
             catch { }
@@ -6044,6 +6649,7 @@ public sealed class RecordingEngine : IDisposable
         return new
         {
             recording_id = rec.Id,
+            profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             status = rec.State.ToString(),
             stop_reason = rec.StopReason ?? "",
@@ -6056,6 +6662,7 @@ public sealed class RecordingEngine : IDisposable
     private object BuildStoppingResponse(Recording rec) => new
     {
         recording_id = rec.Id,
+        profile_ref = ProfileRefObject(rec),
         status = rec.State.ToString(),
         stop_reason = rec.StopReason ?? "",
         output = rec.IsScreenshotSeries ? ScreenshotSeriesOutput(rec) : (object?)null,
@@ -6155,6 +6762,7 @@ public sealed class RecordingEngine : IDisposable
         return new
         {
             recording_id = rec.Id,
+            profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             status = PublicRecordingStatus(rec),
             source = new { type = rec.SourceType, title = rec.SourceTitle },
@@ -6249,6 +6857,7 @@ public sealed class RecordingEngine : IDisposable
         return new
         {
             recording_id = rec.Id,
+            profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             output = OutputObj(rec, meta, full: true),
             series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
@@ -6444,6 +7053,10 @@ public sealed class RecordingEngine : IDisposable
     private static string PublicRecordingStatus(Recording rec)
         => rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : rec.State.ToString();
 
+    private static object? ProfileRefObject(Recording rec) => rec.FixedRegionProfileReference is { } reference
+        ? new { id = reference.ProfileId, version = reference.ProfileVersion, digest = reference.ProfileDigest }
+        : null;
+
     private long CreationWaitNowTicks()
     {
         var now = CreationWaitTimestampProviderForTests();
@@ -6616,6 +7229,7 @@ public sealed class RecordingEngine : IDisposable
     public IEnumerable<object> List() => _recs.Values.Select(r => new
     {
         recording_id = r.Id, mode = r.Mode, status = r.IsScreenshotSeries ? PublicScreenshotSeriesStatus(r) : r.State.ToString(),
+        profile_ref = ProfileRefObject(r),
         started_at = r.StartedAtUtc == default ? null : Iso(r.StartedAtUtc),
         completed_at = r.CompletedAtUtc.HasValue ? Iso(r.CompletedAtUtc.Value) : null,
         output_path = r.OutputPath,
@@ -6681,6 +7295,7 @@ public sealed class RecordingEngine : IDisposable
 
     public void Dispose()
     {
+        foreach (var rec in _recs.Values) rec.Config.StorageSafety?.Dispose();
         foreach (var recordingId in _displayRuntimeMonitors.Keys.ToArray())
             StopDisplayRuntimeMonitor(recordingId);
 

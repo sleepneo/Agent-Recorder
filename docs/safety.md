@@ -139,12 +139,23 @@ Context files are written using a random temp file in the same directory and ato
 
 - Current builds target Windows.
 - The portable package is not code-signed.
-- A tray app cold-started by an agent on an isolated Windows desktop may be
-  API-ready while its local dialogs are not visible on the user's input
-  desktop. The current `host.supports_region_selection_ui` flag does not
-  prove cross-desktop visibility. Use a tray instance started on the user's
-  interactive desktop or opt in to per-user autostart; do not treat API
-  readiness as consent UI readiness.
+- A tray process must prove the active user's session, `WinSta0`, `Default`
+  thread desktop, and `Default` input desktop before it acquires the
+  single-instance mutex or binds the API. `ensure-running` validates that proof
+  on reuse. Before calling the CLI, an agent should check whether its host
+  provides an authorized user-desktop execution surface and, when available,
+  invoke the fixed `ensure-running` command through that surface. Codex may
+  provide tool-authorized execution for a specific command; this is a host
+  invocation mechanism, not a Recorder CLI option, and is not guaranteed for
+  other agents/hosts. Recorder cannot escape a sandbox or cross Windows account
+  boundaries. Cross-account callers fail with
+  `INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED` before the CLI touches the requested
+  data directory. API readiness and `supports_region_selection_ui` alone are
+  not consent-UI readiness. Locked/no-session states fail closed. A one-time
+  current-user task setup is only an advanced recovery option when the isolated
+  process and active desktop have the same Windows SID; `--agent-sid` and legacy
+  cross-account registrations are unsupported, and the CLI does not modify
+  legacy tasks.
 - Recurring setup status reports authorization and scheduling, not each
   occurrence's execution result. An agent must not claim that a recording
   started or completed solely because setup says `scheduled`. Use the
@@ -227,3 +238,47 @@ directory rename. Audit frame events include only recording id, index, offsets,
 lateness, dimensions, and size; they never include pixels, paths, titles, or
 hashes. Audio requests, marks, and overwrite publication are fail-closed for
 this mode.
+
+## Future-window one-shot boundary
+
+An authenticated agent may create only a durable `pending` setup. Activation
+requires an explicit local desktop approval that displays the complete
+executable, output, endpoint, duration, validity, user/session, and broad
+window-content scope. No future-window preview or capture is performed before
+approval. A pinned local executable image is bound by canonical path, Windows
+volume/file ID, and SHA-256; the same file is held without write/delete sharing
+while the grant remains pending or active. Runtime validation additionally
+binds process creation time, SID, session, exact HWND ownership, and the unique
+eligible top-level window. Publisher fields are certificate metadata only,
+not a certificate-chain trust verdict, and this does not attest loaded modules
+or prevent in-process injection.
+
+The one-use consume is durable and atomic before the normal RecordingEngine
+start path. A shared start/revoke interlock and a second durable check, output
+probe, endpoint check, and process/window revalidation run immediately before
+the existing WGC/AvSplit backend starts. Failure is terminal; a process restart
+after consume becomes `started_unknown`, never an automatic retry. Local
+safety-center revocation and the authenticated revoke route both block future
+starts and request stop of the exact active run; neither represents it as a
+normal maximum-duration completion. There is no
+livestream recognition, automatic player launch, browser identity, recurring
+schedule, microphone, machine wake, concurrent unattended capture, or
+screen-rectangle fallback in this slice.
+
+The safety center's Stop All transaction revokes every pending, active, or
+consumed future-window grant scoped to the current Windows SID and session.
+Disabling unattended mode likewise revokes those grants and stops an active
+future-window Run; reenabling does not restore a revoked grant. The durable
+global safety state is checked at one-use consumption and again under the same
+process interlock immediately before physical backend start. These controls
+and a start/revoke therefore have one process-local ordering point.
+
+The maximum run must fit in the remaining authorization window at setup,
+atomic consume, and the final physical start check. `expires_at_utc` is the
+authorization end, and `latest_permissible_start_at_utc` is that end minus the
+whole approved duration. The run is never shortened to fit. At the final
+physical start boundary, the engine anchors a monotonic deadline for the full
+approved duration; wall-clock rollback after start cannot extend that deadline.
+If the wall clock rolls back before the run starts, or final revalidation cannot
+prove the full duration still fits, the run is rejected without calling the
+capture backend.

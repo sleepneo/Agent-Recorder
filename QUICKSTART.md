@@ -85,6 +85,20 @@ skip the visible countdown while keeping local confirmation, preparation,
 preflight, and credible-first-frame gating. The value is shown in the local
 confirmation summary and returned under recording `config`.
 
+## Saved Regions And Future Windows
+
+Ask the agent to save a named recording region when the same area is used
+often. Select it locally once; each later recording uses the exact saved
+version and still needs local confirmation. Current saved-region reuse is
+silent, lasts 1-600 seconds, and rejects changed display geometry.
+
+For a window opened later, the agent can request a one-shot authorization for
+an exact local executable, output directory, and optional fixed system-audio
+device. Enable unattended mode and approve that bounded grant locally. The
+agent then opens the program, identifies its eligible window, and requests the
+single run. Grants last at most one hour; each run is at most 30 minutes.
+Recorder does not open video platforms or recognize livestreams.
+
 ## Files
 
 When started through `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`

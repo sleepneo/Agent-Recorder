@@ -54,6 +54,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     private Task? _watcher;
     private int _firstFrameObserved;
     private FirstFrameObservation? _firstFrameObservation;
+    private string? _startedRecordingId;
     private bool _seenTerminalEvent;
     private int _exitCode = -1;
     private string? _failureReason;
@@ -773,6 +774,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             // violation that we ignore for state-machine purposes.
             if (_state == WgcContinuousManagedSessionState.Authorized)
             {
+                if (string.IsNullOrWhiteSpace(evt.RecordingId))
+                    violation = "started_identity_missing";
                 string expectedMethod = _options.TargetKind == WgcContinuousTargetKind.Window
                     ? "WGC_D3D11_WINDOW_FRAME_STREAM"
                     : _options.TargetKind == WgcContinuousTargetKind.Region
@@ -790,7 +793,11 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                     (evt.EncoderMode == "hardware"
                         ? evt.EncoderSelectionReason == "hardware_selected"
                         : evt.EncoderSelectionReason != "hardware_selected");
-                if (!string.Equals(evt.CaptureMethod, expectedMethod, StringComparison.Ordinal))
+                if (violation != null)
+                {
+                    // Keep the session identity mismatch as the primary reason.
+                }
+                else if (!string.Equals(evt.CaptureMethod, expectedMethod, StringComparison.Ordinal))
                     violation = _options.TargetKind == WgcContinuousTargetKind.Region
                         ? "region_started_metadata_mismatch"
                         : "capture_method_mismatch";
@@ -802,7 +809,10 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                          !EncoderSelectionMatchesRequestedMode(evt.EncoderMode, evt.EncoderSelectionReason))
                     violation = "encoder_selection_policy_mismatch";
                 else
+                {
+                    _startedRecordingId = evt.RecordingId;
                     _state = WgcContinuousManagedSessionState.Started;
+                }
             }
         }
 
@@ -837,6 +847,11 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             {
                 violation = "first_frame_invalid";
             }
+            else if (string.IsNullOrWhiteSpace(_startedRecordingId) ||
+                     !string.Equals(evt.RecordingId, _startedRecordingId, StringComparison.Ordinal))
+            {
+                violation = "first_frame_identity_mismatch";
+            }
             else if (_firstFrameObserved != 0)
             {
                 // A second explicit FIRST_FRAME (valid or not) is a protocol
@@ -856,7 +871,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                     // No encoded bytes exist yet at source-frame time; bytes
                     // evidence stays zero rather than fabricating a value.
                     TotalSizeBytes = 0,
-                    OutTimeUs = evt.ElapsedMs!.Value * 1000
+                    OutTimeUs = evt.ElapsedMs!.Value * 1000,
+                    MediaStartSystemRelativeTimeHns = evt.SourceTimeHns
                 };
                 _firstFrameObservation = observation;
             }
@@ -890,6 +906,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         if (evt.ElapsedMsParseFailed || !evt.ElapsedMs.HasValue || evt.ElapsedMs.Value < 0)
             return false;
         if (!string.Equals(evt.Stage, "Capturing", StringComparison.Ordinal))
+            return false;
+        if (evt.HasDuplicateFields || evt.SourceTimeHnsParseFailed || !evt.SourceTimeHns.HasValue || evt.SourceTimeHns.Value < 0)
             return false;
         return true;
     }

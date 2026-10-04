@@ -65,6 +65,7 @@ public sealed class RegionSelectionForm : Form
     private const int MaxForegroundAttempts = 2;
     private System.Windows.Forms.Timer? _foregroundVerifyTimer;
     private readonly IUiTextProvider _text;
+    private readonly bool _profilePurpose;
 
     /// <summary>
     /// When true (default), OnShown schedules a single delayed foreground verification.
@@ -113,9 +114,11 @@ public sealed class RegionSelectionForm : Form
     public string CoordinateSpace { get; private set; } = "virtual_screen";
 
     public RegionSelectionForm(Rectangle? initialVirtualBounds = null, IWindowActivator? windowActivator = null,
-        Action<RegionSelectionAuditEventArgs>? onAuditEvent = null, IUiTextProvider? textProvider = null)
+        Action<RegionSelectionAuditEventArgs>? onAuditEvent = null, IUiTextProvider? textProvider = null,
+        bool profilePurpose = false)
     {
         _initialVirtualBounds = initialVirtualBounds;
+        _profilePurpose = profilePurpose;
         _windowActivator = windowActivator ?? DefaultWindowActivator.Instance;
         _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
         _visualPalette = RegionSelectionVisualPalette.Create();
@@ -124,13 +127,14 @@ public sealed class RegionSelectionForm : Form
             AuditEvent += (_, e) => onAuditEvent(e);
 
         var buttonFont = new Font("Segoe UI", 11, FontStyle.Bold);
-        var confirmSize = MeasureButtonSize(_text.Get("RegionSelection_Button_Confirm"), buttonFont);
+        var confirmKey = profilePurpose ? "RegionSelection_Button_SaveProfile" : "RegionSelection_Button_Confirm";
+        var confirmSize = MeasureButtonSize(_text.Get(confirmKey), buttonFont);
         var cancelSize = MeasureButtonSize(_text.Get("RegionSelection_Button_Cancel"), buttonFont);
 
         // Initialize button fields FIRST (null guards) before any property that could trigger OnResize
         _confirmButton = new Button
         {
-            Text = _text.Get("RegionSelection_Button_Confirm"),
+            Text = _text.Get(confirmKey),
             Size = confirmSize,
             ForeColor = Color.White,
             BackColor = Color.FromArgb(0, 150, 0),
@@ -162,7 +166,7 @@ public sealed class RegionSelectionForm : Form
         // Info label
         _infoLabel = new Label
         {
-            Text = _text.Get("RegionSelection_Info_Default"),
+            Text = _text.Get(profilePurpose ? "RegionSelection_Profile_Info_Default" : "RegionSelection_Info_Default"),
             ForeColor = Color.White,
             BackColor = Color.FromArgb(150, 0, 0, 0),
             Padding = new Padding(12),
@@ -715,11 +719,15 @@ public sealed class RegionSelectionForm : Form
             return;
         }
 
-        // Normalize to even dimensions (x264/yuv420p requirement)
+        // Ordinary recording keeps the established encoder normalization. Profile
+        // selection preserves the exact user-confirmed geometry for strict validation.
         int normalizedW = _selection.Width;
         int normalizedH = _selection.Height;
-        if (normalizedW % 2 != 0) normalizedW--;
-        if (normalizedH % 2 != 0) normalizedH--;
+        if (!_profilePurpose)
+        {
+            if (normalizedW % 2 != 0) normalizedW--;
+            if (normalizedH % 2 != 0) normalizedH--;
+        }
 
         // Ensure still at least MinSize after normalization
         if (normalizedW < MinSize) normalizedW = MinSize;
@@ -1189,7 +1197,7 @@ public sealed class RegionSelectionForm : Form
             // Convert client area coordinates to virtual screen coordinates for display
             int virtualX = Bounds.X + _selection.X;
             int virtualY = Bounds.Y + _selection.Y;
-            _infoLabel.Text = _text.Format("RegionSelection_Info_Selected", virtualX, virtualY, _selection.Width, _selection.Height);
+            _infoLabel.Text = _text.Format(_profilePurpose ? "RegionSelection_Profile_Info_Selected" : "RegionSelection_Info_Selected", virtualX, virtualY, _selection.Width, _selection.Height);
             _coordsLabel.Text = _text.Format("RegionSelection_Coords_FormBounds", Bounds.X, Bounds.Y, Bounds.Right, Bounds.Bottom);
 
             UpdateDisplayLabel();
@@ -1204,7 +1212,7 @@ public sealed class RegionSelectionForm : Form
         }
         else
         {
-            _infoLabel.Text = _text.Get("RegionSelection_Info_Default");
+            _infoLabel.Text = _text.Get(_profilePurpose ? "RegionSelection_Profile_Info_Default" : "RegionSelection_Info_Default");
             _coordsLabel.Text = _text.Format("RegionSelection_Coords_VirtualScreen", Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height);
             _displayLabel.Text = _text.Get("RegionSelection_Display_Unknown");
 

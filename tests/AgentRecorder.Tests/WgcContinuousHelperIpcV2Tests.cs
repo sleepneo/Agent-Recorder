@@ -1500,7 +1500,8 @@ Height: tall";
         var stdout = @"RESULT: FIRST_FRAME
 Stage: Capturing
 FrameNumber: 1
-ElapsedMs: 42";
+ElapsedMs: 42
+SourceTimeHns: 123456789";
 
         var events = WgcContinuousEventStreamParser.ParseEvents(stdout);
 
@@ -1511,6 +1512,7 @@ ElapsedMs: 42";
         Assert.Equal(1, evt.FrameNumber);
         Assert.False(evt.FrameNumberParseFailed);
         Assert.Equal(42, evt.ElapsedMs);
+        Assert.Equal(123456789, evt.SourceTimeHns);
         Assert.False(evt.ElapsedMsParseFailed);
         Assert.False(evt.HasNumericParseError);
     }
@@ -1547,8 +1549,10 @@ EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
+RecordingId: test-ff-01
 FrameNumber: 1
 ElapsedMs: 17
+SourceTimeHns: 123456789
 
 RESULT: OK
 EncoderMode: software
@@ -1652,13 +1656,17 @@ EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
+RecordingId: test-ff-04
 FrameNumber: 1
 ElapsedMs: 10
+SourceTimeHns: 123456789
 
 RESULT: FIRST_FRAME
 Stage: Capturing
+RecordingId: test-ff-04
 FrameNumber: 2
 ElapsedMs: 20
+SourceTimeHns: 123456789
 
 RESULT: OK
 EncoderMode: software
@@ -1803,8 +1811,10 @@ EncoderSelectionReason: software_default
 
 RESULT: FIRST_FRAME
 Stage: Capturing
+RecordingId: test-ff-08
 FrameNumber: 1
 ElapsedMs: 0
+SourceTimeHns: 0
 
 RESULT: OK
 EncoderMode: software

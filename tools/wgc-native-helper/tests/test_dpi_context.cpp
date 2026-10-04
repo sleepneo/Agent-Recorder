@@ -69,8 +69,30 @@ std::wstring GetHelperProjectRoot() {
     if (len == 0) return L"";
     path.resize(len);
     fs::path testExe = path;
-    // testExe is at tools/wgc-native-helper/bin/x64/Release/wgc-native-helper-tests.exe
-    return testExe.parent_path().parent_path().parent_path().parent_path().wstring();
+    const auto findRoot = [](fs::path candidate) -> fs::path {
+        while (!candidate.empty()) {
+            if (fs::exists(candidate / L"src" / L"wgc-native-helper.exe.manifest")) {
+                return candidate;
+            }
+            const fs::path nestedProject = candidate / L"tools" / L"wgc-native-helper";
+            if (fs::exists(nestedProject / L"src" / L"wgc-native-helper.exe.manifest")) {
+                return nestedProject;
+            }
+
+            const fs::path parent = candidate.parent_path();
+            if (parent == candidate) break;
+            candidate = parent;
+        }
+        return {};
+    };
+
+    const fs::path executableRoot = findRoot(testExe.parent_path());
+    if (!executableRoot.empty()) return executableRoot.wstring();
+
+    std::error_code error;
+    const fs::path workingDirectory = fs::current_path(error);
+    if (!error) return findRoot(workingDirectory).wstring();
+    return L"";
 }
 
 struct ProcessResult {

@@ -35,6 +35,8 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     [InlineData("window_minimized")]
     [InlineData("size_changed")]
     [InlineData("audio_capture_discontinuous")]
+    [InlineData("storage_space_low")]
+    [InlineData("storage_capacity_unavailable")]
     public void Manager_RequestsOneLocalizedAppOwnedNotification(string reasonCode)
     {
         var audit = new CaptureAuditLogger();
@@ -243,7 +245,7 @@ public sealed class RecordingFailureNotificationTests : IDisposable
     public void Layout_FitsLocalizedLongestTextAt100_150_And200Dpi(UiLanguage language)
     {
         var text = new UiTextProvider(language);
-        foreach (var reason in new[] { "display_unavailable", "window_closed", "window_minimized", "size_changed", "audio_capture_discontinuous" })
+        foreach (var reason in new[] { "display_unavailable", "window_closed", "window_minimized", "size_changed", "audio_capture_discontinuous", "storage_space_low", "storage_capacity_unavailable" })
         {
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 96));
             Assert.True(RecordingFailureNotificationLayout.FitsAtDpi(text, reason, 144));
@@ -323,6 +325,8 @@ public sealed class RecordingFailureNotificationTests : IDisposable
 
     private static string BodyKey(string reasonCode) => reasonCode switch
     {
+        "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
+        "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
         "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
         "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
         "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",

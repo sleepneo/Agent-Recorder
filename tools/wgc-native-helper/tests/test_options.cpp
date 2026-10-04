@@ -192,7 +192,7 @@ TEST_REGISTRAR(OptionsStrictWindowSurfaceDurationBounds, []() {
     auto atMaximum = ParseArgs({
         L"--capture-continuous-window",
         L"--window-hwnd", L"0x1234",
-        L"--duration-ms", L"600000",
+        L"--duration-ms", L"1800000",
         L"--allow-long-window-surface-duration"
     });
     ASSERT_TRUE(atMaximum.error.empty());
@@ -201,7 +201,7 @@ TEST_REGISTRAR(OptionsStrictWindowSurfaceDurationBounds, []() {
     auto beyondMaximum = ParseArgs({
         L"--capture-continuous-window",
         L"--window-hwnd", L"0x1234",
-        L"--duration-ms", L"600001",
+        L"--duration-ms", L"1800001",
         L"--allow-long-window-surface-duration"
     });
     ASSERT_FALSE(beyondMaximum.error.empty());

@@ -23,6 +23,16 @@ public interface IVideoCaptureWorker : IDisposable
     long LaunchAnchorTicks { get; }
 
     /// <summary>
+    /// Stopwatch/QPC-domain timestamp corresponding to the source media zero
+    /// used for output video PTS. Null for backends without source-clock proof.
+    /// </summary>
+    long? VideoMediaStartAnchorTicks => null;
+    long? VideoMediaStartSourceTimeHns => null;
+
+    /// <summary>True when finalization must reject a missing source media zero.</summary>
+    bool RequiresVideoMediaStartAnchor => false;
+
+    /// <summary>
     /// Diagnostic monotonic timestamp estimated from the first credible
     /// positive out_time_us progress group. This must not be used as the A/V
     /// alignment anchor because it includes unmeasured stdout delivery delay.

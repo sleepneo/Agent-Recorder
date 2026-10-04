@@ -264,7 +264,9 @@ internal sealed class StandingLeaseSafetyControlService
 
     internal StandingLeaseSafetyControlResult StopAllAndRevokeAll(
         string? operationId,
-        string reasonCode = "user_requested")
+        string reasonCode = "user_requested",
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null)
     {
         if (!IsCanonicalId(operationId))
         {
@@ -289,7 +291,8 @@ internal sealed class StandingLeaseSafetyControlService
 
         var result = Execute(
             operationId!,
-            () => _transaction.StopAllAndRevokeAll(operationId!, reasonCode, nowUtc),
+            () => _transaction.StopAllAndRevokeAll(
+                operationId!, reasonCode, nowUtc, futureWindowUserSid, futureWindowSessionBinding),
             forcePhysicalStop: true);
         return CompleteControlAudit(
             "stop_all_revoke_all",
@@ -303,7 +306,9 @@ internal sealed class StandingLeaseSafetyControlService
     internal StandingLeaseSafetyControlResult SetUnattendedEnabled(
         bool enabled,
         string? operationId,
-        string reasonCode = "user_requested")
+        string reasonCode = "user_requested",
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null)
     {
         if (!IsCanonicalId(operationId))
         {
@@ -328,7 +333,8 @@ internal sealed class StandingLeaseSafetyControlService
 
         var result = Execute(
             operationId!,
-            () => _transaction.SetUnattendedMode(operationId!, enabled, reasonCode, nowUtc));
+            () => _transaction.SetUnattendedMode(
+                operationId!, enabled, reasonCode, nowUtc, futureWindowUserSid, futureWindowSessionBinding));
         return CompleteControlAudit(
             enabled ? "unattended_enable" : "unattended_disable",
             null,
@@ -340,8 +346,10 @@ internal sealed class StandingLeaseSafetyControlService
 
     internal StandingLeaseSafetyControlResult DisableUnattended(
         string? operationId,
-        string reasonCode = "user_requested") =>
-        SetUnattendedEnabled(false, operationId, reasonCode);
+        string reasonCode = "user_requested",
+        string? futureWindowUserSid = null,
+        string? futureWindowSessionBinding = null) =>
+        SetUnattendedEnabled(false, operationId, reasonCode, futureWindowUserSid, futureWindowSessionBinding);
 
     internal StandingLeaseSafetyControlResult EnableUnattended(
         string? operationId,

@@ -49,7 +49,7 @@ internal sealed class TrayRecurringPlanSetupUi(TrayContext tray) : IRecurringPla
         return completion.Task;
     }
 
-    private static bool InteractiveDesktopAvailable()
+    internal static bool InteractiveDesktopAvailable()
     {
         nint input = 0;
         try

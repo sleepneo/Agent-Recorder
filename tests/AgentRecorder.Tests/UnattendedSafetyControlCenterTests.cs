@@ -198,6 +198,72 @@ public sealed class UnattendedSafetyControlCenterTests
     }
 
     [Fact]
+    public void ControlFormShowsCompleteFutureWindowGrantAndConfirmsExactLocalRevoke()
+    {
+        RunOnSta(() =>
+        {
+            var grant = new AgentRecorder.Api.FutureWindowAuthorizationState(
+                "fwa_0123456789abcdef0123456789abcdef", "active", null,
+                @"C:\Player\player.exe", "00AB12CD:0000000000000042", new string('a', 64),
+                "CN=Publisher", new string('b', 64), "system_loopback", "endpoint-1", "Speakers",
+                300, 900, @"D:\Recordings\future-window-test.mp4", At(1), At(2), At(902),
+                null, null, null, null, null, null, null, 1);
+            var gateway = new FakeGateway(CreateState(ConsentLeaseStatus.Active))
+            {
+                FutureWindowGrants = new[] { grant },
+            };
+            var confirmation = new FakeConfirmation { NextAnswer = true };
+            using var form = new UnattendedSafetyControlForm(
+                gateway, new UiTextProvider(UiLanguage.EnUs), confirmation);
+            form.PerformLayout();
+
+            Assert.Equal(1, form.FutureWindowCardCountForTests);
+            var futurePanel = (FlowLayoutPanel)form.LeaseListsForTests.GetControlFromPosition(0, 2)!.Controls[0];
+            var grantCard = (Panel)futurePanel.Controls.Cast<Control>().Single(control =>
+                string.Equals(control.Tag as string, "future:" + grant.AuthorizationId, StringComparison.Ordinal));
+            var card = (TableLayoutPanel)grantCard.Controls[0];
+            var details = (Label)card.GetControlFromPosition(0, 0)!;
+            Assert.Contains(grant.ExecutablePath, details.Text);
+            Assert.Contains(grant.ExecutableSha256, details.Text);
+            Assert.Contains(grant.OutputPath, details.Text);
+            Assert.Contains("Speakers", details.Text);
+            Assert.Contains("latest permissible start", details.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(grant.ExpiresAtUtc!.Value.AddSeconds(-grant.MaximumDurationSeconds).ToString("u"), details.Text);
+
+            var revoke = (Button)card.GetControlFromPosition(1, 0)!;
+            ClickWithoutShowing(revoke);
+
+            Assert.Equal(1, confirmation.CallCount);
+            Assert.Contains(grant.AuthorizationId, confirmation.LastMessage);
+            Assert.Equal(grant.AuthorizationId, gateway.RevokedFutureAuthorizationId);
+            Assert.Contains("revoked", form.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
+    public void GlobalSafetyControlShowsWhenDurableActionCommittedButPhysicalStopFailed()
+    {
+        RunOnSta(() =>
+        {
+            var gateway = new FakeGateway(CreateState(ConsentLeaseStatus.Active))
+            {
+                GlobalControlRequiresStopForTest = true,
+                GlobalControlStopFailedForTest = true,
+            };
+            using var form = new UnattendedSafetyControlForm(
+                gateway,
+                new UiTextProvider(UiLanguage.EnUs),
+                new FakeConfirmation { NextAnswer = true });
+            form.PerformLayout();
+
+            ClickWithoutShowing(form.StopAllButtonForTests);
+
+            Assert.Contains("did not confirm stopping", form.ResultTextForTests, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(Color.DarkRed, form.ResultColorForTests);
+        });
+    }
+
+    [Fact]
     public void ControlFormRequiresConfirmationDisablesActionsDuringWriteAndFailsClosedOnQueryError()
     {
         RunOnSta(() =>
@@ -794,8 +860,13 @@ public sealed class UnattendedSafetyControlCenterTests
         internal bool RecurringRequiresStopForTest { get; set; }
         internal bool RecurringStopFailedForTest { get; set; }
         internal bool RecurringStopNoOpForTest { get; set; }
+        internal bool GlobalControlRequiresStopForTest { get; set; }
+        internal bool GlobalControlStopFailedForTest { get; set; }
         internal Queue<StandingLeaseControlCenterQueryResult>? QuerySequence { get; set; }
         internal List<(string Kind, string OperationId, string? IntentId)> Operations { get; } = new();
+        internal IReadOnlyList<AgentRecorder.Api.FutureWindowAuthorizationState> FutureWindowGrants { get; set; } =
+            Array.Empty<AgentRecorder.Api.FutureWindowAuthorizationState>();
+        internal string? RevokedFutureAuthorizationId { get; private set; }
 
         internal FakeGateway(StandingLeaseControlCenterState state)
         {
@@ -829,20 +900,37 @@ public sealed class UnattendedSafetyControlCenterTests
         public StandingLeaseSafetyControlResult StopAll(string operationId)
         {
             Operations.Add(("stop_all", operationId, null));
-            return StandingLeaseSafetyControlResult.ChangedResult(operationId, "stop_all_applied");
+            var result = StandingLeaseSafetyControlResult.ChangedResult(
+                operationId, "stop_all_applied", GlobalControlRequiresStopForTest, durableOperationCommitted: true);
+            return GlobalControlStopFailedForTest ? result.WithPhysicalStopFailure() : result;
         }
 
         public StandingLeaseSafetyControlResult Disable(string operationId)
         {
             BusyObserved = BusyProbe?.Invoke() ?? false;
             Operations.Add(("disable", operationId, null));
-            return StandingLeaseSafetyControlResult.ChangedResult(operationId, StandingLeaseSafetyReasonCodes.UnattendedDisabled);
+            var result = StandingLeaseSafetyControlResult.ChangedResult(
+                operationId, StandingLeaseSafetyReasonCodes.UnattendedDisabled,
+                GlobalControlRequiresStopForTest, durableOperationCommitted: true);
+            return GlobalControlStopFailedForTest ? result.WithPhysicalStopFailure() : result;
         }
 
         public StandingLeaseSafetyControlResult Enable(string operationId)
         {
             Operations.Add(("enable", operationId, null));
             return StandingLeaseSafetyControlResult.ChangedResult(operationId, "unattended_enabled");
+        }
+
+        public IReadOnlyList<AgentRecorder.Api.FutureWindowAuthorizationState> ListFutureWindowAuthorizations() => FutureWindowGrants;
+
+        public AgentRecorder.Api.FutureWindowAuthorizationState? RevokeFutureWindowAuthorization(string authorizationId)
+        {
+            RevokedFutureAuthorizationId = authorizationId;
+            var target = FutureWindowGrants.SingleOrDefault(item => item.AuthorizationId == authorizationId);
+            if (target is null) return null;
+            var revoked = target with { Status = "revoked", ReasonCode = "locally_revoked" };
+            FutureWindowGrants = FutureWindowGrants.Select(item => item.AuthorizationId == authorizationId ? revoked : item).ToArray();
+            return revoked;
         }
     }
 

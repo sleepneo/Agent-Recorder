@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -17,6 +16,7 @@ namespace AgentRecorder.Cli;
 internal static class Program
 {
     private const int DefaultTimeoutSeconds = 30;
+    private const int ApiPort = 37891;
 
     private static int Main(string[] args)
     {
@@ -32,6 +32,8 @@ internal static class Program
             var opts = ParseOpts(args, 1);
             return RunEnsureRunning(opts);
         }
+        if (command == "interactive-launch")
+            return RunInteractiveLaunchCommand(args);
         if (command == "autostart")
         {
             return RunAutoStart(args);
@@ -63,6 +65,9 @@ internal static class Program
                         break;
                     case "--verbose":
                         opts.Verbose = true;
+                        break;
+                    case "--diagnostics":
+                        opts.Diagnostics = true;
                         break;
                     case "--timeout-ms":
                         var msVal = GetArgValue(args, ref i, "--timeout-ms");
@@ -215,6 +220,114 @@ internal static class Program
             }
             return 1;
         }
+    }
+
+    private static int RunInteractiveLaunchCommand(string[] args)
+    {
+        var subcommand = args.Length > 1 ? args[1].ToLowerInvariant() : "help";
+        var json = false;
+        string? appOverride = null;
+        string? dataDirOverride = null;
+        var crossAccountOptionUsed = GetUnsupportedCrossAccountOptionCode(args) is not null;
+        string? parseError = null;
+        for (var i = 2; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--json": json = true; break;
+                case "--app":
+                    if (++i >= args.Length) parseError ??= "--app requires a value.";
+                    else appOverride = args[i];
+                    break;
+                case "--data-dir":
+                    if (++i >= args.Length) parseError ??= "--data-dir requires a value.";
+                    else dataDirOverride = args[i];
+                    break;
+                case "--agent-sid":
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                        i++;
+                    break;
+                case "--help": case "-h": subcommand = "help"; break;
+                default: parseError ??= $"Unknown interactive-launch option: {args[i]}"; break;
+            }
+        }
+
+        if (subcommand == "help")
+        {
+            Console.WriteLine("interactive-launch - manage the current-user interactive desktop task");
+            Console.WriteLine("  setup     Advanced one-time setup from the unlocked current-user desktop");
+            Console.WriteLine("  status    Read-only registration and Task Scheduler validation");
+            Console.WriteLine("  remove    Remove only the matching Agent Recorder task and registration");
+            Console.WriteLine("  diagnose  Opt-in process/session/window-station/desktop diagnostic");
+            Console.WriteLine("  --json --app <AgentRecorder.App.exe> --data-dir <path>");
+            Console.WriteLine("  Cross-account registration and dispatch are unsupported; --agent-sid is rejected.");
+            return 0;
+        }
+
+        if (crossAccountOptionUsed)
+            return WriteInteractiveLaunchResult(new InteractiveLaunchOperationResult(false, "error",
+                "INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED",
+                "Cross-account enrollment is not supported and no task or registration was changed.",
+                "First check whether the host provides an authorized user-desktop execution surface and run the fixed ensure-running command through it. Recorder cannot cross Windows account boundaries."), json);
+
+        if (parseError is not null || subcommand is not ("setup" or "status" or "remove" or "diagnose"))
+        {
+            var error = new InteractiveLaunchOperationResult(false, "error", "INVALID_ARGUMENT",
+                parseError ?? $"Unknown interactive-launch subcommand: {subcommand}");
+            return WriteInteractiveLaunchResult(error, json);
+        }
+        var options = new CliOptions { AppPath = appOverride, DataDir = dataDirOverride };
+        var packageRoot = ResolvePackageRoot(options);
+        var appPath = ResolveServiceExe(options, packageRoot);
+        var dataDir = ResolveDataDir(options, packageRoot);
+        var manager = new InteractiveLaunchManager(new WindowsInteractiveTaskScheduler());
+        if (subcommand == "diagnose")
+        {
+            var diagnostic = manager.Diagnose();
+            Console.WriteLine(JsonSerializer.Serialize(diagnostic, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+                WriteIndented = false
+            }));
+            return diagnostic.LaunchPathResult == "unavailable" ? 1 : 0;
+        }
+
+        var result = subcommand switch
+        {
+            "setup" => manager.Setup(appPath, dataDir),
+            "status" => manager.Status(appPath, dataDir),
+            _ => manager.Remove()
+        };
+        return WriteInteractiveLaunchResult(result, json);
+    }
+
+    internal static string? GetUnsupportedCrossAccountOptionCode(string[] args) =>
+        Array.Exists(args, argument => argument == "--agent-sid" ||
+            argument.StartsWith("--agent-sid=", StringComparison.Ordinal))
+            ? "INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED" : null;
+
+    private static int WriteInteractiveLaunchResult(InteractiveLaunchOperationResult result, bool json)
+    {
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+                WriteIndented = false,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+            }));
+        }
+        else if (result.Ok)
+        {
+            Console.WriteLine($"Status: {result.Status}");
+            if (!string.IsNullOrWhiteSpace(result.TaskName)) Console.WriteLine($"Task: {result.TaskName}");
+        }
+        else
+        {
+            Console.Error.WriteLine($"Error: {result.Code}: {result.Message}");
+            if (!string.IsNullOrWhiteSpace(result.SuggestedAction)) Console.Error.WriteLine(result.SuggestedAction);
+        }
+        return result.Ok ? 0 : 1;
     }
 
     private static int RunAutoStart(string[] args)
@@ -539,18 +652,37 @@ internal static class Program
     }
 
     internal static EnsureRunningResult EnsureRunningCore(CliOptions opts)
+        => EnsureRunningCore(opts, InteractiveDesktopRuntime.ObserveCurrent());
+
+    internal static EnsureRunningResult EnsureRunningCore(CliOptions opts, InteractiveDesktopObservation desktop)
     {
         var ensureStopwatch = Stopwatch.StartNew();
         var packageRoot = ResolvePackageRoot(opts);
         var dataDir = ResolveDataDir(opts, packageRoot);
         var readyPath = Path.Combine(dataDir, "runtime", "ready.json");
 
+        if (!opts.PreferHeadless && !desktop.IsOnInteractiveDesktop && !desktop.CanBrokerToInteractiveDesktop)
+        {
+            var hasKnownDifferentUser = !string.IsNullOrWhiteSpace(desktop.ProcessUserSid) &&
+                !string.IsNullOrWhiteSpace(desktop.ActiveUserSid) &&
+                !string.Equals(desktop.ProcessUserSid, desktop.ActiveUserSid, StringComparison.Ordinal);
+            var failure = hasKnownDifferentUser ? "INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED" :
+                desktop.FailureCode.Length == 0 ? "INTERACTIVE_DESKTOP_REQUIRED" : desktop.FailureCode;
+            return InteractiveError(failure,
+                hasKnownDifferentUser
+                    ? "Agent Recorder cannot start or reuse the tray App across Windows account boundaries."
+                    : "No verified interactive desktop is available for the tray App.",
+                "First check whether the host offers an authorized user-desktop execution surface, then run this fixed ensure-running command through that surface. Recorder cannot escape a sandbox or obtain another account's permissions; without an authorized surface this request remains fail-closed.",
+                desktop, opts, "none");
+        }
+
         var decision = EvaluateStaleReadyDecision(readyPath);
 
         switch (decision.Action)
         {
             case StaleReadyDecisionAction.ReuseExisting:
-                return BuildSuccessResult(decision.Existing!, "existing", decision.ApiVersion!, ensureStopwatch, dataDir);
+                return BuildSuccessResult(decision.Existing!, "existing", decision.ApiVersion!, ensureStopwatch, dataDir,
+                    "reuse", opts.Diagnostics ? ToDiagnostic(desktop) : null);
 
             case StaleReadyDecisionAction.ReturnError:
                 return new EnsureRunningResult
@@ -559,7 +691,10 @@ internal static class Program
                     Status = "error",
                     Code = decision.ErrorCode!,
                     Message = decision.Message!,
-                    SuggestedAction = decision.SuggestedAction
+                    SuggestedAction = decision.SuggestedAction,
+                    DesktopStatus = desktop.Status,
+                    LaunchPath = "none",
+                    DesktopDiagnostic = opts.Diagnostics ? ToDiagnostic(desktop) : null
                 };
 
             case StaleReadyDecisionAction.DeleteFailed:
@@ -569,7 +704,10 @@ internal static class Program
                     Status = "error",
                     Code = "STALE_READY_FILE_DELETE_FAILED",
                     Message = $"Stale ready file exists at {readyPath} but could not be deleted: {decision.Message}",
-                    SuggestedAction = $"Delete {readyPath} manually and try again."
+                    SuggestedAction = $"Delete {readyPath} manually and try again.",
+                    DesktopStatus = desktop.Status,
+                    LaunchPath = "none",
+                    DesktopDiagnostic = opts.Diagnostics ? ToDiagnostic(desktop) : null
                 };
 
             case StaleReadyDecisionAction.ProceedToStart:
@@ -584,91 +722,207 @@ internal static class Program
             {
                 Ok = false,
                 Status = "error",
-                Code = "SERVICE_NOT_FOUND",
-                Message = "Could not find AgentRecorder.App.exe or AgentRecorder.Headless.exe.",
-                SuggestedAction = "Ensure you are running from the correct package root, or specify --app <path>."
+                Code = opts.PreferHeadless ? "SERVICE_NOT_FOUND" : "TRAY_APP_NOT_FOUND",
+                Message = opts.PreferHeadless
+                    ? "Could not find AgentRecorder.Headless.exe."
+                    : "Could not find AgentRecorder.App.exe; the tray App is required for the normal agent flow.",
+                SuggestedAction = "Ensure the Release package contains AgentRecorder.App.exe, or specify --app <path>.",
+                DesktopStatus = desktop.Status,
+                LaunchPath = "none",
+                DesktopDiagnostic = opts.Diagnostics ? ToDiagnostic(desktop) : null
             };
         }
 
         var stopwatch = Stopwatch.StartNew();
-        using var proc = StartServiceProcess(exePath, dataDir);
+        var isTrayApp = string.Equals(Path.GetFileName(exePath), "AgentRecorder.App.exe", StringComparison.OrdinalIgnoreCase);
+        var requestId = isTrayApp ? InteractiveLaunchProtocol.NewId() : string.Empty;
+        Process? directProcess = null;
+        IInteractiveTaskRun? brokerRun = null;
+        var launchPath = "direct";
 
-        var namedEventName = RuntimeReadiness.NamedEventName;
-        bool readySignaled = false;
-
-        try
+        if (isTrayApp)
         {
-            using var readyEvent = EventWaitHandle.OpenExisting(namedEventName);
-            try { readyEvent.Reset(); } catch { }
-
-            var remaining = Math.Max(0, opts.TimeoutMs - (int)stopwatch.ElapsedMilliseconds);
-            readySignaled = readyEvent.WaitOne(remaining);
-        }
-        catch (WaitHandleCannotBeOpenedException)
-        {
-        }
-
-        if (!readySignaled)
-        {
-            readySignaled = WaitForReadyFile(readyPath, opts.TimeoutMs, stopwatch);
-        }
-
-        var final = ReadReadySnapshot(readyPath);
-        if (final != null && IsAgentRecorderProcess(final.Pid))
-        {
-            var validation = ValidateReadySnapshot(final);
-            if (validation.Valid)
+            var dispatch = InteractiveLaunchDispatcher.Dispatch(
+                desktop, exePath, dataDir, requestId, new WindowsInteractiveTaskScheduler());
+            if (!dispatch.Started)
             {
-                return BuildSuccessResult(final, "started", validation.ApiVersion, ensureStopwatch, dataDir);
+                var suggested = dispatch.FailureCode == "INTERACTIVE_LAUNCH_NOT_ENROLLED"
+                    ? "First check whether the host offers an authorized user-desktop execution surface and run this fixed ensure-running command there. Only for a same-user isolated desktop, consider the one-time interactive-launch setup documented under advanced recovery."
+                    : dispatch.FailureCode is "DESKTOP_LOCKED" or "NO_ACTIVE_INTERACTIVE_SESSION"
+                        ? "Unlock or sign in to the same user desktop, then retry ensure-running."
+                        : dispatch.FailureCode.StartsWith("TASK_", StringComparison.Ordinal)
+                            ? "Run 'AgentRecorder.Cli.exe interactive-launch status --json' as the same user; repair only with setup/remove."
+                            : "Verify the current user/session and enrolled App/data directory, then retry from ensure-running.";
+                return InteractiveError(dispatch.FailureCode,
+                    dispatch.FailureCode == "INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED"
+                        ? "Cross-account launch is not supported by Agent Recorder."
+                        : dispatch.FailureCode == "INTERACTIVE_LAUNCH_NOT_ENROLLED"
+                            ? "A same-user isolated desktop has no explicit interactive launch setup."
+                            : "A visible Agent Recorder App could not be safely dispatched to the active user desktop.",
+                    suggested, desktop, opts, dispatch.LaunchPath);
             }
+            launchPath = dispatch.LaunchPath;
+            brokerRun = dispatch.TaskRun;
+            if (launchPath == "direct")
+                directProcess = StartServiceProcess(exePath, dataDir, requestId);
+        }
+        else
+        {
+            directProcess = StartServiceProcess(exePath, dataDir);
+            launchPath = "direct_headless";
+        }
 
-            if (validation.ErrorCode == "STALE_READY_FILE")
+        using (brokerRun)
+        using (directProcess)
+        {
+            string? launchFailureCode = null;
+            string? launchFailureMessage = null;
+            var launchResultRead = false;
+            var launchedProcessId = 0;
+            var readySignaled = false;
+            while (stopwatch.ElapsedMilliseconds < opts.TimeoutMs)
             {
-                return new EnsureRunningResult
+                if (isTrayApp && !launchResultRead &&
+                    InteractiveLaunchResultStore.TryReadAndDelete(dataDir, requestId, out var launchResult) &&
+                    launchResult is not null)
                 {
-                    Ok = false,
-                    Status = "error",
-                    Code = "STALE_READY_FILE",
-                    Message = validation.Message ?? "Ready file identity does not match /capabilities response after startup.",
-                    SuggestedAction = "The ready.json file does not match the running service. Check for conflicting instances."
-                };
+                    launchResultRead = true;
+                    launchedProcessId = launchResult.ProcessId;
+                    if (launchResult.Status == "rejected" || launchResult.Status == "failed")
+                    {
+                        launchFailureCode = string.IsNullOrWhiteSpace(launchResult.FailureCode)
+                            ? "INTERACTIVE_DESKTOP_REQUIRED" : launchResult.FailureCode;
+                        launchFailureMessage = "Agent Recorder rejected startup before acquiring its single-instance guard because the requested desktop/session was not valid.";
+                        break;
+                    }
+                    if (launchResult.Status == "instance_exists")
+                    {
+                        var existing = ReadReadySnapshot(readyPath);
+                        if (existing is not null && IsAgentRecorderProcess(existing.Pid))
+                        {
+                            var existingValidation = ValidateReadySnapshot(existing);
+                            if (existingValidation.Valid)
+                                return BuildSuccessResult(existing, "existing", existingValidation.ApiVersion,
+                                    ensureStopwatch, dataDir, "reuse", opts.Diagnostics ? ToDiagnostic(desktop) : null);
+                        }
+                        launchFailureCode = "CONFLICTING_DATA_DIR_INSTANCE";
+                        launchFailureMessage = "Another Agent Recorder instance owns the session but does not publish readiness for this data directory.";
+                        break;
+                    }
+                }
+
+                readySignaled = File.Exists(readyPath);
+                if (readySignaled)
+                    break;
+                if (directProcess is { HasExited: true })
+                    break;
+                Thread.Sleep(100);
             }
-        }
 
-        if (proc.HasExited)
-        {
-            return new EnsureRunningResult
+            if (readySignaled || File.Exists(readyPath))
             {
-                Ok = false,
-                Status = "error",
-                Code = "SERVICE_EXITED",
-                Message = $"Service process exited early with code {proc.ExitCode}.",
-                SuggestedAction = $"Check audit log at {Path.Combine(dataDir, "logs", "audit.jsonl")}"
-            };
-        }
+                var final = ReadReadySnapshot(readyPath);
+                if (final != null && IsAgentRecorderProcess(final.Pid))
+                {
+                    var validation = ValidateReadySnapshot(final);
+                    if (validation.Valid)
+                    {
+                        var ownPid = directProcess?.Id ?? launchedProcessId;
+                        var source = final.Pid == ownPid ? "started" : "existing";
+                        return BuildSuccessResult(final, source, validation.ApiVersion, ensureStopwatch, dataDir,
+                            final.Mode == "tray" && source == "existing" ? "reuse" : launchPath,
+                            opts.Diagnostics ? ToDiagnostic(desktop) : null);
+                    }
 
-        return new EnsureRunningResult
-        {
-            Ok = false,
-            Status = "error",
-            Code = "READY_TIMEOUT",
-            Message = $"Agent Recorder did not become ready within {opts.TimeoutMs / 1000} seconds.",
-            SuggestedAction = "Check whether AgentRecorder.App.exe can start in the current desktop session."
-        };
+                    if (validation.ErrorCode is "STALE_READY_FILE" or "INTERACTIVE_DESKTOP_REQUIRED")
+                    {
+                        StopFailedStartup(directProcess, brokerRun);
+                        return InteractiveError(validation.ErrorCode,
+                            validation.Message ?? "The ready snapshot failed its identity or interactive-desktop proof.",
+                            "Do not use this API instance; repair its desktop/session and data-directory ownership first.",
+                            desktop, opts, launchPath);
+                    }
+                }
+            }
+
+            if (launchFailureCode is not null)
+            {
+                StopFailedStartup(directProcess, brokerRun);
+                return InteractiveError(launchFailureCode, launchFailureMessage ?? launchFailureCode,
+                    "Verify the active unlocked desktop and retry through ensure-running.", desktop, opts, launchPath);
+            }
+
+            if (directProcess is { HasExited: true })
+            {
+                var code = isTrayApp && directProcess.ExitCode == 70
+                    ? "INTERACTIVE_DESKTOP_REQUIRED"
+                    : "SERVICE_EXITED";
+                return InteractiveError(code,
+                    $"Service process exited before publishing a verified ready snapshot (exit {directProcess.ExitCode}).",
+                    "Check the startup error log after confirming the current user desktop and package path.",
+                    desktop, opts, launchPath);
+            }
+
+            StopFailedStartup(directProcess, brokerRun);
+            return InteractiveError("READY_TIMEOUT",
+                $"Agent Recorder did not become ready within {opts.TimeoutMs / 1000} seconds; the cold-start process was stopped.",
+                "Check the app startup log, then retry from the same user session.", desktop, opts, launchPath);
+        }
     }
 
-    internal static ProcessStartInfo CreateServiceStartInfo(string exePath)
+    private static EnsureRunningResult InteractiveError(
+        string code,
+        string message,
+        string? suggestedAction,
+        InteractiveDesktopObservation desktop,
+        CliOptions opts,
+        string launchPath) => new()
+    {
+        Ok = false,
+        Status = "error",
+        Code = code,
+        Message = message,
+        SuggestedAction = suggestedAction,
+        DesktopStatus = desktop.Status,
+        LaunchPath = launchPath,
+        DesktopDiagnostic = opts.Diagnostics ? ToDiagnostic(desktop) : null
+    };
+
+    private static InteractiveLaunchDiagnostic ToDiagnostic(InteractiveDesktopObservation desktop) => new(
+        desktop.ProcessId, desktop.ProcessUserSid, desktop.ProcessSessionId, desktop.ActiveSessionId,
+        desktop.WindowStation, desktop.ThreadDesktop, desktop.InputDesktop,
+        desktop.IsOnInteractiveDesktop ? "direct" :
+            desktop.CanBrokerToInteractiveDesktop
+                ? "task_scheduler_interactive_token" : "unavailable",
+        desktop.FailureCode);
+
+    internal static void StopFailedStartup(Process? process, IInteractiveTaskRun? brokerRun)
+    {
+        try
+        {
+            if (process is { HasExited: false })
+            {
+                process.Kill(entireProcessTree: true);
+                _ = process.WaitForExit(3000);
+            }
+        }
+        catch { }
+        try { brokerRun?.Stop(); } catch { }
+    }
+
+    internal static ProcessStartInfo CreateServiceStartInfo(string exePath, string? arguments = null)
     {
         return new ProcessStartInfo
         {
             FileName = exePath,
+            Arguments = arguments ?? string.Empty,
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,
         };
     }
 
-    internal static Process StartServiceProcess(string exePath, string dataDir)
+    internal static Process StartServiceProcess(string exePath, string dataDir, string? requestId = null)
     {
         // Shell execution prevents the long-running service from inheriting the CLI
         // caller's capture pipes. UseShellExecute cannot accept a custom environment,
@@ -678,7 +932,9 @@ internal static class Program
         try
         {
             Environment.SetEnvironmentVariable(dataDirVariable, dataDir);
-            return Process.Start(CreateServiceStartInfo(exePath))
+            var arguments = string.IsNullOrWhiteSpace(requestId)
+                ? null : InteractiveLaunchProtocol.CreateDirectArguments(requestId);
+            return Process.Start(CreateServiceStartInfo(exePath, arguments))
                 ?? throw new InvalidOperationException("Failed to start service process.");
         }
         finally
@@ -788,6 +1044,17 @@ internal static class Program
                     };
                 }
                 return new StaleReadyDecision { Action = StaleReadyDecisionAction.ProceedToStart };
+            }
+
+            if (validation.ErrorCode == "INTERACTIVE_DESKTOP_REQUIRED" && mutexHeld)
+            {
+                return new StaleReadyDecision
+                {
+                    Action = StaleReadyDecisionAction.ReturnError,
+                    ErrorCode = validation.ErrorCode,
+                    Message = validation.Message,
+                    SuggestedAction = "Do not use the isolated API instance. Reuse or launch Agent Recorder in the active unlocked user desktop."
+                };
             }
 
             if (mutexHeld)
@@ -918,10 +1185,6 @@ internal static class Program
         var defaultApp = FindExe("AgentRecorder.App.exe");
         if (!string.IsNullOrEmpty(defaultApp)) return defaultApp;
 
-        // Fallback to headless if App is not available
-        var fallbackHeadless = FindExe("AgentRecorder.Headless.exe");
-        if (!string.IsNullOrEmpty(fallbackHeadless)) return fallbackHeadless;
-
         return string.Empty;
     }
 
@@ -1030,7 +1293,18 @@ internal static class Program
                 return new CapabilitiesValidation { Valid = false, ErrorCode = "CAPABILITIES_UNAVAILABLE", Message = $"HTTP {(int)response.StatusCode} from /capabilities." };
 
             var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-            return ValidateReadySnapshotAgainstCapabilitiesJson(snap, json);
+            var capabilities = ValidateReadySnapshotAgainstCapabilitiesJson(snap, json);
+            if (!capabilities.Valid || !string.Equals(snap.Mode, "tray", StringComparison.OrdinalIgnoreCase))
+                return capabilities;
+            if (!InteractiveDesktopRuntime.IsReadySnapshotForActiveUser(
+                    snap, InteractiveDesktopRuntime.ObserveCurrent()))
+                return new CapabilitiesValidation
+                {
+                    Valid = false,
+                    ErrorCode = "INTERACTIVE_DESKTOP_REQUIRED",
+                    Message = "The API is ready, but its process is not proven to belong to the active user's unlocked WinSta0\\Default desktop."
+                };
+            return capabilities;
         }
         catch
         {
@@ -1082,6 +1356,27 @@ internal static class Program
             if (!string.Equals(capMode, snap.Mode, StringComparison.OrdinalIgnoreCase))
                 return new CapabilitiesValidation { Valid = false, ErrorCode = "STALE_READY_FILE", Message = $"Mode mismatch: ready.json has '{snap.Mode}', capabilities has '{capMode}'." };
 
+            if (string.Equals(snap.Mode, "tray", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!snap.InteractiveDesktopReady || snap.SessionId < 0 ||
+                    !string.Equals(snap.WindowStation, "WinSta0", StringComparison.Ordinal) ||
+                    !string.Equals(snap.Desktop, "Default", StringComparison.Ordinal))
+                    return new CapabilitiesValidation
+                    {
+                        Valid = false,
+                        ErrorCode = "INTERACTIVE_DESKTOP_REQUIRED",
+                        Message = "ready.json does not contain a positive active-user interactive-desktop proof."
+                    };
+                if (!readinessProp.TryGetProperty("interactive_desktop", out var desktopProp) ||
+                    !desktopProp.TryGetProperty("ready", out var desktopReady) || !desktopReady.GetBoolean())
+                    return new CapabilitiesValidation
+                    {
+                        Valid = false,
+                        ErrorCode = "INTERACTIVE_DESKTOP_REQUIRED",
+                        Message = "Capabilities do not confirm interactive desktop readiness."
+                    };
+            }
+
             // Check ready_file - required field (path normalized, case-insensitive on Windows)
             if (!readinessProp.TryGetProperty("ready_file", out var readyFileProp))
                 return new CapabilitiesValidation { Valid = false, ErrorCode = "CAPABILITIES_UNAVAILABLE", Message = "Missing required readiness identity field: ready_file" };
@@ -1132,7 +1427,14 @@ internal static class Program
         }
     }
 
-    internal static EnsureRunningResult BuildSuccessResult(ReadySnapshot snap, string source, string apiVersion, Stopwatch ensureStopwatch, string dataDir)
+    internal static EnsureRunningResult BuildSuccessResult(
+        ReadySnapshot snap,
+        string source,
+        string apiVersion,
+        Stopwatch ensureStopwatch,
+        string dataDir,
+        string? launchPath = null,
+        InteractiveLaunchDiagnostic? desktopDiagnostic = null)
     {
         var ensureElapsedMs = Math.Max(0, ensureStopwatch.ElapsedMilliseconds);
         var startupKind = source == "started" ? "cold" : "warm";
@@ -1157,7 +1459,10 @@ internal static class Program
             AuditLogPath = snap.AuditLogPath,
             NamedEvent = snap.NamedEvent,
             StartupKind = startupKind,
-            EnsureElapsedMs = ensureElapsedMs
+            EnsureElapsedMs = ensureElapsedMs,
+            DesktopStatus = snap.Mode == "tray" ? "interactive" : "not_required",
+            LaunchPath = launchPath ?? (source == "existing" ? "reuse" : "direct"),
+            DesktopDiagnostic = desktopDiagnostic
         };
 
         if (contextId != null)
@@ -1243,6 +1548,7 @@ internal static class Program
         Console.WriteLine("Options:");
         Console.WriteLine("  --json                    Output result as JSON (recommended for AI agents)");
         Console.WriteLine("  --verbose                 Output human-readable diagnostic information");
+        Console.WriteLine("  --diagnostics             Opt in to process/user/session/desktop diagnostics");
         Console.WriteLine("  --package-root <path>     Portable package root directory");
         Console.WriteLine("  --app <path>              Path to AgentRecorder.App.exe");
         Console.WriteLine("  --data-dir <path>         Data directory (default: <package-root>\\.local-data)");
@@ -1258,6 +1564,7 @@ internal sealed class CliOptions
 {
     public bool Json { get; set; }
     public bool Verbose { get; set; }
+    public bool Diagnostics { get; set; }
     public int TimeoutMs { get; set; }
     public int TimeoutSeconds { get; set; }
     public bool PreferHeadless { get; set; }
@@ -1296,6 +1603,10 @@ internal sealed class EnsureRunningResult
     public string? EnsureContextId { get; set; }
     public string? EnsureContextHeader { get; set; }
     public bool? EnsureContextAvailable { get; set; }
+
+    public string? DesktopStatus { get; set; }
+    public string? LaunchPath { get; set; }
+    public InteractiveLaunchDiagnostic? DesktopDiagnostic { get; set; }
 
     // Error fields
     public string? Code { get; set; }

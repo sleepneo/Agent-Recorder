@@ -20,7 +20,10 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
 {
     private const int StdoutMaxChars = 65536;
     private const int StderrMaxChars = 32768;
-    private const int ProtocolMaxBytes = 1048576;
+    // A real 1800-second source-aware loopback stream is about 1.31 MiB at the
+    // helper's 500 ms progress cadence. Keep finite headroom while retaining a
+    // hard ceiling independent of any helper-reported duration.
+    internal const int ProtocolMaxBytes = 4 * 1024 * 1024;
     private const int ProtocolMaxEvents = 10000;
     private const int ProtocolMaxBlockLines = 64;
     private const int ProtocolMaxLineLength = 4096;
@@ -133,6 +136,10 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     }
 
     internal bool IsProtocolError => Interlocked.CompareExchange(ref _protocolErrorRaised, 0, 0) != 0;
+
+    internal int ProtocolBytesReadForTests => Interlocked.CompareExchange(ref _stdoutBytesRead, 0, 0);
+
+    internal int ProtocolEventCountForTests => Interlocked.CompareExchange(ref _eventCount, 0, 0);
 
     public void SetMicrophoneStatusProvider(IMicrophoneStatusProvider? provider)
     {

@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -83,6 +84,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     /// check during finalization. Defaults to true in production.
     /// </summary>
     internal bool ApplyContinuityCheck { get; set; } = true;
+    internal IStagingToFinalPublisher FinalOutputPublisher { get; set; } = StagingToFinalPublisher.Instance;
 
     public event Action<FirstFrameObservation>? FirstFrameObserved;
     public event Action? AudioReady;
@@ -122,7 +124,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         _cfg = cfg;
         _finalOutputPath = cfg.OutputPath;
 
-        var tempDir = Path.Combine(DataDirResolver.Resolve(), "temp");
+        cfg.WritePaths?.ValidateOutputPath(cfg);
+        cfg.StorageSafety?.EnsureAdmission();
+        var tempDir = cfg.WritePaths?.AvTempDirectory ?? CaptureWritePaths.ResolveAvTempDirectory();
         Directory.CreateDirectory(tempDir);
 
         var recordingId = Path.GetFileNameWithoutExtension(_finalOutputPath) ?? "rec_unknown";
@@ -160,6 +164,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         }
 
         var tempVideoPath = _tempVideoPath ?? throw new InvalidOperationException("Temp video path not initialized");
+        cfg.StorageSafety?.EnsureAdmission();
         StartVideoInternal(cfg, tempVideoPath);
     }
 
@@ -552,7 +557,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         // temp video to stabilize. Re-read the typed reason at this boundary
         // so that the capture-ended observation and the finalization branch
         // agree and the natural path cannot proceed to mux/publish.
-        abortCode = ReadAbortCode() ?? abortCode;
+        abortCode = ReadAbortCode() ?? _cfg?.StorageSafety?.FailureCode ?? abortCode;
         RaiseCaptureEnded(localVideoExitCode, abortCode ?? (invokeNaturalExit ? "natural" : "manual"));
 
         // Stop the audio worker. On the natural-exit path the video worker has
@@ -584,7 +589,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         }
         var combinedStderr = CombineStderr(audioStderr, localVideoStderr);
 
-        abortCode = ReadAbortCode() ?? abortCode;
+        abortCode = ReadAbortCode() ?? _cfg?.StorageSafety?.FailureCode ?? abortCode;
 
         // Video exit, video stability, audio exit, or WAV stability failures block
         // finalization and produce a clear failure result while preserving temp
@@ -682,11 +687,27 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         }
         else
         {
-            var result = FinalizeOutput(combinedStderr, localVideoStderr, audioStderr);
-            meta = result.Meta;
-            success = result.Success;
+            try
+            {
+                var result = FinalizeOutput(combinedStderr, localVideoStderr, audioStderr);
+                meta = result.Meta;
+                success = result.Success;
+            }
+            catch (Exception ex) when (_cfg?.StorageSafety?.FailureCode is not null)
+            {
+                // Storage cancellation still goes through this convergence
+                // owner's normal failed-artifact retention and metadata path.
+                meta = new OutputMeta
+                {
+                    StopReason = _cfg.StorageSafety.FailureCode,
+                    StderrLog = CombineStderr(combinedStderr, "storage_finalization_aborted: " + ex.GetType().Name),
+                    AudioStatus = audioRequested ? "lost" : "not_requested"
+                };
+                success = false;
+            }
         }
 
+        abortCode = ReadAbortCode() ?? _cfg?.StorageSafety?.FailureCode ?? abortCode;
         if (abortCode != null)
         {
             // Preserve the engine-owned lifecycle reason even when a worker
@@ -887,8 +908,17 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             // silently producing a video-only output.
             try
             {
-                if (File.Exists(_finalOutputPath)) File.Delete(_finalOutputPath);
-                File.Move(tempVideoPath, _finalOutputPath);
+                if (cfg?.StorageSafety is { } safety)
+                {
+                    safety.EnsureRuntimeCapacity();
+                    if (!safety.TryCommit(() => File.Move(tempVideoPath, _finalOutputPath, overwrite: true), true))
+                        throw new StorageSafetyException(safety.FailureCode ?? WindowStorageSafety.UnavailableCode);
+                }
+                else
+                {
+                    if (File.Exists(_finalOutputPath)) File.Delete(_finalOutputPath);
+                    File.Move(tempVideoPath, _finalOutputPath);
+                }
             }
             catch (Exception ex)
             {
@@ -956,7 +986,11 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         // video frame, which is the normal case. If anchors are missing or the
         // audio appears to start at/after video, the finalizer will reject it.
         TimeSpan? audioPreRoll = null;
-        var videoAnchor = _videoWorker?.LaunchAnchorTicks ?? 0;
+        var videoMediaAnchor = _videoWorker?.VideoMediaStartAnchorTicks ?? 0;
+        var requiresMediaAnchor = _videoWorker?.RequiresVideoMediaStartAnchor == true;
+        var videoAnchor = videoMediaAnchor > 0
+            ? videoMediaAnchor
+            : requiresMediaAnchor ? 0 : _videoWorker?.LaunchAnchorTicks ?? 0;
         var audioAnchor = _audioWorker?.MediaStartAnchorTicks ?? 0;
         if (videoAnchor > 0 && audioAnchor > 0)
         {
@@ -967,7 +1001,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             }
         }
 
-        var result = new AvFinalizer(_runner).FinalizeAsync(
+        cfg?.StorageSafety?.EnsureRuntimeCapacity();
+        var result = new AvFinalizer(_runner, AvFinalizer.DefaultMuxTimeout, FinalOutputPublisher).FinalizeAsync(
             tempVideoPath,
             tempAudioPath!,
             _finalOutputPath,
@@ -976,9 +1011,17 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             applyContinuityCheck: ApplyContinuityCheck,
             audioStderr,
             videoAnchorAvailable: videoAnchor > 0,
-            audioAnchorAvailable: audioAnchor > 0).GetAwaiter().GetResult();
+            audioAnchorAvailable: audioAnchor > 0,
+            cancellationToken: cfg?.StorageSafety?.AbortToken ?? CancellationToken.None,
+            storageSafety: cfg?.StorageSafety).GetAwaiter().GetResult();
 
         var meta = result.Meta;
+        meta.VideoLaunchAnchorTicks = _videoWorker?.LaunchAnchorTicks > 0 ? _videoWorker.LaunchAnchorTicks : null;
+        meta.VideoMediaZeroAnchorTicks = videoMediaAnchor > 0 ? videoMediaAnchor : null;
+        meta.VideoMediaZeroSystemRelativeTimeHns = _videoWorker?.VideoMediaStartSourceTimeHns;
+        meta.VideoAnchorSource = videoMediaAnchor > 0 ? "wgc_system_relative_time" :
+            requiresMediaAnchor ? "wgc_media_anchor_missing" : "launch";
+        meta.AudioMediaStartAnchorTicks = audioAnchor > 0 ? audioAnchor : null;
         meta.AudioSourceKind = _cfg?.AudioSourceKind switch
         {
             AudioCaptureSourceKind.SystemLoopback => "system-loopback",
@@ -1043,12 +1086,35 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         var video = _videoWorker;
         var launchAnchor = video?.LaunchAnchorTicks ?? 0;
         var progressAnchor = video?.FirstFrameAnchorTicks ?? 0;
-        meta.VideoAnchorStatus = launchAnchor > 0 ? "available" : "missing";
+        var mediaAnchor = video?.VideoMediaStartAnchorTicks ?? 0;
+        var requiresMediaAnchor = video?.RequiresVideoMediaStartAnchor == true;
+        meta.VideoAnchorStatus = mediaAnchor > 0 || (!requiresMediaAnchor && launchAnchor > 0)
+            ? "available" : "missing";
         meta.VideoLaunchAnchorTicks = launchAnchor > 0 ? launchAnchor : null;
+        meta.VideoMediaZeroAnchorTicks = mediaAnchor > 0 ? mediaAnchor : null;
+        meta.VideoMediaZeroSystemRelativeTimeHns = video?.VideoMediaStartSourceTimeHns;
+        meta.VideoAnchorSource = mediaAnchor > 0 ? "wgc_system_relative_time" :
+            requiresMediaAnchor ? "wgc_media_anchor_missing" : "launch";
         meta.VideoProgressAnchorTicks = progressAnchor > 0 ? progressAnchor : null;
         meta.VideoProgressAnchorDeltaMs = video?.ProgressAnchorDeltaMs;
         meta.VideoFirstProgressFrame = video?.FirstProgressFrame;
         meta.VideoFirstProgressOutTimeUs = video?.FirstProgressOutTimeUs;
+
+        if (meta.VideoAnchorStatus == "available" && meta.AudioPreRollMs.HasValue)
+        {
+            var timelineDiagnostic = string.Format(
+                CultureInfo.InvariantCulture,
+                "av_timeline_anchor_diag source={0} launch_ticks={1} video_zero_ticks={2} video_zero_hns={3} audio_zero_ticks={4} audio_preroll_ms={5:F3} units=stopwatch_ticks,hns_100ns,ms",
+                meta.VideoAnchorSource ?? "unknown",
+                meta.VideoLaunchAnchorTicks?.ToString(CultureInfo.InvariantCulture) ?? "na",
+                meta.VideoMediaZeroAnchorTicks?.ToString(CultureInfo.InvariantCulture) ?? "na",
+                meta.VideoMediaZeroSystemRelativeTimeHns?.ToString(CultureInfo.InvariantCulture) ?? "na",
+                meta.AudioMediaStartAnchorTicks?.ToString(CultureInfo.InvariantCulture) ?? "na",
+                meta.AudioPreRollMs.Value);
+            meta.StderrLog = string.IsNullOrEmpty(meta.StderrLog)
+                ? timelineDiagnostic
+                : meta.StderrLog + Environment.NewLine + timelineDiagnostic;
+        }
     }
 
     /// <summary>

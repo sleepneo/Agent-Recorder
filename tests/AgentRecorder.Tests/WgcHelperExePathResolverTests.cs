@@ -267,8 +267,13 @@ public sealed class WgcHelperExePathResolverTests : IDisposable
         return path;
     }
 
-    private static WgcHelperExePathResolver.WgcHelperFileIdentity? ReadIdentity(string path)
+    private WgcHelperExePathResolver.WgcHelperFileIdentity? ReadIdentity(string path)
     {
+        // Synthetic resolution must not discover a helper from the real checkout.
+        if (!Path.GetFullPath(path).StartsWith(_root + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+            return null;
+
         try
         {
             if (!File.Exists(path) && !Directory.Exists(path))

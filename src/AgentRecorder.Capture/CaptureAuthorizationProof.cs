@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 
 namespace AgentRecorder.Capture;
@@ -14,7 +15,8 @@ public enum CaptureAuthorizationProofKind
     InteractiveConfirmation = 0,
     StandingLeaseUse = 1,
     RecurringLeaseUse = 2,
-    RequiredOnceExecution = 3
+    RequiredOnceExecution = 3,
+    FutureWindowOneShot = 4
 }
 
 /// <summary>
@@ -508,6 +510,94 @@ public sealed class RecurringLeaseUseProof : CaptureAuthorizationProof
             throw new ArgumentException("The recurring proof nonce must be 128-bit lowercase hexadecimal.", nameof(value));
         }
 
+        return value;
+    }
+}
+
+/// <summary>
+/// One-run future-window authorization issued only from the durable
+/// consumption receipt. It cannot be created from a request or serialized
+/// grant, and binds the exact executable, live HWND/process generation, local
+/// user/session, endpoint, duration and frozen output scope.
+/// </summary>
+public sealed class FutureWindowOneShotProof : CaptureAuthorizationProof
+{
+    internal FutureWindowOneShotProof(
+        string proofId,
+        string runId,
+        string authorizationId,
+        string capturePlanDigest,
+        string scopeDigest,
+        DateTimeOffset committedAtUtc,
+        DateTimeOffset expiresAtUtc,
+        string currentUserSid,
+        string sessionBinding,
+        string executableIdentityDigest,
+        string windowId,
+        int processId,
+        long processCreationFileTimeUtc,
+        string oneTimeNonce,
+        TimeSpan maxDuration)
+        : base(
+            proofId,
+            recordingId: runId,
+            runId,
+            CaptureAuthorizationProofKind.FutureWindowOneShot,
+            "future-window-authorization:" + authorizationId,
+            capturePlanDigest,
+            scopeDigest,
+            committedAtUtc,
+            expiresAtUtc,
+            currentUserSid + "|" + sessionBinding,
+            maxDurationSeconds: null,
+            maxFrameCount: null)
+    {
+        AuthorizationId = RequireField(authorizationId, nameof(authorizationId));
+        CurrentUserSid = RequireField(currentUserSid, nameof(currentUserSid));
+        SessionBinding = RequireField(sessionBinding, nameof(sessionBinding));
+        ExecutableIdentityDigest = RequireDigest(executableIdentityDigest, nameof(executableIdentityDigest));
+        WindowId = RequireField(windowId, nameof(windowId));
+        ProcessId = processId > 0 ? processId : throw new ArgumentOutOfRangeException(nameof(processId));
+        ProcessCreationFileTimeUtc = processCreationFileTimeUtc > 0
+            ? processCreationFileTimeUtc
+            : throw new ArgumentOutOfRangeException(nameof(processCreationFileTimeUtc));
+        OneTimeNonce = RequireNonce(oneTimeNonce);
+        if (committedAtUtc.Offset != TimeSpan.Zero || expiresAtUtc.Offset != TimeSpan.Zero ||
+            maxDuration <= TimeSpan.Zero || maxDuration.Ticks % TimeSpan.TicksPerMillisecond != 0)
+            throw new ArgumentOutOfRangeException(nameof(maxDuration));
+        MaxDuration = maxDuration;
+    }
+
+    public string AuthorizationId { get; }
+    public string CurrentUserSid { get; }
+    public string SessionBinding { get; }
+    public string ExecutableIdentityDigest { get; }
+    public string WindowId { get; }
+    public int ProcessId { get; }
+    public long ProcessCreationFileTimeUtc { get; }
+    public string OneTimeNonce { get; }
+    public TimeSpan MaxDuration { get; }
+
+    private static string RequireField(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value != value.Trim() || value.Any(char.IsControl))
+            throw new ArgumentException("Future-window proof fields must be canonical.", parameterName);
+        return value;
+    }
+
+    private static string RequireDigest(string value, string parameterName)
+    {
+        if (value is null || value.Length != 64 || value.Any(character =>
+                !(character is >= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("The executable identity digest must be lowercase hexadecimal.", parameterName);
+        return value;
+    }
+
+    private static string RequireNonce(string value)
+    {
+        if (value is null || value.Length != 32 || value.Any(character =>
+                !(character is >= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("The future-window nonce must be 128-bit lowercase hexadecimal.", nameof(value));
         return value;
     }
 }

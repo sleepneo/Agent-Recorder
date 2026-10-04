@@ -4,6 +4,7 @@ using System.Text;
 using System.Globalization;
 using AgentRecorder.Capture;
 using AgentRecorder.Core.Automation;
+using AgentRecorder.Windows;
 
 namespace AgentRecorder.Core;
 
@@ -21,6 +22,155 @@ internal static class CaptureAuthorizationProofIssuer
     private const string StandingLeaseUsePlanDigestSchema = "standing-lease-use-plan/v1";
     private const string RecurringLeaseUsePlanDigestSchema = "recurring-lease-use-plan/v1";
     private const string RecurringLeaseUseScopeDigestSchema = "recurring-lease-use-scope/v1";
+    private const string FutureWindowAuthorizationDigestSchema = "future-window-authorization/v1";
+    private const string FutureWindowProofScopeDigestSchema = "future-window-proof-scope/v1";
+
+    internal static FutureWindowOneShotProof IssueFutureWindowOneShot(
+        FutureWindowStartCommitReceipt receipt,
+        Recording recording,
+        CapturePlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        ArgumentNullException.ThrowIfNull(recording);
+        ArgumentNullException.ThrowIfNull(plan);
+        var authorization = receipt.Authorization;
+        var process = receipt.Process;
+        if (authorization.StatusCode != "used" || authorization.ApprovedAtUtc is not { } approvedAt ||
+            authorization.ExpiresAtUtc is not { } expiresAt || authorization.ApprovalId is null ||
+            receipt.CommittedAtUtc.Offset != TimeSpan.Zero || approvedAt.Offset != TimeSpan.Zero ||
+            expiresAt.Offset != TimeSpan.Zero || receipt.CommittedAtUtc < approvedAt ||
+            receipt.CommittedAtUtc >= expiresAt || authorization.ValiditySeconds is < 1 or > 3600 ||
+            authorization.MaximumDurationSeconds is < 1 or > 1800 ||
+            process.ProcessCreationFileTimeUtc <= approvedAt.UtcDateTime.ToFileTimeUtc() ||
+            !string.Equals(process.ProcessUserSid, authorization.CurrentUserSid, StringComparison.Ordinal) ||
+            !SameExecutableIdentity(process.ExecutableIdentity, authorization.ExecutableIdentity) ||
+            !string.Equals(process.CanonicalImagePath, authorization.ExecutableIdentity.CanonicalPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The future-window commit receipt is outside its approved identity or time scope.");
+
+        var config = recording.Config;
+        if (!string.Equals(recording.Id, receipt.RunId, StringComparison.Ordinal) ||
+            !string.Equals(recording.OutputPath, authorization.OutputFilePath, StringComparison.Ordinal) ||
+            !string.Equals(config.OutputPath, authorization.OutputFilePath, StringComparison.Ordinal) ||
+            !string.Equals(config.OutputConflictPolicy, "fail_if_exists", StringComparison.Ordinal) ||
+            recording.DurationSeconds != authorization.MaximumDurationSeconds ||
+            config.DurationSeconds != authorization.MaximumDurationSeconds ||
+            recording.CountdownSeconds != 0 || config.CountdownSeconds != 0 ||
+            !config.RequireWindowSurface || !string.Equals(config.SourceKind, "window", StringComparison.Ordinal) ||
+            config.WindowHandle != process.WindowHandle || config.WindowProcessId != process.ProcessId ||
+            config.Microphone || config.MicDevice is not null || config.IsScreenshotSeries ||
+            (authorization.HasSystemAudio
+                ? !config.AudioRequested || config.Microphone ||
+                  !string.Equals(config.SystemLoopbackEndpoint, authorization.SystemAudioEndpointId, StringComparison.Ordinal)
+                : config.AudioRequested || config.AudioSourceKind != AudioCaptureSourceKind.None) ||
+            !string.Equals(plan.CaptureSemantics, "window_surface", StringComparison.Ordinal) ||
+            !string.Equals(plan.SourceKind, "window", StringComparison.Ordinal) ||
+            !string.Equals(plan.TargetIdentity, process.WindowId, StringComparison.Ordinal) ||
+            plan.WindowHandle != process.WindowHandle || plan.TargetWindowProcessId != process.ProcessId ||
+            plan.FallbackOccurred ||
+            (authorization.HasSystemAudio
+                ? plan.AudioSourceKind != AudioCaptureSourceKind.SystemLoopback ||
+                  !string.Equals(plan.AudioEndpointId, authorization.SystemAudioEndpointId, StringComparison.Ordinal)
+                : plan.AudioSourceKind != AudioCaptureSourceKind.None))
+            throw new InvalidOperationException("The future-window recording does not match its committed capture scope.");
+
+        var identityDigest = ComputeFutureWindowExecutableIdentityDigest(authorization.ExecutableIdentity);
+        var capturePlanDigest = ComputeCapturePlanDigest(plan);
+        var scopeDigest = ComputeFutureWindowProofScopeDigest(authorization, process, recording, plan);
+
+        return new FutureWindowOneShotProof(
+            receipt.ProofId,
+            receipt.RunId,
+            authorization.AuthorizationId,
+            capturePlanDigest,
+            scopeDigest,
+            receipt.CommittedAtUtc,
+            expiresAt,
+            authorization.CurrentUserSid,
+            authorization.SessionBinding,
+            identityDigest,
+            process.WindowId,
+            process.ProcessId,
+            process.ProcessCreationFileTimeUtc,
+            receipt.ProofNonce,
+            TimeSpan.FromSeconds(authorization.MaximumDurationSeconds));
+    }
+
+    internal static string ComputeFutureWindowAuthorizationDigest(FutureWindowAuthorizationScope scope)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        var identity = scope.ExecutableIdentity;
+        return Digest(builder =>
+        {
+            Field(builder, "schema", FutureWindowAuthorizationDigestSchema);
+            Field(builder, "version", "1");
+            Field(builder, "authorization_id", scope.AuthorizationId);
+            Field(builder, "request_digest", scope.RequestDigest);
+            Field(builder, "current_user_sid", scope.CurrentUserSid);
+            Field(builder, "session_binding", scope.SessionBinding);
+            Field(builder, "executable_path", identity.CanonicalPath);
+            Field(builder, "executable_file_identity", identity.FileIdentity);
+            Field(builder, "executable_sha256", identity.Sha256);
+            Field(builder, "signer_subject", identity.SignerSubject);
+            Field(builder, "signer_certificate_sha256", identity.SignerCertificateSha256);
+            Field(builder, "audio_endpoint_id", scope.SystemAudioEndpointId);
+            Field(builder, "audio_endpoint_name", scope.SystemAudioEndpointName);
+            Field(builder, "maximum_duration_seconds", StableInt32(scope.MaximumDurationSeconds));
+            Field(builder, "validity_seconds", StableInt32(scope.ValiditySeconds));
+            Field(builder, "output_directory", scope.OutputDirectory);
+            Field(builder, "output_file_name", scope.OutputFileName);
+            Field(builder, "created_at_utc_ticks", StableInt64(scope.CreatedAtUtc.UtcDateTime.Ticks));
+            Field(builder, "approved_at_utc_ticks", scope.ApprovedAtUtc is { } approved
+                ? StableInt64(approved.UtcDateTime.Ticks) : null);
+            Field(builder, "expires_at_utc_ticks", scope.ExpiresAtUtc is { } expires
+                ? StableInt64(expires.UtcDateTime.Ticks) : null);
+            Field(builder, "approval_id", scope.ApprovalId);
+        });
+    }
+
+    internal static string ComputeFutureWindowExecutableIdentityDigest(FutureWindowExecutableIdentity identity) =>
+        Digest(builder =>
+        {
+            Field(builder, "schema", "future-window-executable-identity/v1");
+            Field(builder, "path", identity.CanonicalPath);
+            Field(builder, "file_identity", identity.FileIdentity);
+            Field(builder, "sha256", identity.Sha256);
+            Field(builder, "signer_subject", identity.SignerSubject);
+            Field(builder, "signer_certificate_sha256", identity.SignerCertificateSha256);
+        });
+
+    internal static string ComputeFutureWindowProofScopeDigest(
+        FutureWindowAuthorizationScope authorization,
+        FutureWindowProcessSnapshot process,
+        Recording recording,
+        CapturePlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(authorization);
+        ArgumentNullException.ThrowIfNull(process);
+        ArgumentNullException.ThrowIfNull(recording);
+        ArgumentNullException.ThrowIfNull(plan);
+        return Digest(builder =>
+        {
+            Field(builder, "schema", FutureWindowProofScopeDigestSchema);
+            Field(builder, "authorization_digest", authorization.AuthorizationDigest);
+            Field(builder, "capture_plan_digest", ComputeCapturePlanDigest(plan));
+            Field(builder, "capture_scope_digest", ComputeCaptureScopeDigest(recording, plan));
+            Field(builder, "window_id", process.WindowId);
+            Field(builder, "process_id", StableInt32(process.ProcessId));
+            Field(builder, "process_creation_filetime_utc", StableInt64(process.ProcessCreationFileTimeUtc));
+            Field(builder, "process_user_sid", process.ProcessUserSid);
+            Field(builder, "process_session_id", StableInt32(process.SessionId));
+        });
+    }
+
+    private static bool SameExecutableIdentity(
+        FutureWindowExecutableIdentity left,
+        FutureWindowExecutableIdentity right) =>
+        left.Version == right.Version &&
+        string.Equals(left.CanonicalPath, right.CanonicalPath, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(left.FileIdentity, right.FileIdentity, StringComparison.Ordinal) &&
+        string.Equals(left.Sha256, right.Sha256, StringComparison.Ordinal) &&
+        string.Equals(left.SignerSubject, right.SignerSubject, StringComparison.Ordinal) &&
+        string.Equals(left.SignerCertificateSha256, right.SignerCertificateSha256, StringComparison.Ordinal);
 
     internal static StandingLeaseUseProof IssueStandingLeaseUse(
         StandingLeaseUseProofIssuanceReceipt receipt)

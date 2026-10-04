@@ -10,7 +10,7 @@ namespace wgc {
 
 inline constexpr int kWgcContinuousMinDurationMs = 1000;
 inline constexpr int kWgcContinuousMaxDurationMs = 60000;
-inline constexpr int kWgcWindowSurfaceMaxDurationMs = 600000;
+inline constexpr int kWgcWindowSurfaceMaxDurationMs = 1800000;
 
 enum class CaptureMode {
     None,

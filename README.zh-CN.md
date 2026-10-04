@@ -14,6 +14,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 - AI agent 负责启动应用、读取 API key、调用 API、轮询状态并报告结果。
 - 常见录屏意图优先使用 `POST /api/v1/recordings/quick`，减少 agent 往返。
 - Agent Recorder 保留本地安全边界：普通录制需要用户逐次确认；可选的一次性及每日/每周计划都必须先由用户在本地重新选择固定区域并批准有界 Lease，AI agent 不能自行授权或扩大范围。
+- 可选未来窗口一次性录制仅在能力开放时可用：agent 只能提交待审批范围，用户须在本地明确批准；授权绑定本机可执行文件、一个运行窗口、音频端点、输出目标和时长，并可在本地安全中心撤销。这不提供直播识别或自动启动播放器。
 - 支持嵌套录制，外层视频可以记录 AI agent 发起内层录制的过程。
 - 录制控件采用角色感知的捕获可见性：默认 FFmpeg 路径下普通录制画面保持干净，嵌套外层可记录内层录制控件和操作过程；跨 Windows/DWM 环境的捕获排除属于 best-effort 行为。
 
@@ -57,7 +58,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 - 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
 - AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。
 
-隔离 Windows desktop 内的 agent 可以调用用户桌面已运行服务的本地 API，但从隔离桌面冷启动托盘程序不能保证弹窗出现在用户面前。当前 `host.supports_region_selection_ui` 表示宿主具备选区 UI，不是跨桌面可见性证明；需要本地选区时，可先从用户交互桌面启动应用或启用当前用户自启。
+需要托盘、本地选区或确认 UI 时，agent 应先检查宿主是否提供获准的用户桌面命令执行入口，并经该入口调用 `ensure-running`。Codex 宿主可对具体命令使用工具授权执行入口；这是宿主调用能力，不是 Recorder CLI 参数，也不代表其他 agent/宿主均支持。Recorder 不会跳出沙盒或跨 Windows 账户派发；没有适当执行面时保持 fail-closed。`host.supports_region_selection_ui` 只表示宿主具备选区 UI，不是托盘可见性的证明。
 
 `target.type` 支持：
 
@@ -93,7 +94,9 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | quick API | 已实现 | 一次请求表达常见录制意图 |
 | 有界创建等待 | 已实现 | raw/quick 创建请求可在同一 POST 中等待本地批准、准备、倒计时和可信首帧；不改变本地确认边界 |
 | 显示器录制 | 已实现 | 录制整个显示器 |
-| 窗口录制 | 已实现 | 默认按窗口可见边界使用 `ffmpeg-window-region` 录制屏幕矩形；raw API 可对固定 `window_id` 明确要求 `window_surface`，以 WGC 录制被其他窗口遮挡的窗口内容，不回退屏幕矩形。严格路径支持无音频或经确认的系统声音，时长 1-600 秒；当前设备已通过 300 秒 PotPlayer 音画验收，尚不代表完整直播或未来窗口无人值守已就绪 |
+| 窗口录制 | 已实现 | 默认按窗口可见边界使用 `ffmpeg-window-region` 录制屏幕矩形；raw API 可对固定 `window_id` 明确要求 `window_surface`，以 WGC 录制被遮挡的窗口内容，不回退屏幕矩形。严格路径支持无音频或固定系统声音端点，时长 1-1800 秒；普通 300 秒及未来窗口半小时音画已在当前设备验收，不代表全设备或完整直播保证 |
+| 未来窗口单次授权 | 已实现 | 本地批准精确程序、时长、输出和可选固定系统声音；批准后由 agent 启动程序、解析唯一 eligible 窗口并提交一次运行。有效期最多一小时，运行最多半小时，可撤销；不负责开播识别或播放器操作 |
+| 固定区域配置复用 | 已实现 | 本地首次选区保存命名 Profile，支持不可变版本、ETag/If-Match 管理和普通录制精确复用。配置不等于授权，仍须逐次确认并核对显示器环境；当前仅无音频、1-600 秒，不接线 Profile 发起计划 |
 | 选区录制 | 已实现 | 支持拖拽、精确坐标、尺寸预设、边缘/窗口吸附、点击窗口选区和双屏可靠置顶 |
 | 嵌套录制 | 已实现 | 外层录制过程中可以启动内层录制 |
 | 本地确认 | 已实现 | 普通录制逐次由人类确认；麦克风、普通无音频 FFmpeg 与延迟授权 WGC 路径在批准后显示不采集画面的可配置 0-10 秒倒计时 |
@@ -110,6 +113,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | API Key | 已实现 | 状态变更接口需要 `X-Agent-Recorder-Key` |
 | 审计日志 | 已实现 | 录制生命周期写入本地 JSONL 日志 |
 | 自启管理 | 已实现 | CLI 支持当前用户级 autostart |
+| Agent 交互桌面冷启动 | 已实现；依赖宿主授权执行面 | 在已验证的当前用户桌面直接启动/复用。调用前由 agent 检查宿主的用户桌面授权执行入口；Recorder 不跨账户派发。仅同用户隔离桌面的高级故障恢复可显式设置当前用户任务 |
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
 | 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |

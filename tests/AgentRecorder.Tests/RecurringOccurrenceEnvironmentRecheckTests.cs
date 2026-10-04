@@ -648,12 +648,13 @@ public sealed class RecurringOccurrenceEnvironmentRecheckTests
     [Fact]
     public void SpecificationDigestHasGoldenVectorAndChangesForSecurityCriticalInputs()
     {
-        var fixture = CreateFixture();
+        // Golden bytes must not depend on the machine's temporary directory.
+        var fixture = CreateFixture(outputDirectory: @"C:\AgentRecorderGoldenVectors\task262");
         var baseline = Assert.IsType<RecurringOccurrenceExecutionSpecification>(
             Evaluate(fixture).ExecutionSpecification);
 
         Assert.Equal(
-            "recurring-occurrence-execution-spec/v1:91dad2721ae8c65450087f14d1e1f5e9fad0c2d5221f2012138f53c20f0cb7a5",
+            "recurring-occurrence-execution-spec/v1:1893877ca8d6315f032c8938eb9851d7c19e86421519888951f2b0bfe6255c59",
             baseline.SpecificationDigest);
 
         var changedEvaluationTime = Assert.IsType<RecurringOccurrenceExecutionSpecification>(
@@ -781,7 +782,8 @@ public sealed class RecurringOccurrenceEnvironmentRecheckTests
         DateTimeOffset? bindingAt = null,
         DateTimeOffset? leaseCreatedAt = null,
         DateTimeOffset? validFromAt = null,
-        DateTimeOffset? approvalAt = null)
+        DateTimeOffset? approvalAt = null,
+        string? outputDirectory = null)
     {
         var plan = new PlanDefinition("periodic-plan-262", isOneTime: false, BaseTime);
         Assert.True(plan.TryTransition(PlanDefinitionStatus.Enabled, BaseTime.AddMinutes(1)).Succeeded);
@@ -808,7 +810,7 @@ public sealed class RecurringOccurrenceEnvironmentRecheckTests
         var profile = RecurringFixedRegionProfileVersion.CreateVersion1(
             "profile-262",
             profileCreatedAt ?? BaseTime,
-            CreateProfileSpecification());
+            CreateProfileSpecification(outputDirectory: outputDirectory));
         var binding = new RecurringPlanProfileBinding(
             plan.Id,
             profile.Reference,
@@ -1049,7 +1051,8 @@ public sealed class RecurringOccurrenceEnvironmentRecheckTests
             profile.Orientation);
 
     private static RecurringFixedRegionProfileSpecification CreateProfileSpecification(
-        TimeSpan? duration = null) =>
+        TimeSpan? duration = null,
+        string? outputDirectory = null) =>
         new(
             AuthorizedScopeTargetType.FixedRegion,
             RecurringFixedRegionRebindPolicy.ExactMatchOnly,
@@ -1069,7 +1072,7 @@ public sealed class RecurringOccurrenceEnvironmentRecheckTests
             AuthorizedAudioMode.None,
             duration ?? TimeSpan.FromMinutes(2),
             3,
-            Path.Combine(Path.GetTempPath(), "task262-output-" + StableDisplayFingerprint),
+            outputDirectory ?? Path.Combine(Path.GetTempPath(), "task262-output-" + StableDisplayFingerprint),
             "recurring-demo",
             AuthorizedOutputConflictPolicy.FailIfExists,
             AuthorizedWakePolicy.NaturalWakeOnly,

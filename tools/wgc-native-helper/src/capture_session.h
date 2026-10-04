@@ -158,7 +158,7 @@ struct CaptureSessionTestHooks {
     // been accepted by the timeline and copied/staged successfully, while
     // FramesCaptured may still be zero. Tests can use this to verify ordering
     // and exactly-once semantics without parsing redirected stdout.
-    std::function<void(int64_t frameNumber, int64_t elapsedMs)> onFirstFrame;
+    std::function<void(int64_t frameNumber, int64_t elapsedMs, int64_t sourceTimeHns)> onFirstFrame;
 
     // Production code reads the partial file size for progress and failure
     // evidence. Tests that do not use a real encoder can supply a deterministic

@@ -207,6 +207,40 @@ internal static class Program
         if (nonPositiveBytes)
             bytesWritten = -1;
 
+        string? protocolMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_MODE");
+        if (protocolMode is "long-loopback" or "padded-loopback-boundary" or "padded-loopback-overflow")
+        {
+            if (!string.Equals(sourceKind, "system-loopback", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine("Long protocol test mode requires system-loopback source identity.");
+                return 2;
+            }
+
+            Console.Out.NewLine = "\r\n";
+            if (protocolMode == "long-loopback")
+            {
+                EmitSourceAwareLoopbackProtocol(recordingId, startAnchor, progressCount: 3600);
+                return 0;
+            }
+
+            string? targetText = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_TARGET_BYTES");
+            if (!int.TryParse(targetText, NumberStyles.None, CultureInfo.InvariantCulture, out int targetBytes) || targetBytes < 1)
+            {
+                Console.Error.WriteLine("Invalid protocol test target byte count.");
+                return 2;
+            }
+
+            EmitSourceAwareLoopbackProtocol(
+                recordingId,
+                startAnchor,
+                progressCount: 1000,
+                targetBytes,
+                includeTerminal: protocolMode == "padded-loopback-boundary");
+            if (protocolMode == "padded-loopback-overflow")
+                Thread.Sleep(Timeout.Infinite);
+            return 0;
+        }
+
         if (progressBeforeStarted)
         {
             EmitProgress(recordingId, bytesWritten, 0);
@@ -398,6 +432,160 @@ internal static class Program
         WriteLine("AudioSourceKind", "microphone");
         WriteLine("AudioSourceKind", "system-loopback");
         EndBlock();
+    }
+
+    private static long EmitSourceAwareLoopbackProtocol(
+        string recordingId,
+        long startAnchor,
+        int progressCount,
+        int targetBytes = 0,
+        bool includeTerminal = true)
+    {
+        if (progressCount is < 1 or > 3600)
+            throw new ArgumentOutOfRangeException(nameof(progressCount));
+
+        const string sourceKind = "system-loopback";
+        const long initialBytesWritten = 192_000;
+        const int bytesPerElapsedMillisecond = 192;
+        const int maxProtocolLineLength = 4096;
+        const string paddingPrefix = "Padding: ";
+        var started = BuildLoopbackStartedLines(recordingId, sourceKind, startAnchor, initialBytesWritten);
+        var progressBlocks = new List<List<string>>(progressCount);
+        long totalBytes = CountProtocolBlockBytes(started);
+
+        for (int index = 1; index <= progressCount; index++)
+        {
+            long elapsedMs = index * 500L;
+            long bytesWritten = initialBytesWritten + elapsedMs * bytesPerElapsedMillisecond;
+            var lines = BuildLoopbackProgressLines(sourceKind, elapsedMs, bytesWritten);
+            progressBlocks.Add(lines);
+            totalBytes += CountProtocolBlockBytes(lines);
+        }
+
+        List<string>? terminal = null;
+        if (includeTerminal)
+        {
+            long durationMs = progressCount * 500L;
+            long bytesWritten = initialBytesWritten + durationMs * bytesPerElapsedMillisecond;
+            terminal = BuildLoopbackTerminalLines(sourceKind, durationMs, bytesWritten);
+            totalBytes += CountProtocolBlockBytes(terminal);
+        }
+
+        if (targetBytes > 0)
+        {
+            long paddingBytes = targetBytes - totalBytes;
+            int minimumPaddingLineBytes = Encoding.UTF8.GetByteCount(paddingPrefix) + 2;
+            int maximumPaddingLineBytes = maxProtocolLineLength + 2;
+            long minimumPaddingCapacity = (long)minimumPaddingLineBytes * progressCount;
+            long maximumPaddingCapacity = (long)maximumPaddingLineBytes * progressCount;
+            if (paddingBytes < minimumPaddingCapacity || paddingBytes > maximumPaddingCapacity)
+            {
+                throw new InvalidOperationException(
+                    $"Target {targetBytes} cannot be represented with {progressCount} bounded progress padding lines; " +
+                    $"base={totalBytes}, padding={paddingBytes}.");
+            }
+
+            long basePaddingLineBytes = paddingBytes / progressCount;
+            long remainder = paddingBytes % progressCount;
+            for (int index = 0; index < progressBlocks.Count; index++)
+            {
+                long lineBytes = basePaddingLineBytes + (index < remainder ? 1 : 0);
+                int valueLength = checked((int)(lineBytes - minimumPaddingLineBytes));
+                progressBlocks[index].Add(paddingPrefix + new string('x', valueLength));
+            }
+        }
+
+        WriteProtocolBlock(started);
+        foreach (var progress in progressBlocks)
+            WriteProtocolBlock(progress);
+        if (terminal != null)
+            WriteProtocolBlock(terminal);
+
+        if (targetBytes > 0)
+            totalBytes = targetBytes;
+        string? countPath = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_COUNT_PATH");
+        if (!string.IsNullOrWhiteSpace(countPath))
+            File.WriteAllText(countPath, totalBytes.ToString(CultureInfo.InvariantCulture));
+        return totalBytes;
+    }
+
+    private static List<string> BuildLoopbackStartedLines(
+        string recordingId,
+        string sourceKind,
+        long startAnchor,
+        long bytesWritten) =>
+    [
+        "RESULT: STARTED",
+        "Stage: AudioCapturing",
+        $"RecordingId: {recordingId}",
+        $"AudioSourceKind: {sourceKind}",
+        "SampleRate: 48000",
+        "Channels: 2",
+        "BitsPerSample: 16",
+        FormatProtocolLine("FirstSampleAnchorTicks", startAnchor),
+        FormatProtocolLine("TimestampFrequency", Stopwatch.Frequency),
+        FormatProtocolLine("BytesWritten", bytesWritten),
+        "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+        "CaptureEngine: wasapi-direct"
+    ];
+
+    private static List<string> BuildLoopbackProgressLines(string sourceKind, long elapsedMs, long bytesWritten) =>
+    [
+        "RESULT: PROGRESS",
+        "Stage: AudioCapturing",
+        $"AudioSourceKind: {sourceKind}",
+        FormatProtocolLine("ElapsedMs", elapsedMs),
+        FormatProtocolLine("WallElapsedMs", elapsedMs),
+        FormatProtocolLine("BytesWritten", bytesWritten),
+        "EstimatedGapMs: 0",
+        "LastCallbackAgeMs: 10",
+        "DiscontinuityCount: 0",
+        "RecoveryCount: 0",
+        "GapFilledBytes: 0",
+        "GapFilledMs: 0",
+        "MaxEstimatedGapMs: 0",
+        "QpcOutlierCount: 0",
+        "ContinuityStatus: continuous",
+        "CaptureEngine: wasapi-direct"
+    ];
+
+    private static List<string> BuildLoopbackTerminalLines(string sourceKind, long durationMs, long bytesWritten) =>
+    [
+        "RESULT: OK",
+        "Stage: Complete",
+        FormatProtocolLine("DurationMs", durationMs),
+        FormatProtocolLine("BytesWritten", bytesWritten),
+        "EstimatedGapMs: 0",
+        $"AudioSourceKind: {sourceKind}",
+        "CaptureMethod: WASAPI_SHARED_LOOPBACK",
+        "CaptureEngine: wasapi-direct",
+        "ContinuityStatus: continuous",
+        "RecoveryCount: 0",
+        "RecoveryAttempts: 0",
+        "GapFilledBytes: 0",
+        "GapFilledMs: 0",
+        "DiscontinuityCount: 0",
+        "MaxEstimatedGapMs: 0",
+        "QpcOutlierCount: 0"
+    ];
+
+    private static string FormatProtocolLine(string key, long value) =>
+        $"{key}: {value.ToString(CultureInfo.InvariantCulture)}";
+
+    private static long CountProtocolBlockBytes(IEnumerable<string> lines)
+    {
+        long byteCount = 2; // The blank CRLF line terminating the event block.
+        foreach (string line in lines)
+            byteCount += Encoding.UTF8.GetByteCount(line) + 2;
+        return byteCount;
+    }
+
+    private static void WriteProtocolBlock(IEnumerable<string> lines)
+    {
+        foreach (string line in lines)
+            Console.Out.WriteLine(line);
+        Console.Out.WriteLine();
+        Console.Out.Flush();
     }
 
     private static void WriteLine(string key, string value)

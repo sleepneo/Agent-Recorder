@@ -70,12 +70,12 @@ Agents should use the paths returned by `ensure-running` or
 `GET /api/v1/capabilities`, especially `data_dir`, `ready_file`, and
 `api_key_file`.
 
-An agent running on an isolated Windows desktop can call an already-running
-service on loopback, but starting the tray app from that desktop does not make
-its dialogs visible on the user's input desktop. The current
-`host.supports_region_selection_ui` flag describes host capability, not
-cross-desktop visibility. Start the app once from the user's interactive
-desktop or opt in to per-user autostart before relying on local selection.
+For tray, selection, and approval UI, the agent should invoke `ensure-running`
+through its host's approved command-execution channel for the current user's
+interactive desktop. Starting a process on an isolated desktop is not proof
+that its dialogs are visible. Recorder does not escape a sandbox or dispatch
+across Windows accounts; without an appropriate execution channel, fail closed.
+`host.supports_region_selection_ui` describes host capability, not visibility.
 
 ## Capabilities
 
@@ -94,10 +94,22 @@ desktop or opt in to per-user autostart before relying on local selection.
   `required_capture_semantics: "window_surface"`. This public strict path uses
   WGC to capture the selected window even while another window obscures it,
   supports no audio or an explicitly approved system-loopback endpoint, and
-  accepts a bounded 1-600 second duration. It never falls back to a desktop
+  accepts a bounded 1-1800 second duration. It never falls back to a desktop
   rectangle. A 300-second PotPlayer video-and-system-audio run passed local
-  desktop acceptance; longer sessions and unattended future-window capture
-  are not yet validated.
+  desktop acceptance. The separately authorized future-window flow also passed
+  a supervised 30-minute run on the current hardware; this is not a guarantee
+  for every device or a full livestream.
+- One-shot future-window authorization binds an exact local executable, a new
+  post-approval process and its unique eligible window, a frozen output target,
+  and either no audio or a fixed system-loopback endpoint. A locally approved,
+  revocable grant lasts at most one hour and permits one run of up to 30 minutes.
+  The external agent opens the player and resolves the window; Recorder does
+  not recognize livestreams or control playback.
+- Reusable fixed-region profiles: save a fresh local selection, manage immutable
+  versions through authenticated APIs with ETag/If-Match, and request an ordinary
+  recording using an exact profile reference. Reuse still requires local approval
+  and unchanged display geometry. This path is silent and bounded to 1-600 seconds;
+  a profile is configuration, not capture authorization or a plan request.
 - Interactive selected-region UI with precise coordinates, size presets, edge/window
   snapping, click-to-pick visible windows, and resilient top-most behavior across
   multi-monitor desktops.

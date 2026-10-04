@@ -87,6 +87,9 @@ public sealed class WgcContinuousEvent
     /// </summary>
     public long? ElapsedMs { get; set; }
 
+    /// <summary>Raw WGC SystemRelativeTime for FIRST_FRAME, in 100-ns units.</summary>
+    public long? SourceTimeHns { get; set; }
+
     /// <summary>
     /// The DurationMs field value.
     /// </summary>
@@ -169,6 +172,7 @@ public sealed class WgcContinuousEvent
     /// Whether ElapsedMs was successfully parsed as a number.
     /// </summary>
     public bool ElapsedMsParseFailed { get; set; }
+    public bool SourceTimeHnsParseFailed { get; set; }
 
     /// <summary>
     /// Whether DurationMs was present but failed to parse as a number.
@@ -196,6 +200,7 @@ public sealed class WgcContinuousEvent
         FrameNumberParseFailed ||
         FramesDroppedParseFailed ||
         ElapsedMsParseFailed ||
+        SourceTimeHnsParseFailed ||
         DurationMsParseFailed ||
         BytesWrittenParseFailed ||
         FileSizeParseFailed;

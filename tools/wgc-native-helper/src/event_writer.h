@@ -31,8 +31,10 @@ public:
     // by the timeline, and was copied/staged successfully. This is emitted
     // exactly once per session and is intentionally independent from
     // FramesCaptured, which keeps its encoded-output meaning.
-    void FirstFrame(int64_t frameNumber,
-                    int64_t elapsedMs);
+    void FirstFrame(const std::string& recordingId,
+                    int64_t frameNumber,
+                    int64_t elapsedMs,
+                    int64_t sourceTimeHns);
 
     void Progress(int64_t framesCaptured,
                   int64_t framesDropped,

@@ -270,6 +270,72 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public void SystemAudioFailureDuringCountdown_FinalizesOnceAndRetiresCountdownBeforeVideo()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "agent-recorder-system-countdown-fail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            RecordingPreflightChecker.FreeSpaceProvider = (string _, out long free) => { free = 10L * 1024 * 1024 * 1024; return true; };
+            RecordingPreflightChecker.EncoderProvider = (out string? ffmpeg, out string? ffprobe) =>
+            {
+                ffmpeg = typeof(SystemAudioProductFlowTests).Assembly.Location;
+                ffprobe = ffmpeg;
+                return true;
+            };
+            RecordingPreflightChecker.ShouldUseWasapiBackend = () => false;
+
+            var backend = new OrderedAudioReadyBackend();
+            var tray = new PendingTray();
+            var engine = new RecordingEngine(
+                new AuditLogger(),
+                displayTopologyProvider: new FixedDisplayTopologyProvider(
+                    new DisplayTopologySnapshot(
+                        "display_1",
+                        "synthetic-test-display:display_1",
+                        DisplayIdentityResolutionStatus.Resolved,
+                        new CapturePlanBounds(0, 0, 1920, 1080))),
+                systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint))
+            {
+                CountdownInterval = TimeSpan.FromMilliseconds(250),
+                CountdownSteps = 3,
+                FirstFrameTimeout = TimeSpan.FromSeconds(1)
+            };
+            engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
+
+            engine.CreateRecording(Request(outputDirectory: tmp), "agent", tray);
+            var rec = Assert.Single(engine._recs.Values);
+            tray.PendingCallback!(ConfirmationDecision.Approve());
+            Assert.True(SpinWait.SpinUntil(() => rec.State == RecState.preparing, TimeSpan.FromSeconds(2)));
+            backend.SignalAudioReady();
+            Assert.True(SpinWait.SpinUntil(() => rec.State == RecState.countdown, TimeSpan.FromSeconds(2)));
+            Assert.True(engine.ActiveCountdownOperationCountForTests > 0);
+
+            backend.SignalFailureBeforeVideo();
+            Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => engine.ActiveCountdownOperationCountForTests == 0,
+                TimeSpan.FromSeconds(2)));
+            Assert.Equal(RecState.failed, rec.State);
+            Assert.Equal("audio_capture_discontinuous", rec.Error);
+            Assert.Equal("unexpected_exit", rec.StopReason);
+            Assert.Equal(0, backend.StartVideoCalls);
+            Assert.Equal(default, rec.StartedAtUtc);
+
+            // A duplicate/late helper terminal callback cannot publish a
+            // second state transition or revive the canceled countdown.
+            backend.SignalFailureBeforeVideo();
+            Assert.Equal(RecState.failed, rec.State);
+            Assert.Equal("audio_capture_discontinuous", rec.Error);
+            Assert.Equal(0, engine.ActiveCountdownOperationCountForTests);
+            Assert.Equal(0, backend.StartVideoCalls);
+        }
+        finally
+        {
+            try { Directory.Delete(tmp, recursive: true); } catch { }
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -418,6 +484,20 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public int ExitCode => 0;
         public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) { StartCalls++; Events.Add("start"); cfg.CommandArgs = "controlled-test"; }
         public void SignalAudioReady() { _audioReady = true; Events.Add("audio-ready"); AudioReady?.Invoke(); }
+        public void SignalFailureBeforeVideo()
+        {
+            Events.Add("audio-failed-before-video");
+            _naturalExit?.Invoke(1, new OutputMeta
+            {
+                StopReason = "unexpected_exit",
+                AudioSourceKind = "system-loopback",
+                AudioStatus = "lost",
+                AudioContinuityStatus = "degraded",
+                AudioHelperErrorCode = "audio_capture_discontinuous",
+                AudioHelperFailureReason = "Failed to append loopback packet: synthetic QPC/device conflict",
+                Warnings = new[] { "audio_worker_exited_before_video_started" }
+            });
+        }
         public void StartVideo()
         {
             StartVideoCalls++;

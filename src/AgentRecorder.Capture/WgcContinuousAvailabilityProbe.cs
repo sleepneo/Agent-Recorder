@@ -84,7 +84,7 @@ public sealed class WgcContinuousAvailabilityProbe :
     IWgcContinuousAvailabilityProbe,
     IWgcContinuousAvailabilityWarmupProbe
 {
-    public const string SupportedHelperVersion = "0.3.0";
+    public const string SupportedHelperVersion = "0.4.0";
     public const int VersionTimeoutMs = 1500;
     public const int ProbeTimeoutMs = 3000;
     public static readonly TimeSpan DefaultCacheTtl = TimeSpan.FromSeconds(30);

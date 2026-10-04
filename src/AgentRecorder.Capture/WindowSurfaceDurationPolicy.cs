@@ -8,7 +8,7 @@ namespace AgentRecorder.Capture;
 public static class WindowSurfaceDurationPolicy
 {
     public const int MinSeconds = 1;
-    public const int MaxSeconds = 600;
+    public const int MaxSeconds = 1800;
     public const int MillisecondsPerSecond = 1000;
     public const int MinMilliseconds = MinSeconds * MillisecondsPerSecond;
     public const int MaxMilliseconds = MaxSeconds * MillisecondsPerSecond;

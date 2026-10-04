@@ -84,17 +84,26 @@ public sealed class AvFinalizer
     /// The audio is cropped so its start aligns with the video start and its
     /// duration matches the actual video duration.
     /// </summary>
-    public async Task<Result> FinalizeAsync(
+    public Task<Result> FinalizeAsync(
+        string videoPath, string audioPath, string outputPath, TimeSpan? audioPreRoll,
+        AudioCaptureSourceKind audioSourceKind, bool applyContinuityCheck,
+        string? audioStderr = null, bool? videoAnchorAvailable = null,
+        bool? audioAnchorAvailable = null, CancellationToken cancellationToken = default)
+        => FinalizeAsync(videoPath, audioPath, outputPath, audioPreRoll, audioSourceKind,
+            applyContinuityCheck, audioStderr, videoAnchorAvailable, audioAnchorAvailable, cancellationToken, null);
+
+    internal async Task<Result> FinalizeAsync(
         string videoPath,
         string audioPath,
         string outputPath,
         TimeSpan? audioPreRoll,
         AudioCaptureSourceKind audioSourceKind,
         bool applyContinuityCheck,
-        string? audioStderr = null,
-        bool? videoAnchorAvailable = null,
-        bool? audioAnchorAvailable = null,
-        CancellationToken cancellationToken = default)
+        string? audioStderr,
+        bool? videoAnchorAvailable,
+        bool? audioAnchorAvailable,
+        CancellationToken cancellationToken,
+        WindowStorageSafety? storageSafety)
     {
         var dir = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -290,7 +299,9 @@ public sealed class AvFinalizer
             // staging file has been copied, flushed and size-verified. A
             // pre-existing valid final file is preserved when any step fails and
             // is never replaced with an unvalidated file.
-            var publishResult = await _publisher.PublishAsync(tempMuxPath, outputPath, cancellationToken).ConfigureAwait(false);
+            storageSafety?.EnsureRuntimeCapacity();
+            var publishResult = await _publisher.PublishAsync(tempMuxPath, outputPath, cancellationToken,
+                storageSafety?.CreateCommitGate(null, true)).ConfigureAwait(false);
             if (!publishResult.Success)
                 return Failed("atomic_publish_failed", $"Publish failed: {publishResult.FailureCategory}", meta, -1, publishResult.FailureCategory ?? "");
 

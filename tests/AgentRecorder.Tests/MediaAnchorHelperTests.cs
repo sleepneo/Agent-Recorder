@@ -8,6 +8,17 @@ namespace AgentRecorder.Tests;
 public class MediaAnchorHelperTests
 {
     [Fact]
+    public void FromSystemRelativeTimeHns_ConvertsQpc100NanosecondUnits()
+    {
+        Assert.Equal(Stopwatch.Frequency,
+            MediaAnchorHelper.FromSystemRelativeTimeHns(10_000_000));
+        Assert.Equal(Stopwatch.Frequency / 4,
+            MediaAnchorHelper.FromSystemRelativeTimeHns(2_500_000));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            MediaAnchorHelper.FromSystemRelativeTimeHns(-1));
+    }
+
+    [Fact]
     public void ToTimeSpan_HalfSecondOfStopwatchTicks_ReturnsFiveHundredMilliseconds()
     {
         var ticks = Stopwatch.Frequency / 2;

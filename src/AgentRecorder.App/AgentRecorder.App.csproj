@@ -12,6 +12,7 @@
   <ItemGroup>
     <Using Include="AgentRecorder.UI.Geometry" />
     <InternalsVisibleTo Include="AgentRecorder.Tests" />
+    <InternalsVisibleTo Include="AgentRecorder.FutureWindowUiTestHost" />
   </ItemGroup>
 
   <ItemGroup>

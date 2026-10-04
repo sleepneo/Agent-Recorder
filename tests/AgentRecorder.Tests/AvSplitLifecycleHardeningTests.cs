@@ -65,10 +65,10 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
         return path;
     }
 
-    private static string CreateValidAudio(string tempDir)
+    private static string CreateValidAudio(string tempDir, int durationSeconds = 2)
     {
         var path = Path.Combine(tempDir, $"fixture-audio-{Guid.NewGuid():N}.wav");
-        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration=2 -acodec pcm_s16le -ar 44100 -ac 2 \"{path}\"");
+        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration={durationSeconds} -acodec pcm_s16le -ar 44100 -ac 2 \"{path}\"");
         return path;
     }
 
@@ -622,6 +622,75 @@ public sealed class AvSplitLifecycleHardeningTests : IDisposable
         Assert.NotNull(meta.AudioPreRollMs);
         Assert.InRange(meta.AudioPreRollMs!.Value, 99.0, 101.0);
         Assert.NotInRange(meta.AudioPreRollMs.Value, 49.0, 51.0);
+    }
+
+    [Theory]
+    [InlineData(0, 700)]
+    [InlineData(250, 1100)]
+    [InlineData(1000, 1800)]
+    public void WgcAvSplitFinalization_UsesSourceMediaZeroNotLaunchOrEventDelivery(
+        int sourceFrameDelayMs, int eventDeliveryDelayMs)
+    {
+        var validAudio = CreateValidAudio(_tempDir, 5);
+        var validVideo = CreateValidVideo(_tempDir);
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var video = new FakeVideoCaptureWorker();
+        var runner = new FakeExternalProcessRunner(outputFileToCopy: validVideo);
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+        File.Copy(validAudio, audio.OutputPath!, overwrite: true);
+
+        var launch = audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10;
+        var actualMediaZero = launch + (long)(sourceFrameDelayMs * Stopwatch.Frequency / 1000.0);
+        video.SetLaunchAnchorTicks(launch);
+        video.SetVideoMediaStartAnchorTicks(actualMediaZero);
+        video.SetFirstFrameAnchorTicks(actualMediaZero +
+            (long)(eventDeliveryDelayMs * Stopwatch.Frequency / 1000.0));
+
+        var meta = backend.Stop();
+
+        Assert.Equal(1, runner.RunCallCount);
+        Assert.NotNull(meta.AudioPreRollMs);
+        Assert.InRange(meta.AudioPreRollMs!.Value, 99.0 + sourceFrameDelayMs - 1,
+            101.0 + sourceFrameDelayMs + 1);
+        Assert.NotInRange(meta.AudioPreRollMs.Value,
+            99.0 + eventDeliveryDelayMs - 1, 101.0 + eventDeliveryDelayMs + 1);
+    }
+
+    [Fact]
+    public void WgcAvSplitFinalization_MissingSourceClockFailsClosedWithoutLaunchFallback()
+    {
+        var validAudio = CreateValidAudio(_tempDir, 5);
+        var validVideo = CreateValidVideo(_tempDir);
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var video = new FakeVideoCaptureWorker { RequiresVideoMediaStartAnchor = true };
+        var runner = new FakeExternalProcessRunner(outputFileToCopy: validVideo);
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var cfg = CreateConfig();
+        var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        backend.StartVideo();
+        File.Copy(validVideo, video.OutputPath!, overwrite: true);
+        File.Copy(validAudio, audio.OutputPath!, overwrite: true);
+        video.SetLaunchAnchorTicks(audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10);
+
+        var meta = backend.Stop();
+
+        Assert.Equal(0, runner.RunCallCount);
+        Assert.Equal("missing", meta.VideoAnchorStatus);
+        Assert.Equal("wgc_media_anchor_missing", meta.VideoAnchorSource);
+        Assert.False(File.Exists(cfg.OutputPath));
     }
 
     private static FFmpegProgressGroup CreateProgressGroup(long frame, long totalSize, long? outTimeUs)

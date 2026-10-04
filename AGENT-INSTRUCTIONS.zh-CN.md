@@ -24,9 +24,9 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 ## 启动与就绪检查（推荐使用 CLI 握手）
 
-**强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**，它会自动处理单实例检测、`/capabilities` 二次确认、启动等待，并返回机器可读的就绪信息。
+**强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**。它验证单实例、`/capabilities` 和托盘进程的真实活动桌面；同用户桌面直接启动/复用，同用户隔离桌面只允许使用下文的显式高级恢复设置。Recorder 不会跨 Windows 账户派发启动。
 
-若 agent 运行在与用户输入桌面不同的 Windows desktop，`ensure-running` 可复用已在用户桌面运行的服务，但不能保证新启动的托盘 UI 对用户可见。当前 `host.supports_region_selection_ui` 只说明宿主具备 UI 代码，不证明用户能看到弹窗；不能把 API ready 当作本地 UI ready。需要选区或授权而窗口未出现在用户桌面时，应说明从用户交互桌面启动应用或先启用当前用户自启，不要反复创建请求。
+发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口；若有，通过该入口运行固定的 `AgentRecorder.Cli.exe ensure-running --json`。Codex 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
 
 ### 方式一：CLI 握手（推荐）
 
@@ -58,6 +58,8 @@ AgentRecorder.Cli.exe ensure-running --json
 | `api_version` | API 版本，如 `v1` |
 | `ready_file` | ready.json 路径 |
 | `data_dir` | 数据目录路径 |
+| `desktop_status` | `interactive` 表示托盘进程已证明位于活动用户桌面；headless 为 `not_required` |
+| `launch_path` | `direct`、`task_scheduler_interactive_token` 或 `reuse` |
 | `startup_elapsed_ms` | 服务进程启动到 ready 的耗时（毫秒；warm 时为复用服务当初的启动耗时） |
 | `ensure_elapsed_ms` | 本次 `ensure-running` 握手的总墙钟耗时（毫秒；同时覆盖 cold/warm） |
 | `startup_kind` | `cold`（新启动）或 `warm`（复用已有服务） |
@@ -87,6 +89,8 @@ AgentRecorder.Cli.exe ensure-running --json
   "port": 37891,
   "api_version": "v1",
   "mode": "tray",
+  "desktop_status": "interactive",
+  "launch_path": "reuse",
   "data_dir": "C:\\...\\.local-data",
   "ready_file": "C:\\...\\runtime\\ready.json",
   "api_key_file": "C:\\...\\config\\api-key.txt",
@@ -115,7 +119,8 @@ AgentRecorder.Cli.exe ensure-running --json
 | 错误码 | 说明 |
 |--------|------|
 | `READY_TIMEOUT` | 服务在超时时间内未就绪 |
-| `SERVICE_NOT_FOUND` | 找不到 AgentRecorder.App.exe 或 AgentRecorder.Headless.exe |
+| `TRAY_APP_NOT_FOUND` | 普通产品流找不到 AgentRecorder.App.exe |
+| `SERVICE_NOT_FOUND` | 显式 headless 模式找不到 AgentRecorder.Headless.exe |
 | `SERVICE_EXITED` | 服务进程启动后提前退出 |
 | `STALE_READY_FILE` | ready 文件存在但 PID 不是 Agent Recorder 进程 |
 | `CAPABILITIES_UNAVAILABLE` | PID 存活但 `/capabilities` 不可用 |
@@ -123,11 +128,18 @@ AgentRecorder.Cli.exe ensure-running --json
 | `INSTANCE_ALREADY_RUNNING_BUT_UNHEALTHY` | 有实例在运行（mutex 持有）但当前 data-dir 下不健康 |
 | `STALE_READY_FILE_DELETE_FAILED` | stale ready 文件无法删除，需要人工清理后重试 |
 | `INVALID_ARGUMENT` | 参数错误 |
+| `INTERACTIVE_DESKTOP_REQUIRED` | 当前进程不在活动用户的可见桌面，且不能安全 broker |
+| `DESKTOP_LOCKED` / `NO_ACTIVE_INTERACTIVE_SESSION` | 桌面已锁定或没有可用的活动用户会话 |
+| `INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED` | Recorder 不跨 Windows 账户启动；应先检查宿主是否提供获准的用户桌面执行入口 |
+| `INTERACTIVE_LAUNCH_NOT_ENROLLED` | 需要先完成一次性当前用户桌面注册 |
+| `INTERACTIVE_LAUNCH_STALE_BINARY` / `INTERACTIVE_LAUNCH_DATA_DIR_MISMATCH` | App 文件或数据目录与信任注册不一致 |
+| `TASK_DEFINITION_MISMATCH` / `TASK_NOT_FOUND` | 计划任务缺失或与固定 App 定义不一致 |
+| `CONFLICTING_DATA_DIR_INSTANCE` | 同一会话中已有实例，但它不属于请求的数据目录 |
 
 CLI 会自动：
 - 检测已有运行实例并复用
 - 通过 `/api/v1/capabilities` 二次确认服务健康状态
-- 如未运行则启动新实例（默认 Tray/App 模式，支持本地选区和确认 UI）
+- 如未运行则在已验证的用户交互桌面直启；同用户隔离桌面仅使用已显式注册的当前用户按需任务
 - 等待服务就绪（30秒超时）
 - 返回统一格式的 JSON
 
@@ -145,6 +157,20 @@ CLI 会自动：
 | `--help` | 显示帮助 | - |
 
 **注意：** 默认启动 Tray App 模式，它提供本地选区和确认 UI，是主产品路径。仅在确无 GUI 需求时使用 `--headless`。
+
+### 高级恢复：同用户隔离桌面的一次性设置
+
+只有当宿主没有可用的用户桌面授权执行入口，且 agent 进程 SID 与活动桌面 SID **相同**、但运行在另一个桌面时，才考虑当前用户级 Task Scheduler 恢复。须由用户在已解锁、非提权的同一账户桌面中显式运行一次：
+
+```text
+AgentRecorder.Cli.exe interactive-launch setup --json --app "<AgentRecorder.App.exe 的完整路径>" --data-dir "<与 ensure-running 一致的数据目录>"
+AgentRecorder.Cli.exe interactive-launch status --json
+AgentRecorder.Cli.exe interactive-launch remove --json
+```
+
+此设置只针对同一 Windows 用户，不支持 `--agent-sid` 或任何跨账户派发；`--agent-sid` 和旧跨账户注册均返回明确不支持，CLI 不会自动改动旧任务。若身份不一致，改由宿主检查授权桌面执行面；没有授权入口时停止并保留失败状态。`remove` 只撤销匹配的当前用户任务，不会关闭已经运行的 App。
+
+App 更新或路径/数据目录改变后必须先检查状态；stale 或 mismatch 时不要绕过校验。`interactive-launch diagnose` 或 `ensure-running --diagnostics --json` 是显式 opt-in，只输出进程 ID、用户 SID、session、window station/desktop 名和启动路径，不读取窗口标题、屏幕内容或 API key。
 
 **透传 ensure-running 上下文：** 当 `ensure_context_available=true` 时，agent 应在紧接着的下一次录制创建请求中附加 header：
 
@@ -665,6 +691,12 @@ AGENT-API-REFERENCE.zh-CN.md
 发生变化，录制未开始”，然后重新创建请求。不得通过 HTTP 自批准，也不得把该失败
 当作已开始录制或返回一个输出文件路径。
 
+严格窗口及未来窗口单次执行的 `storage_space_low` 表示实际输出/暂存卷容量不足，
+`storage_capacity_unavailable` 表示容量无法可信确认（含卷不可用、身份改变和查询超时）。
+运行中可信中止为 failed，原因在 `stop_reason`；不得将 partial 当作最终视频。
+启动容量估计不是预留，运行低水位固定 256 MiB。没有面向 Agent 的关闭监控、
+更换监控盘或阈值开关；失败授权不可自动复用，后续新录制仍遵循本地批准流程。
+
 ### 配置每条录制的开始前倒计时
 
 raw `POST /api/v1/recordings` 和 quick `POST /api/v1/recordings/quick` 使用同一个顶层
@@ -701,3 +733,47 @@ FFmpeg 单帧进程；不要把截图序列理解成连续 worker，也不要并
 `series.json` 中，`captured_offset_ms` 是有效提交相对首帧锚点的偏移，`lateness_ms` 是
 不含本帧捕获/编码耗时的认领迟到，`capture_duration_ms` 是认领到有效 PNG 提交的单调
 时钟耗时。不要向用户承诺固定的桌面毫秒延迟。
+
+### 未来程序窗口的一次性授权
+
+仅在 `/capabilities.future_window_one_shot.setup_supported=true` 且
+`execution_supported=true` 时使用 `POST /api/v1/future-window-authorizations`。
+请求只创建幂等 `pending` 设置，不会启动播放器、读取窗口内容或开始录制；用户必须在
+交互桌面检查完整授权范围并点击本地批准。相同 `Idempotency-Key` 和相同规范化范围重放
+返回原设置，不同范围返回冲突。仅支持本地 `.exe`、1–1800 秒、最多 3600 秒有效期、固定
+输出目录，以及明确的 `audio.mode=none` 或精确 `system_loopback` endpoint。
+
+本地批准后，agent 自行安排何时启动内容，并从本机窗口清单取得唯一精确 `window_id`，再
+调用 `POST /api/v1/future-window-authorizations/{authorization_id}/runs`。Recorder 只接受
+批准可执行文件所属的唯一可见、未最小化顶层窗口；不按标题、前台窗口、进程名或内容猜测，
+也不回退到屏幕矩形。一个授权最多启动一次。响应的 `run_id` 可用
+`GET /api/v1/recordings/{run_id}` 轮询；授权状态和输出证据用授权 GET 路由读取。失败或重启
+后 `started_unknown` 都不可自动重试。系统 loopback 会录下所选 render endpoint 的全部
+声音，不仅是该窗口的声音。
+
+用户可在本地「无人值守安全控制中心」查看并撤销授权；经认证的 agent 也可调用该授权的
+`/revoke` 路由。撤销会阻止新启动并请求停止该授权的活动录制，不会把它报告成达到时长
+上限的正常完成。此功能不表示支持 livestream 检测/选择、浏览器标签身份、自动打开播放器、
+定时/重复录制、机器唤醒、麦克风或屏幕矩形回退。
+
+## 固定区域 Profile 配置复用
+
+### 普通交互录制
+
+当 `/capabilities.profile_management.ordinary_recording_profile_ref_supported=true` 时，先读取 Profile 的精确 `id/version/digest`，再以唯一请求体调用 `POST /api/v1/recordings`：
+
+```json
+{"profile_ref":{"id":"profile-id","version":1,"digest":"exact-version-digest"}}
+```
+
+不可附加 raw source/output/audio、Plan/Lease/proof 或其他覆盖字段；不使用名称或 latest。此路径仍要求本地用户逐次确认，不是无人值守授权。只支持无音频固定区域和 1–600 整秒；不可精确表达的毫秒时长、奇数/过小区域、显示器或后端变化会拒绝，不会自动改配置或回退。确认窗允许用户仅为本次录制更改保存目录。POST 没有幂等键；若响应不确定，先查询录制状态，不要盲目重发。`plan_profile_ref_supported=false` 时不得把计划创建请求改成 profile ref。
+
+历史版本列表与精确版本接口的目录元数据、当前引用和版本数据来自同一个数据库读取快照；读取规格用 canonical 策略码，并以 duration_seconds 精确返回秒值、duration_ms 返回毫秒整数。整秒输出保持整数，POST/PATCH 仍只允许 1–600 整数秒。
+
+历史版本列表与精确版本接口的目录元数据、当前引用和版本数据来自同一个数据库读取快照；读取规格用 canonical 策略码，并以 duration_seconds 精确返回秒值，duration_ms 返回毫秒整数。整秒输出保持整数，POST/PATCH 仍只允许 1–600 整数秒。
+
+用户要求保存或复用既有固定区域配置时，可使用 `GET /api/v1/profiles` 分页发现旧配置，再以详情给出的精确 `{id, version, digest}` 调用 `POST /api/v1/profiles` 复制。创建请求必须带新的稳定 `Idempotency-Key`；同键只能用于完全相同请求。修改使用 `PATCH` 并传详情返回的强 `ETag` 到 `If-Match`；并发或陈旧时先 GET 核对，不能自动以新 ETag 重试。DELETE 也需要 `If-Match`，被旧计划任一历史版本引用时会得到 `409 PROFILE_IN_USE`，不要尝试取消计划来绕过。
+
+首次创建而尚无 Profile 时，若 `/capabilities.profile_management.creation_modes` 包含 `create_from_local_selection`，先调用 `POST /api/v1/regions/select` 并明确传 `{"purpose":"profile"}`，等待用户在本地选择器中确认；随后把响应中的 `selection_ref` 原样用于唯一 `POST /api/v1/profiles` 请求，提交命名和 `changes.duration_seconds`（1–600），并可选择 countdown（0–10，默认 3）、filename_prefix（默认 `recording`）及 output_directory（省略则冻结当前默认目录）。使用新的 `Idempotency-Key`。选区引用是短期配置输入，不是授权或录制凭证；取消/超时须重新选择。不可用过期引用、last-region、普通录制选择或自行构造的几何替代真实本地交互。创建之后仍须按精确 Profile ref 发起普通录制并由本地用户逐次确认；不得把配置保存当作批准或启动。
+
+这组接口只管理固定区域、无音频的配置，不是录制授权或执行入口。不得提交选择几何、proof、批准、音频/窗口目标，也不得声称保存/复制/修改成功就代表显示器当前可用、计划已绑定或录制已批准。历史版本通过 exact version 路由读取；墓碑配置默认不在列表中，可显式请求 `include_deleted=true` 查看。

@@ -31,12 +31,12 @@ public sealed class RecurringFixedRegionProfilePersistenceTests
     };
 
     [Fact]
-    public void FreshSchemaV16HasAnEmptyImmutableProfileTableAndFixedMigrationEvidence()
+    public void FreshCurrentSchemaHasAnEmptyImmutableProfileTableAndFixedMigrationEvidence()
     {
         using var database = new TestDatabase();
         database.Store.Initialize();
 
-        Assert.Equal(18L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM schema_migrations;"));
+        Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM schema_migrations;"));
         Assert.Equal("schema_v9_recurring_fixed_region_profile_versions", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT name FROM schema_migrations WHERE version = 9;"));
         Assert.Equal("c5f3846be6a761dbeab25824e2c8de8184e691e14738669a0ac726ff4b09d11a", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT definition_checksum FROM schema_migrations WHERE version = 9;"));
         Assert.Equal("schema_v10_recurring_plan_profile_bindings", ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT name FROM schema_migrations WHERE version = 10;"));
@@ -45,7 +45,7 @@ public sealed class RecurringFixedRegionProfilePersistenceTests
         Assert.Equal(SqliteSchemaV13.MigrationChecksum, ScalarString(OpenRaw(database.Store.DatabasePath), "SELECT definition_checksum FROM schema_migrations WHERE version = 13;"));
         Assert.Equal(0L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM recurring_fixed_region_profile_versions;"));
         Assert.Equal(1L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_recurring_fixed_region_profile_versions_profile_version_desc';"));
-        Assert.Equal(2L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'recurring_fixed_region_profile_versions';"));
+        Assert.Equal(3L, Scalar(OpenRaw(database.Store.DatabasePath), "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'recurring_fixed_region_profile_versions';"));
     }
 
     [Fact]

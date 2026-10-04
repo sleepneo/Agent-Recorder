@@ -13,6 +13,10 @@
 | portable 默认 data-dir | `<package-root>\.local-data` |
 | 直接启动默认 data-dir | `%LOCALAPPDATA%\AgentRecorder` |
 
+## 启动与桌面执行边界
+
+调用 `AgentRecorder.Cli.exe ensure-running --json` 前，agent 应先检查宿主是否提供适当的用户桌面命令执行/授权入口；若有，经该入口运行固定 CLI 命令。Codex 宿主可对具体命令提供工具授权执行入口，这是宿主调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或跨 Windows 账户派发；没有合适授权桌面执行面时必须 fail-closed。旧 `--agent-sid` 参数和跨账户注册返回 `INTERACTIVE_CROSS_ACCOUNT_UNSUPPORTED`，不自动修改旧任务。
+
 所有响应格式：
 
 ```json
@@ -255,11 +259,11 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC 能力边界**：display/region 的实验性 WGC 路径仍是内部受控功能，默认关闭；固定 window 有独立的公共严格请求，见“窗口捕获语义”。该请求只在 `recording.window_surface.supported=true` 时可用；WGC 探测失败不会回退桌面矩形。严格窗口表面请求时长为 1–600 秒，并使用正常本地逐次确认；能力探测只证明运行时可用，不代表已经完成该设备/窗口/端点的 5 分钟 A/V 稳定性验收；600 秒上限也不表示完整直播录制已经就绪。system loopback 变体还要求 `recording.window_surface.system_audio_supported=true` 和一个可用输出端点。display、region 与未声明严格语义的旧 WGC 路径仍为最多 60 秒。
+**WGC 能力边界**：display/region 的实验性 WGC 路径仍是内部受控功能，默认关闭；固定 window 有独立的公共严格请求，见“窗口捕获语义”。该请求只在 `recording.window_surface.supported=true` 时可用；WGC 探测失败不会回退桌面矩形。严格窗口表面请求时长为 1–1800 秒，并使用正常本地逐次确认；这是配置和执行上限，不代表已经完成该设备/窗口/端点的 30 分钟 A/V 稳定性验收，也不表示完整直播录制已经就绪。system loopback 变体还要求 `recording.window_surface.system_audio_supported=true` 和一个可用输出端点。display、region 与未声明严格语义的旧 WGC 路径仍为最多 60 秒。
 
 **音频能力**：麦克风和系统声音均由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone", "system_audio"]`。`recording.audio_capabilities.microphone` 与 `.system_audio` 都返回 `supported: true`，状态为新鲜的 `ready`、`no_devices` 或 `unavailable`。系统声音请求仍须本地确认；批准的 render endpoint 在本次录制中保持固定，默认输出切换不会自动跟随，切回批准端点后执行有界同端点恢复并通过连续性指标披露缺口。麦克风和系统声音不能在同一请求中同时启用。
 
-`recording.window_surface` 报告 WGC 窗口运行时当前探测结果、失败原因、1–600 秒范围和逐次本地确认要求。`long_run_readiness="bounded_duration_only"` 与 `long_run_stress_tested=false` 表明能力探测不等于长时 A/V 验收。只有 WGC、render endpoint 与 WASAPI helper 协议探测都可用时，`system_audio_supported` 才为 true；`system_audio_helper_status`/`system_audio_helper_reason_code` 单独说明 helper 状态；若没有可用 endpoint，helper 状态为 `not_checked`。system audio 是批准的 Windows 输出端点 loopback，捕获该端点播放的系统声音，**不是所选窗口独占的音轨**。
+`recording.window_surface` 报告 WGC 窗口运行时当前探测结果、失败原因、1–1800 秒范围和逐次本地确认要求。`long_run_readiness="bounded_duration_only"` 与 `long_run_stress_tested=false` 表明能力探测不等于长时 A/V 验收。只有 WGC、render endpoint 与 WASAPI helper 协议探测都可用时，`system_audio_supported` 才为 true；`system_audio_helper_status`/`system_audio_helper_reason_code` 单独说明 helper 状态；若没有可用 endpoint，helper 状态为 `not_checked`。system audio 是批准的 Windows 输出端点 loopback，捕获该端点播放的系统声音，**不是所选窗口独占的音轨**。
 
 返回中包含 `readiness` 字段，提供启动就绪信息：
 
@@ -707,7 +711,9 @@ GET /windows?include_minimized=false&include_system_windows=false
 X-Agent-Recorder-Key: <api-key>
 ```
 
-用途：当用户明确要录制某个窗口时，AI agent 可以列出窗口并选择匹配项。常见“录当前窗口/选区录屏”请求优先使用 quick API。
+用途：当用户明确要录制某个窗口时，AI agent 可以列出窗口并选择匹配项。响应中的 `capture_eligibility_reason_code` 为空表示该窗口符合可选的内容表面结构规则；非空时会说明排除原因（例如 owner 辅助窗、tool window、非激活瞬态窗、无标题、零面积或不与活动显示器相交）。该字段不包含窗口像素或额外窗口文本；测试注入枚举器可能返回 `not_evaluated`。常见“录当前窗口/选区录屏”请求优先使用 quick API。
+
+未来窗口授权会对所有顶层 HWND 应用同一结构规则，再额外验证精确可执行文件身份、批准后的进程创建时间、当前用户/会话以及候选集合唯一性。`/windows` 是窗口清单，仍可能返回不符合项；只选择 eligibility reason 为空的窗口。若同一已批准程序有多个合格内容窗，后端会继续 fail closed 并报告歧义。
 
 ## 4. 请求用户选区
 
@@ -1990,12 +1996,25 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 ```
 
 该字段只接受精确字符串 `window_surface`。仅支持固定 `window_id`、普通
-`video` 模式、1–600 秒以及无音频或 system audio；不支持麦克风、`quick`、
+`video` 模式、1–1800 秒以及无音频或 system audio；不支持麦克风、`quick`、
 `screenshot_series`、`nested` 或计划/Lease 请求。请求仍须本地逐次确认，HTTP
 不能批准确认。确认摘要应显示 `capture_semantics=window_surface`；系统声音版本的
 `planned_backend` 为 `wgc-window-av-split`，且 `selection_fallback=false`。批准后由
 WGC 捕获所选 HWND 的窗口表面、由 WASAPI loopback 捕获固定输出端点，现有 A/V
 finalizer 输出含 AAC 音轨的 MP4。系统声音范围是整个输出端点而非窗口独占声音。
+
+严格窗口录制及未来窗口单次授权执行会冻结输出目录、WGC 有效暂存根和有声音时的
+A/V 暂存目录，按挂载/重解析后的实际本地固定卷检查容量并按卷汇总同时存在的文件
+估计。视频及 PCM 各自沿用至少 100 MiB 或每秒 2 MiB（PCM 另加 4 KiB 头部余量）；视频暂存、mux partial 和发布
+副本分别计入相应卷，并留 256 MiB 安全余量。这是启动空间估计，不是磁盘预留或配额。
+每次 helper/capture 启动前复核，包括未来授权的真实执行边界。
+
+录制、合流和最终发布期间约每 5 秒检查；任一监控卷低于 256 MiB 时以
+`storage_space_low` 中止，恰好 256 MiB 可以继续。卷不可用、卷身份改变、容量查询
+异常/非法结果、不支持的存储或两秒查询超时使用 `storage_capacity_unavailable`。
+可信中止最终为 `failed`，可通过 `stop_reason` 查询；录制未完成、未保存最终视频，
+不会把短片伪装成 completed。已提交成功后迟到采样不改变结果。API 无关闭监控、
+改阈值或选监控路径的开关；不会自动搬盘、删其他文件、重试或复用已消耗授权。
 
 若能力不可用，严格请求在确认前失败（`WINDOW_SURFACE_UNAVAILABLE`），绝不静默
 退回 `screen_rectangle`。601 秒及以上返回稳定的 `400 INVALID_ARGUMENT`，不会创建
@@ -2030,6 +2049,7 @@ REC/停止 UI 和输出文件创建之前终止。请重新创建请求；HTTP �
 
 ## 有界截图序列 API
 
+
 截图序列沿用 `POST /api/v1/recordings` 和 `POST /api/v1/recordings/quick`，请求体增加：
 
 ```json
@@ -2062,3 +2082,131 @@ runner 请求和 manifest 统一使用 `virtual_screen` 坐标空间。
 提交偏移，`lateness_ms` 是不含本帧捕获/编码耗时的非负认领迟到，
 `capture_duration_ms` 是认领到有效 PNG 提交的单调时钟耗时。此诊断字段不构成固定桌面
 毫秒延迟或实时保证。
+
+## 未来程序窗口一次性授权
+
+仅当 `/capabilities.future_window_one_shot.setup_supported` 与
+`execution_supported` 为 `true` 时可用。该功能允许 agent 在目标窗口出现前提交待本地批准
+的一次性范围；它不启动播放器，不识别直播内容，不按内容/标题挑选窗口，也不是循环计划。
+所有请求都需要 `X-Agent-Recorder-Key`。
+
+### 创建待批准授权
+
+```http
+POST /api/v1/future-window-authorizations
+X-Agent-Recorder-Key: <key>
+Idempotency-Key: player-session-2026-09-29-a
+Content-Type: application/json
+```
+
+```json
+{
+  "executable_path": "C:\\Program Files\\Player\\player.exe",
+  "audio": { "mode": "system_loopback", "endpoint_id": "{render-endpoint-id}" },
+  "maximum_duration_seconds": 300,
+  "validity_seconds": 900,
+  "output_directory": "D:\\Recordings"
+}
+```
+
+`audio` 必须明确选择 `{ "mode": "none" }` 或精确 endpoint 的
+`{ "mode": "system_loopback", "endpoint_id": "..." }`。时长范围为 1–1800 秒，
+有效期为 1–3600 秒。服务绑定本机核验的可执行文件、当前 user/session、系统 endpoint 和
+固定输出文件；文件名由服务生成且冲突时失败。创建响应为 `202`，`data.result` 为
+`created` 或 `existing`，授权最初为 `pending`。HTTP 永远不能批准；用户必须在本地桌面检查
+完整 scope，包括“该程序所选窗口中的任何内容都可能被录制”和 loopback 录下 endpoint
+全部声音的警告。相同幂等键、相同范围重放得到原授权；不同范围返回
+`409 IDEMPOTENCY_KEY_REUSED`。
+
+### 读取状态、启动一次录制
+
+```http
+GET /api/v1/future-window-authorizations/{authorization_id}
+POST /api/v1/future-window-authorizations/{authorization_id}/runs
+Content-Type: application/json
+
+{"window_id":"window_123456"}
+```
+
+启动 body 只接受一个本机精确 `window_id`；客户端不能提交 HWND/PID 哈希或更改授权范围。
+需由 agent 自行启动/安排播放器，并在运行时从 `/windows` 取得 ID。服务器重新枚举并要求
+窗口可见、非最小化、顶层；必须能验证进程在批准后创建、user/session 一致，且恰有一个
+匹配已批准可执行文件的 eligible window。并发启动只有一个能原子消费授权。成功返回
+`202`：
+
+```json
+{"ok":true,"data":{"result":"start_committed","run_id":"rec_0123456789ab","status_url":"/api/v1/recordings/rec_0123456789ab"},"request_id":"..."}
+```
+
+通过 `GET /api/v1/recordings/{run_id}` 轮询运行，通过授权 GET 读取持久化状态、原因和可信
+输出证据。状态可能为 `pending`、`active`、`used`、`completed`、`revoked`、`expired`、
+`blocked` 或 `failed`；进程重启后无法证明开始结果时 `run_status=started_unknown`，不重试。
+启动期身份、endpoint、桌面或输出检查失败均 fail closed，绝不回退到屏幕矩形。
+
+### 撤销
+
+用户可在本地无人值守安全控制中心查看并撤销授权。已认证 agent 也可调用：
+
+```http
+POST /api/v1/future-window-authorizations/{authorization_id}/revoke
+X-Agent-Recorder-Key: <key>
+Content-Type: application/json
+
+{}
+```
+
+响应包含 `revocation_accepted` 与最新 `authorization`。撤销阻止未来启动并请求停止已消费
+授权的活动 recording；被撤销的运行不会记作正常时长完成。若录制不再处于活动状态，重复
+撤销不会制造新的 run 或恢复授权。需要人工复核/紧急操作时仍可从本地安全控制中心执行。
+
+## 固定区域 Profile 管理 API
+
+目录条目、版本页和精确版本响应中的目录名称/删除状态、当前 profile_ref、is_current 与 ETag 均来自同一个 SQLite 读取快照。规格策略字段使用领域 canonical code，例如 physical_virtual_screen、landscape_flipped、fail_if_exists、natural_wake_only、interactive_desktop_required。读取规格保留时长精度：duration_seconds 为精确 JSON 数值（整秒仍为整数，非整秒可为小数），duration_ms 为精确整数毫秒。POST/PATCH 输入仍只接受 1–600 的整数秒，不因读取精度而放宽写入权限。
+
+`/api/v1/profiles` 是已认证的配置管理接口，仅用于查询、精确版本复制、有限字段修订和逻辑删除。当前只支持固定区域、`exact_match_only`、`ffmpeg-region`、无音频。它不创建几何、不选择显示器、不检查当前显示器可用性，也不创建录制或计划、不绑定 Profile、不授权捕获。
+
+复制已有不可变版本：
+
+```http
+POST /api/v1/profiles
+X-Agent-Recorder-Key: <key>
+Idempotency-Key: <稳定客户端键>
+Content-Type: application/json
+
+{
+  "name": "课件演示",
+  "source_profile_ref": {
+    "id": "从列表获取的 profile id",
+    "version": 1,
+    "digest": "recurring-fixed-region-profile/v1:<64 位小写十六进制>"
+  },
+  "changes": {
+    "duration_seconds": 30,
+    "countdown_seconds": 3,
+    "output_directory": "D:\\AgentRecorder\\.local-data\\Videos",
+    "filename_prefix": "lesson"
+  }
+}
+```
+
+`name` 必填，1–80 个可读字符；源 ref 必须精确包含 `id`、正整数 `version`、`digest`。`changes` 可省略；其唯一允许字段为 `duration_seconds`（1–600）、`countdown_seconds`（0–60）、`output_directory`、`filename_prefix`。未提供字段沿用指定源版本。拒绝重复/未知 JSON 属性、非整数、路径穿越、非法 prefix，以及任何音频、目标、选择、proof 或授权字段。源不存在返回 404，不会暗造全屏配置；服务端生成新 ID 和 v1。
+
+列表 `GET /api/v1/profiles?limit=...&cursor=...` 按稳定 Profile ID 做 keyset 分页，默认 20、上限 100；旧内部配置也会出现，缺名称时使用确定 fallback。默认隐藏墓碑，`include_deleted=true` 可显式列出。详情返回名称、精确当前 ref、spec、删除状态及强 ETag。版本列表 `GET /api/v1/profiles/{id}/versions` 同样有界分页；`/versions/{version}` 读取指定精确版本。cursor 不透明、有限长且绑定资源，格式错误或跨 Profile 使用返回 400。
+
+`PATCH /api/v1/profiles/{id}` 接受非空对象，只可包含 `name` 和上面的四个配置字段；每次成功都生成新不可变版本，旧版本 digest 和计划绑定不变。PATCH、DELETE 均必须带当前强 `If-Match`：缺失 428，陈旧或跨资源 ETag 412；弱、通配符或多个 ETag 为 400。成功后 HTTP `ETag` 头与 JSON `etag` 完全一致。相同 ETag 的并发 PATCH 只能一个成功；失败后先 GET 核对，不要自动重试修改。
+
+DELETE 在同一 SQLite 写事务内检查该 ID 的**所有历史版本**引用并写入逻辑墓碑。被任一计划引用时返回 409 `PROFILE_IN_USE` 和有界引用摘要，不修改计划或授权；不会级联取消计划。墓碑阻止新修改、复制和首次绑定，历史读取及已有精确绑定 replay 保留。POST 的 Profile v1、目录行和幂等结果同事务提交；同键同规范化请求在重启后返回原结果/ETag，同键不同请求 409。
+
+`/capabilities.profile_management` 声明 `list`、`get`、`list_versions`、`get_version`、`copy_existing_version`、`patch`、`delete` 操作；只有交互选择器与持久化 gateway 均可用时才增加 `create_from_local_selection`。`supported_targets=[fixed_region]`，headless 的 `creation_modes` 仅含复制，`audio_allowed=false`。兼容字段 `recording_or_plan_profile_ref_supported=false` 表示录制与计划组合能力并非都支持；请分别读取 `ordinary_recording_profile_ref_supported`、`ordinary_recording_execution_supported` 和 `plan_profile_ref_supported=false`。保存 Profile 本身不弹确认窗、不选区、不启动 worker、不签发 proof、不预留 Lease 配额、不创建输出目录或媒体。
+
+首次创建固定区域配置可在支持本地选区的交互主机上调用 `POST /api/v1/regions/select`，请求 `{"purpose":"profile"}`。用户在既有本地选择器中确认区域后，响应携带原样虚拟屏幕 bounds、短期不透明 `selection_ref` 与 `expires_at`（进程内 5 分钟）。取消、超时、普通 `purpose=recording` 选择以及持久化 last-region 均不能作为该引用。该交互只保存区域位置，不代表批准或开始录制；原 `/api/v1/region-selections` 普通选择路径保持兼容。
+
+随后用新的 `Idempotency-Key` 调用 `POST /api/v1/profiles`：`{"name":"课件演示","source_selection_ref":"sel_<opaque>","changes":{"duration_seconds":30,"countdown_seconds":3,"filename_prefix":"lesson"}}`。该创建形状与 `source_profile_ref` 复制形状互斥。`duration_seconds` 必填 1–600 秒，倒计时省略时为 3 且范围 0–10，prefix 缺省为 `recording`；`output_directory` 省略时把创建时有效默认目录固化到版本。拒绝过期/未知引用、显示拓扑/DPI/分辨率/方向变化、奇数或小于 32 像素尺寸、跨屏/越界矩形；不裁剪、不重定位、不归一化。同键同请求先按持久化幂等快照重放，再检查短期引用，因此引用过期或服务重启后仍返回原版本、digest、ETag；同键不同请求为 409。
+
+能力字段 `creation_modes` 仅在 durable profile gateway 与本地 selector 同时可用时包含 `create_from_local_selection`；headless 仅声明复制，不声称交互选区可用。创建不创建输出目录、不做写探测、不启动 worker/媒体、不创建 Plan/Occurrence/Lease/Proof，也不产生捕获授权。创建后可按精确 ref 列表/读取/历史，并使用既有普通录制 `profile_ref` 流程；录制仍需本地逐次确认。
+
+普通录制可通过 `POST /api/v1/recordings` 提交唯一的 `{ "profile_ref": { "id": "...", "version": 1, "digest": "..." } }` 请求体。必须使用详情/版本接口返回的精确不可变引用；不允许 raw 覆盖字段、Plan/Lease/proof、未知字段或重复 JSON 属性。目录 tombstone、摘要不匹配、版本缺失和显示环境变化均明确拒绝，不回退默认配置。只执行固定区域、exact-match、`ffmpeg-region`、无音频配置；时长须为 1–600 整秒，奇数或小于 32 像素区域以及无法精确表达的毫秒时长会拒绝，不做归一化。仍须本地用户逐次批准；批准窗可为本次更改输出目录。该 POST 没有幂等重试保证，超时后不得盲目重发。计划 Profile 引用仍不支持。
+
+请求处理期间发现的环境不匹配会同步返回 HTTP 错误。请求一旦以 HTTP 200 接受并等待本地确认，之后（包括倒计时结束、实际启动前）发生的环境变化不会追溯改写该 HTTP 响应为 409；录制会以 `failed` 终态结算，普通状态字段 `stop_reason` 和 `error` 为 `PROFILE_ENVIRONMENT_CHANGED`。Agent 应查询录制详情或 status-wait 获取终态原因。
+
+profile 请求错误仍使用标准 envelope，并在 `details.field`、`details.reason_code` 标明字段与原因：非法/混合/重复请求为 400 `INVALID_PROFILE_RECORDING_REQUEST`；精确版本不存在为 404 `PROFILE_VERSION_NOT_FOUND`；摘要不符、墓碑、环境漂移或后端不符为 409 `PROFILE_REF_MISMATCH`、`PROFILE_DELETED`、`PROFILE_ENVIRONMENT_CHANGED`、`PROFILE_BACKEND_UNAVAILABLE`；不可执行的 duration/geometry/policy 为 422 `PROFILE_NOT_EXECUTABLE`；快照基础设施不可用为 503 `PROFILE_EXECUTION_UNAVAILABLE`。

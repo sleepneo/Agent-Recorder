@@ -48,4 +48,12 @@ internal static class MediaAnchorHelper
     {
         return TimeSpan.FromSeconds((double)stopwatchTicks / Stopwatch.Frequency);
     }
+
+    /// <summary>Maps WGC QPC-derived SystemRelativeTime (10 MHz) to Stopwatch/QPC ticks.</summary>
+    public static long FromSystemRelativeTimeHns(long systemRelativeTimeHns)
+    {
+        if (systemRelativeTimeHns < 0)
+            throw new ArgumentOutOfRangeException(nameof(systemRelativeTimeHns));
+        return checked((long)((decimal)systemRelativeTimeHns * Stopwatch.Frequency / 10_000_000m));
+    }
 }

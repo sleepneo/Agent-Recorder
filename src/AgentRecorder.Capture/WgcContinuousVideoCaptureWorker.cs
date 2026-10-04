@@ -25,6 +25,8 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
     private int _firstFrameSeen;
     private long _launchAnchorTicks;
     private long _firstFrameAnchorTicks;
+    private long _videoMediaStartAnchorTicks;
+    private long _videoMediaStartSourceTimeHns;
     private long _firstProgressFrame = -1;
     private long _firstProgressOutTimeUs = -1;
 
@@ -52,6 +54,11 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
     public bool HasExited => Volatile.Read(ref _hasExited) != 0;
     public long LaunchAnchorTicks => Interlocked.Read(ref _launchAnchorTicks);
     public long FirstFrameAnchorTicks => Interlocked.Read(ref _firstFrameAnchorTicks);
+    public long? VideoMediaStartAnchorTicks => Interlocked.Read(ref _videoMediaStartAnchorTicks) > 0
+        ? Interlocked.Read(ref _videoMediaStartAnchorTicks) : null;
+    public bool RequiresVideoMediaStartAnchor => true;
+    public long? VideoMediaStartSourceTimeHns => Interlocked.Read(ref _videoMediaStartSourceTimeHns) > 0
+        ? Interlocked.Read(ref _videoMediaStartSourceTimeHns) : null;
     public long? FirstProgressFrame => Interlocked.Read(ref _firstProgressFrame) is var frame && frame >= 0 ? frame : null;
     public long? FirstProgressOutTimeUs => Interlocked.Read(ref _firstProgressOutTimeUs) is var time && time >= 0 ? time : null;
     public double? ProgressAnchorDeltaMs => null;
@@ -151,6 +158,20 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
         if (Interlocked.Exchange(ref _firstFrameSeen, 1) != 0)
             return;
         Interlocked.Exchange(ref _firstFrameAnchorTicks, _timestampProvider());
+        if (observation.MediaStartSystemRelativeTimeHns is long sourceTimeHns)
+        {
+            if (sourceTimeHns > 0)
+                Interlocked.Exchange(ref _videoMediaStartSourceTimeHns, sourceTimeHns);
+            try
+            {
+                Interlocked.Exchange(ref _videoMediaStartAnchorTicks,
+                    MediaAnchorHelper.FromSystemRelativeTimeHns(sourceTimeHns));
+            }
+            catch (OverflowException)
+            {
+                Interlocked.Exchange(ref _videoMediaStartAnchorTicks, 0);
+            }
+        }
         Interlocked.Exchange(ref _firstProgressFrame, observation.FrameNumber);
         if (observation.OutTimeUs is long outTimeUs)
             Interlocked.Exchange(ref _firstProgressOutTimeUs, outTimeUs);
@@ -181,6 +202,9 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
             WindowProcessId = source.WindowProcessId,
             WindowSurfaceBounds = source.WindowSurfaceBounds,
             RequireWindowSurface = true,
+            WritePaths = source.WritePaths,
+            StorageSafety = source.StorageSafety,
+            StorageIntermediatePublication = true,
             AudioSourceKind = AudioCaptureSourceKind.None,
             Microphone = false,
             Fps = source.Fps,

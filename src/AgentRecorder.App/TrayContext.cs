@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using AgentRecorder.Api;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -66,6 +67,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly RecordingFailureNotificationManager _failureNotificationManager;
     private IUiTextProvider _uiText;
     private readonly StandingLeaseSafetyControlService? _unattendedSafetyService;
+    private IFutureWindowOneShotGateway? _futureWindowOneShotGateway;
     private UnattendedSafetyControlForm? _unattendedSafetyForm;
 
     // Confirmation queue
@@ -1078,16 +1080,22 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _confirmSep.Visible = false;
     }
 
+    internal void SetFutureWindowOneShotGateway(IFutureWindowOneShotGateway gateway)
+    {
+        _futureWindowOneShotGateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
+    }
+
     private void OpenUnattendedSafetyControl()
     {
-        if (_unattendedSafetyService is null)
+        if (_unattendedSafetyService is null && _futureWindowOneShotGateway is null)
             return;
 
         var reused = _unattendedSafetyForm is not null && !_unattendedSafetyForm.IsDisposed;
         if (_unattendedSafetyForm is null || _unattendedSafetyForm.IsDisposed)
         {
             _unattendedSafetyForm = new UnattendedSafetyControlForm(
-                new StandingLeaseSafetyControlGateway(_unattendedSafetyService),
+                new StandingLeaseSafetyControlGateway(_unattendedSafetyService!,
+                    futureWindowGateway: _futureWindowOneShotGateway),
                 _uiText);
             _unattendedSafetyForm.FormClosed += (_, _) => _unattendedSafetyForm = null;
         }
@@ -1129,7 +1137,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     /// </summary>
     public void RequestRegionSelection(int timeoutSeconds,
         Action<string, int, int, int, int, string, string> callback)
+        => RequestRegionSelection(timeoutSeconds, callback, "recording");
+
+    public void RequestRegionSelection(int timeoutSeconds,
+        Action<string, int, int, int, int, string, string> callback, string purpose)
     {
+        var profilePurpose = string.Equals(purpose, "profile", StringComparison.Ordinal);
         // Use Interlocked for once-guarantee: callback can only fire once
         var callbackState = new CallbackState();
         Action<string, int, int, int, int, string, string> guardedCallback = (status, x, y, w, h, did, cs) =>
@@ -1210,13 +1223,13 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
                 // Load last selected region to pre-populate the selection UI.
                 Rectangle? initialBounds = null;
-                var lastState = RegionSelectionStateStore.Load();
+                var lastState = profilePurpose ? null : RegionSelectionStateStore.Load();
                 if (lastState != null)
                 {
                     initialBounds = new Rectangle(lastState.X, lastState.Y, lastState.Width, lastState.Height);
                 }
 
-                using var form = CreateRegionSelectionForm(initialBounds, e => _audit.Log(e.EventName, e.Payload), _uiText);
+                using var form = CreateRegionSelectionForm(initialBounds, e => _audit.Log(e.EventName, e.Payload), _uiText, profilePurpose);
                 callbackState.FormHandle = form.Handle;
 
                 _audit.Log("region_selection.ui_opened", new
@@ -1482,10 +1495,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     /// </summary>
     internal static RegionSelectionForm CreateRegionSelectionForm(Rectangle? initialBounds,
         Action<RegionSelectionForm.RegionSelectionAuditEventArgs> auditCallback,
-        IUiTextProvider textProvider)
+        IUiTextProvider textProvider, bool profilePurpose = false)
     {
         return new RegionSelectionForm(initialBounds, onAuditEvent: auditCallback,
-            textProvider: textProvider);
+            textProvider: textProvider, profilePurpose: profilePurpose);
     }
 
     private class CallbackState

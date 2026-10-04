@@ -2903,6 +2903,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameEmittedPromptlyForStaticSingleFrame, []()
     std::atomic<int> firstFrameCalls{0};
     std::atomic<int64_t> firstFrameNumber{0};
     std::atomic<int64_t> firstFrameElapsedMs{-1};
+    std::atomic<int64_t> firstFrameSourceTimeHns{-1};
     // Number of encoder writes that had happened at the moment FIRST_FRAME was
     // emitted. For a static single-frame source this must be zero: the explicit
     // event fires while FramesCaptured is still 0.
@@ -2925,10 +2926,11 @@ TEST_REGISTRAR(CaptureSessionFirstFrameEmittedPromptlyForStaticSingleFrame, []()
         return EncoderResult{EncoderStatus::Ok};
     };
     hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
-    hooks.onFirstFrame = [&](int64_t frameNumber, int64_t elapsedMs) {
+    hooks.onFirstFrame = [&](int64_t frameNumber, int64_t elapsedMs, int64_t sourceTimeHns) {
         firstFrameCalls.fetch_add(1);
         firstFrameNumber.store(frameNumber);
         firstFrameElapsedMs.store(elapsedMs);
+        firstFrameSourceTimeHns.store(sourceTimeHns);
         writesAtFirstFrame.store(writeCount.load());
         if (!sessionReturned.load()) {
             firstFrameBeforeReturn.store(true);
@@ -2962,6 +2964,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameEmittedPromptlyForStaticSingleFrame, []()
     ASSERT_EQ(firstFrameCalls.load(), 1);
     ASSERT_EQ(firstFrameNumber.load(), 1);
     ASSERT_GE(firstFrameElapsedMs.load(), 0);
+    ASSERT_EQ(firstFrameSourceTimeHns.load(), 0);
     ASSERT_EQ(writesAtFirstFrame.load(), 0);
     ASSERT_TRUE(firstFrameBeforeReturn.load());
 
@@ -3010,7 +3013,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameEmittedExactlyOnceWithMultipleFrames, [](
         return EncoderResult{EncoderStatus::Ok};
     };
     hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
-    hooks.onFirstFrame = [&](int64_t, int64_t) {
+    hooks.onFirstFrame = [&](int64_t, int64_t, int64_t) {
         firstFrameCalls.fetch_add(1);
     };
     hooks.onCaptureActive = [](FrameQueue& queue) {
@@ -3067,7 +3070,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedOnCopyFailure, []() {
         return false; // GPU copy fails on the very first frame
     };
     hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
-    hooks.onFirstFrame = [&](int64_t, int64_t) {
+    hooks.onFirstFrame = [&](int64_t, int64_t, int64_t) {
         firstFrameCalls.fetch_add(1);
     };
     hooks.onCaptureActive = [](FrameQueue& queue) {
@@ -3118,7 +3121,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedOnTimelineRejection, []() {
         return true;
     };
     hooks.onFinalize = []() { return EncoderResult{EncoderStatus::Ok}; };
-    hooks.onFirstFrame = [&](int64_t, int64_t) {
+    hooks.onFirstFrame = [&](int64_t, int64_t, int64_t) {
         firstFrameCalls.fetch_add(1);
     };
     hooks.onCaptureActive = [](FrameQueue& queue) {
@@ -3166,7 +3169,7 @@ TEST_REGISTRAR(CaptureSessionFirstFrameNotEmittedWhenBeginTimesOut, []() {
         return EncoderResult{EncoderStatus::Ok};
     };
     hooks.onStartCapture = []() {};
-    hooks.onFirstFrame = [&](int64_t, int64_t) {
+    hooks.onFirstFrame = [&](int64_t, int64_t, int64_t) {
         firstFrameCalls.fetch_add(1);
     };
     session.SetTestHooks(hooks);

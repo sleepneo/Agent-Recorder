@@ -52,10 +52,10 @@ public sealed class WgcContinuousSessionOptions
     /// <summary>Absolute output MP4 path.</summary>
     public string OutputPath { get; set; } = "";
 
-    /// <summary>Recording duration in milliseconds; 1000-60000 normally, up to 600000 only for strict window-surface capture.</summary>
+    /// <summary>Recording duration in milliseconds; 1000-60000 normally, up to 1800000 only for strict window-surface capture.</summary>
     public int DurationMs { get; set; } = 5000;
 
-    /// <summary>Enables the isolated 10-minute duration contract for an approved strict window-surface request only.</summary>
+    /// <summary>Enables the isolated 30-minute duration contract for an approved strict window-surface request only.</summary>
     public bool AllowExtendedWindowSurfaceDuration { get; set; }
 
     /// <summary>Target frame rate, 1-60.</summary>

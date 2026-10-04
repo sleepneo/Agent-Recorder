@@ -29,11 +29,14 @@ public sealed class RuntimeReadiness : IDisposable
         WriteIndented = false
     };
 
-    public RuntimeReadiness(string mode, int port)
+    private readonly InteractiveDesktopObservation? _desktopObservation;
+
+    public RuntimeReadiness(string mode, int port, InteractiveDesktopObservation? desktopObservation = null)
     {
         _mode = mode;
         _pid = Environment.ProcessId;
         _port = port;
+        _desktopObservation = desktopObservation;
         _stopwatch = Stopwatch.StartNew();
     }
 
@@ -94,7 +97,11 @@ public sealed class RuntimeReadiness : IDisposable
             ApiKeyFile = ApiKeyFilePath,
             AuditLogPath = AuditLogPathResolved,
             ReadyFile = ReadyFilePath,
-            NamedEvent = NamedEventName
+            NamedEvent = NamedEventName,
+            InteractiveDesktopReady = _mode != "tray" || _desktopObservation?.IsOnInteractiveDesktop == true,
+            SessionId = _desktopObservation?.ProcessSessionId ?? -1,
+            WindowStation = _desktopObservation?.WindowStation ?? "",
+            Desktop = _desktopObservation?.ThreadDesktop ?? ""
         };
 
         WriteReadyFileAtomic(snapshot);
@@ -150,7 +157,18 @@ public sealed class RuntimeReadiness : IDisposable
             ready_file = ReadyFilePath,
             api_key_file = ApiKeyFilePath,
             audit_log_path = AuditLogPathResolved,
-            named_event = NamedEventName
+            named_event = NamedEventName,
+            interactive_desktop = new
+            {
+                ready = _mode != "tray" || _desktopObservation?.IsOnInteractiveDesktop == true,
+                process_user_sid = _desktopObservation?.ProcessUserSid ?? "",
+                active_user_sid = _desktopObservation?.ActiveUserSid ?? "",
+                session_id = _desktopObservation?.ProcessSessionId ?? -1,
+                active_session_id = _desktopObservation?.ActiveSessionId ?? -1,
+                window_station = _desktopObservation?.WindowStation ?? "",
+                desktop = _desktopObservation?.ThreadDesktop ?? "",
+                input_desktop = _desktopObservation?.InputDesktop ?? ""
+            }
         };
     }
 
@@ -220,6 +238,10 @@ public sealed class ReadySnapshot
     public string AuditLogPath { get; set; } = "";
     public string ReadyFile { get; set; } = "";
     public string NamedEvent { get; set; } = "";
+    public bool InteractiveDesktopReady { get; set; }
+    public int SessionId { get; set; } = -1;
+    public string WindowStation { get; set; } = "";
+    public string Desktop { get; set; } = "";
 }
 
 public sealed class ReadyFileDeleteResult

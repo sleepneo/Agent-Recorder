@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -129,6 +130,41 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.Equal("h264", videoCodecName);
         Assert.Equal("audio", audioCodecType);
         Assert.Equal("aac", audioCodecName);
+    }
+
+    [Fact]
+    public async Task AvFinalizer_SyntheticVisualAndAudioEventsRemainAlignedAfterSourceMediaTrim()
+    {
+        SkipIfNoFfmpeg();
+        var videoPath = Path.Combine(_tmpDir, "task304-sync-video.mp4");
+        var audioPath = Path.Combine(_tmpDir, "task304-sync-audio.wav");
+        var outputPath = Path.Combine(_tmpDir, "task304-sync-output.mp4");
+        GenerateTwoToneVideo(videoPath);
+        GenerateAudioPulse(audioPath, pulseStart: 1.25, pulseEnd: 2.25, duration: 5);
+
+        var finalizer = new AvFinalizer(new ExternalProcessRunner());
+        var result = await finalizer.FinalizeAsync(
+            videoPath,
+            audioPath,
+            outputPath,
+            TimeSpan.FromMilliseconds(750),
+            AudioCaptureSourceKind.SystemLoopback,
+            applyContinuityCheck: false,
+            videoAnchorAvailable: true,
+            audioAnchorAvailable: true);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.Meta.OutputFileExists);
+        var videoEvidence = await RunFfmpegDiagnostics("-i", outputPath, "-vf", "blackdetect=d=0.01:pix_th=0.1", "-an", "-f", "null", "-");
+        var audioEvidence = await RunFfmpegDiagnostics("-i", outputPath, "-af", "silencedetect=noise=-45dB:d=0.01", "-vn", "-f", "null", "-");
+        var visualAt = ParseFfmpegSeconds(videoEvidence.Stderr, @"black_end:\s*([0-9.]+)");
+        var audioAt = ParseFfmpegSeconds(audioEvidence.Stderr, @"silence_end:\s*([0-9.]+)");
+
+        // The black-to-white visual transition is generated at 500 ms. The
+        // 1.25s audio lead-in minus the 750ms source-media pre-roll puts its
+        // tone onset at the same 500ms content time after AAC encoder delay.
+        Assert.InRange(visualAt, 0.45, 0.55);
+        Assert.InRange(Math.Abs(audioAt - visualAt), 0, 0.1);
     }
 
     [Fact]
@@ -1515,6 +1551,14 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i \"{filter}\" -acodec pcm_s16le -ar 44100 -ac 2 -t {durationSeconds} \"{path}\"");
     }
 
+    private static void GenerateAudioPulse(string path, double pulseStart, double pulseEnd, int duration)
+    {
+        var start = pulseStart.ToString(CultureInfo.InvariantCulture);
+        var end = pulseEnd.ToString(CultureInfo.InvariantCulture);
+        var filter = $"aevalsrc=if(between(t\\,{start}\\,{end})\\,0.8*sin(2*PI*1000*t)\\,0):s=44100:d={duration}";
+        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i \"{filter}\" -acodec pcm_s16le -ar 44100 -ac 2 -t {duration} \"{path}\"");
+    }
+
     private static void GenerateTwoToneVideo(string path)
     {
         // 0.5s black followed by 1.5s white, total 2.0s.
@@ -1587,6 +1631,25 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         }
         if (proc.ExitCode != 0)
             throw new InvalidOperationException("ffmpeg generation failed: " + proc.StandardError.ReadToEnd());
+    }
+
+    private static async Task<ExternalProcessResult> RunFfmpegDiagnostics(params string[] arguments)
+    {
+        var result = await new ExternalProcessRunner().RunAsync(
+            FfmpegLocator.FfmpegPath,
+            arguments,
+            TimeSpan.FromSeconds(30),
+            captureStderr: true);
+        Assert.False(result.TimedOut, "FFmpeg diagnostic timed out.");
+        Assert.Equal(0, result.ExitCode);
+        return result;
+    }
+
+    private static double ParseFfmpegSeconds(string stderr, string pattern)
+    {
+        var match = Regex.Match(stderr, pattern, RegexOptions.CultureInvariant);
+        Assert.True(match.Success, "Expected bounded content-timing marker was absent from FFmpeg diagnostics.");
+        return double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
     }
 
     private static JsonArray GetStreams(string path)

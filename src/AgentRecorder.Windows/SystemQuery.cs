@@ -55,7 +55,15 @@ public static class SystemQuery
         IntPtr handle,
         int? windows_display_number = null);
 
-    public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds);
+    public record WindowInfo(string id, string title, string app_name, int process_id, bool is_active, bool is_minimized, Bounds bounds)
+    {
+        /// <summary>
+        /// Shared user-facing content-surface eligibility evidence. An empty
+        /// string means structurally eligible; "not_evaluated" is used by
+        /// injected/test window providers that do not model native HWND styles.
+        /// </summary>
+        public string capture_eligibility_reason_code { get; init; } = "not_evaluated";
+    }
 
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
@@ -575,9 +583,16 @@ public static class SystemQuery
                 return true;
 
             var bounds = TryGetVisibleWindowBounds(hWnd);
+            var eligibilityReason = FutureWindowCandidateEligibility.TryDescribe(hWnd, out var candidate) &&
+                                    candidate.ProcessId == pid
+                ? candidate.IneligibilityReasonCode ?? string.Empty
+                : "window_candidate_inspection_failed";
             list.Add(new WindowInfo(
                 $"window_{hWnd.ToInt64()}", title, app, pid,
-                hWnd == fg, min, bounds));
+                hWnd == fg, min, bounds)
+            {
+                capture_eligibility_reason_code = eligibilityReason
+            });
             return true;
         }, IntPtr.Zero);
         return list;

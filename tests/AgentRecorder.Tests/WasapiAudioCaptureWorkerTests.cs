@@ -1,10 +1,12 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace AgentRecorder.Tests;
 
@@ -13,9 +15,11 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
 {
     private readonly string _tmpDir;
     private readonly FakeAudioHelperDeployment _fakeHelper;
+    private readonly ITestOutputHelper _output;
 
-    public WasapiAudioCaptureWorkerTests()
+    public WasapiAudioCaptureWorkerTests(ITestOutputHelper output)
     {
+        _output = output;
         _tmpDir = Path.Combine(Path.GetTempPath(), $"wasapi-worker-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tmpDir);
         _fakeHelper = new FakeAudioHelperDeployment(_tmpDir);
@@ -413,6 +417,93 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
     }
 
     [Fact]
+    public void SystemLoopbackAt1800Seconds_UsesFakeHelperWithoutWaitingForCaptureDeadline()
+    {
+        var config = CaptureConfigWithLoopback();
+        config.DurationSeconds = 1800;
+        var stopwatch = Stopwatch.StartNew();
+
+        var summary = RunRealWorkerSourceKindScenario(
+            config,
+            reportedSourceKind: "system-loopback",
+            out int audioReadyCount);
+
+        Assert.Equal(1, audioReadyCount);
+        Assert.True(summary.State is AudioHelperSessionState.Success or AudioHelperSessionState.Stopped);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+            $"The deterministic helper should exit without waiting for the 1800-second recording deadline; elapsed={stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public void SystemLoopback1800Seconds_3600SourceAwareProgressEventsFitBoundedProtocolBudget()
+    {
+        var result = RunProtocolBudgetScenario("long-loopback", targetBytes: null);
+
+        Assert.Equal(1, result.AudioReadyCount);
+        Assert.Equal(1, result.NaturalExitCount);
+        Assert.Equal(AudioHelperSessionState.Success, result.Summary.State);
+        Assert.Null(result.Summary.ErrorCode);
+        Assert.Empty(result.Summary.ValidationErrors);
+        Assert.Equal("system-loopback", result.Summary.AudioSourceKind);
+        Assert.Equal(1_800_000L, result.Summary.DurationMs);
+        Assert.Equal(3602, result.ProtocolEventCount);
+        Assert.Equal(1, result.ProtocolTerminalEventCount);
+        Assert.Equal((int?)result.ProtocolBytesRead, result.GeneratedByteCount);
+        _output.WriteLine(
+            $"Generated source-aware loopback stream: bytes={result.GeneratedByteCount}; observed={result.ProtocolBytesRead}; events={result.ProtocolEventCount}; budget={WasapiAudioCaptureWorker.ProtocolMaxBytes}.");
+        Assert.True(result.ProtocolBytesRead > 1_048_576,
+            $"The generated legal 1800-second source-aware stream must exceed the old 1 MiB cap; bytes={result.ProtocolBytesRead}.");
+        Assert.True(result.ProtocolBytesRead < WasapiAudioCaptureWorker.ProtocolMaxBytes,
+            $"The legal stream must remain under the finite protocol budget; bytes={result.ProtocolBytesRead}, budget={WasapiAudioCaptureWorker.ProtocolMaxBytes}.");
+        Assert.False(result.StopSignalExistsAfterDispose);
+    }
+
+    [Fact]
+    public void ProtocolStdout_ExactlyAtFiniteBudget_IsAcceptedAndReadsTrustedTerminal()
+    {
+        var result = RunProtocolBudgetScenario(
+            "padded-loopback-boundary",
+            WasapiAudioCaptureWorker.ProtocolMaxBytes);
+
+        Assert.Equal(1, result.AudioReadyCount);
+        Assert.Equal(1, result.NaturalExitCount);
+        Assert.Equal(AudioHelperSessionState.Success, result.Summary.State);
+        Assert.Null(result.Summary.ErrorCode);
+        Assert.Empty(result.Summary.ValidationErrors);
+        Assert.Equal((int?)WasapiAudioCaptureWorker.ProtocolMaxBytes, result.GeneratedByteCount);
+        Assert.Equal(WasapiAudioCaptureWorker.ProtocolMaxBytes, result.ProtocolBytesRead);
+        Assert.Equal(1002, result.ProtocolEventCount);
+        Assert.Equal(1, result.ProtocolTerminalEventCount);
+        _output.WriteLine(
+            $"Exact protocol budget accepted: generated={result.GeneratedByteCount}; observed={result.ProtocolBytesRead}; events={result.ProtocolEventCount}.");
+        Assert.False(result.StopSignalExistsAfterDispose);
+    }
+
+    [Fact]
+    public void ProtocolStdout_OverFiniteBudget_FailsClosedStopsHelperAndReleasesResources()
+    {
+        var baselinePids = FakeHelperProcessIds();
+        var result = RunProtocolBudgetScenario(
+            "padded-loopback-overflow",
+            WasapiAudioCaptureWorker.ProtocolMaxBytes + 1);
+
+        Assert.Equal(1, result.AudioReadyCount);
+        Assert.Equal(1, result.NaturalExitCount);
+        Assert.Equal(AudioHelperSessionState.MalformedSequence, result.Summary.State);
+        Assert.Equal("audio_helper_protocol_error", result.Summary.ErrorCode);
+        Assert.Equal(0, result.ProtocolTerminalEventCount);
+        Assert.Contains(result.Summary.ValidationErrors, error => error.Contains("Stdout exceeded 4194304 bytes", StringComparison.Ordinal));
+        Assert.True(result.ProtocolBytesRead > WasapiAudioCaptureWorker.ProtocolMaxBytes,
+            $"Observed bytes must cross the hard limit; bytes={result.ProtocolBytesRead}, budget={WasapiAudioCaptureWorker.ProtocolMaxBytes}.");
+        Assert.True(result.ProtocolEventCount <= 1002,
+            $"The byte-limit failure should stop the helper while the bounded stream is still below the event-count limit; events={result.ProtocolEventCount}.");
+        _output.WriteLine(
+            $"Over-budget protocol stopped: generated target={WasapiAudioCaptureWorker.ProtocolMaxBytes + 1}; observed before stop={result.ProtocolBytesRead}; events={result.ProtocolEventCount}; NaturalExit callbacks={result.NaturalExitCount}.");
+        Assert.False(result.StopSignalExistsAfterDispose);
+        AssertNoNewFakeHelperProcesses(baselinePids, "stdout budget overflow cleanup");
+    }
+
+    [Fact]
     public void MicrophoneRequested_HelperReportsMicrophone_RaisesAudioReadyExactlyOnce()
     {
         var summary = RunRealWorkerSourceKindScenario(
@@ -496,6 +587,85 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         }
     }
 
+    private ProtocolBudgetScenarioResult RunProtocolBudgetScenario(string mode, int? targetBytes)
+    {
+        var outputPath = Path.Combine(_tmpDir, mode + ".wav");
+        var countPath = Path.Combine(_tmpDir, mode + ".protocol-bytes.txt");
+        var stopSignalPath = Path.Combine(_tmpDir, mode + ".stop.signal");
+        var baselinePids = FakeHelperProcessIds();
+        var originalSourceKind = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND");
+        var originalMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_MODE");
+        var originalTarget = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_TARGET_BYTES");
+        var originalCountPath = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_COUNT_PATH");
+        var worker = CreateWorker("");
+        worker.StopSignalPathOverride = stopSignalPath;
+        int audioReadyCount = 0;
+        int naturalExitCount = 0;
+        bool stopSignalExistsAfterDispose = false;
+        ProtocolBudgetScenarioResult? result = null;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", "system-loopback");
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_MODE", mode);
+            Environment.SetEnvironmentVariable(
+                "AGENT_RECORDER_FAKE_PROTOCOL_TARGET_BYTES",
+                targetBytes?.ToString(CultureInfo.InvariantCulture));
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_COUNT_PATH", countPath);
+            worker.AudioReady += () => Interlocked.Increment(ref audioReadyCount);
+            worker.NaturalExit += (_, _) => Interlocked.Increment(ref naturalExitCount);
+
+            var config = CaptureConfigWithLoopback();
+            config.DurationSeconds = 1800;
+            worker.Start(config, outputPath);
+            int? helperPid = worker.HelperProcessIdForTests;
+            Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(30)),
+                WorkerDiagnostics(worker, $"{mode} protocol worker exit timeout"));
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref naturalExitCount) == 1, TimeSpan.FromSeconds(5)),
+                WorkerDiagnostics(worker, $"{mode} NaturalExit callback timeout"));
+
+            var summary = worker.GetTerminalSummary();
+            Assert.NotNull(summary);
+            int? generatedByteCount = File.Exists(countPath)
+                ? int.Parse(File.ReadAllText(countPath), CultureInfo.InvariantCulture)
+                : null;
+            result = new ProtocolBudgetScenarioResult(
+                summary!,
+                Volatile.Read(ref audioReadyCount),
+                Volatile.Read(ref naturalExitCount),
+                worker.ProtocolBytesReadForTests,
+                worker.ProtocolEventCountForTests,
+                worker.ProtocolEventsForTests.Count(evt =>
+                    evt.StartsWith("Ok:", StringComparison.Ordinal) ||
+                    evt.StartsWith("Stopped:", StringComparison.Ordinal) ||
+                    evt.StartsWith("Fail:", StringComparison.Ordinal)),
+                generatedByteCount,
+                StopSignalExistsAfterDispose: false,
+                helperPid);
+        }
+        finally
+        {
+            try
+            {
+                if (!worker.HasExited)
+                    worker.Stop();
+            }
+            catch { }
+            try { worker.Dispose(); } catch { }
+            stopSignalExistsAfterDispose = File.Exists(stopSignalPath);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", originalSourceKind);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_MODE", originalMode);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_TARGET_BYTES", originalTarget);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_PROTOCOL_COUNT_PATH", originalCountPath);
+            try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+            try { if (File.Exists(countPath)) File.Delete(countPath); } catch { }
+            try { if (File.Exists(stopSignalPath)) File.Delete(stopSignalPath); } catch { }
+        }
+
+        AssertNoNewFakeHelperProcesses(baselinePids, $"{mode} helper process cleanup");
+        return result! with { StopSignalExistsAfterDispose = stopSignalExistsAfterDispose };
+    }
+
     private static CaptureConfig CaptureConfigWithLoopback()
     {
         return new CaptureConfig
@@ -565,4 +735,15 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         var stderr = worker.GetStderrLog();
         return $"{context}; ready={worker.IsAudioReady}; exited={worker.HasExited}; pid={worker.HelperProcessIdForTests?.ToString() ?? "<none>"}; exitCode={worker.ExitCode}; summary={summaryText}; events={events}; stderr={stderr}";
     }
+
+    private sealed record ProtocolBudgetScenarioResult(
+        AudioHelperSessionSummary Summary,
+        int AudioReadyCount,
+        int NaturalExitCount,
+        int ProtocolBytesRead,
+        int ProtocolEventCount,
+        int ProtocolTerminalEventCount,
+        int? GeneratedByteCount,
+        bool StopSignalExistsAfterDispose,
+        int? HelperProcessId);
 }

@@ -8,11 +8,20 @@ namespace AgentRecorder.Tests;
 
 internal static class TestHelper
 {
-    // Test assembly: tests/AgentRecorder.Tests/bin/.../AgentRecorder.Tests.dll
-    // AppContext.BaseDirectory = tests/AgentRecorder.Tests/bin/Release/net8.0-windows10.0.19041.0/
-    // Go up 5 levels: net8.0-windows10.0.19041.0 -> Release -> bin -> AgentRecorder.Tests -> tests -> project root
-    public static readonly string ProjectRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    // Discover the checkout root so isolated output segments (for example
+    // bin/Task300T/Release) do not shift test fixtures into tests/.local-data.
+    public static readonly string ProjectRoot = FindProjectRoot();
+
+    private static string FindProjectRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "AgentRecorder.sln")))
+                return directory.FullName;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate AgentRecorder.sln above the test output directory.");
+    }
 
     public static string FfmpegBinDir => Path.Combine(ProjectRoot, "tools", "ffmpeg", "bin");
 }

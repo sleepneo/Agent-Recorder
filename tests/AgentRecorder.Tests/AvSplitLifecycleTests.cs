@@ -205,6 +205,9 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public bool WaitForExitCalled { get; private set; }
     public long LaunchAnchorTicks { get; private set; }
     public long FirstFrameAnchorTicks { get; private set; }
+    public long? VideoMediaStartAnchorTicks { get; private set; }
+    public bool RequiresVideoMediaStartAnchor { get; set; }
+    bool IVideoCaptureWorker.RequiresVideoMediaStartAnchor => RequiresVideoMediaStartAnchor;
     public long? FirstProgressFrame { get; private set; }
     public long? FirstProgressOutTimeUs { get; private set; }
     public double? ProgressAnchorDeltaMs { get; private set; }
@@ -282,6 +285,11 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public void SetLaunchAnchorTicks(long ticks)
     {
         LaunchAnchorTicks = ticks;
+    }
+
+    public void SetVideoMediaStartAnchorTicks(long ticks)
+    {
+        VideoMediaStartAnchorTicks = ticks;
     }
 
     public void EmitNaturalExit(int exitCode, string stderr)
@@ -1088,6 +1096,58 @@ public sealed class AvSplitLifecycleTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(0, 350)]
+    [InlineData(250, 700)]
+    [InlineData(1000, 450)]
+    public void RequiredWindowSurfaceWgc_AdapterCarriesSourceClockAcrossEventDeliveryDelay(
+        int sourceFrameDelayMs, int eventDeliveryDelayMs)
+    {
+        InstallWindowSurfaceTarget();
+        var videoFixture = CreateValidVideo();
+        var audioFixture = CreateValidAudio(5);
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig(systemAudio: true);
+            var audio = new FakeAudioCaptureWorker(
+                raiseAudioReadyOnStart: true,
+                holdFileOpen: true,
+                holdFileOpenCopyFrom: audioFixture);
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio, videoFixture);
+            var runner = new FakeExternalProcessRunner(outputFileToCopy: videoFixture);
+            using var backend = new AvSplitCaptureBackend(stack, runner, new TempRetentionPolicy(_tempDir))
+            {
+                ApplyContinuityCheck = false
+            };
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+
+            var actualMediaZeroTicks = audio.MediaStartAnchorTicks +
+                (long)((100 + sourceFrameDelayMs) * Stopwatch.Frequency / 1000.0);
+            var sourceTimeHns = checked((long)((decimal)actualMediaZeroTicks * 10_000_000m / Stopwatch.Frequency));
+            Thread.Sleep(sourceFrameDelayMs + eventDeliveryDelayMs);
+            stack.Session!.EmitFirstFrame(sourceTimeHns);
+
+            var meta = backend.Stop();
+
+            Assert.Equal(1, runner.RunCallCount);
+            Assert.Equal("wgc_system_relative_time", meta.VideoAnchorSource);
+            Assert.NotNull(meta.VideoMediaZeroSystemRelativeTimeHns);
+            Assert.NotNull(meta.VideoMediaZeroAnchorTicks);
+            Assert.NotNull(meta.AudioMediaStartAnchorTicks);
+            Assert.Contains("av_timeline_anchor_diag", meta.StderrLog);
+            Assert.Contains("units=stopwatch_ticks,hns_100ns,ms", meta.StderrLog);
+            Assert.InRange(meta.AudioPreRollMs!.Value, 99.0 + sourceFrameDelayMs - 2,
+                101.0 + sourceFrameDelayMs + 2);
+            Assert.NotInRange(meta.AudioPreRollMs.Value,
+                99.0 + eventDeliveryDelayMs - 2, 101.0 + eventDeliveryDelayMs + 2);
+        }
+        finally
+        {
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
     private CaptureConfig CreateWindowSurfaceConfig(bool systemAudio = false) => new()
     {
         SourceKind = "window",
@@ -1638,10 +1698,10 @@ public sealed class AvSplitLifecycleTests : IDisposable
         return path;
     }
 
-    private string CreateValidAudio()
+    private string CreateValidAudio(int durationSeconds = 2)
     {
         var path = Path.Combine(_tempDir, $"fixture-audio-{Guid.NewGuid():N}.wav");
-        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration=2 -acodec pcm_s16le -ar 44100 -ac 2 \"{path}\"");
+        RunFfmpeg($"-y -nostats -loglevel error -f lavfi -i sine=frequency=1000:duration={durationSeconds} -acodec pcm_s16le -ar 44100 -ac 2 \"{path}\"");
         return path;
     }
 
@@ -1817,12 +1877,13 @@ public sealed class AvSplitLifecycleTests : IDisposable
             });
         }
 
-        public void EmitFirstFrame() => FirstFrameObserved?.Invoke(new FirstFrameObservation
+        public void EmitFirstFrame(long sourceTimeHns = 123456789) => FirstFrameObserved?.Invoke(new FirstFrameObservation
         {
             EvidenceKind = "test_frame",
             FrameNumber = 1,
             TotalSizeBytes = 1024,
-            OutTimeUs = 0
+            OutTimeUs = 0,
+            MediaStartSystemRelativeTimeHns = sourceTimeHns
         });
     }
 

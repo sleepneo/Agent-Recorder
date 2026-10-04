@@ -47,6 +47,9 @@ public sealed class CaptureConfig
     /// the quick, nested, screenshot-series, or unattended request paths.
     /// </summary>
     public bool RequireWindowSurface;
+    internal CaptureWritePaths? WritePaths;
+    internal WindowStorageSafety? StorageSafety;
+    internal bool StorageIntermediatePublication;
     public bool Microphone;
     public string? MicDevice;
     public string? MicDeviceName;
