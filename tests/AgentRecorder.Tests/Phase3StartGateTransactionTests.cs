@@ -4699,6 +4699,7 @@ public sealed class Phase3StartGateTransactionTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

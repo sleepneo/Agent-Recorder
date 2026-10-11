@@ -35,6 +35,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     private readonly TempRetentionPolicy _retentionPolicy;
     private IMicrophoneStatusProvider? _microphoneStatusProvider;
     private CaptureAuthorizationProof? _authorizationProof;
+    private readonly CancellationTokenSource _videoOnlyPublicationCancellation = new();
+    private readonly CancellationToken _videoOnlyPublicationToken;
 
     private int _audioPrematureExitCode;
     private string _audioPrematureStderr = "";
@@ -46,6 +48,10 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     // this TCS with the single final OutputMeta. All other concurrent callers
     // wait on the same task and receive the same result.
     private TaskCompletionSource<OutputMeta>? _convergenceTcs;
+    // Result arbitration can finish before the mux owner (a waiter timeout or
+    // pre-media cancellation). Path admission needs actual writer quiescence.
+    private int _outputSettled;
+    internal bool IsOutputSettled => Volatile.Read(ref _outputSettled) != 0;
 
     private static readonly TimeSpan VideoStopTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan VideoStabilizeTimeout = TimeSpan.FromSeconds(3);
@@ -85,6 +91,9 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
     /// </summary>
     internal bool ApplyContinuityCheck { get; set; } = true;
     internal IStagingToFinalPublisher FinalOutputPublisher { get; set; } = StagingToFinalPublisher.Instance;
+    // Uses the production structured prober; the seam permits deterministic
+    // media-probe faults without changing worker or convergence behavior.
+    internal IOutputProber VideoOnlyOutputProber { get; set; } = new FfmpegOutputProber();
 
     public event Action<FirstFrameObservation>? FirstFrameObserved;
     public event Action? AudioReady;
@@ -95,6 +104,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
 
     public AvSplitCaptureBackend(IAvWorkerFactory workerFactory, IExternalProcessRunner runner, TempRetentionPolicy retentionPolicy)
     {
+        _videoOnlyPublicationToken = _videoOnlyPublicationCancellation.Token;
         _workerFactory = workerFactory ?? throw new ArgumentNullException(nameof(workerFactory));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _retentionPolicy = retentionPolicy ?? throw new ArgumentNullException(nameof(retentionPolicy));
@@ -129,7 +139,11 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         var tempDir = cfg.WritePaths?.AvTempDirectory ?? CaptureWritePaths.ResolveAvTempDirectory();
         Directory.CreateDirectory(tempDir);
 
-        var recordingId = Path.GetFileNameWithoutExtension(_finalOutputPath) ?? "rec_unknown";
+        // Different approved directories may use the same final basename.
+        // Ordinary AV input ownership follows the trusted Run, not that basename.
+        var recordingId = cfg.StorageSafety?.IsFfmpegAvPublication == true
+            ? authorizationProof.RecordingId
+            : Path.GetFileNameWithoutExtension(_finalOutputPath) ?? "rec_unknown";
         _tempVideoPath = Path.Combine(tempDir, recordingId + "_video.mp4");
         _tempAudioPath = Path.Combine(tempDir, recordingId + "_audio.wav");
 
@@ -141,7 +155,14 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             _audioWorker.SetMicrophoneStatusProvider(cfg.IsMicrophone ? _microphoneStatusProvider : null);
             _audioWorker.AudioReady += OnAudioReady;
             _audioWorker.NaturalExit += OnAudioNaturalExit;
-            _audioWorker.Start(cfg, _tempAudioPath);
+            // Worker construction/endpoint setup can take time. Recheck immediately at physical start.
+            cfg.StorageSafety?.EnsureAdmission();
+            lock (_lock)
+            {
+                if (_concluded) return;
+                cfg.StorageSafety?.AbortToken.ThrowIfCancellationRequested();
+                _audioWorker.Start(cfg, _tempAudioPath);
+            }
         }
         // Video worker is started by the engine via StartVideo() after the
         // optional preparation/countdown phases. No-microphone recordings still
@@ -181,7 +202,13 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             catch { }
         };
         _videoWorker.NaturalExit += OnVideoNaturalExit;
-        _videoWorker.Start(cfg, tempVideoPath);
+        cfg.StorageSafety?.EnsureAdmission();
+        lock (_lock)
+        {
+            if (_concluded) return;
+            cfg.StorageSafety?.AbortToken.ThrowIfCancellationRequested();
+            _videoWorker.Start(cfg, tempVideoPath);
+        }
     }
 
     private void OnAudioReady()
@@ -320,6 +347,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             if (_completionMeta == null)
                 _abortReason = reason;
         }
+        CancelVideoOnlyPublication();
         return EnterConcludeCapture(0, "", invokeNaturalExit: true, abortReason: reason);
     }
 
@@ -403,6 +431,8 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             NormalizeTerminalOutputMeta(candidate, published: false);
         }
 
+        Volatile.Write(ref _outputSettled, 1);
+
         // The TCS is the single source of truth. The owner publishes its
         // candidate; if a waiter already arbitrated a timeout result, that
         // canonical result wins and the owner returns it too.
@@ -460,19 +490,32 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             }
         }
 
+        CancelVideoOnlyPublication();
+
         if (tcs != null && cancelMeta != null)
         {
             tcs.TrySetResult(cancelMeta);
         }
 
-        // Stop audio worker if it was started. Do not start/stop video worker
-        // when cancellation happens during warmup.
+        // Warmup has no video worker. During first-frame wait a video worker
+        // already exists: cancellation must stop that owned worker too, without
+        // constructing another worker or interfering with a convergence owner.
+        if (cancelMeta is not null)
+        {
+            try { _videoWorker?.Stop(); } catch { }
+            try { _videoWorker?.WaitForExit(VideoStopTimeout); } catch { }
+        }
         try { _audioWorker?.Stop(); } catch { }
         try { _audioWorker?.WaitForExit(AudioExitTimeout); } catch { }
 
-        // Delete temp files; do not run finalizer on cancellation.
-        TryDeleteTempFile(_tempVideoPath);
-        TryDeleteTempFile(_tempAudioPath);
+        // An in-flight video-only convergence owner still owns its source and
+        // diagnostic retention. First-event cancellation retains warmup cleanup.
+        if (cancelMeta != null || _cfg?.AudioRequested != false)
+        {
+            TryDeleteTempFile(_tempVideoPath);
+            TryDeleteTempFile(_tempAudioPath);
+        }
+        if (cancelMeta is not null) Volatile.Write(ref _outputSettled, 1);
     }
 
     public void OnNaturalExit(Action<int, OutputMeta> callback)
@@ -776,6 +819,7 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         meta.OutputPath = _finalOutputPath;
         if (!published)
         {
+            meta.PublicationReceipt = null;
             meta.OutputFileExists = false;
             meta.SizeBytes = 0;
             return;
@@ -785,10 +829,12 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         {
             var finalFile = new FileInfo(_finalOutputPath);
             meta.OutputFileExists = finalFile.Exists && finalFile.Length > 0;
-            meta.SizeBytes = finalFile.Exists ? finalFile.Length : 0;
+            if (!meta.OutputFileExists) meta.PublicationReceipt = null;
+            meta.SizeBytes = meta.PublicationReceipt?.Anchor.Length ?? (finalFile.Exists ? finalFile.Length : 0);
         }
         catch
         {
+            meta.PublicationReceipt = null;
             meta.OutputFileExists = false;
             meta.SizeBytes = 0;
         }
@@ -896,53 +942,21 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         var tempVideoPath = _tempVideoPath ?? "";
         var tempAudioPath = _tempAudioPath;
 
-        var video = FfmpegCaptureBackend.Probe(tempVideoPath);
-        video.StderrLog = videoStderr;
-        var audioExists = !string.IsNullOrEmpty(tempAudioPath) && File.Exists(tempAudioPath);
-
-        if (cfg?.AudioRequested != true || (!audioExists && cfg?.IsSystemLoopback != true))
+        // Only an explicit no-audio configuration may enter the silent path.
+        // Requested audio disappearing after WAV stability remains a failure
+        // in the existing audio finalizer; it never downgrades to video-only.
+        if (cfg?.AudioRequested == false)
         {
-            // No audio requested or available: just move/copy the video file.
-            // System loopback with missing audio must still go through the
-            // finalizer so it can report a proper mux failure rather than
-            // silently producing a video-only output.
-            try
-            {
-                if (cfg?.StorageSafety is { } safety)
-                {
-                    safety.EnsureRuntimeCapacity();
-                    if (!safety.TryCommit(() => File.Move(tempVideoPath, _finalOutputPath, overwrite: true), true))
-                        throw new StorageSafetyException(safety.FailureCode ?? WindowStorageSafety.UnavailableCode);
-                }
-                else
-                {
-                    if (File.Exists(_finalOutputPath)) File.Delete(_finalOutputPath);
-                    File.Move(tempVideoPath, _finalOutputPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                video.StderrLog = CombineStderr(combinedStderr, ex.Message);
-                video.Warnings = (video.Warnings ?? Array.Empty<string>())
-                    .Append("finalize_move_failed: " + ex.Message).ToArray();
-                return (video, false);
-            }
-            video.StderrLog = combinedStderr;
-            video.OutputPath = _finalOutputPath;
-            video.AudioStatus = "not_requested";
-            video.AudioContinuityStatus = "not_checked";
-            try
-            {
-                var finalFile = new FileInfo(_finalOutputPath);
-                video.SizeBytes = finalFile.Exists ? finalFile.Length : 0;
-                video.OutputFileExists = finalFile.Exists && finalFile.Length > 0;
-            }
-            catch
-            {
-                video.SizeBytes = 0;
-                video.OutputFileExists = false;
-            }
-            return (video, video.OutputFileExists && video.DurationSeconds > 0);
+            var silent = new AvFinalizer(_runner, AvFinalizer.DefaultMuxTimeout, FinalOutputPublisher, VideoOnlyOutputProber)
+                .FinalizeAsync(tempVideoPath, tempAudioPath ?? "", _finalOutputPath, null,
+                    AudioCaptureSourceKind.None, applyContinuityCheck: false, audioStderr: null,
+                    videoAnchorAvailable: null, audioAnchorAvailable: null,
+                    cancellationToken: _videoOnlyPublicationToken,
+                    storageSafety: cfg.StorageSafety).GetAwaiter().GetResult();
+            silent.Meta.AudioSourceKind = "none";
+            silent.Meta.StderrLog = CombineStderr(combinedStderr, silent.Stderr);
+            return (silent.Meta, silent.ExitCode == 0 && !silent.TimedOut &&
+                string.IsNullOrEmpty(silent.Error) && silent.Meta.OutputFileExists && silent.Meta.SizeBytes > 0);
         }
 
         // If the WASAPI helper already declared a terminal failure, do not run
@@ -1354,9 +1368,18 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         catch { }
     }
 
+    private void CancelVideoOnlyPublication()
+    {
+        if (_cfg?.AudioRequested != false) return;
+        try { _videoOnlyPublicationCancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
     public void Dispose()
     {
+        CancelVideoOnlyPublication();
         _audioWorker?.Dispose();
         _videoWorker?.Dispose();
+        _videoOnlyPublicationCancellation.Dispose();
     }
 }

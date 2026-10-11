@@ -275,7 +275,29 @@ public sealed class RecurringPlanProfileBindingTests
         bindings.Bind(draft.Id, profile.Reference, CreatedAt);
         Assert.Throws<SqliteException>(() => Execute(database.Store.DatabasePath, $"UPDATE {BindingTable} SET bound_at_utc = $boundAtUtc WHERE plan_id = $planId;", ("$planId", draft.Id), ("$boundAtUtc", CreatedAt.AddMinutes(1).Ticks)));
         Assert.Throws<SqliteException>(() => Execute(database.Store.DatabasePath, $"DELETE FROM {BindingTable} WHERE plan_id = $planId;", ("$planId", draft.Id)));
-        Assert.Throws<SqliteException>(() => Execute(database.Store.DatabasePath, BindingInsertSql, ("$planId", wrongReference.Id), ("$profileId", profile.ProfileId), ("$profileVersion", profile.ProfileVersion), ("$profileDigest", profile.ProfileDigest[..^1] + "0"), ("$boundAtUtc", CreatedAt.Ticks)));
+        var wrongDigest = CreateDifferentProfileDigest(profile.ProfileDigest);
+        Assert.NotEqual(profile.ProfileDigest, wrongDigest);
+        Assert.Throws<SqliteException>(() => Execute(database.Store.DatabasePath, BindingInsertSql, ("$planId", wrongReference.Id), ("$profileId", profile.ProfileId), ("$profileVersion", profile.ProfileVersion), ("$profileDigest", wrongDigest), ("$boundAtUtc", CreatedAt.Ticks)));
+    }
+
+    [Theory]
+    [InlineData('0', '1')]
+    [InlineData('1', '0')]
+    [InlineData('f', '0')]
+    public void DifferentProfileDigestPreservesDigestShapeAndAlwaysChangesValue(char originalLastDigit, char expectedLastDigit)
+    {
+        var prefix = RecurringFixedRegionProfileVersion.DigestPrefix;
+        var original = prefix + new string('a', 63) + originalLastDigit;
+
+        var changed = CreateDifferentProfileDigest(original);
+
+        Assert.NotEqual(original, changed);
+        Assert.StartsWith(prefix, changed);
+        Assert.Equal(original.Length, changed.Length);
+        Assert.Equal(prefix.Length + 64, changed.Length);
+        Assert.Matches("^[0-9a-f]{64}$", changed[prefix.Length..]);
+        Assert.Equal(original[..^1], changed[..^1]);
+        Assert.Equal(expectedLastDigit, changed[^1]);
     }
 
     [Fact]
@@ -452,6 +474,9 @@ public sealed class RecurringPlanProfileBindingTests
 
     private const string BindingTable = "recurring_plan_profile_bindings";
     private const string BindingInsertSql = "INSERT INTO recurring_plan_profile_bindings (plan_id, profile_id, profile_version, profile_digest, bound_at_utc) VALUES ($planId, $profileId, $profileVersion, $profileDigest, $boundAtUtc);";
+
+    private static string CreateDifferentProfileDigest(string digest) =>
+        digest[..^1] + (digest[^1] == '0' ? '1' : '0');
 
     private static PlanDefinition CreatePlan(string id, bool isOneTime) => new(id, isOneTime, CreatedAt);
 

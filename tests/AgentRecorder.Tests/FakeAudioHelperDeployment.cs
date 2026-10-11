@@ -18,7 +18,7 @@ internal sealed class FakeAudioHelperDeployment : IDisposable
     private readonly string _sourceDirectory;
     private bool _disposed;
 
-    public FakeAudioHelperDeployment(string ownerDirectory)
+    public FakeAudioHelperDeployment(string ownerDirectory, Action<string>? afterCopyForTests = null)
     {
         if (string.IsNullOrWhiteSpace(ownerDirectory))
             throw new ArgumentException("An owner directory is required.", nameof(ownerDirectory));
@@ -51,19 +51,30 @@ internal sealed class FakeAudioHelperDeployment : IDisposable
         Root = Path.Combine(ownerDirectory, "fake-audio-helper");
         Directory.CreateDirectory(Root);
 
+        try
+        {
         foreach (var sourcePath in Directory.EnumerateFiles(_sourceDirectory, "*", SearchOption.AllDirectories))
         {
             var relativePath = Path.GetRelativePath(_sourceDirectory, sourcePath);
             var destinationPath = Path.Combine(Root, relativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
             File.Copy(sourcePath, destinationPath, overwrite: false);
+            afterCopyForTests?.Invoke(destinationPath);
         }
 
         ExecutablePath = Path.Combine(Root, "AgentRecorder.AudioHelper.Fake.exe");
         if (!File.Exists(ExecutablePath))
         {
-            TestDirectoryCleanup.DeleteOwnedDirectory(Root);
             throw new FileNotFoundException("Private Fake AudioHelper executable was not deployed.", ExecutablePath);
+        }
+        }
+        catch (Exception original)
+        {
+            // No instance was handed to the owner; only this private partial copy
+            // belongs to us. Preserve both failures when bounded cleanup also fails.
+            try { TestDirectoryCleanup.DeleteOwnedDirectory(Root); }
+            catch (Exception cleanup) { throw new AggregateException("Fake helper deployment and cleanup failed.", original, cleanup); }
+            throw;
         }
     }
 

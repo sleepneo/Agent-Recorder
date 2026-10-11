@@ -40,6 +40,18 @@ public sealed class PlanExecutionStatusQueryTests
         Assert.Null(first.LatestOccurrence.OutputPath);
         Assert.False(first.LatestOccurrence.OutputPathRecorded);
         Assert.Null(first.LatestOccurrence.OutputFileExists);
+        var history = new PlanExecutionStatusQueryService(database.Store).GetHistory("once-1", Sid, Session, 20)!;
+        Assert.Null(Assert.Single(history.Items).OutputPath);
+        Assert.False(history.Items[0].OutputPathRecorded);
+        Assert.Null(history.Items[0].OutputFileExists);
+        using var ordinary = new SqliteOrdinaryRecordingHistoryStore(database.Store);
+        var unified = new UnifiedHistoryQueryService(database.Store, ordinary).GetPage(Sid, Session, 20, new("plan"));
+        var item = Assert.Single(unified.Items);
+        Assert.Equal("completed", item.OccurrenceStatus);
+        Assert.Equal("settled", item.RunStatus);
+        Assert.False(item.OutputPathRecorded);
+        Assert.Null(item.OutputPath);
+        Assert.Null(item.OutputFileExists);
 
         File.Delete(target);
         var reopenedStore = new SqliteOperationalStore(database.Store.DatabasePath);
@@ -80,6 +92,120 @@ public sealed class PlanExecutionStatusQueryTests
         Assert.Null(result.NextOccurrence.RunId);
         Assert.Null(result.NextOccurrence.Run);
         Assert.Equal(result.NextOccurrence, result.LatestOccurrence);
+    }
+
+    [Fact]
+    public void HistoryPagesBeyondStatusBoundUsesStableRowIdWatermarkAndReadsOnlyRequestedEvidence()
+    {
+        using var database = new TestDatabase();
+        SeedOwnedPlan(database.Store, "history-large", isOneTime: true);
+        for (var index = 0; index < 620; index++)
+            SeedOccurrence(database.Store, "history-large", $"history-{index:D4}", "scheduled", null, Created);
+
+        var query = new PlanExecutionStatusQueryService(database.Store);
+        var observedCandidates = new List<int>();
+        var observedValidated = new List<int>();
+        query.HistoryCandidateRowsSelectedForTests = observedCandidates.Add;
+        query.HistoryEvidenceRowsValidatedForTests = observedValidated.Add;
+        var first = query.GetHistory("history-large", Sid, Session, 100)!;
+        Assert.Equal(100, first.Items.Count);
+        Assert.Equal(100, observedValidated[^1]);
+        Assert.Equal(101, observedCandidates[^1]);
+        Assert.Equal(Enumerable.Range(0, 100).Select(index => $"history-{index:D4}"), first.Items.Select(item => item.OccurrenceId));
+
+        // A later insertion with an older window is outside the first-page watermark.
+        SeedOccurrence(database.Store, "history-large", "history-late-old-window", "scheduled", null, Created.AddDays(-1));
+        var ids = first.Items.Select(item => item.OccurrenceId).ToList();
+        var cursor = first.NextCursor;
+        while (cursor is not null)
+        {
+            var page = query.GetHistory("history-large", Sid, Session, 100, cursor)!;
+            Assert.InRange(page.Items.Count, 1, 100);
+            ids.AddRange(page.Items.Select(item => item.OccurrenceId));
+            cursor = page.NextCursor;
+        }
+        Assert.Equal(620, ids.Count);
+        Assert.Equal(620, ids.Distinct(StringComparer.Ordinal).Count());
+        Assert.DoesNotContain("history-late-old-window", ids);
+        Assert.All(observedValidated, count => Assert.InRange(count, 0, 100));
+        Assert.All(observedCandidates, count => Assert.InRange(count, 0, 101));
+    }
+
+    [Fact]
+    public void HistoryCursorIsBoundToPlanAndSessionAndQueryDoesNotMutateDatabase()
+    {
+        using var database = new TestDatabase();
+        SeedOwnedPlan(database.Store, "history-owned", isOneTime: true);
+        SeedOwnedPlan(database.Store, "history-other", isOneTime: true);
+        SeedOccurrence(database.Store, "history-owned", "history-a", "scheduled", null, Created);
+        SeedOccurrence(database.Store, "history-owned", "history-b", "scheduled", null, Created);
+        var before = ReadOperationalRows(database.Store);
+        var query = new PlanExecutionStatusQueryService(database.Store);
+        var first = query.GetHistory("history-owned", Sid, Session, 1)!;
+        Assert.NotNull(first.NextCursor);
+        Assert.Throws<PlanExecutionHistoryCursorException>(() => query.GetHistory("history-other", Sid, Session, 1, first.NextCursor));
+        Assert.Null(query.GetHistory("history-owned", Sid, "different-session", 1, first.NextCursor));
+        Assert.Throws<PlanExecutionHistoryCursorException>(() => query.GetHistory("history-owned", Sid, Session, 1, "bad.cursor"));
+        var reopened = new PlanExecutionStatusQueryService(new SqliteOperationalStore(database.Store.DatabasePath));
+        Assert.Equal("history-b", Assert.Single(reopened.GetHistory("history-owned", Sid, Session, 1, first.NextCursor)!.Items).OccurrenceId);
+        Assert.Equal(before, ReadOperationalRows(database.Store));
+    }
+
+    [Fact]
+    public void HistoryCursorFreezesMembershipButReadsMutableStateFromEachPageSnapshot()
+    {
+        using var database = new TestDatabase();
+        SeedOwnedPlan(database.Store, "history-mutable", isOneTime: true);
+        SeedOccurrence(database.Store, "history-mutable", "history-mutable-a", "scheduled", null, Created.AddMinutes(1));
+        SeedOccurrence(database.Store, "history-mutable", "history-mutable-b", "scheduled", null, Created);
+        var query = new PlanExecutionStatusQueryService(database.Store);
+        var first = query.GetHistory("history-mutable", Sid, Session, 1)!;
+        Assert.Equal("history-mutable-a", Assert.Single(first.Items).OccurrenceId);
+        Assert.NotNull(first.NextCursor);
+        Execute(database.Store, "UPDATE plan_occurrences SET status_code='missed', terminal_reason_code='window_elapsed', updated_at_utc=updated_at_utc+1, version=version+1 WHERE id='history-mutable-b';");
+        var second = query.GetHistory("history-mutable", Sid, Session, 1, first.NextCursor)!;
+        Assert.Equal("history-mutable-b", Assert.Single(second.Items).OccurrenceId);
+        Assert.Equal("missed", second.Items[0].Status);
+        Assert.Equal("window_elapsed", second.Items[0].TerminalReasonCode);
+    }
+
+    [Fact]
+    public void OwnedCorruptHistoryFailsClosedWhileForeignCorruptHistoryStaysHidden()
+    {
+        using var database = new TestDatabase();
+        SeedOwnedPlan(database.Store, "history-corrupt-owned", isOneTime: true);
+        SeedOwnedPlan(database.Store, "history-corrupt-foreign", isOneTime: true, sid: "S-1-5-21-foreign", session: "foreign-session");
+        SeedOccurrence(database.Store, "history-corrupt-owned", "history-owned-row", "scheduled", null, Created);
+        SeedOccurrence(database.Store, "history-corrupt-foreign", "history-foreign-row", "scheduled", null, Created);
+        Execute(database.Store, "PRAGMA ignore_check_constraints = ON; UPDATE plan_occurrences SET status_code = 'corrupt_status'; PRAGMA ignore_check_constraints = OFF;");
+        var query = new PlanExecutionStatusQueryService(database.Store);
+        Assert.Null(query.GetHistory("history-corrupt-foreign", Sid, Session, 10));
+        Assert.Equal("plan_status_data_invalid", Assert.Throws<Phase3PersistenceException>(() =>
+            query.GetHistory("history-corrupt-owned", Sid, Session, 10)).Code);
+    }
+
+    private static string ReadOperationalRows(SqliteOperationalStore store)
+    {
+        using var connection = store.OpenConnection();
+        var rows = new List<string>();
+        var tables = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) tables.Add(reader.GetString(0));
+        }
+        foreach (var table in tables)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT * FROM \"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\";";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                rows.Add(table + ":" + string.Join("|", Enumerable.Range(0, reader.FieldCount)
+                    .Select(index => Convert.ToString(reader.GetValue(index), System.Globalization.CultureInfo.InvariantCulture))));
+        }
+        rows.Sort(StringComparer.Ordinal);
+        return string.Join("\n", rows);
     }
 
     [Fact]
@@ -149,6 +275,10 @@ public sealed class PlanExecutionStatusQueryTests
         Assert.Null(result.LatestOccurrence.OutputPath);
         Assert.False(result.LatestOccurrence.OutputPathRecorded);
         Assert.Null(result.LatestOccurrence.OutputFileExists);
+        var history = new PlanExecutionStatusQueryService(database.Store).GetHistory("completed-settled-plan", Sid, Session, 20)!;
+        Assert.Null(Assert.Single(history.Items).OutputPath);
+        Assert.False(history.Items[0].OutputPathRecorded);
+        Assert.Null(history.Items[0].OutputFileExists);
     }
 
     [Fact]
@@ -276,7 +406,18 @@ public sealed class PlanExecutionStatusQueryTests
     {
         using var database = new TestDatabase();
         SeedOwnedPlan(database.Store, "ambiguous-plan", isOneTime: true);
-        InsertSetupIntent(database.Store, "second-setup", "ambiguous-plan", Sid, Session, "second-key");
+        // v23 rejects ambiguity during writes. Inject it only in this disposable
+        // corrupt fixture, restoring the exact trigger before exercising reads.
+        using (var connection = database.Store.OpenConnection())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT sql FROM sqlite_master WHERE name='trg_history_setup_intents_insert';";
+            var trigger = (string)command.ExecuteScalar()!;
+            command.CommandText = "DROP TRIGGER trg_history_setup_intents_insert;";
+            command.ExecuteNonQuery();
+            try { InsertSetupIntent(database.Store, "second-setup", "ambiguous-plan", Sid, Session, "second-key"); }
+            finally { command.CommandText = trigger; command.ExecuteNonQuery(); }
+        }
 
         var exception = Assert.Throws<Phase3PersistenceException>(() =>
             new PlanExecutionStatusQueryService(database.Store).Get("ambiguous-plan", Sid, Session));
@@ -482,7 +623,12 @@ public sealed class PlanExecutionStatusQueryTests
         using (var connection = store.OpenConnection())
         using (var command = connection.CreateCommand())
         {
-            command.CommandText = "DROP TABLE recording_run_output_evidence; DELETE FROM schema_migrations WHERE version = 16;";
+            foreach (var index in SqliteSchemaV29.Indexes.Concat(SqliteSchemaV28.Indexes))
+            {
+                command.CommandText = $"DROP INDEX {index.Name};";
+                command.ExecuteNonQuery();
+            }
+            command.CommandText = "DELETE FROM schema_migrations WHERE version = 29; DELETE FROM schema_migrations WHERE version = 28; DROP TABLE recording_run_output_evidence; DELETE FROM schema_migrations WHERE version = 16;";
             command.ExecuteNonQuery();
         }
 
@@ -495,9 +641,16 @@ public sealed class PlanExecutionStatusQueryTests
 
     private sealed class TestDatabase : IDisposable
     {
+        private readonly string? _previousTemp = Environment.GetEnvironmentVariable("TEMP");
+        private readonly string? _previousTmp = Environment.GetEnvironmentVariable("TMP");
         internal TestDatabase()
         {
-            Root = Path.Combine(Path.GetTempPath(), "AgentRecorderPlanStatus_" + Guid.NewGuid().ToString("N"));
+            var testTempRoot = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".local-data", "temp", "task310");
+            testTempRoot = Path.GetFullPath(testTempRoot);
+            Directory.CreateDirectory(testTempRoot);
+            Environment.SetEnvironmentVariable("TEMP", testTempRoot, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable("TMP", testTempRoot, EnvironmentVariableTarget.Process);
+            Root = Path.Combine(testTempRoot, Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Root);
             Store = new SqliteOperationalStore(Path.Combine(Root, SqliteOperationalStore.DatabaseFileName));
             Store.Initialize();
@@ -509,6 +662,8 @@ public sealed class PlanExecutionStatusQueryTests
         public void Dispose()
         {
             try { Directory.Delete(Root, recursive: true); } catch { }
+            Environment.SetEnvironmentVariable("TEMP", _previousTemp, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable("TMP", _previousTmp, EnvironmentVariableTarget.Process);
         }
     }
 }

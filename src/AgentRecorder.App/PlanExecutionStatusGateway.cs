@@ -5,7 +5,7 @@ using AgentRecorder.Persistence;
 
 namespace AgentRecorder.App;
 
-internal sealed class PlanExecutionStatusGateway : IPlanExecutionStatusGateway
+internal sealed class PlanExecutionStatusGateway : IPlanExecutionStatusGateway, IPlanExecutionHistoryGateway
 {
     private readonly PlanExecutionStatusQueryService _query;
 
@@ -35,6 +35,26 @@ internal sealed class PlanExecutionStatusGateway : IPlanExecutionStatusGateway
                 snapshot.OccurrenceCount,
                 Map(snapshot.NextOccurrence),
                 Map(snapshot.LatestOccurrence));
+    }
+
+    public PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor)
+    {
+        string? sid;
+        try { sid = WindowsIdentity.GetCurrent().User?.Value; }
+        catch { sid = null; }
+
+        PlanExecutionHistoryPageSnapshot? snapshot;
+        try { snapshot = _query.GetHistory(planId, sid, CaptureAuthorizationSessionBinding.Current, limit, cursor); }
+        catch (PlanExecutionHistoryCursorException exception) { throw new ArgumentException("The history cursor is invalid.", exception); }
+        return snapshot is null
+            ? null
+            : new PlanExecutionHistoryPageState(snapshot.PlanId, snapshot.Kind,
+                snapshot.Items.Select(item => new PlanExecutionHistoryItemState(
+                    item.OccurrenceId, item.CreatedAtUtc, item.WindowStartUtc, item.WindowEndUtc,
+                    item.Status, item.TerminalReasonCode, item.RunId,
+                    item.Run is null ? null : new PlanExecutionRunState(item.Run.RunId, item.Run.Status, item.Run.TerminalReasonCode),
+                    item.ExecutionStatusCode, item.OutputPath, item.OutputPathRecorded, item.OutputFileExists)).ToArray(),
+                snapshot.NextCursor);
     }
 
     private static PlanExecutionOccurrenceState? Map(PlanExecutionStatusOccurrenceSnapshot? occurrence) =>

@@ -12,9 +12,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="AgentRecorder.Capture" />
+    <InternalsVisibleTo Include="AgentRecorder.Core" />
     <InternalsVisibleTo Include="AgentRecorder.App" />
     <InternalsVisibleTo Include="AgentRecorder.Cli" />
     <InternalsVisibleTo Include="AgentRecorder.Tests" />
+    <InternalsVisibleTo Include="AgentRecorder.Persistence" />
   </ItemGroup>
 
 </Project>

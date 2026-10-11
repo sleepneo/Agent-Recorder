@@ -19,7 +19,9 @@ public sealed class RecordingBundleSnapshot
     {
         Status = status ?? throw new ArgumentNullException(nameof(status));
         Path = path;
-        Contents = contents ?? Array.Empty<RecordingBundleContentItem>();
+        var copy = (contents ?? Array.Empty<RecordingBundleContentItem>()).Take(6).ToArray();
+        if (copy.Length > 5) throw new ArgumentException("At most five bundle outputs are supported.", nameof(contents));
+        Contents = Array.AsReadOnly(copy);
         ErrorCode = errorCode;
     }
 

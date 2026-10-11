@@ -35,14 +35,14 @@ public sealed class SqliteOperationalStoreTests
     }
 
     [Fact]
-    public void SchemaV21ContainsRecordingEvidenceRequiredOnceFutureWindowAndProfileManagementTables()
+    public void SchemaV23ContainsOrdinaryHistoryAndPlanLocator()
     {
         using var database = new TemporaryDatabase();
         database.Store.Initialize();
 
         using var connection = database.Store.OpenConnection();
         Assert.Equal(
-            new[] { "authorized_capture_scopes", "consent_leases", "fixed_region_profile_create_idempotency", "fixed_region_profile_directory", "future_window_authorizations", "lease_uses", "plan_occurrences", "plans", "recording_run_output_evidence", "recording_runs", "recurring_advancement_operations", "recurring_consent_leases", "recurring_fixed_region_profile_versions", "recurring_lease_local_approvals", "recurring_lease_uses", "recurring_occurrence_execution_specs", "recurring_occurrence_slots", "recurring_plan_profile_bindings", "recurring_schedule_cursors", "recurring_schedule_versions", "recurring_setup_preparations", "required_once_authorized_specs", "required_once_execution_authorizations", "required_once_setup_intents", "schema_migrations", "setup_intents", "standing_lease_safety_operations", "unattended_safety_state" },
+            new[] { "authorized_capture_scopes", "consent_leases", "fixed_region_profile_create_idempotency", "fixed_region_profile_directory", "future_window_authorizations", "lease_uses", "ordinary_bundle_contents", "ordinary_bundle_contents_boundary", "ordinary_bundle_contents_items", "ordinary_bundle_identity", "ordinary_bundle_identity_boundary", "ordinary_bundle_identity_items", "ordinary_publication_anchors", "ordinary_recording_bundles", "ordinary_recording_history", "ordinary_recording_target_boundary", "ordinary_recording_targets", "ordinary_recording_window_targets", "ordinary_window_target_boundary", "plan_history_locator", "plan_occurrences", "plans", "recording_run_output_evidence", "recording_runs", "recurring_advancement_operations", "recurring_consent_leases", "recurring_fixed_region_profile_versions", "recurring_lease_local_approvals", "recurring_lease_uses", "recurring_occurrence_execution_specs", "recurring_occurrence_slots", "recurring_plan_profile_bindings", "recurring_schedule_cursors", "recurring_schedule_versions", "recurring_setup_preparations", "required_once_authorized_specs", "required_once_execution_authorizations", "required_once_setup_intents", "schema_migrations", "setup_intents", "standing_lease_safety_operations", "unattended_safety_state" },
             GetTables(connection).OrderBy(name => name));
 
         Assert.Equal(new[]
@@ -57,6 +57,15 @@ public sealed class SqliteOperationalStoreTests
         }, GetColumnsInDeclarationOrder(connection, "future_window_authorizations"));
 
         Assert.Equal(new[] { "version", "name", "definition_checksum", "applied_at_utc" }, GetColumnsInDeclarationOrder(connection, "schema_migrations"));
+        Assert.Equal(new[]
+        {
+            "recording_id", "history_sequence", "created_at_utc", "status_code", "source_type", "capture_semantics",
+            "source_title", "requested_duration_seconds", "audio_mode", "microphone_device_id", "microphone_device_name",
+            "system_audio_endpoint_id", "system_audio_endpoint_name", "output_path", "nested_role", "parent_recording_id",
+            "nested_session_id", "profile_id", "profile_version", "profile_digest", "started_at_utc", "completed_at_utc",
+            "reason_code", "output_size_bytes", "output_duration_ms", "updated_at_utc"
+        }, GetColumnsInDeclarationOrder(connection, "ordinary_recording_history"));
+        Assert.Contains("idx_ordinary_recording_history_created", GetExplicitIndexes(connection, "ordinary_recording_history"));
         Assert.Equal(new[] { "id", "is_one_time", "status_code", "created_at_utc", "updated_at_utc", "version" }, GetColumnsInDeclarationOrder(connection, "plans"));
         Assert.Equal(new[] { "id", "plan_id", "status_code", "window_start_utc", "window_end_utc", "run_id", "terminal_reason_code", "created_at_utc", "updated_at_utc", "version" }, GetColumnsInDeclarationOrder(connection, "plan_occurrences"));
         Assert.Equal(new[] { "id", "occurrence_id", "status_code", "has_crossed_start_commit", "media_artifact_id", "bundle_id", "terminal_reason_code", "created_at_utc", "updated_at_utc", "version" }, GetColumnsInDeclarationOrder(connection, "recording_runs"));
@@ -254,7 +263,7 @@ public sealed class SqliteOperationalStoreTests
     }
 
     [Fact]
-    public void MigrationsV1ThroughV21AreRecordedOnceAndRepeatedInitializationIsANoOp()
+    public void MigrationsV1ThroughV23AreRecordedOnceAndRepeatedInitializationIsANoOp()
     {
         using var database = new TemporaryDatabase();
         database.Store.Initialize();
@@ -265,7 +274,7 @@ public sealed class SqliteOperationalStoreTests
         var second = ReadMigration(database.Store);
 
         Assert.Equal(first, second);
-        Assert.Equal(21, second.Count);
+        Assert.Equal(SqliteOperationalStore.CurrentSchemaVersion, second.Count);
         Assert.Equal((1, "schema_v1_operational_domain"), (second[0].Version, second[0].Name));
         Assert.Equal((2, "schema_v2_authorized_capture_scopes"), (second[1].Version, second[1].Name));
         Assert.Equal(SqliteSchemaV1.Migrations.Single().Checksum, second[0].Checksum);
@@ -308,9 +317,32 @@ public sealed class SqliteOperationalStoreTests
         Assert.Equal(SqliteSchemaV20.Migrations.Single().Checksum, second[19].Checksum);
         Assert.Equal((21, "schema_v21_fixed_region_profile_management"), (second[20].Version, second[20].Name));
         Assert.Equal(SqliteSchemaV21.Migrations.Single().Checksum, second[20].Checksum);
+        Assert.Equal((22, "schema_v22_ordinary_recording_history"), (second[21].Version, second[21].Name));
+        Assert.Equal(SqliteSchemaV22.Migrations.Single().Checksum, second[21].Checksum);
         using (var modeConnection = database.Store.OpenConnection())
             Assert.Equal("disabled", ScalarString(modeConnection, "SELECT unattended_mode_code FROM unattended_safety_state WHERE state_id = 'global';"));
         Assert.Equal(firstBytes, File.ReadAllBytes(database.Store.DatabasePath));
+    }
+
+    [Fact]
+    public void V21DatabaseUpgradesAdditiveHistoryAndReopensWithoutChangingExistingRows()
+    {
+        using var database = new TemporaryDatabase();
+        CreatePreloadedSchemaThroughV21(database.Store);
+        using (var before = OpenRawConnection(database.Store.DatabasePath))
+            Execute(before, "INSERT INTO plans(id, is_one_time, status_code, created_at_utc, updated_at_utc, version) VALUES ('legacy-plan', 1, 'active', 1000, 1000, 0);");
+
+        database.Store.Initialize();
+        var afterUpgrade = File.ReadAllBytes(database.Store.DatabasePath);
+        database.Store.Initialize();
+
+        using (var verification = database.Store.OpenConnection())
+        {
+            Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, ScalarInt64(verification, "SELECT MAX(version) FROM schema_migrations;"));
+            Assert.Equal(1L, ScalarInt64(verification, "SELECT COUNT(*) FROM plans WHERE id = 'legacy-plan';"));
+            Assert.Equal(0L, ScalarInt64(verification, "SELECT COUNT(*) FROM ordinary_recording_history;"));
+        }
+        Assert.Equal(afterUpgrade, File.ReadAllBytes(database.Store.DatabasePath));
     }
 
     [Fact]
@@ -801,8 +833,9 @@ public sealed class SqliteOperationalStoreTests
 
         using var connection = database.Store.OpenConnection();
         Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, ScalarInt64(connection, "SELECT COUNT(*) FROM schema_migrations;"));
-        Assert.Equal(27, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
+        Assert.Equal(41, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
         Assert.Contains("lease_uses", GetTables(connection));
+        Assert.Contains("ordinary_recording_history", GetTables(connection));
     }
 
     [Fact]
@@ -985,6 +1018,20 @@ public sealed class SqliteOperationalStoreTests
             (19, "schema_v19_future_window_one_shot", "d06ea5108551af24ec3ce12cfde986f37b7d4ccbd3a3eaf446ffc0d36b02ad76"),
             (20, "schema_v20_future_window_30_minute_duration", "f614b995ad6e3aa5504fd1da5b80076e60fe1b70cc87208488ad7dc7a06cc43e"),
             (21, "schema_v21_fixed_region_profile_management", "bc9b43603cedb067ce33e62cb4110c5779609a00af17086a631dba5c4573c34b"),
+            (22, "schema_v22_ordinary_recording_history", "16724c936346743a8706ebca471e8ce2a47fc01d7e7e7d4a7ec75bc5ca5b5deb"),
+            (23, "schema_v23_indexed_unified_history", "38f9eb5e64665c42beaf366187359b6bded9c4f5bf409f6143ef2b08b7887d07"),
+            (24, "schema_v24_ordinary_history_status_filter", "f3416cd534bef531da6ef4782f171e901243a437b0aa374922c5d61c0176c93e"),
+            (25, "schema_v25_ordinary_history_parent_reference", "67593a68f47a292736305488562badfe2656c3eef45d8c88c2298db9a4427a5a"),
+            (26, "schema_v26_ordinary_history_profile_filter", "8eaf8a5fd54d4a826367d13089f641be8fa7f24ef686b902647085766c99af9d"),
+            (27, "schema_v27_history_source_type_plan_filter", "28a44c823d64070e21d0e9b36115f323cf0516e4569cb5a9c2ae6b8545225fcb"),
+            (28, "schema_v28_retention_shared_output_path", "4fcbe4b92a92634c8c418f512a005079cde42ea57678136f50ba517f93a2d24a"),
+            (29, "schema_v29_retention_planned_output_path", "838d28e05e07cf315eb7f8c0708e7b59dc6d466dacd63d36878f4941d8f29300"),
+            (30, SqliteSchemaV30.MigrationName, SqliteSchemaV30.MigrationChecksum),
+            (31, "schema_v31_ordinary_bundle_history", "e3105eefad82884651c430b5a9412e71e9f4094231f94de01293538210604146"),
+            (32, "schema_v32_ordinary_screen_target", "b9040e1b954fcfd34c29f058049a7147a0610b0d0b502843e8d93bd7c7507952"),
+            (33, "schema_v33_ordinary_bundle_contents", "5c6d8b87ed8746296bedf6d8c5c39807f4108de86e278b87600b26696fc205ec"),
+            (34, SqliteSchemaV34.MigrationName, SqliteSchemaV34.MigrationChecksum),
+            (35, SqliteSchemaV35.MigrationName, SqliteSchemaV35.MigrationChecksum),
         };
 
         var actual = SqliteSchemaCatalog.Migrations
@@ -1351,6 +1398,22 @@ public sealed class SqliteOperationalStoreTests
         }
     }
 
+    private static void CreatePreloadedSchemaThroughV21(SqliteOperationalStore store)
+    {
+        using var connection = OpenRawConnection(store.DatabasePath);
+        foreach (var migration in SqliteSchemaCatalog.Migrations.Where(migration => migration.Version <= 21))
+        {
+            Execute(connection, migration.Definition);
+            Execute(
+                connection,
+                "INSERT INTO schema_migrations(version, name, definition_checksum, applied_at_utc) VALUES ($version, $name, $checksum, $appliedAtUtc);",
+                ("$version", migration.Version),
+                ("$name", migration.Name),
+                ("$checksum", migration.Checksum),
+                ("$appliedAtUtc", 1000L + migration.Version));
+        }
+    }
+
     private static void InsertV19FutureWindowAuthorizationStates(SqliteConnection connection)
     {
         foreach (var status in new[] { "pending", "active", "used", "revoked", "expired", "blocked", "failed", "completed" })
@@ -1452,6 +1515,7 @@ public sealed class SqliteOperationalStoreTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

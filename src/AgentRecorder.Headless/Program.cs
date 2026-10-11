@@ -9,12 +9,25 @@ using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
+using AgentRecorder.Persistence;
 using AgentRecorder.Windows;
 
 namespace AgentRecorder.Headless;
 
 internal static class Program
 {
+    internal static IObservationHealthGateway CreateObservationHealthGateway(ApiServer server,RuntimeReadiness readiness,
+        string dataDirectory,ObservationHealthProbes? probes=null)
+    {
+        var directory=Path.GetFullPath(dataDirectory);
+        var window=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar));
+        var display=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar));
+        var region=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.RegionBackendEnvVar));
+        ObservationHealthOwner Owner()=>new(server.ReadRuntimeObservation(),readiness.ReadObservation(),directory,
+            new(false,false,null,"always",false,0),new(false,false,null,"while_recording",false,0),DateTimeOffset.UtcNow,window,display,region);
+        return new ObservationHealthGateway(Owner,probes,_=>Task.FromResult(Owner()),Owner);
+    }
+
     private static readonly ManualResetEventSlim _exitSignal = new(false);
     private static readonly object _shutdownLock = new();
     private static int _shutdownStarted;
@@ -27,6 +40,7 @@ internal static class Program
     private static SingleInstanceGuard? _instanceGuard;
     private static FfmpegPrewarmer? _ffmpegPrewarmer;
     private static RecordingPerformanceTracer? _perfTracer;
+    private static SqliteOrdinaryRecordingHistoryStore? _ordinaryRecordingHistory;
     private const string DefaultShutdownEventName = "AgentRecorder.Headless.Shutdown";
 
     // Windows console APIs: optional signal handling and console detach.
@@ -46,6 +60,8 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--internal-storage-capacity-probe")
+            return WindowsStorageCapacityProbe.Run();
         // Start timing as early as possible.
         _readiness = new RuntimeReadiness("headless", ApiServer.Port);
 
@@ -302,6 +318,18 @@ internal static class Program
         var perfTracer = new RecordingPerformanceTracer(_dataDir);
         _perfTracer = perfTracer;
 
+        var operationalStore = new SqliteOperationalStore();
+        operationalStore.Initialize();
+        var ordinaryRecordingHistory = new SqliteOrdinaryRecordingHistoryStore(
+            operationalStore,
+            (recordingId, errorType) => audit.Log("recording.history_write_failed", new
+            {
+                recording_id = recordingId,
+                exception_type = errorType
+            }));
+        ordinaryRecordingHistory.RecoverIncomplete(DateTimeOffset.UtcNow);
+        _ordinaryRecordingHistory = ordinaryRecordingHistory;
+
         // Production microphone device provider: owned by the engine and shared
         // with /audio/devices, /permissions, and /capabilities via the engine
         // reference. Keeps a short TTL cache so multiple API calls within a few
@@ -318,6 +346,7 @@ internal static class Program
             micProvider,
             micStatusProvider,
             systemAudioEndpointProvider: systemAudioEndpointProvider);
+        engine.ConfigureOrdinaryRecordingHistory(ordinaryRecordingHistory);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 
@@ -328,7 +357,15 @@ internal static class Program
 
         var ensureContextStore = new EnsureContextStore(_dataDir);
         var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(_dataDir);
-        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider);
+        var unifiedHistoryQuery = new UnifiedHistoryQueryService(operationalStore, ordinaryRecordingHistory, ordinaryOnly: true);
+        Func<(string Sid, string Session)> historyIdentity = () => (System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty,
+            CaptureAuthorizationSessionBinding.Current);
+        var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider,
+            unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity),
+            retentionPreviewGateway: new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, _dataDir), historyIdentity),
+            artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)));
+
+        server.SetObservationHealthGateway(CreateObservationHealthGateway(server,_readiness!,_dataDir));
 
         _engine = engine;
         _server = server;
@@ -412,8 +449,23 @@ internal static class Program
             _readiness = null;
             _instanceGuard = null;
 
-            try { engine?.StopAllSync("service_exit"); } catch { }
-            try { server?.Stop(); } catch { }
+            if (server is not null && engine is not null && _ordinaryRecordingHistory is not null)
+            {
+                try
+                {
+                    HostRecordingShutdown.Stop(server, engine, _ordinaryRecordingHistory, "service_exit",
+                        audit is null ? null : (eventName, payload) => audit.Log(eventName, payload));
+                    _ordinaryRecordingHistory = null;
+                }
+                catch { }
+            }
+            else
+            {
+                try { server?.Stop(); } catch { }
+                try { engine?.ShutdownForHost("service_exit"); } catch { }
+                try { _ordinaryRecordingHistory?.Dispose(); } catch { }
+                _ordinaryRecordingHistory = null;
+            }
             try { _exitSignal.Set(); } catch { }
             try { _perfTracer?.Dispose(); } catch { }
 

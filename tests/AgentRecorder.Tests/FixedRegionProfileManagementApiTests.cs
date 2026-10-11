@@ -437,7 +437,13 @@ public sealed class FixedRegionProfileManagementApiTests : IDisposable
             tray.CapturedCallback!(ConfirmationDecision.Approve());
             await countdownGateReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Equal(0, backend.StartCalls);
-            var statusJson = JsonDocument.Parse(JsonSerializer.Serialize(engine.GetStatus(data.GetProperty("recording_id").GetString()!)));
+            var recordingId = data.GetProperty("recording_id").GetString()!;
+            // The pre-start failure hook signals immediately before the
+            // engine publishes its failed terminal state. Wait on the engine's
+            // lifecycle condition instead of racing that final publication.
+            var terminalWait = engine.GetCreationRecordingWait(recordingId, 10_000);
+            var statusJson = JsonDocument.Parse(JsonSerializer.Serialize(terminalWait.GetType()
+                .GetProperty("Recording")!.GetValue(terminalWait)));
             Assert.Equal("failed", statusJson.RootElement.GetProperty("status").GetString());
             Assert.Equal(profile.ProfileId, statusJson.RootElement.GetProperty("profile_ref").GetProperty("id").GetString());
             var effectiveOutputPath = statusJson.RootElement.GetProperty("output").GetProperty("path").GetString()!;

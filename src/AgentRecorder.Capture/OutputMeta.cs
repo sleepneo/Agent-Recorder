@@ -6,6 +6,8 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class OutputMeta
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal PublicationReceipt? PublicationReceipt { get; set; }
     public long SizeBytes; public double DurationSeconds;
     public int Width; public int Height; public int Fps;
     public string? StderrLog;

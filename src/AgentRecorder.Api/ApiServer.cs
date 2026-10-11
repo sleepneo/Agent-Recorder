@@ -16,6 +16,7 @@ using AgentRecorder.Core;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
+using AgentRecorder.Persistence;
 using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 
@@ -44,6 +45,47 @@ public sealed class ApiServer
     private readonly IStandingPlanSetupGateway? _standingPlanSetupGateway;
     private readonly IRecurringPlanSetupGateway? _recurringPlanSetupGateway;
     private readonly IPlanExecutionStatusGateway? _planExecutionStatusGateway;
+    private readonly IPlanExecutionHistoryGateway? _planExecutionHistoryGateway;
+    private readonly IUnifiedHistoryGateway? _unifiedHistoryGateway;
+    private readonly IRetentionPreviewGateway? _retentionPreviewGateway;
+    private readonly IOrdinaryArtifactCheckGateway? _artifactCheckGateway;
+    private IObservationHealthGateway? _observationHealth;
+    internal void SetObservationHealthGateway(IObservationHealthGateway gateway)=>_observationHealth=gateway;
+    private ObservationHealthSnapshot PartialHealth(HealthProbeState state)
+    {
+        var owner=UnavailableObservationHealthGateway.Instance.CaptureOwner() with {Api=ReadRuntimeObservation(),Readiness=_readiness?.ReadObservation()};
+        return ObservationHealthSnapshot.Partial(owner,state);
+    }
+    private string GetHealth(string requestId)
+    {
+        try
+        {
+            using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            ObservationHealthSnapshot snapshot;
+            try
+            {
+                snapshot=_observationHealth is null?PartialHealth(HealthProbeState.NotChecked):
+                    _observationHealth.ReadAsync(requestCancellation.Token).WaitAsync(TimeSpan.FromSeconds(3),requestCancellation.Token).GetAwaiter().GetResult();
+            }
+            finally
+            {
+                // The outer HTTP deadline must cancel too, even when a provider's
+                // own deadline continuation has not run yet. Its quota stays owned.
+                try {requestCancellation.Cancel();} catch { }
+            }
+            return ApiResponse.Ok(ObservationHealthResponse.From(snapshot),requestId);
+        }
+        catch(TimeoutException) { return SafePartialHealth(HealthProbeState.Timeout,requestId); }
+        catch { return SafePartialHealth(HealthProbeState.Failed,requestId); }
+    }
+    private string SafePartialHealth(HealthProbeState state,string requestId)
+    {
+        // Guard mapping, serialization and runtime observation as well as the provider.
+        // Nothing from this endpoint is allowed to reach the generic raw-exception fallback.
+        try {return ApiResponse.Ok(ObservationHealthResponse.From(_observationHealth?.PartialSnapshot(state)??PartialHealth(state)),requestId);}
+        catch {return ApiResponse.Ok(ObservationHealthResponse.From(ObservationHealthSnapshot.Partial(
+            UnavailableObservationHealthGateway.Instance.CaptureOwner(),state)),requestId);}
+    }
     private readonly IRequiredOncePlanSetupGateway? _requiredOncePlanSetupGateway;
     private readonly IFutureWindowOneShotGateway? _futureWindowOneShotGateway;
     private readonly IFixedRegionProfileManagementGateway? _profileManagementGateway;
@@ -52,9 +94,9 @@ public sealed class ApiServer
     private CancellationTokenSource _cts = new();
     private Task? _loopTask;
     private int _started;
+    private int _acceptingStopped;
     private int _stopped;
-    private readonly TaskCompletionSource<object?> _stopCompleted =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Action? BeforeStopClientDrainWaitForTests { get; set; }
 
     private SelectedRegionState? _lastSelectedRegion;
     private readonly object _regionLock = new();
@@ -73,11 +115,15 @@ public sealed class ApiServer
         IPlanExecutionStatusGateway? planExecutionStatusGateway = null,
         IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null,
         IFutureWindowOneShotGateway? futureWindowOneShotGateway = null,
-        IFixedRegionProfileManagementGateway? profileManagementGateway = null)
+        IFixedRegionProfileManagementGateway? profileManagementGateway = null,
+        IPlanExecutionHistoryGateway? planExecutionHistoryGateway = null,
+        IUnifiedHistoryGateway? unifiedHistoryGateway = null,
+        IRetentionPreviewGateway? retentionPreviewGateway = null,
+        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
             planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
-            profileManagementGateway, null)
+            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway)
     {
     }
 
@@ -95,7 +141,11 @@ public sealed class ApiServer
         IRequiredOncePlanSetupGateway? requiredOncePlanSetupGateway = null,
         IFutureWindowOneShotGateway? futureWindowOneShotGateway = null,
         IFixedRegionProfileManagementGateway? profileManagementGateway = null,
-        IFixedRegionProfileDisplayEnvironmentProvider? profileDisplayEnvironmentProvider = null)
+        IFixedRegionProfileDisplayEnvironmentProvider? profileDisplayEnvironmentProvider = null,
+        IPlanExecutionHistoryGateway? planExecutionHistoryGateway = null,
+        IUnifiedHistoryGateway? unifiedHistoryGateway = null,
+        IRetentionPreviewGateway? retentionPreviewGateway = null,
+        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -110,12 +160,31 @@ public sealed class ApiServer
         _standingPlanSetupGateway = standingPlanSetupGateway;
         _recurringPlanSetupGateway = recurringPlanSetupGateway;
         _planExecutionStatusGateway = planExecutionStatusGateway;
+        _planExecutionHistoryGateway = planExecutionHistoryGateway;
+        _unifiedHistoryGateway = unifiedHistoryGateway;
+        _retentionPreviewGateway = retentionPreviewGateway;
+        _artifactCheckGateway = artifactCheckGateway;
         _requiredOncePlanSetupGateway = requiredOncePlanSetupGateway;
         _futureWindowOneShotGateway = futureWindowOneShotGateway;
         _profileManagementGateway = profileManagementGateway;
         _profileDisplayEnvironmentProvider = profileDisplayEnvironmentProvider ??
             SystemQueryFixedRegionProfileDisplayEnvironmentProvider.Instance;
         _lastSelectedRegion = RegionSelectionStateStore.Load();
+    }
+
+    public static string BuildVersion => ProductVersion;
+    // These are the same backend support facts advertised by capabilities, not device probes.
+    private const bool MicrophoneBackendSupported = true, SystemAudioBackendSupported = true;
+    public ApiRuntimeObservation ReadRuntimeObservation()
+    {
+        lock (_lifecycleGate)
+        {
+            var state = _stopped != 0 || _acceptingStopped != 0 ? ApiListenerState.Stopped
+                : _started != 0 ? ApiListenerState.Listening : ApiListenerState.NotStarted;
+            return new(ProductVersion, _tray.HostMode, Environment.ProcessId, state,
+                state == ApiListenerState.Listening ? ((IPEndPoint)_listener.LocalEndpoint).Port : null,
+                MicrophoneBackendSupported, SystemAudioBackendSupported);
+        }
     }
 
     internal int BoundPort => _started == 0
@@ -144,7 +213,7 @@ public sealed class ApiServer
         {
             if (_started != 0)
                 throw new InvalidOperationException("ApiServer has already been started.");
-            if (_stopped != 0)
+            if (_stopped != 0 || _acceptingStopped != 0)
                 throw new InvalidOperationException("ApiServer has already been stopped.");
             _listener.Start();
             _loopTask = Task.Run(() => Loop(_cts.Token));
@@ -152,45 +221,76 @@ public sealed class ApiServer
         }
     }
 
-    public void Stop()
+    public void StopAccepting()
     {
-        Task? loopTask;
-        var ownsStop = false;
         lock (_lifecycleGate)
         {
-            if (_stopped == 0)
-            {
-                Volatile.Write(ref _stopped, 1);
-                ownsStop = true;
-                try { _cts.Cancel(); } catch { }
-                try { _listener.Stop(); } catch { }
-            }
+            if (Interlocked.Exchange(ref _acceptingStopped, 1) != 0) return;
+            try { _cts.Cancel(); } catch { }
+            try { _listener.Stop(); } catch { }
+        }
+    }
+
+    public void Stop() => StopCore(Timeout.InfiniteTimeSpan);
+
+    public bool Stop(TimeSpan timeout) => StopCore(timeout);
+
+    private bool StopCore(TimeSpan timeout)
+    {
+        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        Task? loopTask;
+        StopAccepting();
+        lock (_lifecycleGate)
+        {
+            Volatile.Write(ref _stopped, 1);
             loopTask = _loopTask;
         }
-        if (!ownsStop)
-        {
-            _stopCompleted.Task.GetAwaiter().GetResult();
-            return;
-        }
 
-        try
-        {
-            try { loopTask?.GetAwaiter().GetResult(); } catch { }
+        // Close currently accepted sockets immediately. The accept loop may
+        // have won a final Accept concurrently with StopAccepting, so take a
+        // second snapshot after the loop has actually exited.
+        CloseActiveClientsAndSnapshot(out _);
+        if (loopTask is not null && !WaitForTask(loopTask, Remaining(timeout, startedAt)))
+            return false;
 
-            Task[] clients;
-            TcpClient[] active;
-            lock (_clientTaskGate)
-            {
-                clients = _clientTasks.ToArray();
-                active = _activeClients.ToArray();
-            }
-            foreach (var client in active)
-            {
-                try { client.Dispose(); } catch { }
-            }
-            try { Task.WhenAll(clients).GetAwaiter().GetResult(); } catch { }
+        CloseActiveClientsAndSnapshot(out var clients);
+        BeforeStopClientDrainWaitForTests?.Invoke();
+        return WaitForTask(Task.WhenAll(clients), Remaining(timeout, startedAt));
+    }
+
+    private void CloseActiveClientsAndSnapshot(out Task[] clients)
+    {
+        TcpClient[] active;
+        lock (_clientTaskGate)
+        {
+            clients = _clientTasks.ToArray();
+            active = _activeClients.ToArray();
         }
-        finally { _stopCompleted.TrySetResult(null); }
+        foreach (var client in active)
+        {
+            try { client.Dispose(); } catch { }
+        }
+    }
+
+    private static TimeSpan Remaining(TimeSpan timeout, long startedAt)
+    {
+        if (timeout == Timeout.InfiniteTimeSpan) return timeout;
+        var remaining = timeout - System.Diagnostics.Stopwatch.GetElapsedTime(startedAt);
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+
+    private static bool WaitForTask(Task task, TimeSpan timeout)
+    {
+        if (task.IsCompleted) return true;
+        if (timeout == Timeout.InfiniteTimeSpan)
+        {
+            try { task.GetAwaiter().GetResult(); } catch { }
+            return task.IsCompleted;
+        }
+        try { return task.Wait(timeout); }
+        catch { return task.IsCompleted; }
     }
 
     private async Task Loop(CancellationToken ct)
@@ -241,10 +341,24 @@ public sealed class ApiServer
 
                 if (RequiresAuth(method, path))
                 {
-                    ApiKeyAuth.ValidateHeader(request.Headers.GetValueOrDefault("x-agent-recorder-key"));
+                    var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
+                    if(method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)))
+                    {
+                        // The new diagnostic endpoint requires authentication even in an
+                        // unconfigured host. Preserve the shared validator and existing codes.
+                        if(!ApiKeyAuth.IsEnabled) throw new ApiException(401,"UNAUTHORIZED","API key is required.");
+                        try {ApiKeyAuth.ValidateHeader(key);}
+                        catch(ApiException ex) when(ex.Status==403)
+                        {throw new ApiException(401,"FORBIDDEN","Invalid API key");}
+                    }
+                    else ApiKeyAuth.ValidateHeader(key);
                 }
 
-                var responseBody = Route(method, path, request, body, reqId, out int status, out var responseHeaders);
+                using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                var disconnect=method=="GET" && IsArtifactCheckPath(path)?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
+                string responseBody; int status; Dictionary<string,string> responseHeaders;
+                try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
+                finally { requestCancellation.Cancel(); await disconnect; }
                 await WriteJson(stream, status, responseBody, responseHeaders);
             }
             catch (ApiException ex)
@@ -260,6 +374,34 @@ public sealed class ApiServer
         {
             try { client.Dispose(); } catch { }
         }
+    }
+
+    private static bool IsArtifactCheckPath(string path)=>path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)&&
+        path.EndsWith("/artifacts/check",StringComparison.Ordinal);
+    internal Action<bool>? ArtifactTransportObservedForTests { get; set; }
+    private async Task MonitorArtifactDisconnect(TcpClient client,CancellationTokenSource cancellation)
+    {
+        var peek=new byte[1];
+        try
+        {
+            while(!cancellation.IsCancellationRequested)
+            {
+                // Read readiness includes a peer's send-only FIN. Peek without consuming
+                // bytes: zero is EOF, not evidence that the peer abandoned its receive side.
+                // Only a confirmed connection error cancels; ambiguous graceful Close
+                // remains bounded by the artifact service's existing total deadline.
+                var socket=client.Client;
+                var sendEof=socket.Poll(0,SelectMode.SelectRead)&&socket.Receive(peek,SocketFlags.Peek)==0;
+                ArtifactTransportObservedForTests?.Invoke(sendEof);
+                await Task.Delay(50,cancellation.Token).ConfigureAwait(false);
+            }
+        }
+        catch(OperationCanceledException){ }
+        catch(SocketException ex) when(ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted
+            or SocketError.NetworkReset or SocketError.NotConnected or SocketError.Shutdown)
+        {try {cancellation.Cancel();}catch(ObjectDisposedException){ }}
+        catch(ObjectDisposedException) { } // API Stop has its own linked cancellation.
+        catch { } // An observation failure alone does not prove the peer cannot receive.
     }
 
     private static async Task WriteJson(Stream stream, int status, string body, IReadOnlyDictionary<string, string>? responseHeaders = null)
@@ -392,13 +534,13 @@ public sealed class ApiServer
         if (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE")
             return true;
 
-        var sensitivePaths = new[] { "/api/v1/recordings", "/api/v1/confirmations", "/api/v1/plan-setups", "/api/v1/plans", "/api/v1/future-window-authorizations", "/api/v1/profiles" };
+        var sensitivePaths = new[] { "/api/v1/health", "/api/v1/recordings", "/api/v1/recording-history", "/api/v1/history", "/api/v1/retention", "/api/v1/confirmations", "/api/v1/plan-setups", "/api/v1/plans", "/api/v1/future-window-authorizations", "/api/v1/profiles" };
         return sensitivePaths.Any(p => path.StartsWith(p));
     }
 
     private string Route(string method, string path, HttpRequest req,
                          string reqBody, string reqId, out int status,
-                         out Dictionary<string, string> responseHeaders)
+                         out Dictionary<string, string> responseHeaders, CancellationToken cancellation = default)
     {
         status = 200;
         responseHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -410,6 +552,9 @@ public sealed class ApiServer
         {
             case ("GET", "/capabilities"):
                 return ApiResponse.Ok(Capabilities(), reqId);
+
+            case ("GET", "/health"):
+                return GetHealth(reqId);
 
             case ("GET", "/permissions"):
                 return ApiResponse.Ok(Permissions(), reqId);
@@ -443,12 +588,29 @@ public sealed class ApiServer
 
             case ("GET", "/recordings"):
                 return ApiResponse.Ok(new { recordings = _engine.List() }, reqId);
+
+            case ("GET", "/history"):
+                return GetUnifiedHistory(req, reqId);
+
+            case ("GET", "/retention/preview"):
+                return GetRetentionPreview(req, reqId);
+
+            case ("GET", "/recording-history"):
+                if (req.Query.Keys.Any(key => key is not ("limit" or "cursor")))
+                    throw new ApiException(400, "INVALID_ARGUMENT", "Only limit and cursor query parameters are supported.");
+                return GetOrdinaryRecordingHistory(req, reqId);
         }
 
         if (TryRouteFixedRegionProfiles(sub, method, req, reqBody, reqId, ref status, responseHeaders, out var profileResponse))
             return profileResponse;
 
         var seg = sub.Trim('/').Split('/');
+
+        if (seg.Length == 4 && seg[0] == "recording-history" && seg[2] == "artifacts" && seg[3] == "check" && method == "GET")
+            return GetOrdinaryArtifactsCheck(seg[1], req, reqId, cancellation);
+
+        if (seg.Length == 2 && seg[0] == "recording-history" && method == "GET")
+            return GetOrdinaryRecordingHistoryDetail(seg[1], reqId);
 
         if (seg.Length >= 1 && seg[0] == "plan-setups" && method == "GET")
         {
@@ -533,6 +695,12 @@ public sealed class ApiServer
 
         if (seg.Length >= 1 && seg[0] == "plans" && method == "GET")
         {
+            if (seg.Length == 3 && seg[2] == "history")
+            {
+                if (req.Query.Keys.Any(key => key is not ("limit" or "cursor")))
+                    throw new ApiException(400, "INVALID_ARGUMENT", "Only limit and cursor query parameters are supported.");
+                return GetPlanExecutionHistory(seg[1], req, reqId);
+            }
             if (seg.Length != 3 || seg[2] != "status")
                 throw new ApiException(404, "PLAN_NOT_FOUND", "The requested plan was not found.");
             return GetPlanExecutionStatus(seg[1], reqId);
@@ -581,6 +749,277 @@ public sealed class ApiServer
         throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint: " + sub);
     }
 
+    private static DateTimeOffset ParseExplicitUtcTime(string value)
+    {
+        if (value != value.Trim() || !System.Text.RegularExpressions.Regex.IsMatch(value,
+                @"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|\+00:00|-00:00)$") ||
+            !DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) || date.Offset != TimeSpan.Zero)
+            throw new ApiException(400, "INVALID_ARGUMENT", "Times must be explicit UTC timestamps with seconds.");
+        return date.ToUniversalTime();
+    }
+
+    private string GetRetentionPreview(HttpRequest request, string requestId)
+    {
+        if (request.Query.Keys.Any(key => key is not ("completed_before" or "limit" or "cursor")) ||
+            !request.Query.TryGetValue("completed_before", out var rawBefore))
+            throw new ApiException(400, "INVALID_ARGUMENT", "Only completed_before, limit and cursor are supported; completed_before is required.");
+        var before = ParseExplicitUtcTime(rawBefore);
+        var limit = 20;
+        if (before > DateTimeOffset.UtcNow || request.Query.TryGetValue("limit", out var rawLimit) &&
+            (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100))
+            throw new ApiException(400, "INVALID_ARGUMENT", "The cutoff cannot be in the future; limit must be between 1 and 100.");
+        var gateway = _retentionPreviewGateway ?? throw new ApiException(503, "RETENTION_PREVIEW_UNAVAILABLE", "Retention preview is not configured.");
+        RetentionPreviewPage page;
+        try { page = gateway.GetPage(limit, before, request.Query.GetValueOrDefault("cursor")); }
+        catch (UnifiedHistoryArgumentException)
+        { throw new ApiException(400, "INVALID_ARGUMENT", "The preview arguments or cursor are invalid."); }
+        catch (Exception)
+        { throw new ApiException(503, "RETENTION_PREVIEW_UNAVAILABLE", "Retention preview is temporarily unavailable."); }
+        return ApiResponse.Ok(new
+        {
+            items = page.Items.Select(e => new
+            {
+                entry_id = e.EntryId, recording_id = e.RecordingId, status = e.Status,
+                completed_at_utc = e.CompletedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
+                evaluation = e.Evaluation, reason_code = e.ReasonCode, age_candidate = e.AgeCandidate,
+                recorded_path = e.RecordedPath, recorded_bytes = e.RecordedBytes, observed_file_bytes = e.ObservedFileBytes
+            }),
+            next_cursor = page.NextCursor, page_size = page.PageSize,
+            completed_before = page.CompletedBefore.ToString("O", CultureInfo.InvariantCulture),
+            evaluated_count = page.EvaluatedCount, age_candidate_count = page.AgeCandidateCount,
+            observed_candidate_bytes = page.ObservedCandidateBytes, observed_candidate_file_count = page.ObservedCandidateFileCount,
+            unknown_candidate_file_count = page.UnknownCandidateFileCount, observed_bytes_complete = page.UnknownCandidateFileCount == 0,
+            bytes_scope = "current_page_age_candidates_mp4_logical_length", read_only = true,
+            deletion_supported = false, reference_protection_ready = false, physical_identity_protection_ready = false,
+            snapshot = "membership_watermarks_states_and_file_samples_live_per_page", bundle_included = false
+        }, requestId);
+    }
+
+    private string GetUnifiedHistory(HttpRequest request, string requestId)
+    {
+        var allowed = new[] { "limit", "source", "created_from", "created_before", "cursor", "status", "profile_id", "profile_version", "source_type", "plan_id", "target_key" };
+        if (request.Query.Keys.Any(k => !allowed.Contains(k, StringComparer.Ordinal)))
+            throw new ApiException(400, "INVALID_ARGUMENT", "Unsupported history query parameter.");
+        var limit = 20;
+        if (request.Query.TryGetValue("limit", out var rawLimit) &&
+            (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100))
+            throw new ApiException(400, "INVALID_ARGUMENT", "History limit must be between 1 and 100.");
+        DateTimeOffset? ParseTime(string name)
+        {
+            if (!request.Query.TryGetValue(name, out var value)) return null;
+            return ParseExplicitUtcTime(value);
+        }
+        long? profileVersion = null;
+        if (request.Query.TryGetValue("profile_version", out var rawVersion))
+        {
+            if (!long.TryParse(rawVersion, NumberStyles.None, CultureInfo.InvariantCulture, out var version) || version <= 0)
+                throw new ApiException(400, "INVALID_ARGUMENT", "History profile version must be a positive decimal Int64.");
+            profileVersion = version;
+        }
+        var filters = new UnifiedHistoryFilters(request.Query.GetValueOrDefault("source") ?? "all",
+            ParseTime("created_from"), ParseTime("created_before"), request.Query.GetValueOrDefault("status"),
+            request.Query.GetValueOrDefault("profile_id"), profileVersion,
+            request.Query.GetValueOrDefault("source_type"), request.Query.GetValueOrDefault("plan_id"), request.Query.GetValueOrDefault("target_key"));
+        if (!filters.HasValidStatus || !filters.HasValidProfile || !filters.HasValidSourceType || !filters.HasValidPlanId || !filters.HasValidTargetKey || filters.Source is not ("all" or "ordinary" or "plan" or "future_window") ||
+            filters.CreatedFrom is { } from && filters.CreatedBefore is { } before && from >= before)
+            throw new ApiException(400, "INVALID_ARGUMENT", "History source, status, or creation-time interval is invalid.");
+        var gateway = _unifiedHistoryGateway ?? throw new ApiException(503, "HISTORY_UNAVAILABLE", "Unified history is not configured.");
+        if (filters.Source != "all" && !gateway.SupportedSources.Contains(filters.Source))
+            throw new ApiException(400, "INVALID_ARGUMENT", "The requested history source is not supported by this host.");
+        UnifiedHistoryPage page;
+        try { page = gateway.GetPage(limit, filters, request.Query.GetValueOrDefault("cursor")) ?? throw new InvalidDataException("History page is unavailable."); }
+        catch (UnifiedHistoryArgumentException)
+        { throw new ApiException(400, "INVALID_ARGUMENT", "The history arguments or cursor are invalid."); }
+        catch (Exception)
+        { throw new ApiException(503, "HISTORY_UNAVAILABLE", "Unified history is temporarily unavailable."); }
+        return ApiResponse.Ok(new
+        {
+            items = page.Items.Select(item => new
+            {
+                entry_id = item.EntryId, source = item.Source, entry_kind = item.EntryKind,
+                created_at_utc = item.CreatedAtUtc.ToString("O", CultureInfo.InvariantCulture),
+                recording_id = item.RecordingId, plan_id = item.PlanId, occurrence_id = item.OccurrenceId,
+                source_type = item.Source == "ordinary" ? item.SourceType : null,
+                target_key = item.Source == "ordinary" ? item.TargetKey : null,
+                profile_id = item.Source == "ordinary" ? item.ProfileId : null,
+                profile_version = item.Source == "ordinary" ? item.ProfileVersion : null,
+                authorization_id = item.AuthorizationId, run_id = item.RunId,
+                status = item.Status, reason_code = item.ReasonCode,
+                authorization_status = item.AuthorizationStatus, occurrence_status = item.OccurrenceStatus,
+                run_status = item.RunStatus, run_reason_code = item.RunReasonCode,
+                execution_status_code = item.ExecutionStatusCode,
+                output_path = item.OutputPath, output_path_recorded = item.OutputPathRecorded,
+                output_file_exists = item.OutputFileExists, output_size_bytes = item.OutputSizeBytes,
+                output_duration_seconds = item.OutputDurationSeconds,
+                bundle = item.Source == "ordinary" ? HistoryBundleObject(item.Bundle) : null,
+                started_at_utc = item.StartedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
+                completed_at_utc = item.CompletedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
+                window_start_utc = item.WindowStartUtc?.ToString("O", CultureInfo.InvariantCulture),
+                window_end_utc = item.WindowEndUtc?.ToString("O", CultureInfo.InvariantCulture)
+            }).ToArray(),
+            next_cursor = page.NextCursor, page_size = page.PageSize,
+            filters = new
+            {
+                source = page.Filters.Source, status = page.Filters.Status,
+                profile_id = page.Filters.ProfileId, profile_version = page.Filters.ProfileVersion,
+                source_type = page.Filters.SourceType, plan_id = page.Filters.PlanId, target_key = page.Filters.TargetKey,
+                created_from = page.Filters.CreatedFrom?.ToString("O", CultureInfo.InvariantCulture),
+                created_before = page.Filters.CreatedBefore?.ToString("O", CultureInfo.InvariantCulture)
+            }
+        }, requestId);
+    }
+
+    private string GetOrdinaryRecordingHistory(HttpRequest request, string requestId)
+    {
+        var store = _engine.OrdinaryRecordingHistory ?? throw new ApiException(503,
+            "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is not configured.");
+        var limitText = request.Query.GetValueOrDefault("limit");
+        int limit;
+        if (limitText is null) limit = 20;
+        else if (!int.TryParse(limitText, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100)
+            throw new ApiException(400, "INVALID_ARGUMENT", "limit must be an integer between 1 and 100.");
+        var cursor = request.Query.GetValueOrDefault("cursor");
+        try
+        {
+            var page = store.ReadPage(limit, cursor);
+            return ApiResponse.Ok(new
+            {
+                scope = "ordinary_video",
+                items = page.Items.Select(item => HistoryEntryObject(item, includeFileMetadata: false)).ToArray(),
+                next_cursor = page.NextCursor,
+                page_size = limit
+            }, requestId);
+        }
+        catch (ArgumentException)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "The history cursor or page limit is invalid.");
+        }
+        catch (OrdinaryRecordingHistoryUnavailableException)
+        {
+            throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is temporarily unavailable.");
+        }
+        catch (SqliteOperationalStoreException)
+        {
+            throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is temporarily unavailable.");
+        }
+    }
+
+    private string GetOrdinaryRecordingHistoryDetail(string recordingId, string requestId)
+    {
+        var store = _engine.OrdinaryRecordingHistory ?? throw new ApiException(503,
+            "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is not configured.");
+        try
+        {
+            var item = store.Read(Uri.UnescapeDataString(recordingId));
+            if (item is null) throw new ApiException(404, "RECORDING_HISTORY_NOT_FOUND", "No ordinary recording history entry exists for this id.");
+            return ApiResponse.Ok(new { recording = HistoryEntryObject(item, includeFileMetadata: true) }, requestId);
+        }
+        catch (ArgumentException)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "The recording history id is invalid.");
+        }
+        catch (OrdinaryRecordingHistoryUnavailableException)
+        {
+            throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is temporarily unavailable.");
+        }
+        catch (SqliteOperationalStoreException)
+        {
+            throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is temporarily unavailable.");
+        }
+    }
+
+    private string GetOrdinaryArtifactsCheck(string recordingId,HttpRequest request,string requestId,CancellationToken cancellation)
+    {
+        if(request.Query.Count!=0)throw new ApiException(400,"INVALID_ARGUMENT","Artifact checks do not accept query parameters.");
+        try {recordingId=Uri.UnescapeDataString(recordingId);OrdinaryArtifactCheckService.ValidateRecordingId(recordingId);}
+        catch(ArgumentException){throw new ApiException(400,"INVALID_ARGUMENT","The recording history id is invalid.");}
+        if(_artifactCheckGateway is null)throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Artifact checks are not configured.");
+        try
+        {
+            var result=_artifactCheckGateway.ReadAsync(recordingId,cancellation).GetAwaiter().GetResult();
+            if(result is null)throw new ApiException(404,"RECORDING_HISTORY_NOT_FOUND","No ordinary recording history entry exists for this id.");
+            object Item(OrdinaryArtifactFileCheck item)=>new {
+                name=item.Name,recorded_size_bytes=item.RecordedSizeBytes,observed_size_bytes=item.ObservedSizeBytes,
+                observation=item.Observation,reason_code=item.ReasonCode,sampled_at_utc=item.SampledAtUtc,identity_state=item.IdentityState };
+            return ApiResponse.Ok(new {
+                recording_id=result.RecordingId,check_started_at_utc=result.CheckStartedAtUtc,check_completed_at_utc=result.CheckCompletedAtUtc,
+                probe_state=result.ProbeState,media_history_status=result.MediaHistoryStatus,media=Item(result.Media),
+                bundle=new {history_status=result.Bundle.HistoryStatus,contents_evidence_version=result.Bundle.ContentsEvidenceVersion,
+                    contents=result.Bundle.Contents?.Select(Item).ToArray()},
+                read_only=true,metadata_only=true,content_verified=false,deletion_supported=false,
+                observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot" },requestId);
+        }
+        catch(ApiException){throw;}
+        catch {throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Artifact history is temporarily unavailable.");}
+    }
+
+    private static object? HistoryBundleObject(OrdinaryRecordingBundleSnapshot? bundle) => bundle is null ? null : new
+    {
+        status = bundle.Status, path = bundle.Path, error_code = bundle.ErrorCode,
+        contents_evidence_version = bundle.ContentsEvidence is null ? (int?)null : RecordingBundleContentsEvidence.EvidenceVersion,
+        contents = bundle.ContentsEvidence?.Contents.Select(item => new {
+            name = item.Name, media_type = item.MediaType, size_bytes = item.SizeBytes }).ToArray()
+    };
+
+    private static object HistoryEntryObject(OrdinaryRecordingHistorySnapshot item, bool includeFileMetadata) => new
+    {
+        recording_id = item.RecordingId,
+        created_at = item.CreatedAtUtc.ToString("O", CultureInfo.InvariantCulture),
+        status = item.Status,
+        source_type = item.SourceType,
+        target_key = item.TargetKey,
+        capture_semantics = item.CaptureSemantics,
+        source_title = item.SourceTitle,
+        requested_duration_seconds = item.RequestedDurationSeconds,
+        audio = new
+        {
+            mode = item.AudioMode,
+            microphone_device_id = item.MicrophoneDeviceId,
+            microphone_device_name = item.MicrophoneDeviceName,
+            system_endpoint_id = item.SystemAudioEndpointId,
+            system_endpoint_name = item.SystemAudioEndpointName
+        },
+        output_path = item.OutputPath,
+        output_size_bytes = item.OutputSizeBytes,
+        output_duration_seconds = item.OutputDurationSeconds,
+        bundle = HistoryBundleObject(item.Bundle),
+        output_file = includeFileMetadata ? ReadOutputFileMetadata(item.OutputPath) : null,
+        started_at = item.StartedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
+        completed_at = item.CompletedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
+        reason_code = item.ReasonCode,
+        nested = item.NestedRole is null ? null : new
+        {
+            role = item.NestedRole,
+            parent_recording_id = item.ParentRecordingId,
+            session_id = item.NestedSessionId
+        },
+        profile_ref = item.ProfileId is null ? null : new
+        {
+            id = item.ProfileId,
+            version = item.ProfileVersion,
+            digest = item.ProfileDigest
+        }
+    };
+
+    private static object ReadOutputFileMetadata(string outputPath)
+    {
+        try
+        {
+            var file = new FileInfo(outputPath);
+            file.Refresh();
+            return new
+            {
+                exists = file.Exists,
+                size_bytes = file.Exists ? file.Length : (long?)null,
+                last_write_time_utc = file.Exists ? file.LastWriteTimeUtc.ToString("O", CultureInfo.InvariantCulture) : null
+            };
+        }
+        catch
+        {
+            return new { exists = false, size_bytes = (long?)null, last_write_time_utc = (string?)null };
+        }
+    }
+
     private static ApiException FutureWindowNotFound() =>
         new(404, "FUTURE_WINDOW_AUTHORIZATION_NOT_FOUND", "The future-window authorization was not found.");
 
@@ -625,6 +1064,58 @@ public sealed class ApiServer
             occurrence_count = state.OccurrenceCount,
             next_occurrence = PlanExecutionOccurrenceObject(state.NextOccurrence),
             latest_occurrence = PlanExecutionOccurrenceObject(state.LatestOccurrence)
+        }, requestId);
+    }
+
+    private string GetPlanExecutionHistory(string planId, HttpRequest request, string requestId)
+    {
+        if (string.IsNullOrWhiteSpace(planId) || planId.Length > 128 || planId != planId.Trim() ||
+            !planId.All(character => character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.'))
+            throw new ApiException(400, "INVALID_ARGUMENT", "plan_id is not a valid plan identifier.");
+        var limitText = request.Query.GetValueOrDefault("limit");
+        var limit = 20;
+        if (limitText is not null && (!int.TryParse(limitText, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100))
+            throw new ApiException(400, "INVALID_ARGUMENT", "limit must be an integer between 1 and 100.");
+        var cursor = request.Query.GetValueOrDefault("cursor");
+        if (cursor is { Length: 0 or > 1024 })
+            throw new ApiException(400, "INVALID_ARGUMENT", "The history cursor is invalid.");
+        var gateway = _planExecutionHistoryGateway;
+        if (gateway is null)
+            throw new ApiException(503, "PLAN_HISTORY_UNAVAILABLE", "Durable plan execution history is unavailable.");
+
+        PlanExecutionHistoryPageState? page;
+        try { page = gateway.GetPage(planId, limit, cursor); }
+        catch (ArgumentException)
+        {
+            throw new ApiException(400, "INVALID_ARGUMENT", "The history cursor or page limit is invalid.");
+        }
+        catch
+        {
+            throw new ApiException(503, "PLAN_HISTORY_UNAVAILABLE", "Durable plan execution history is unavailable.");
+        }
+        if (page is null) throw new ApiException(404, "PLAN_NOT_FOUND", "The requested plan was not found.");
+        return ApiResponse.Ok(new
+        {
+            plan_id = page.PlanId,
+            kind = page.Kind,
+            items = page.Items.Select(item => new
+            {
+                occurrence_id = item.OccurrenceId,
+                created_at_utc = item.CreatedAtUtc.ToString("O", CultureInfo.InvariantCulture),
+                window_start_utc = item.WindowStartUtc.ToString("O", CultureInfo.InvariantCulture),
+                window_end_utc = item.WindowEndUtc.ToString("O", CultureInfo.InvariantCulture),
+                occurrence_status = item.Status,
+                occurrence_reason_code = item.TerminalReasonCode,
+                run_id = item.RunId,
+                run_status = item.Run?.Status,
+                run_reason_code = item.Run?.TerminalReasonCode,
+                execution_status_code = item.ExecutionStatusCode,
+                output_path = item.OutputPath,
+                output_path_recorded = item.OutputPathRecorded,
+                output_file_exists = item.OutputFileExists
+            }).ToArray(),
+            next_cursor = page.NextCursor,
+            page_size = limit
         }, requestId);
     }
 
@@ -2868,6 +3359,16 @@ public sealed class ApiServer
                     value_name = autoStartInfo?.ValueName ?? WindowsAutoStartManager.DefaultValueName
                 }
             },
+            plan_execution_history = new
+            {
+                supported = _planExecutionHistoryGateway is not null,
+                endpoint = "/api/v1/plans/{plan_id}/history",
+                default_limit = 20,
+                min_limit = 1,
+                max_limit = 100,
+                supported_kinds = new[] { "once", "daily", "weekly" },
+                read_only = true
+            },
             ffmpeg = new
             {
                 resolved = ffmpegResolved,
@@ -2885,8 +3386,8 @@ public sealed class ApiServer
                 audio = new[] { "microphone", "system_audio" },
                 audio_capabilities = new
                 {
-                    microphone = new { supported = true, status = GetFreshMicrophoneAvailability() },
-                    system_audio = new { supported = true, status = systemAudioAvailability }
+                    microphone = new { supported = MicrophoneBackendSupported, status = GetFreshMicrophoneAvailability() },
+                    system_audio = new { supported = SystemAudioBackendSupported, status = systemAudioAvailability }
                 },
                 window_surface = new
                 {
@@ -2942,6 +3443,81 @@ public sealed class ApiServer
                     max_concurrent = 2,
                     roles = new[] { "outer", "inner" }
                 }
+            },
+            health = new { endpoint = "/api/v1/health", requires_api_key = true, read_only = true },
+            unified_history = new
+            {
+                supported = _unifiedHistoryGateway is not null,
+                endpoint = "/api/v1/history",
+                supported_sources = _unifiedHistoryGateway?.SupportedSources ?? Array.Empty<string>(),
+                page_size_default = 20,
+                page_size_min = 1,
+                page_size_max = 100,
+                filters = new[] { "source", "created_from", "created_before", "status", "profile_id", "profile_version", "source_type", "plan_id", "target_key" },
+                source_type_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                supported_source_types = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? UnifiedHistoryFilterCodes.SourceTypes : Array.Empty<string>(),
+                plan_id_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("plan") == true ? new[] { "plan" } : Array.Empty<string>(),
+                source_type_match = "exact_persisted_recording_category",
+                plan_id_match = "exact_case_sensitive_plan_id_with_current_server_ownership",
+                target_key_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                target_key_source_types = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "display", "region", "fixed_region_profile", "window" } : Array.Empty<string>(),
+                target_key_match = "exact_frozen_screen_target_v1",
+                target_key_window_supported = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true,
+                target_key_window_semantics = "window_surface",
+                target_key_window_match = "exact_frozen_window_facts_v1",
+                bundle_contents_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                bundle_contents_evidence_version = 1,
+                bundle_contents_max = 5,
+                bundle_contents_semantics = "recorded_generation_bytes_not_current_file_identity",
+                profile_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                profile_version_requires_profile_id = true,
+                profile_match = "exact_persisted_id_and_optional_version",
+                status_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                supported_statuses = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? OrdinaryRecordingHistoryStatusCodes.Supported : Array.Empty<string>(),
+                timeline = "immutable_task_creation_time",
+                sort = "created_at_utc DESC, source BINARY ASC, source_local_id BINARY ASC",
+                pagination = "keyset_insert_watermarks",
+                snapshot = "membership_frozen_states_live_per_page",
+                read_only = true,
+                ownership = "host_ordinary_directory_and_current_server_sid_session",
+                captures_media = false,
+                mutates_authorization = false
+            },
+            retention_preview = new
+            {
+                supported = _retentionPreviewGateway is not null, endpoint = "/api/v1/retention/preview",
+                read_only = true, deletion_supported = false, reference_protection_ready = false,
+                physical_identity_protection_ready = false, scope = "host_data_directory_videos_ordinary_mp4",
+                page_size_default = 20, page_size_min = 1, page_size_max = 100,
+                age_basis = "completed_at_utc_exclusive_cutoff", evaluated_candidates_per_page_max = 100,
+                path_length_max = AgentRecorder.Persistence.RetentionPreviewQueryService.MaxPathLength,
+                path_components_max = AgentRecorder.Persistence.RetentionPreviewQueryService.MaxPathComponents,
+                attribute_checks_per_entry_max = AgentRecorder.Persistence.RetentionPreviewQueryService.MaxAttributeChecksPerEntry,
+                bundle_included = false, directory_enumeration = false,
+                bytes_scope = "current_page_age_candidates_mp4_logical_length",
+                pagination = "unified_history_keyset_insert_watermarks", file_samples_snapshot = false
+            },
+            recording_history = new
+            {
+                supported = _engine.OrdinaryRecordingHistory is not null,
+                scope = "ordinary_video",
+                cross_restart_readable = _engine.OrdinaryRecordingHistory is not null,
+                pagination = "keyset",
+                page_size_default = 20,
+                page_size_max = 100,
+                list_endpoint = "/api/v1/recording-history",
+                detail_endpoint = "/api/v1/recording-history/{recording_id}",
+                auto_execution_supported = false,
+                screenshot_series_supported = false
+            },
+            ordinary_artifact_check = new
+            {
+                supported = _artifactCheckGateway is not null,
+                endpoint = "/api/v1/recording-history/{recording_id}/artifacts/check",
+                scope = "ordinary_video", max_files = 6, max_distinct_ancestors = 64, deadline_ms = 3000,
+                metadata_only = true, content_verification = false, deletion_supported = false,
+                observation_semantics = "sequential_point_in_time_metadata_not_atomic_snapshot",
+                identity_scope = "media_and_five_bundle_publication_anchors"
             },
             chapter_marks = new
             {

@@ -1239,13 +1239,14 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         long finalSize;
         try
         {
-            finalSize = new FileInfo(cfg.OutputPath).Length;
+            finalSize = publish.Receipt is not null ? publish.FinalSizeBytes : new FileInfo(cfg.OutputPath).Length;
         }
         catch
         {
             finalSize = publish.FinalSizeBytes;
         }
 
+        probeMeta.PublicationReceipt = cfg.StorageIntermediatePublication ? null : publish.Receipt;
         probeMeta.OutputPath = cfg.OutputPath;
         probeMeta.SizeBytes = finalSize;
         probeMeta.OutputFileExists = true;
@@ -1418,6 +1419,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         OutputMeta? context = null)
     {
         var meta = context ?? new OutputMeta();
+        meta.PublicationReceipt = null;
         meta.OutputPath = cfg?.OutputPath;
         meta.Container = "mp4";
         meta.Codec = "h264";

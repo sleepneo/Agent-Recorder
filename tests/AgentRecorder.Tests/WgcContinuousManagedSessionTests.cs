@@ -481,6 +481,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             string tmpPath,
             string finalPath,
             string token,
+            Action publishPreparedToken,
             CancellationToken cancellationToken)
         {
             _enteredTcs.TrySetResult();
@@ -498,7 +499,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
                 Directory.CreateDirectory(dir);
 
             await File.WriteAllTextAsync(tmpPath, token, cancellationToken).ConfigureAwait(false);
-            File.Move(tmpPath, finalPath, overwrite: true);
+            publishPreparedToken();
         }
 
         public void Release() => _releaseTcs.TrySetResult();
@@ -519,6 +520,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             string tmpPath,
             string finalPath,
             string token,
+            Action publishPreparedToken,
             CancellationToken cancellationToken)
         {
             var dir = Path.GetDirectoryName(finalPath);
@@ -533,7 +535,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
 
             cancellationToken.ThrowIfCancellationRequested();
-            File.Move(tmpPath, finalPath, overwrite: true);
+            publishPreparedToken();
         }
     }
 
@@ -1693,7 +1695,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
 
         var writer = new FileAuthorizationSignalWriter();
         var thrown = await Record.ExceptionAsync(
-            () => writer.WriteBeginTokenAsync(tmpPath, finalPath, "secret-token", CancellationToken.None));
+            () => writer.WriteBeginTokenAsync(tmpPath, finalPath, "secret-token",
+                () => File.Move(tmpPath, finalPath, overwrite: true), CancellationToken.None));
 
         Assert.NotNull(thrown);
         Assert.False(File.Exists(tmpPath), "tmp must be deleted when this call did not commit the move");
@@ -3348,7 +3351,10 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
             .Concat(Progress(1, 100, 50000))
             .Concat(Ok())
             .ToArray();
-        var fake = new FakeWgcContinuousProcess(stdout);
+        // This test exercises malformed events after authorization. Seeing the
+        // begin file alone can precede the managed authorization result; use the
+        // existing explicit emission barrier so the consent gate is settled first.
+        var fake = new FakeWgcContinuousProcess(Array.Empty<string>(), finalStdout: stdout);
         fake.WaitForBeginSignalPath = opts.BeginSignalPath;
         using var session = new WgcContinuousManagedSession(opts, fake);
         _disposables.Add(session);
@@ -3357,7 +3363,8 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         session.FirstFrameObserved += _ => Interlocked.Increment(ref firstFrameCount);
 
         await session.StartAsync();
-        await session.AuthorizeCapture();
+        Assert.True(await session.AuthorizeCapture());
+        fake.Continue();
         var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(result.State == WgcContinuousManagedSessionState.Failed,

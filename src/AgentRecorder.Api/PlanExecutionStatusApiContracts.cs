@@ -9,6 +9,31 @@ public interface IPlanExecutionStatusGateway
     PlanExecutionStatusState? Get(string planId);
 }
 
+public interface IPlanExecutionHistoryGateway
+{
+    PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor);
+}
+
+public sealed record PlanExecutionHistoryPageState(
+    string PlanId,
+    string Kind,
+    IReadOnlyList<PlanExecutionHistoryItemState> Items,
+    string? NextCursor);
+
+public sealed record PlanExecutionHistoryItemState(
+    string OccurrenceId,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset WindowStartUtc,
+    DateTimeOffset WindowEndUtc,
+    string Status,
+    string? TerminalReasonCode,
+    string? RunId,
+    PlanExecutionRunState? Run,
+    string? ExecutionStatusCode,
+    string? OutputPath,
+    bool OutputPathRecorded,
+    bool? OutputFileExists);
+
 public sealed record PlanExecutionStatusState(
     string PlanId,
     string Kind,

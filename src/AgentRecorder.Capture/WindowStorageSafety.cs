@@ -5,8 +5,17 @@ using AgentRecorder.Infrastructure;
 namespace AgentRecorder.Capture;
 
 // These paths are application-owned. They are never read from a request body.
-internal sealed record CaptureWritePaths(string OutputDirectory, string? AvTempDirectory, string WgcTempRoot)
+internal sealed record CaptureWritePaths(string OutputDirectory, string? AvTempDirectory, string? WgcTempRoot)
 {
+    // FFmpeg video-only owns its stage beneath the approved output directory.
+    // No WGC or AV temporary location is used by this layout.
+    internal static CaptureWritePaths FreezeFfmpegVideoOnly(CaptureConfig config, string? approvedOutputPath = null) => new(
+        Path.GetDirectoryName(Path.GetFullPath(approvedOutputPath ?? config.OutputPath))
+            ?? throw new StorageSafetyException(WindowStorageSafety.UnavailableCode), null, null);
+    internal static CaptureWritePaths FreezeFfmpegAv(CaptureConfig config, string? approvedOutputPath = null) => new(
+        Path.GetDirectoryName(Path.GetFullPath(approvedOutputPath ?? config.OutputPath))
+            ?? throw new StorageSafetyException(WindowStorageSafety.UnavailableCode),
+        Path.GetFullPath(ResolveAvTempDirectory()), null);
     internal static string ResolveAvTempDirectory() => Path.Combine(DataDirResolver.Resolve(), "temp");
     internal static string ResolveWgcTempRoot() => Path.Combine(
         Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(), "AgentRecorder");
@@ -17,9 +26,8 @@ internal sealed record CaptureWritePaths(string OutputDirectory, string? AvTempD
         config.IsSystemLoopback ? Path.GetFullPath(ResolveAvTempDirectory()) : null,
         Path.GetFullPath(ResolveWgcTempRoot()));
 
-    internal string[] Directories => AvTempDirectory is null
-        ? new[] { OutputDirectory, WgcTempRoot }
-        : new[] { OutputDirectory, AvTempDirectory, WgcTempRoot };
+    internal string[] Directories => new[] { OutputDirectory, AvTempDirectory, WgcTempRoot }
+        .OfType<string>().ToArray();
 
     internal void ValidateOutputPath(CaptureConfig config)
     {
@@ -44,7 +52,9 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
 {
     internal int LastProbeProcessId { get; private set; }
     internal Func<string> ExecutablePath { get; init; } = () =>
-        Path.Combine(AppContext.BaseDirectory, "AgentRecorder.App.exe");
+        Path.Combine(AppContext.BaseDirectory,
+            System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name == "AgentRecorder.Headless"
+                ? "AgentRecorder.Headless.exe" : "AgentRecorder.App.exe");
 
     public async Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(
         IReadOnlyList<string> paths, CancellationToken token)
@@ -108,6 +118,15 @@ internal sealed class WindowStorageSafety : IDisposable
     private readonly CancellationTokenSource _abortCts = new();
     private readonly CancellationToken _abortToken;
     private Dictionary<string, string>? _pathVolumes;
+    private enum PublicationMode { Legacy, FfmpegVideoOnly, FfmpegAv }
+    private PublicationMode _publicationMode;
+    private bool TracksCopy => _publicationMode != PublicationMode.Legacy;
+    internal bool IsFfmpegAvPublication => _publicationMode == PublicationMode.FfmpegAv;
+    private long _publicationCopyBytes;
+    private readonly SemaphoreSlim _copySamplingGate = new(1, 1);
+    private CopyReservation? _activeCopy;
+    internal Action? AfterPhysicalCopyWriteForTests { get; set; }
+    internal long RemainingPublicationCopyBytes { get { lock (_gate) return _publicationCopyBytes; } }
     private bool _committed;
     private bool _disposed;
     private string? _failure;
@@ -139,6 +158,107 @@ internal sealed class WindowStorageSafety : IDisposable
     // the existing conservative media rate (not an assumed endpoint format)
     // + output mux partial and publication copy. Video-only: WGC video
     // + publication copy. The watermark remains available above these estimates.
+    // The FFmpeg stage is on the output volume, which may differ from WGC temp.
+    internal void ReserveFfmpegVideoOnlyPublication()
+    {
+        lock (_gate)
+        {
+            _publicationMode = PublicationMode.FfmpegVideoOnly;
+            _publicationCopyBytes = VideoEstimate(_durationSeconds);
+        }
+    }
+
+    // AV admission already includes mux + copy on output and video + PCM on AV temp.
+    // Runtime copy demand starts only when the actual validated mux source exists.
+    internal void EnableFfmpegAvPublication()
+    {
+        lock (_gate) _publicationMode = PublicationMode.FfmpegAv;
+    }
+
+    internal void ReserveAvPublicationCopy(long sourceBytes)
+    {
+        if (_publicationMode == PublicationMode.FfmpegAv) ReservePublicationCopy(sourceBytes);
+    }
+
+    internal void ReservePublicationCopy(long sourceBytes)
+    {
+        lock (_gate)
+        {
+            if (_activeCopy is not null) throw new InvalidOperationException("A publication copy is already active.");
+            _publicationCopyBytes = Math.Max(_publicationCopyBytes, sourceBytes);
+        }
+    }
+
+    internal void EndFfmpegVideoOnlyPublication()
+    {
+        lock (_gate) { if (_activeCopy is null) _publicationCopyBytes = 0; }
+    }
+
+    private async Task<IPublicationCopyReservation?> BeginCopyAsync(long bytes, CancellationToken token)
+    {
+        lock (_gate) { if (!TracksCopy) return null; }
+        await _copySamplingGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            lock (_gate)
+            {
+                if (_disposed || _failure is not null || _committed) throw new OperationCanceledException();
+                if (_activeCopy is not null) throw new InvalidOperationException("A publication copy is already active.");
+                _publicationCopyBytes = bytes; // Actual source size is now known; all bytes remain unwritten.
+                return _activeCopy = new CopyReservation(this);
+            }
+        }
+        finally { _copySamplingGate.Release(); }
+    }
+
+    private sealed class CopyReservation(WindowStorageSafety owner) : IPublicationCopyReservation
+    {
+        public async Task WriteAsync(FileStream destination, ReadOnlyMemory<byte> bytes, CancellationToken token)
+        {
+            await owner._copySamplingGate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                lock (owner._gate)
+                {
+                    if (owner._disposed || owner._failure is not null || !ReferenceEquals(owner._activeCopy, this)) throw new OperationCanceledException();
+                    if (bytes.Length > owner._publicationCopyBytes) throw new IOException("Publication source length changed.");
+                }
+                await destination.WriteAsync(bytes, token).ConfigureAwait(false);
+                // Flush the managed buffer to the original native handle before reducing demand.
+                // The existing final Flush(true) still establishes durability before rename.
+                await destination.FlushAsync(token).ConfigureAwait(false);
+                owner.AfterPhysicalCopyWriteForTests?.Invoke();
+                lock (owner._gate) owner._publicationCopyBytes -= bytes.Length;
+            }
+            finally { owner._copySamplingGate.Release(); }
+        }
+
+        public async Task EnsureCapacityAsync(CancellationToken token)
+        {
+            var code = await owner.CheckAsync(false, token).ConfigureAwait(false);
+            if (code is not null) { owner.BeforeFailureClaimForTests?.Invoke(); owner.TryAbort(code); }
+            lock (owner._gate)
+            {
+                if (owner._failure is not null) throw new StorageSafetyException(owner._failure);
+                if (owner._disposed) throw new OperationCanceledException();
+            }
+            token.ThrowIfCancellationRequested();
+        }
+
+        public void Dispose()
+        {
+            owner._copySamplingGate.Wait();
+            try
+            {
+                lock (owner._gate)
+                {
+                    if (ReferenceEquals(owner._activeCopy, this)) { owner._activeCopy = null; owner._publicationCopyBytes = 0; }
+                }
+            }
+            finally { owner._copySamplingGate.Release(); }
+        }
+    }
+
     internal Dictionary<string, long> AdmissionBudgets(IReadOnlyList<StorageVolumeSample> samples)
     {
         var video = VideoEstimate(_durationSeconds);
@@ -146,7 +266,8 @@ internal sealed class WindowStorageSafety : IDisposable
         {
             [_paths.OutputDirectory] = checked(video * (_paths.AvTempDirectory is null ? 1 : 2)),
         };
-        AddComponent(components, _paths.WgcTempRoot, video);
+        if (_publicationMode == PublicationMode.FfmpegVideoOnly) AddComponent(components, _paths.OutputDirectory, video);
+        if (_paths.WgcTempRoot is { } wgc) AddComponent(components, wgc, video);
         if (_paths.AvTempDirectory is { } av)
             AddComponent(components, av, checked(video * 2 + 4096));
         var budgets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -178,10 +299,17 @@ internal sealed class WindowStorageSafety : IDisposable
 
     private async Task<string?> ProbeAsync(bool admission, CancellationToken token)
     {
+        bool samplingHeld = false;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _cts.Token);
             timeout.CancelAfter(QueryTimeout);
+            // Serialize only this copy's native writes with its capacity sample. No recording/UI lock is held.
+            if (TracksCopy)
+            {
+                await _copySamplingGate.WaitAsync(timeout.Token).ConfigureAwait(false);
+                samplingHeld = true;
+            }
             var paths = _paths.Directories.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             var samples = await _provider.QueryAsync(paths, timeout.Token)
                 .WaitAsync(timeout.Token).ConfigureAwait(false);
@@ -203,13 +331,18 @@ internal sealed class WindowStorageSafety : IDisposable
             {
                 // Account-specific free space: take the conservative sample
                 // if several paths on one volume were observed during a query.
-                if (volume.Min(s => s.AvailableBytes) < (budgets?[volume.Key] ?? LowWaterBytes))
+                long minimum = budgets?[volume.Key] ?? LowWaterBytes;
+                if (!admission && TracksCopy && volume.Any(s =>
+                    string.Equals(s.Path, _paths.OutputDirectory, StringComparison.OrdinalIgnoreCase)))
+                    minimum = checked(minimum + _publicationCopyBytes);
+                if (volume.Min(s => s.AvailableBytes) < minimum)
                     return LowSpaceCode;
             }
             return null;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested || _cts.IsCancellationRequested) { return null; }
         catch { return UnavailableCode; }
+        finally { if (samplingHeld) _copySamplingGate.Release(); }
     }
 
     internal void EnsureAdmission() => EnsureCapacity(admission: true);
@@ -302,8 +435,9 @@ internal sealed class WindowStorageSafety : IDisposable
     internal IFileCommitGate CreateCommitGate(IFileCommitGate? localGate, bool finalPublication)
         => new StorageCommitGate(this, localGate, finalPublication);
 
-    private sealed class StorageCommitGate(WindowStorageSafety owner, IFileCommitGate? local, bool final) : IFileCommitGate
+    private sealed class StorageCommitGate(WindowStorageSafety owner, IFileCommitGate? local, bool final) : IFileCommitGate, IPublicationCopyCapacityGate
     {
+        public Task<IPublicationCopyReservation?> BeginCopyAsync(long bytes, CancellationToken token) => owner.BeginCopyAsync(bytes, token);
         public bool IsClosed => owner.FailureCode is not null || (local?.IsClosed ?? false);
         public void Close() => local?.Close();
         public bool TryCommit(Action move) => owner.TryCommit(() =>
@@ -313,9 +447,29 @@ internal sealed class WindowStorageSafety : IDisposable
         }, final);
     }
 
+    // Cancellation before media zero competes with failure under this same arbiter.
+    // If failure already won, its existing observer owns teardown and history.
+    internal bool TryCloseBeforeCaptureCancellation()
+    {
+        lock (_gate)
+        {
+            if (_failure is not null) return false;
+            if (_disposed) return true;
+            _disposed = true;
+            if (_activeCopy is null) _publicationCopyBytes = 0;
+        }
+        CompleteDisposal();
+        return true;
+    }
+
     public void Dispose()
     {
-        lock (_gate) { if (_disposed) return; _disposed = true; }
+        lock (_gate) { if (_disposed) return; _disposed = true; if (_activeCopy is null) _publicationCopyBytes = 0; }
+        CompleteDisposal();
+    }
+
+    private void CompleteDisposal()
+    {
         CancelSafely(_cts);
         if (!_committed) CancelSafely(_abortCts);
         // CTS resources are released after the monitor/probe finishes, without

@@ -1,5 +1,11 @@
 # Agent Recorder API
 
+This reference describes the current source contracts, including accepted
+history, health, artifact and retention-preview increments through SQLite v35.
+The published v0.1.15 package predates those increments; inspect `/capabilities`
+on the running host. Generation-time durable media hashes, content verification
+and retention deletion are not implemented.
+
 Base URL: `http://127.0.0.1:37891/api/v1`
 
 Agent Recorder exposes a localhost HTTP API for local AI agents. Common natural
@@ -58,7 +64,7 @@ dispatch across Windows account boundaries.
 
 Before calling `ensure-running`, the agent should check whether its host offers
 an authorized user-desktop command execution surface. If so, invoke the fixed
-CLI command through that host surface. Codex may provide tool-authorized
+CLI command through that host surface. Some agent hosts may provide tool-authorized
 execution for a specific command; that is a host invocation mechanism, not a
 Recorder CLI option, and does not imply that other agents or hosts have the
 same capability. Recorder cannot escape a sandbox or obtain another account's
@@ -93,6 +99,7 @@ path.
 | Endpoint | Auth |
 | --- | --- |
 | `GET /capabilities` | No |
+| `GET /health` | Yes |
 | `GET /permissions` | No |
 | `GET /displays` | No |
 | `GET /windows` | No |
@@ -104,11 +111,30 @@ path.
 | `POST /plans` | Yes |
 | `GET /plan-setups/{id}` | Yes |
 | `GET /plans/{plan_id}/status` | Yes |
+| `GET /plans/{plan_id}/history` | Yes |
 | `GET /recordings` | Yes |
 | `GET /recordings/{id}` | Yes |
 | `POST /recordings/{id}/marks` | Yes |
 | `POST /recordings/{id}/stop` | Yes |
 | `GET /confirmations/{id}` | Yes |
+
+## On-demand read-only health
+
+Use `GET /api/v1/health` with `X-Agent-Recorder-Key` when diagnosing an environment or a failure. Both App and Headless expose it; `capabilities.health` advertises its endpoint, authentication and read-only nature without sampling. This is optional diagnosis, not a required pre-recording step. Continue to use recordings/history/plans APIs for task status, stop and results. Do not ask a human to open a panel or explain technical status; health does not grant capture permission, repair the environment or authorize retrying a failed recording.
+
+The existing `{ok,data,request_id}` envelope returns HTTP 200 with `data.sample_status` equal to `complete`, `busy`, `timeout`, `failed` or `not_checked`. Missing/wrong keys return 401 before sampling, using existing `UNAUTHORIZED`/`FORBIDDEN` error codes (other endpoints keep their existing authentication status codes). An unconfigured provider yields `not_checked`. One three-second deadline covers owner dispatch and probes. Concurrent API/UI reads share one quota. Timeout ends waiting; an undrained owner callback or a native probe still running retains the quota, and subsequent reads return `busy`.
+
+| Group | Fields and evidence |
+| --- | --- |
+| `instance` | `version`, `mode`, `pid`, actual `listening_port` (null when not listening), `ready_state`, frozen `data_directory`, `sampled_at`, `evidence_type=runtime_snapshot`. Ready requires this host's live publication receipt, not a stale file or PID check. |
+| `desktop` | `ui_required`; `startup` contains static receipt state/time; `current` contains dynamic read-only desktop state/time. Each has `reason_code`, `evidence_type`, and `limitation`. Headless's lack of UI requirement does not establish an interactive desktop. |
+| `tools` | `ffmpeg`, `ffprobe`, `wgc_helper`, `audio_helper`: `path`, whitelisted `source`, `state`, `reason_code`, `sampled_at`, `evidence_type=path_only`. A found path does not verify execution. |
+| `hotkeys` | `stop`, `chapter`: `supported`, `registered`, whitelisted `gesture`, `policy`, `state`, `reason_code`, `sampled_at`, `evidence_type=owner_snapshot`. Chapter's unregistered idle state is `idle`, required registration failure is `registration_failed`; Headless reports unsupported. |
+| `backends` | `window`, `display`, `region`: frozen `policy`, `experimental`, `capture_check=not_checked`, `evidence_type=configuration_only`; `microphone`, `system_audio`: backend `supported`, `device_check=not_checked`, `evidence_type=backend_support_only`. |
+
+Codes and snake_case keys are independent of UI language. No blanket `healthy`/`can_record` field is provided. Partial snapshots mark unsampled probes `not_checked`; unavailable owner facts remain unknown. Secrets, identity/SID, titles, device lists and raw exceptions are excluded. Reading starts no tool/helper process or capture and writes no business data.
+
+This endpoint accepts no parameters. As with parameterless capabilities, syntactically valid unknown query keys are ignored, including `refresh`, `watch` and `timeout`; none changes behavior. The existing parser still rejects duplicate/empty keys or malformed encoding with 400. There is no refresh/watch/long-poll/custom-timeout protocol.
 
 ## Performance Tracing
 
@@ -210,7 +236,13 @@ The response includes:
 - readiness data when available
 - performance summary (`perf_summary`) with cold/warm P50/P95 statistics
 - chapter-mark API and local-hotkey state (`chapter_marks`)
+- durable ordinary-video recording history (`recording_history`), explicitly excluding unattended execution and screenshot series
 - bounded one-shot unattended support and its live safety state (`unattended_lease`)
+
+`recording_history` advertises `scope="ordinary_video"`, authenticated list and
+detail endpoints, stable keyset pagination (default 20, maximum 100), and the
+fact that the history can be read after process restart. It does not claim
+coverage of automatic/lease executions or screenshot-series output.
 
 A native `wgc-native-helper.exe`, managed continuous session, and
 capture-backend adapter are present in the repository. Guarded selectors can
@@ -720,7 +752,49 @@ storage aborts settle as `failed`, with the reason in `stop_reason`, and publish
 no final media. A late sample cannot change a successfully committed run. There
 are no API controls to disable the monitor or choose its paths/threshold. No
 automatic relocation, deletion of other recordings, retry or authorization
-reuse occurs; legacy display/region behavior is unchanged.
+reuse occurs. Ordinary locally confirmed silent video on display/region,
+including raw, quick and region Profile requests selecting ffmpeg/ffmpeg-region,
+also uses this storage safety. Its owned staging and publication copy are both
+beneath the approved output directory: admission budgets two video estimates
+plus one watermark on that actual volume, without unused WGC/AV TEMP.
+Confirmation, a locally approved directory change and the physical backend-start
+boundary recheck capacity; runtime and publication checks include remaining
+unwritten copy bytes (already written bytes are not reserved again). Local
+directory approval replaces only that Run's layout and monitor; no fallback
+directory is chosen. Low capacity and unverifiable capacity use the same stable
+storage errors and failed terminal state. This added scope excludes
+Standing/Recurring/Required plans, experimental WGC display/region,
+screenshot series and other backends. It is neither a quota nor automatic
+retention/deletion, and real full-disk/remount desktop acceptance remains pending.
+
+Ordinary locally confirmed video with system audio or microphone, using
+ffmpeg-av-split/ffmpeg-region-av-split for display/region, shares the same safety.
+It freezes approved output plus the actual application AV temp directory, excluding
+unused WGC TEMP. Admission sums video and conservative PCM on AV temp, and mux
+partial and publication copy on output, merging roles by actual volume identity
+with one 256 MiB watermark per volume. Checks run before confirmation, after
+approval, immediately before audio start and at countdown completion before video
+start; monitoring covers audio preparation too. Native final publication accounts
+only for actual remaining copy bytes, synchronized with capacity samples.
+`storage_space_low` and `storage_capacity_unavailable` stop both owned workers
+and prevent successful publication when failure wins the existing commit arbiter.
+Region Profiles remain silent only; API fields, endpoint binding, A/V coverage and
+synchronization tolerances do not change. Point-in-time checks are not a disk
+reservation, quota or retention execution; real full-disk/remount acceptance is pending.
+
+Ordinary video requests cannot concurrently occupy the same normalized final path
+when either Run is ordinary FFmpeg AV. Registration returns `409 OUTPUT_PATH_IN_USE`;
+an approved local directory change that loses this race becomes `rejected` with
+`stop_reason=OUTPUT_PATH_IN_USE`, without starting its workers or changing the other
+Run. Pending confirmation, preparation, countdown and publication retain ownership;
+directory approval cannot rename around an occupied requested filename, even when
+the other Run has already written a final file but is still converging.
+even a terminal cancellation retains it until owned writer cleanup has ended.
+The check uses full paths and ordinal case-insensitive comparison within this engine.
+Each AV finalization uses an internally generated private mux filename in the
+approved output directory. This does not change copy accounting or publication
+receipts, and is not a persistent reservation across plans, hosts, hard links or
+directory reparse aliases.
 
 An invalid field, ineligible request, unavailable helper/endpoint, changed HWND
 identity/size, or minimized/closed target fails explicitly. In particular,
@@ -802,7 +876,7 @@ normalized region actually passed to the capture backend:
   "resolved_source": {
     "type": "window",
     "window_id": "window_123",
-    "title": "Codex",
+    "title": "Conversation",
     "bounds": { "x": 0, "y": 0, "width": 3200, "height": 2050 },
     "capture_bounds": { "x": 0, "y": 0, "width": 3200, "height": 2050 }
   },
@@ -1078,6 +1152,49 @@ The result is scoped to the current Windows user and interactive session.
 Unknown and differently owned plan IDs both return 404 PLAN_NOT_FOUND. A
 malformed ID returns 400 INVALID_ARGUMENT. Unavailable or inconsistent
 persisted status fails closed with 503 PLAN_STATUS_UNAVAILABLE.
+
+### Paged plan execution history
+
+Use the authenticated, read-only history endpoint to inspect every persisted
+occurrence for a currently owned standing once, required once, or recurring
+daily/weekly plan:
+
+~~~~http
+GET /api/v1/plans/{plan_id}/history?limit=20&cursor=<opaque>
+X-Agent-Recorder-Key: <api-key>
+~~~~
+
+`limit` defaults to 20 and accepts 1–100. Only `limit` and `cursor` are
+supported; unknown or duplicate query parameters, invalid limits, and empty,
+oversized, or malformed cursors return 400 `INVALID_ARGUMENT`. The response
+uses `ok/request_id/data`; `data` contains `plan_id`, `kind`, `items`,
+`next_cursor`, and `page_size`. Items are ordered by `window_start_utc`
+descending and occurrence ID in SQLite binary ascending order. They include
+the persisted occurrence creation/window/status/reason, the optional raw Run
+state, required-mode `execution_status_code`, and only validated output-path
+evidence. A null `run_id` means no Run was registered. File absence or
+inaccessibility changes only the point-in-time `output_file_exists` value; it
+does not rewrite the durable lifecycle state. Legacy path-unavailable evidence
+remains null.
+
+Each request revalidates ownership using the current Windows SID and
+interactive-session binding. Unknown, foreign, and cross-session plans return
+404 `PLAN_NOT_FOUND`; unavailable storage or inconsistent owned data returns
+503 `PLAN_HISTORY_UNAVAILABLE`. A cursor is bound to its plan and identity and
+cannot replace ownership validation. The first page fixes membership at the
+maximum SQLite rowid then present; later inserts are excluded
+even when their scheduled window is older. The watermark is table-wide while
+the cursor remains bound to the requested plan. Ordering uses keyset pagination,
+not offset. The watermark freezes page membership only: each page's mutable
+status and output evidence reflect that page's own SQLite read snapshot.
+Candidate selection and lifecycle/evidence validation are bounded to at most
+`limit + 1` candidate rows and `limit` returned rows; the status endpoint's
+512-occurrence projection limit does not apply to history.
+
+Capabilities expose `plan_execution_history` only when the current host has
+the production owned-plan gateway, with endpoint, supported kinds, and page
+bounds. This does not claim global ordinary/plan/future-window history or a
+history UI. The Headless host remains unsupported and returns 503.
 
 ### Required-mode one-time fixed-region plan
 
@@ -2075,3 +2192,657 @@ precision: duration_seconds is an exact JSON number (integer for whole seconds,
 fractional for sub-second values), and duration_ms is the exact integer
 millisecond value. Whole-second responses remain integer-valued. POST/PATCH
 inputs still accept only integer duration_seconds from 1 through 600.
+
+## Durable ordinary recording history
+
+```http
+GET /api/v1/recording-history?limit=20&cursor=<opaque>
+X-Agent-Recorder-Key: <api-key>
+GET /api/v1/recording-history/{recording_id}
+X-Agent-Recorder-Key: <api-key>
+```
+
+This read-only API returns durable **ordinary video recording** history,
+including raw/quick requests, ordinary nested recordings and exact fixed-region
+profile references. It excludes automatic, standing/recurring/required-once/
+future-window executions and screenshot series. `limit` defaults to 20 and must
+be 1–100. The opaque bounded cursor uses stable keyset ordering and a first-page
+high-water mark; entries created while paging are excluded from later pages.
+Each page and detail is read from one SQLite snapshot. List responses do not
+probe media. Detail adds best-effort `FileInfo` metadata (existence, size and
+last-write time) for the recorded main path, without reading contents or checking
+original identity. Use the explicit artifact check for bounded, handle-based
+media/attachment observations. A missing detail ID
+returns the standard 404 error envelope. All endpoints require
+`X-Agent-Recorder-Key`; capabilities describe this scope under
+`recording_history`.
+
+An accepted ordinary recording is synchronously registered before the create
+request returns or capture can start. A registration failure returns 503 and
+fails closed. Subsequent real lifecycle state changes are queued to one bounded
+SQLite writer; terminal states are monotonic, and active rows left by process
+termination are reconciled to `interrupted_unknown` on the next startup. This
+history is a separate projection and does not create or mutate plan, lease, run,
+proof, or authorization records.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "scope": "ordinary_video",
+    "items": [{
+      "recording_id": "rec_123",
+      "status": "recording",
+      "source_type": "display",
+      "capture_semantics": "display_capture",
+      "audio": { "mode": "system_loopback" },
+      "output_path": "C:\\Recordings\\capture.mp4",
+      "nested": null,
+      "profile_ref": null
+    }],
+    "next_cursor": null,
+    "page_size": 20
+  },
+  "request_id": "req_123"
+}
+```
+
+## Unified read-only task history
+
+This contract is implemented in the current source tree; it is not a released
+package announcement. Inspect `capabilities.unified_history` before using it.
+App supports `ordinary`, `plan`, and `future_window`. Headless advertises only
+`["ordinary"]` and does not start Plan or future-window runtimes. `source=all`
+means all sources advertised by that host. An explicit unsupported source
+returns 400 `INVALID_ARGUMENT` with a host-support explanation.
+
+```http
+GET /api/v1/history?limit=20&source=all&created_from=2026-10-01T00:00:00Z&created_before=2026-11-01T00:00:00Z
+X-Agent-Recorder-Key: <api-key>
+```
+
+Only `limit`, `source`, `status`, `profile_id`, `profile_version`, `source_type`, `plan_id`, `target_key`, `created_from`, `created_before`, and `cursor` are accepted;
+unknown or duplicate query parameters are invalid. `limit` defaults to 20 and
+must be an integer from 1 to 100. Sources are exact lower-case codes. Times must
+include seconds and explicit UTC (`Z` or zero offset); percent-encode `+` in an
+HTTP query. The lower bound is inclusive, the upper exclusive, and a supplied
+interval must have `created_from < created_before`. Omitted bounds are unbounded.
+
+Optional `status` requires explicit `source=ordinary`. It accepts exactly one
+lower-case persistent code: `pending_confirmation`, `preparing`, `countdown`,
+`recording`, `finalizing`, `completed`, `failed`, `cancelled`, `rejected`, `expired`,
+or `interrupted_unknown`. Empty, uppercase, comma-separated, unknown or duplicate
+values (including URL-encoded duplicate keys) return 400 `INVALID_ARGUMENT`.
+Omitting status preserves all existing source behavior. Status is applied in the
+indexed database query before pagination and can combine with creation bounds.
+
+```http
+GET /api/v1/history?source=ordinary&status=failed&limit=20
+X-Agent-Recorder-Key: <api-key>
+```
+
+`capabilities.unified_history.status_supported_sources` is `["ordinary"]` and
+`supported_statuses` lists these codes when an ordinary history gateway is
+available; both lists are empty when history is unconfigured.
+
+
+Optional `profile_id` and `profile_version` select persisted ordinary Profile associations.
+Either parameter requires explicit `source=ordinary`, including on Headless;
+omitted source or `all`/`plan`/`future_window` with these parameters returns 400.
+ID matching is exact and case-sensitive, independent of display name, current
+version, rename, or logical deletion. IDs use existing Profile validation (1–128
+characters, no surrounding whitespace, control characters, slash, backslash, or
+colon), without trimming or case folding. `profile_version` requires `profile_id`
+and unsigned decimal positive Int64 syntax (no sign, whitespace, fractions,
+exponents, or overflow). ID-only matches all persisted versions; ID plus version
+matches that exact version. Unknown valid IDs/versions return an empty page,
+without consulting the Profile directory or requiring a live configuration.
+
+```http
+GET /api/v1/history?source=ordinary&profile_id=prof_example&limit=20
+X-Agent-Recorder-Key: <api-key>
+```
+
+```http
+GET /api/v1/history?source=ordinary&profile_id=prof_example&profile_version=2&status=completed&limit=20
+X-Agent-Recorder-Key: <api-key>
+```
+
+Both conditions combine with status and creation bounds and apply in parameterized
+SQL before LIMIT. Additive v26 only adds two ordered indexes for ID-only and exact
+version seeks; historical rows and previous migration definitions remain unchanged.
+`capabilities.unified_history.filters` includes both parameters;
+`profile_supported_sources` is `["ordinary"]` only with an ordinary gateway,
+otherwise empty. `profile_version_requires_profile_id=true` and
+`profile_match=exact_persisted_id_and_optional_version` describe the matching rule.
+The default output directory remains `.local-data/Videos`.
+No additional UI, capture, authorization, or retention filter is introduced.
+
+Optional `source_type` requires explicit `source=ordinary` and matches the persisted
+recording category exactly: `display`, `window`, `region`, or `fixed_region_profile`.
+Profile recordings persist `fixed_region_profile`; it is distinct from `region`.
+This category does not identify a particular window or display. No historical rows
+are rewritten; unfiltered requests still return older allowed source types.
+Empty, uppercase, list, unknown, or incompatible-source values return 400.
+It can combine with status, Profile association, creation time and pagination;
+a valid intersection with no matches returns an empty page.
+
+```http
+GET /api/v1/history?source=ordinary&source_type=window&created_from=2026-10-01T00:00:00Z&limit=20
+X-Agent-Recorder-Key: <key>
+```
+
+Optional `plan_id` requires explicit `source=plan`. It is a Plan ID, with the
+same canonical 1–128 character ASCII letters/digits/`-_.` boundary as dedicated
+Plan history: exact case-sensitive equality, no trimming or fuzzy match. It can
+combine with creation time and pagination, but not ordinary status, Profile or
+source-type filters. Empty, invalid and duplicate parameters return 400.
+Unknown valid IDs and Plans owned by another server SID/session return success
+with an empty page; their evidence is not read. Headless rejects plan source.
+
+```http
+GET /api/v1/history?source=plan&plan_id=plan_example&created_from=2026-10-01T00:00:00Z&created_before=2026-11-01T00:00:00Z&limit=20
+X-Agent-Recorder-Key: <key>
+```
+
+Both predicates run in SQL before LIMIT. v27 only adds two ordered indexes;
+status/Profile intersections may require residual scanning even though candidates
+and evidence projections remain bounded. The locator Plan filter retains original
+owner/occurrence checks. Unified Plan history sorts by creation time; dedicated
+`/plans/{id}/history` sorts by window start, and the two are not interchangeable.
+The default output directory remains `.local-data/Videos`.
+`capabilities.unified_history.filters` includes `source_type` and `plan_id`.
+`source_type_supported_sources=["ordinary"]` and `supported_source_types` lists
+the four codes when an ordinary gateway exists; otherwise both lists are empty.
+`plan_id_supported_sources=["plan"]` only when plan is supported, empty for
+Headless or missing gateway. Match descriptions are
+`source_type_match=exact_persisted_recording_category` and
+`plan_id_match=exact_case_sensitive_plan_id_with_current_server_ownership`.
+Discovery performs no capture, migration, device probe or UI operation.
+Retention preview continues rejecting both new parameters.
+
+Members are accepted durable ordinary video recordings in the host's ordinary
+history directory, server SID/session-owned Plan occurrences from standing-once,
+recurring local approval, or required-once setup, and each owned future-window
+authorization starting at authorization creation. Unused pending/active/expired/
+revoked authorizations are tasks, even without a Run. A later Run remains on the
+same authorization entry. This is a task-creation timeline, not a successful
+media gallery, last-update timeline, or aggregate of all users' histories.
+Screenshot series are excluded.
+
+Optional `target_key` requires explicit `source=ordinary`. It is an exact frozen
+target fact key: `target:v1:display:<64 lowercase SHA256 hex>` or
+`target:v1:region:<64 lowercase SHA256 hex>` or
+`target:v1:window:<64 lowercase SHA256 hex>` (82, 81 or 81 characters respectively).
+Empty, uppercase, malformed, duplicate or incompatible source/Plan combinations
+return 400 `INVALID_ARGUMENT`; an unknown canonical key returns an empty page.
+It combines with creation bounds, ordinary status, source_type and Profile/version.
+The indexed SQL applies it before sorting and LIMIT; each page validates at most
+100 target facts in the same SQLite snapshot as media and Bundle evidence.
+
+Ordinary list/detail and unified ordinary items expose nullable `target_key`.
+The key freezes once from the immutable accepted CapturePlan before first history
+registration: underlying source kind, capture semantics, coordinate space,
+explicitly resolved stable display identity, display bounds and actual normalized
+pixel bounds. A manual region and an equivalent fixed_region_profile share a
+region key. Backend, title, duration, audio, output and Profile version are excluded.
+Screenshot series, legacy window screen_rectangle, nested window requests, other
+history sources, old rows and unsupported or untrusted facts remain null. No old-row
+backfill supplies a key. Strict ordinary window_surface video freezes HWND bits, PID,
+process creation UTC FILETIME, Windows session ID, semantics and approved surface
+width/height from the accepted plan and one read-only native metadata observation
+before durable registration. No pixels, executable paths or signatures are read.
+Missing, exited or changed metadata yields null without disabling a legal recording.
+Title, window position, audio, output and duration do not affect the key. The value
+is a frozen-fact retrieval key, not a permanent Windows window UUID: the same process
+may destroy and reuse an HWND with the same facts. It cannot authorize capture,
+identity revalidation, retention or deletion. Later updates and queries reuse the
+frozen value, even after the window closes; they never observe the desktop again.
+It is neither an authorization nor a cross-computer permanent ID or tamper-proof
+physical identity claim. Target corruption returns history unavailable (503);
+retention keeps its existing protections and fails before file probes.
+
+`capabilities.unified_history` advertises `target_key` in filters,
+`target_key_supported_sources=["ordinary"]` when ordinary is configured,
+`target_key_source_types=["display","region","fixed_region_profile","window"]`,
+`target_key_match="exact_frozen_screen_target_v1"`, and
+`target_key_window_supported=true` with ordinary configured,
+`target_key_window_semantics="window_surface"` and
+`target_key_window_match="exact_frozen_window_facts_v1"`. Source/type lists are empty without a gateway.
+
+```http
+GET /api/v1/history?source=ordinary&target_key=target:v1:region:aacff74f6dc6d9532b84651fad18a7bfd7e52827837b84ba52e3437c5b78e465&limit=20
+# Use the window key returned by ordinary history; retain all filters with next_cursor.
+GET /api/v1/history?source=ordinary&source_type=window&target_key=target:v1:window:<64-lowercase-hex-from-history>&limit=20
+X-Agent-Recorder-Key: <api-key>
+```
+
+Ordering is immutable `created_at_utc DESC`, then source BINARY ASC, then the
+source-local identifier BINARY ASC. `entry_id` prefixes the local ID with its
+source (`ordinary:`, `plan:`, or `future_window:`). A first page freezes insert
+watermarks for its advertised sources. Subsequent pages exclude later inserts,
+even backdated ones, but read current states and evidence from one new SQLite
+snapshot per page. The opaque cursor is bounded to 2048 characters and binds
+schema/query version, server identity and host scope, and normalized filters.
+Keep the same filters, including nullable status, profile_id, profile_version, source_type, plan_id, and target_key; changing status requires a new
+first page, otherwise the cursor returns 400. Page size may change. Reopening the store with the same server SID/session against the same valid
+migrated store does not invalidate the cursor. Existing cursors with omitted/null
+status and omitted/null profile fields remain valid after additive v24/v26 index migrations
+for the same unfiltered-by-profile query. They cannot be used with profile filters;
+switching ID, version, or ID-only/exact version requires a new first page.
+After v27, old cursors with omitted/null sourceType/planId (including pre-status
+and pre-Profile cursors) remain valid for the same old query without resetting
+watermarks. They cannot be reused with a new type/Plan filter; changing either
+requires a new first page. Do not parse or construct cursors.
+After v32, cursors with omitted/null targetKey remain compatible with the same old
+query. A target cursor cannot change or remove target_key; start a new first page.
+Status matches use each page's current snapshot. A state change may remove an
+unread match or introduce one before the cursor position, which cannot be
+revisited by continuing forward. Refresh the first page to rebuild the filter;
+a dynamic status traversal does not promise exactly-once membership.
+
+The standard success envelope contains `data.items`, `next_cursor` (null at the
+end), requested `page_size`, and normalized `filters` (`source`, `created_from`,
+`created_before`, `status`, `profile_id`, `profile_version`, `source_type`, `plan_id`, `target_key`, null for omitted values). Items use this explicit whitelist:
+
+| Fields | Meaning |
+| --- | --- |
+| `entry_id`, `source`, `entry_kind`, `created_at_utc` | Stable task identity and creation time; kinds are `ordinary_video`, `plan_occurrence`, `future_window_authorization` |
+| `recording_id`, `plan_id`, `occurrence_id`, `authorization_id`, `run_id` | Relevant IDs; inapplicable or absent values are null |
+| `source_type` | Persisted ordinary category; null for other sources; not a target identity |
+| `target_key` | Frozen ordinary display/region pixel target or strict window facts; null for unknown, unsupported, old or other sources |
+| `profile_id`, `profile_version` | Immutable recorded ordinary Profile association; null for unassociated ordinary and all other sources. No digest or configuration is exposed |
+| `status`, `reason_code` | Persistent source state and reason |
+| `authorization_status`, `occurrence_status`, `run_status`, `run_reason_code`, `execution_status_code` | Separate source-specific states; inapplicable values are null |
+| `output_path`, `output_path_recorded`, `output_file_exists` | Valid recorded output evidence versus present/accessibly existing file; absent evidence gives null path, false recorded, null existence |
+| `output_size_bytes`, `output_duration_seconds` | Available validated persistent metadata; otherwise null |
+| `started_at_utc`, `completed_at_utc`, `window_start_utc`, `window_end_utc` | Available source facts only; no invented Run times |
+
+Ordinary successful active stops use their real completed publication and media
+metadata; completion is not restricted to the duration-reached reason. Plan
+rows reuse the existing ownership, lifecycle, receipt/settlement and
+output-path checks. Legacy settled Runs without recorded paths stay completed
+with `output_path_recorded=false`. Future pending/active/used or unsuccessful
+entries never expose planned paths as completed media. A missing file does not
+rewrite persistent completion. Existence checks use metadata only and do not
+read media content. Internal SID/session, proofs, nonces, approval digests,
+executable identity, configuration and Lease quota are never serialized.
+
+Reads authenticate and use the trusted server SID/session; clients cannot select
+an identity. The ordinary writer's bounded failure-aware barrier precedes the
+read-only transaction. Reads do not expire authorizations, advance Plans, recover
+Runs, consume quota, confirm capture, or invoke recording/UI. Invalid filters or
+cursor return 400 `INVALID_ARGUMENT`. Missing gateway, unavailable identity,
+writer failure/timeout, broken schema or invalid owned persistent evidence
+return 503 `HISTORY_UNAVAILABLE` without storage paths or exception details.
+An initialized empty store returns a successful empty page; a failed source is
+not replaced by a partial successful page. Existing ordinary history, per-Plan
+history, recording and authorization APIs retain their contracts.
+
+## Retention preview
+
+`GET /api/v1/retention/preview` requires the existing `X-Agent-Recorder-Key`.
+It evaluates a time rule for ordinary MP4 outputs under the host data directory's
+fixed `Videos` root. It does not grant deletion permission or implement cleanup.
+App and Headless share the implementation. External output directories, Plan and
+future-window outputs, screenshot series and Bundle artifacts are excluded.
+
+An agent intent such as “Show completed ordinary videos older than October 1
+under Recorder's Videos directory and estimate their current file bytes” uses:
+
+```http
+GET /api/v1/retention/preview?completed_before=2026-10-01T00:00:00Z&limit=20
+X-Agent-Recorder-Key: <api-key>
+```
+
+Only `completed_before`, `limit`, and `cursor` are accepted. The cutoff is required:
+a timestamp with seconds, at most seven fractional digits, and explicit UTC `Z`
+or zero offset (`+` must be URL encoded). It cannot be later than the service clock.
+The actual age rule is `completed_at_utc < completed_before`, independent of
+file creation/last-write dates. Limit defaults to 20 and ranges from 1 to 100.
+Unknown/duplicate arguments and invalid times, limits or cursors return 400
+`INVALID_ARGUMENT`. No directory, path, identity, execution or deletion argument
+is supported. No cleanup/execution route exists.
+
+The service performs one bounded ordinary-source read through the same unified
+history indexed query, writer barrier, evidence validation and read-only
+transaction. `created_before` narrows candidates to the cutoff; the actual
+completion-time rule is evaluated afterward. This internal read disables history
+projection's file-existence probe before scope validation; the public history
+API keeps its original behavior. Each page evaluates at most `limit` candidates,
+including protected/skipped entries. It never scans directories or reads extra
+pages to fill qualifying results. `next_cursor` retains unified-history insert
+watermarks and keyset order, binding the cutoff, trusted server identity and host
+scope. Keep the cutoff unchanged; limit may change. File samples and task states
+are live per page, not a cross-page filesystem snapshot.
+
+The standard envelope's `data` contains:
+
+| Fields | Meaning |
+| --- | --- |
+| `items[].entry_id`, `recording_id`, `status`, `completed_at_utc` | Public identity and actual completion facts |
+| `evaluation`, `reason_code`, `age_candidate` | Time-rule result and protection reason; never approval to delete |
+| `recorded_path`, `recorded_bytes`, `observed_file_bytes` | Scoped persistent evidence versus nullable current metadata sample; rejected paths are omitted |
+| `evaluated_count`, `age_candidate_count` | Historical candidates inspected versus old, evidenced MP4 entries passing lexical Videos scope |
+| `observed_candidate_bytes`, `observed_candidate_file_count`, `unknown_candidate_file_count`, `observed_bytes_complete` | Checked sum of reliable samples on this page; unknown samples are not represented as known zero |
+| `next_cursor`, `page_size`, `completed_before` | Manual pagination and normalized cutoff |
+| `read_only`, `deletion_supported`, `reference_protection_ready`, `physical_identity_protection_ready`, `bundle_included`, `bytes_scope`, `snapshot` | Explicit scope and limitations |
+
+`evaluation` is `age_candidate`, `protected`, or `skipped`. An `age_candidate=true`
+entry may remain protected because of ordinary nested relationships, shared output paths, frozen planned targets, or because
+the file is missing, inaccessible, linked or changed. Reasons are a whitelist: `not_completed`, `completion_time_unknown`,
+`output_evidence_missing`, `completion_not_before_cutoff`, `outside_videos`,
+`path_invalid`, `not_mp4`, `path_check_limit`, `reparse_point`,
+`parent_not_directory`, `output_not_file`, `parent_missing`, `file_missing`,
+`file_inaccessible`, `metadata_unavailable`, `metadata_changed`,
+`file_length_changed`, `nested_relationship`, `nested_parent_referenced`,
+`nested_reference_invalid`, `shared_output_path`, `planned_output_path`,
+`hard_linked_output`, `file_identity_unavailable`, `file_identity_changed`,
+`resolved_path_mismatch`, `publication_identity_missing`,
+`publication_identity_mismatch`, `bundle_evidence_unknown`,
+`bundle_generation_in_progress`, `bundle_artifact_reference`,
+`bundle_artifact_state_unknown`, and `age_rule_match`. A missing sample never rewrites the
+persistent completed status. A reliable changed length is reported separately
+and included in the page's sampled-byte sum while the entry stays protected.
+
+Ordinary nested protection is evaluated after existing state/completion/output/age
+and lexical path reasons, and before any file attributes or size probe. Any valid
+`nested_role`, `parent_recording_id` or `nested_session_id` on the item protects it
+as `nested_relationship`, including missing parents, outer recordings with no
+child, self references and cycles. Malformed role/ID/session fields protect as
+`nested_reference_invalid` using existing field rules. Even with all three fields
+null, any ordinary row referencing this recording as its parent protects it as
+`nested_parent_referenced`; child status, date, current page and cursor insertion
+watermarks do not restrict this existence check. No child IDs or session material
+are returned.
+
+After nested protection, an eligible old completed item is protected as
+`shared_output_path` if another ordinary recording, recording run output evidence,
+required-once execution authorization or future-window authorization has the same
+explicit persisted `output_path`. Its own ordinary `recording_id` is excluded;
+null paths do not match. This private existence check includes other identities,
+all statuses and dates, other pages and rows beyond the candidate watermark.
+It returns no matching source, count, other ID, authorization proof or scope.
+Protection occurs before any file attributes or length probes; without a match,
+the remaining database protections apply before physical checks.
+
+After shared-output protection, a remaining eligible item is protected as
+`planned_output_path` when its exact file target is already frozen in a standing
+scope (`authorized_capture_scopes.output_directory + frozen_file_name`), recurring
+occurrence specification (`recurring_occurrence_execution_specs.frozen_output_file_path`),
+required-once specification (`required_once_authorized_specs.output_directory + frozen_file_name`)
+or future-window authorization (`output_directory + output_file_name`). All
+persisted frozen uses count, including foreign identities and revoked, expired
+or ended plans; this does not approve execution or prove current plan validity.
+A directory alone, a filename alone or a template for an ungenerated future
+file does not match. Matching sources, counts, IDs and proof remain private.
+The branch precedes every file probe and contributes an unknown-byte candidate.
+
+Standing and the required-once API normalize directories with a trailing
+separator; future-window ordinarily removes it, preserving the drive root.
+The query slices only the candidate raw text into filename and two bounded
+parent-directory forms (with/without the trailing separator; a root stays
+`C:\` in both), comparing both columns through v29 composite indexes. Recurring
+uses its stored full frozen path and a single-column v29 index. The v28 raw
+OrdinalIgnoreCase collation is reused unchanged; no LIKE, extra connection,
+foreign-scope JSON parsing, readiness probe or path normalization of foreign
+rows occurs. Only these existing canonical storage forms are covered. Historical
+noncanonical text, textual/physical aliases and not-yet-concrete targets are not
+proved free of use. No such preview result grants cleanup permission.
+
+The current ordinary page, nested flags and four explicit plus four frozen-path existence checks are read
+in one read-only SQLite transaction/snapshot after the existing writer barrier.
+Parameterized batches contain at most 100 candidates; reverse checks use the
+v25 parent index, four v28 path indexes and four v29 frozen-target indexes. Missing, invalid or untrustworthy
+private reference evidence, provider/query/schema/receipt/collation failure
+returns the entire existing 503 without file probes or read repair. v28 adds
+only four indexes and its receipt; v29 only adds the four frozen-target indexes
+and its receipt. v1–v28 definitions/checksums, tables, triggers
+and business content are unchanged. The centrally registered, fixed versioned
+`AGENTRECORDER_PATH_ORDINAL_IGNORE_CASE_V1` collation uses raw
+`StringComparer.OrdinalIgnoreCase`, including non-ASCII case comparison, without
+fallback to SQLite NOCASE. It does not trim, complete relative paths, normalize
+Unicode, resolve links or equate 8.3/UNC/extended-path aliases. Case-sensitive
+directories can be conservatively over-protected; textual aliases for the same
+physical file remain outside this proof.
+Relations can change after this read transaction or between pages; the preview
+cannot freeze a future deletion decision. Protected nested, shared-path or frozen-target items passing the age
+and lexical rules still have `age_candidate=true`, contribute to the candidate
+count and unknown-sample count, but have `observed_file_bytes=null` and add no
+bytes to the observed sum. Neither count nor byte sum is safely reclaimable space.
+
+After the existing time/completion, lexical, nested, shared/planned-output and
+publication-anchor protections, ordinary Bundle facts protect the MP4 before
+any ancestor attribute, leaf-handle or file-existence probe:
+
+| Persisted ordinary `bundle` | Evaluation / reason |
+| --- | --- |
+| `null` (never registered) | `protected / bundle_evidence_unknown` |
+| `generating` | `protected / bundle_generation_in_progress` |
+| `ready` | `protected / bundle_artifact_reference` |
+| `failed` or `interrupted_unknown` | `protected / bundle_artifact_state_unknown` |
+| `not_applicable` | Continue the existing ancestor, handle, identity and length rules |
+
+These protected entries retain `age_candidate=true`, `recorded_path` and
+`recorded_bytes`; `observed_file_bytes=null`, and contribute to
+`unknown_candidate_file_count`, not `observed_candidate_bytes`. Bundle facts are
+the already batched, at-most-100 ordinary facts from the same read-only SQLite
+snapshot as the media, references and anchors. Invalid state/path/error tuples,
+media bindings, schema or migration receipts fail the entire page with the
+existing 503, even if an earlier item reason would protect it. Provider facts
+are validated too. No JSON, images, media contents or directories are read to
+infer or repair missing facts. Old rows remain null without backfill.
+
+`ready` records a historical association, not current attachment readiness;
+failure/unknown cannot rule out partial artifacts. `not_applicable` records that
+this recording did not generate a Bundle and proves no absence of other uses.
+Facts may change after the transaction or on a subsequent cursor page; they
+cannot freeze a future deletion decision. Metadata, marks, first/last frames and
+thumbnails have a recorded five-item generation list, without per-attachment
+physical identity anchors or a complete cross-artifact reference graph. `bundle_included=false` still means attachment
+entities and sizes are excluded; full attachment references, identities and
+deletion protection are not implemented. All existing deletion/reference/
+physical readiness flags remain false; preview remains read-only.
+
+Scope comparisons use Windows case-insensitive separator boundaries. Device,
+UNC, noncanonical and reserved-component paths are protected without probing.
+Paths are capped at 1024 characters and 32 components from the drive root.
+Ancestor path-attribute checks include the drive, Videos root and every intervening
+parent (at most 32); reparse/junction/symlink or unreliable metadata stops sampling.
+`attribute_checks_per_entry_max=32` bounds these ancestor path calls; the two
+handle-based basic-attribute queries described below are separate fixed calls.
+The leaf then uses one short-lived Windows SafeFileHandle with OPEN_EXISTING,
+FILE_READ_ATTRIBUTES and OPEN_REPARSE_POINT. No content/data-read, write or delete
+access is requested. Final attributes, logical length, link count, deletion state,
+volume plus full 128-bit file ID and last-write time come from that same handle,
+sampled twice; no FileInfo.Length or second path-based leaf attribute fallback is
+used. FILE_STANDARD_INFO/FILE_ID_INFO and basic attributes are queried twice, with
+two final-path queries using fixed 2048-character buffers and no retry. Only a
+supported canonical local drive path (optionally stripping the exact standard
+`\\?\` prefix) equal to the requested path and within Videos qualifies.
+
+A reliable link count above one protects as `hard_linked_output`; missing/invalid
+identity or unsupported/native metadata protects as `file_identity_unavailable`.
+Deletion-pending or inconsistent identity/volume/attributes/length/link count/write
+time protects as `file_identity_changed` (new reparse/directory or invalid negative
+length retains `metadata_changed`). Unavailable/truncated/nonlocal or mismatching
+final paths protect as `resolved_path_mismatch`. Known leaf reparse/directory,
+missing and access errors retain their existing reasons. These untrusted samples
+have null observed bytes and contribute unknown-byte counts. Only a stable,
+valid single-link observation supplies length; a reliable recorded-length mismatch
+still contributes current sampled bytes while remaining protected. Missing or
+invalid provider/result contracts fail the whole page with 503; ordinary native
+sampling failures protect individual items. No identity material or other resolved
+directory is returned or logged.
+
+Sharing is read-only, without write/delete sharing, but pure attribute access can
+bypass data-handle sharing conflicts and does not pin a filename or ancestor chain.
+The fixed call/buffer bounds are not a hard wall-clock deadline or cancellation
+promise for synchronous native calls. No media decoding, content read, hash,
+directory traversal, filesystem write, background timeout worker or process occurs.
+
+`bytes_scope=current_page_age_candidates_mp4_logical_length`: this is neither the
+whole Videos directory's size, Bundle size, physical disk allocation nor safely
+reclaimable space. Summation overflow, unavailable caller identity, writer barrier
+failure/timeout or required database/evidence failure returns an entire 503
+`RETENTION_PREVIEW_UNAVAILABLE`, never a successful empty/partial page. File-level
+protection is reported per item without raw exceptions or credentials.
+
+Capabilities advertise the scope, read-only status and bounds.
+`deletion_supported=false`, `reference_protection_ready=false`, and
+`physical_identity_protection_ready=false` remain false even when all samples
+match. For ordinary completed outputs, only a receipt issued from the shared
+publisher's original CREATE_NEW copy handle can supply a private publication
+anchor. WGC continuous final publication and AvFinalizer audio mux and validated
+None final publication (including AV split and default FFmpeg video-only terminal
+paths) propagate that receipt; intermediate AV video, legacy FFmpeg direct audio, screenshot sequences
+and independent plan/future history remain unanchored.
+No existing row is backfilled and no preview observation becomes a publication ID. The Windows physical publisher opens the original copy with write,
+read-attributes and DELETE access, sharing read/delete but not write. Commit uses
+handle-bound rename/replace inside the existing commit gate; a renamed source
+still commits the verified original object, never a replacement at its former
+name. Failed publication requests disposition on that original handle before
+closing it. Invalid handles or failed disposition retain a residue; cleanup does
+not reopen or delete the former path. Optional identity query failure may omit a
+receipt after a real original-object commit; commit failure has no path fallback.
+These operations do not make parent paths or later external changes atomic.
+
+The page, ordinary nested/shared/planned references and private anchors are read
+in one read-only SQLite snapshot with a bounded indexed anchor batch (at most
+100 rows). After earlier time/lexical/reference reasons, an unanchored row returns
+`protected` / `publication_identity_missing`, with `observed_file_bytes=null`,
+before ancestor or leaf probes. An anchored row with a recorded `not_applicable`
+Bundle still passes all existing current
+metadata, hard-link, stability and resolved-path checks; a different volume or
+any part of the full 128-bit file ID returns `publication_identity_mismatch` with
+unknown bytes. Only matching identity proceeds to the reliable recorded-length
+comparison. Invalid anchor schema, encoding or row binding fails the whole page
+safely; no read repairs or private identity material appear in public responses.
+
+`age_rule_match` includes this limited publication-copy comparison. It proves
+neither upstream content/video authenticity nor safety against every same-account
+process. Atomic ancestor chains, changes after sampling, ID reuse, in-place
+same-size writes, memory-mapped writes, all aliases and deletion TOCTOU remain
+outside the proof. A future deletion design must separately add complete
+references, permissions and explicit local approval. The four explicit path
+columns, four persisted frozen uses and ordinary nested relationships are only
+partial reference protection. Not-yet-concrete planned outputs or reservations,
+Profile configuration references and Bundle/marks/thumbnails remain outside it.
+References inserted after the current snapshot are absent from that preview;
+a future cleanup must revalidate complete references and physical identity.
+An item with no detected reference is not proven free of every reference.
+This describes workspace code, not a released v0.1.15 capability.
+
+### Durable ordinary Bundle generation facts
+
+`GET /api/v1/recording-history`, its `/{recording_id}` detail, and ordinary entries of `GET /api/v1/history` include `bundle: null` for older/unrecorded Bundle facts, otherwise a status object with nullable generation-time contents:
+
+```json
+{
+  "bundle": {
+    "status": "ready",
+    "path": "D:\\captures\\clip.bundle",
+    "error_code": null,
+    "contents_evidence_version": 1,
+    "contents": [
+      {
+        "name": "metadata.json",
+        "media_type": "application/json",
+        "size_bytes": 1234
+      },
+      {
+        "name": "thumbnail.jpg",
+        "media_type": "image/jpeg",
+        "size_bytes": 5678
+      },
+      {
+        "name": "first_frame.png",
+        "media_type": "image/png",
+        "size_bytes": 9012
+      },
+      {
+        "name": "last_frame.png",
+        "media_type": "image/png",
+        "size_bytes": 3456
+      },
+      {
+        "name": "marks.json",
+        "media_type": "application/json",
+        "size_bytes": 78
+      }
+    ]
+  }
+}
+```
+
+The durable statuses are `generating`, `ready`, `failed`, `not_applicable`, and `interrupted_unknown`. Media `completed` remains independent of Bundle generation: a completed MP4 may have a failed Bundle. `generating` and `not_applicable` are recorded atomically with the ordinary media terminal; later internal results only update the registered generation operation. `failed` exposes an allowlisted stable Bundle error code, not exception text or stderr. A recorded `ready` is the generator's historical result, not current directory completeness, identity or deletion safety. Queries never inspect Bundle images/JSON or rebuild facts from directories.
+
+Facts survive writer drain and restart. At the existing owning-host startup recovery, unsettled `generating` becomes `interrupted_unknown` with `bundle_interrupted_unknown`; its old operation is revoked. Recovery does not regenerate, scan, resume recording or restore authorization. Unrecorded historical rows and all other unified sources remain `bundle: null`. Existing auth, filters, cursors, pagination and media metadata semantics are unchanged. Persistence failures and bounded read/drain failures use the existing unavailable contract; completed media is not evidence that Bundle updates drained. Retention stays preview-only; reference, deletion and physical readiness remain false.
+
+
+The ordinary history Bundle `contents_evidence_version` is `1` only when its first ready result atomically registered all five outputs in the order shown; `contents` is then exactly five immutable generation facts. Names, media types and positive `size_bytes` come from the production generator's verified, owned staging files, frozen before directory publication and returned only after publication succeeds. No arbitrary attachment paths or extra outputs are supported. These lengths are historical generation bytes, not current disk samples, identity, hashes or safe deletion allowances.
+
+Legacy ready results and compatibility generators without explicit evidence, plus generating/failed/interrupted_unknown/not_applicable, expose both added fields as `null`, not an empty list. Older Bundle facts themselves remain null. Schema v33 is additive; it does not inspect or backfill old attachments. A newly required registration, partial list, wrong version/count/type/size or operation/media/directory association is unavailable/503, not an unknown legacy list. Initial registration and ready status/contents commit atomically; value-equal same-operation replay is idempotent, conflicting or late evidence cannot replace a terminal. Writer queue acceptance is not a durable acknowledgement. Startup recovery revokes unfinished operations without regeneration; existing ready contents survive restart.
+
+History reads batch at most 100 ordinary entries / 500 attachment rows in the existing SQLite snapshot with targets/media/Bundle, without directory enumeration or attachment reads. Auth, queries, target filters and cursors are unchanged. `capabilities.unified_history` publishes `bundle_contents_supported_sources=["ordinary"]` only when ordinary is served, `bundle_contents_evidence_version=1`, `bundle_contents_max=5`, and `bundle_contents_semantics="recorded_generation_bytes_not_current_file_identity"`. Retention still protects ready Bundles and fails on damaged evidence before file probes; `bundle_included=false` and all deletion/reference/physical readiness flags remain false. Recorded attachment sizes do not contribute to observed reclaimable bytes.
+
+### On-demand ordinary artifact availability
+
+```http
+GET /api/v1/recording-history/{recording_id}/artifacts/check
+X-Agent-Recorder-Key: <key>
+```
+
+App and Headless provide this authenticated, read-only endpoint for ordinary video only. It accepts **no query parameters**, paths, names or repair requests. Missing/incorrect authentication returns 401 (`UNAUTHORIZED`/`FORBIDDEN`); unknown parameters or invalid IDs return 400 `INVALID_ARGUMENT`, absent records 404 `RECORDING_HISTORY_NOT_FOUND`, and unavailable or damaged history/evidence 503 `RECORDING_HISTORY_UNAVAILABLE`. These failures precede file probes. Without its gateway it returns 503 and capability `supported=false`. Ordinary list and unified history are database-only; ordinary detail separately adds best-effort main-file metadata. None automatically invokes this handle-based artifact check.
+
+The existing writer barrier precedes one read-only SQLite transaction that freezes this ID's media, registered Bundle contents and optional private media publication anchor. No live recording state, initialization, recovery or backfill is consulted. Media `completed`, Bundle `ready` and recorded sizes remain historical generation facts, regardless of this response. No schema or historical row is written, no tool/process or capture is started, and no file content or directory members are read.
+
+The normal `{ok,data,request_id}` envelope contains these `data` fields:
+
+| Field | Meaning |
+|---|---|
+| `recording_id` | Requested ordinary history ID. |
+| `check_started_at_utc`, `check_completed_at_utc` | UTC start and response snapshot times, including database work. |
+| `probe_state` | `complete`, `busy`, `timeout`, `cancelled`, or `failed`. Complete means processing ended, not that artifacts passed. |
+| `media_history_status` | Frozen `pending_confirmation`, `preparing`, `countdown`, `recording`, `finalizing`, `completed`, `failed`, `cancelled`, `rejected`, `expired`, or `interrupted_unknown`; null when no snapshot was acquired. |
+| `media` | One file check with `name="media"`; the response discloses no output path. |
+| `bundle.history_status` | Frozen `generating`, `ready`, `failed`, `interrupted_unknown`, `not_applicable`; null for unrecorded Bundle or unavailable snapshot. |
+| `bundle.contents_evidence_version` | `1` for the explicit complete generation list, otherwise null. |
+| `bundle.contents` | Exactly five checks for known ready version 1, otherwise null, **not an established empty collection**. |
+| `read_only`, `metadata_only` | Both true. |
+| `content_verified`, `deletion_supported` | Both false. |
+| `observation_semantics` | `sequential_point_in_time_metadata_not_atomic_snapshot`. |
+
+Each file check has `name`, nullable historical `recorded_size_bytes`, nullable `observed_size_bytes`, `observation`, `reason_code`, nullable `sampled_at_utc`, and `identity_state`. Known attachments retain the fixed generation order: `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`; their paths are derived only from the validated frozen Bundle directory. `sampled_at_utc` is the UTC start of that item's metadata attempt; null means no attempt. An interrupted attempt can have a timestamp and unavailable outcome without a completed leaf sample. Items are sampled sequentially, not at a shared atomic instant.
+
+| `observation` | Meaning |
+|---|---|
+| `present_size_matches` | A stable metadata sample has the recorded length; inspect identity separately. |
+| `missing` | Explicit file/parent not-found result. |
+| `size_mismatch` | A stable sample differs from recorded length. |
+| `inaccessible` | Access denied or sharing conflict; does not mean missing. |
+| `unsafe_path` | Refused lexical/reparse/directory/resolved-path condition. |
+| `changed_during_probe` | Metadata/identity changed between same-handle frames or deletion was pending. |
+| `unavailable` | Unsupported, malformed, failed or interrupted metadata attempt, or bounded path/ancestor check exceeded. |
+| `not_checked` | No completed check, including queued items after cancellation/timeout or ineligible media's attachments. |
+| `not_applicable` | Media is not a completed ordinary MP4. |
+| `unknown` | Completed MP4 lacks a usable completion/positive recorded length. |
+
+`identity_state` is `match`/`mismatch` for stable media or one of the five attachments compared with its trusted private publication anchor; otherwise it is `unverified` for a valid sample without an anchor, or `unknown` when identity cannot be evaluated. The formal Bundle producer can persist a complete five-item original-object identity set together with ready status and the manifest in SQLite V35. Old history, public `Ready(path)`, manifest-only compatibility results and unavailable native identity remain unanchored; there is no scan or backfill. Same-name, same-size replacement of an anchored attachment reports size matching with identity mismatch. A malformed or incomplete modern identity set fails the history read rather than silently becoming unverified. Media, manifest and attachment anchors are frozen in the same database snapshot; physical observations remain point-in-time metadata checks. Neither match nor size matching proves unchanged contents, playability, audiovisual completeness or safe deletion. Volume/file IDs, anchors, operation IDs, nonce and raw exceptions are never returned.
+
+The complete allowlist of `reason_code` values is:
+
+- `not_checked`, `media_not_applicable`, `media_evidence_unknown`;
+- `path_invalid`, `path_check_limit`, `ancestor_check_limit`, `local_drive_unavailable`;
+- `ancestor_reparse_point`, `parent_not_directory`, `parent_missing`, `file_missing`, `file_inaccessible`;
+- `leaf_reparse_point`, `output_not_file`, `metadata_changed`, `metadata_unavailable`, `resolved_path_unavailable`, `resolved_path_mismatch`;
+- `publication_identity_mismatch`, `file_size_mismatch`, `metadata_and_publication_identity_match`, `size_matches_identity_unverified`;
+- `probe_busy`, `probe_timeout`, `probe_cancelled`, `probe_failed`.
+
+Noncompleted/nonvideo media and insufficient usable output evidence incur zero file IO. Legacy ready/unknown, generating, failed, interrupted and not-applicable Bundles never acquire five-item evidence from files already present. The check accepts canonical local drive paths, including legitimate user-selected outputs outside Videos; UNC/device/ADS/relative/traversal and reserved-name paths are refused before attributes or leaf opens. The existing 1024-character bound and **64 distinct ancestors across the entire request** apply. Ancestor attributes are cached only within this request. Reparse ancestors, reparse leaves and directories posing as files are refused. Each leaf uses the existing Windows metadata-only single handle (`READ_ATTRIBUTES`, share-read) with before/after attributes, length, identity and final-path checks; no content handle is opened.
+
+One process/host lease permits at most one worker, with no waiting queue; excess requests return `busy`. The **3-second total deadline starts before database dispatch**. Timeout or cancellation freezes an immutable partial response: finished samples remain, the active attempt is unavailable, remaining items are not checked, and no next item starts after cancellation. Native/SQLite synchronous work may outlive the response. The lease remains occupied until the worker actually exits, including after API stop and service/API recreation. No previous request's samples are reused. API shutdown explicitly cancels the request. Confirmed connection errors/RST trigger best-effort cancellation; a send-only FIN does not imply that the client abandoned receiving. Graceful Close and send half-close cannot reliably be distinguished from EOF alone, so ambiguous cases remain subject to the same total deadline, without an extra waiting period.
+
+`capabilities.ordinary_artifact_check` publishes `supported`, this `endpoint`, `scope="ordinary_video"`, `max_files=6`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `metadata_only=true`, `content_verification=false`, `deletion_supported=false`, `observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`, and `identity_scope="media_and_five_bundle_publication_anchors"`. This describes workspace code, not a released capability. SQLite facts and subsequent file observations are separate snapshots; ancestor chains are not atomically locked. Changes after sampling, in-place same-size writes, ID reuse, aliases and directory TOCTOU remain outside the result. Retention still protects ready Bundles, preserves unknown-byte accounting and all deletion/reference/physical-readiness flags; a check cannot authorize cleanup or bypass references.
+
+Bundle identity matching does not change retention protection: registered Bundle protection is applied before physical sampling and never becomes delete permission. This API does not expose receipt or identity material and does not perform content hashing or playback checks.

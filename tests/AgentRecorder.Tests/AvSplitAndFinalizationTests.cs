@@ -770,6 +770,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.Contains("output_missing_audio_stream", result.Error, StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(outputPath), "final output must not be published on false success");
         Assert.NotEqual("system_loopback_recorded", result.Meta.AudioStatus);
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "temp mux partial must be cleaned up");
     }
 
@@ -1091,6 +1092,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
             audioSourceKind: AudioCaptureSourceKind.SystemLoopback,
             applyContinuityCheck: false));
 
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned after cancellation");
         AssertExistingFinalUnchanged(outputPath);
     }
@@ -1117,6 +1119,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
             audioSourceKind: AudioCaptureSourceKind.SystemLoopback,
             applyContinuityCheck: false));
 
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned after runner exception");
         AssertExistingFinalUnchanged(outputPath);
     }
@@ -1140,6 +1143,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
 
         AssertErrorCode(result, "mux_failed");
         AssertExistingFinalUnchanged(outputPath);
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned after mux failure");
     }
 
@@ -1167,6 +1171,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.NotNull(result.Error);
         Assert.Contains("output_missing_audio_stream", result.Error, StringComparison.OrdinalIgnoreCase);
         AssertExistingFinalUnchanged(outputPath);
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned on validation failure");
     }
 
@@ -1192,6 +1197,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
 
         AssertErrorCode(result, "atomic_publish_failed");
         AssertExistingFinalUnchanged(outputPath);
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned on publish failure");
     }
 
@@ -1218,6 +1224,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.Equal(0, result.ExitCode);
         Assert.True(File.Exists(outputPath), "final output must exist after success");
         Assert.NotEqual("PRE-EXISTING-FINAL", File.ReadAllText(outputPath));
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "no mux partial may remain after success");
         var leftoverTmp = Directory.GetFiles(Path.GetDirectoryName(outputPath)!, $"{Path.GetFileName(outputPath)}.publish-tmp-*");
         Assert.Empty(leftoverTmp);
@@ -1324,6 +1331,7 @@ public sealed class AvSplitAndFinalizationTests : IDisposable
         Assert.Contains(expectedCodePart, result.Error, StringComparison.OrdinalIgnoreCase);
         if (preserveFinal)
             AssertExistingFinalUnchanged(outputPath);
+        AvMuxOwnershipTests.AssertNoOwnedMux(outputPath);
         Assert.False(File.Exists(outputPath + ".muxing.partial.mp4"), "mux partial must be cleaned");
     }
 

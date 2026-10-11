@@ -76,6 +76,19 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
         Assert.True(completed.LatestOccurrence.OutputFileExists);
         Assert.Equal(Path.GetFullPath(Path.Combine(setup.OutputPath, "required-once-test.mp4")),
             completed.LatestOccurrence.OutputPath);
+        var history = new PlanExecutionStatusQueryService(database.Store).GetHistory(state.PlanId!, Sid, Session, 20)!;
+        Assert.Equal("settled", Assert.Single(history.Items).ExecutionStatusCode);
+        Assert.Equal(completed.LatestOccurrence.OutputPath, history.Items[0].OutputPath);
+        Assert.True(history.Items[0].OutputFileExists);
+        using (var ordinaryHistory = new SqliteOrdinaryRecordingHistoryStore(database.Store))
+        {
+            var unified = new UnifiedHistoryQueryService(database.Store, ordinaryHistory).GetPage(Sid, Session, 20, new("plan"));
+            Assert.Equal("settled", Assert.Single(unified.Items).ExecutionStatusCode);
+            Assert.Equal(history.Items[0].OutputPath, unified.Items[0].OutputPath);
+            Assert.True(unified.Items[0].OutputPathRecorded);
+            Assert.True(unified.Items[0].OutputFileExists);
+            Assert.Equal(1, backend.StartCalls);
+        }
         Assert.Equal(0, Count(database.Store, "lease_uses"));
         Assert.Equal(0, Count(database.Store, "consent_leases"));
         Assert.Equal(1, Count(database.Store, "recording_runs"));

@@ -1,8 +1,14 @@
 using AgentRecorder.Capture;
+using System.Net;
+using System.Text.Json;
+using AgentRecorder.Api;
 using AgentRecorder.Core;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
+using AgentRecorder.Logging;
 using AgentRecorder.Persistence;
+using AgentRecorder.Headless;
+using AgentRecorder.Windows;
 using Xunit;
 
 namespace AgentRecorder.Tests;
@@ -107,6 +113,11 @@ public sealed class RecurringLeaseLifecycleTransactionTests
         Assert.Equal(outputPath, first.LatestOccurrence!.OutputPath);
         Assert.True(first.LatestOccurrence.OutputPathRecorded);
         Assert.True(first.LatestOccurrence.OutputFileExists);
+        var firstHistory = new PlanExecutionStatusQueryService(started.Context.Fixture.Store).GetHistory(
+            started.Context.Fixture.PlanId, "S-1-5-21-task261", "session-task261", 20)!;
+        Assert.Equal(outputPath, Assert.Single(firstHistory.Items).OutputPath);
+        Assert.True(firstHistory.Items[0].OutputPathRecorded);
+        Assert.True(firstHistory.Items[0].OutputFileExists);
 
         var changedReplay = ValidMeta(started, 1.25);
         changedReplay.OutputPath = Path.Combine(started.Context.Fixture.RootPath, "replay-must-not-replace.mp4");
@@ -124,6 +135,137 @@ public sealed class RecurringLeaseLifecycleTransactionTests
         Assert.Equal(outputPath, afterRestart.LatestOccurrence!.OutputPath);
         Assert.True(afterRestart.LatestOccurrence.OutputPathRecorded);
         Assert.False(afterRestart.LatestOccurrence.OutputFileExists);
+        var historyAfterRestart = new PlanExecutionStatusQueryService(reopened).GetHistory(
+            started.Context.Fixture.PlanId, "S-1-5-21-task261", "session-task261", 20)!;
+        Assert.Equal(outputPath, Assert.Single(historyAfterRestart.Items).OutputPath);
+        Assert.True(historyAfterRestart.Items[0].OutputPathRecorded);
+        Assert.False(historyAfterRestart.Items[0].OutputFileExists);
+    }
+
+    [Fact]
+    public async Task CorruptSettledOutputPathIsUnavailableForOwnerAndHiddenFromForeignCaller()
+    {
+        var previousTemp = Environment.GetEnvironmentVariable("TEMP");
+        var previousTmp = Environment.GetEnvironmentVariable("TMP");
+        var previousDataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
+        var taskTempRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".local-data", "temp", "task310r"));
+        Directory.CreateDirectory(taskTempRoot);
+        Environment.SetEnvironmentVariable("TEMP", taskTempRoot, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable("TMP", taskTempRoot, EnvironmentVariableTarget.Process);
+        var apiDataDir = Path.Combine(taskTempRoot, "api-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(apiDataDir);
+        ApiServer? server = null;
+        try
+        {
+            using var started = Start(slotCount: 2);
+            var at = started.Context.Fixture.CreatedAt.AddMinutes(3);
+            Assert.True(started.Lifecycle.ObserveFirstFrame(
+                new FirstFrameObservation { FrameNumber = 0, TotalSizeBytes = 100 }, at).Succeeded);
+            var settled = started.Lifecycle.CompleteTermination(
+                RecurringLeaseLifecycleTerminationKind.NaturalExit, 0, ValidMeta(started, 1.25), at.AddMinutes(1));
+            Assert.True(settled.Succeeded && settled.Terminal);
+
+            var planId = started.Context.Fixture.PlanId;
+            var query = new PlanExecutionStatusQueryService(started.Context.Fixture.Store);
+            var baseline = query.GetHistory(planId, "S-1-5-21-task261", "session-task261", 20)!;
+            Assert.Contains(baseline.Items, item => item.Status == "completed" && item.Run?.Status == "settled");
+            var settledItem = Assert.Single(baseline.Items.Where(item => item.Status == "completed"));
+            Assert.True(settledItem.OutputPathRecorded);
+            Assert.Equal(started.Receipt.Specification.FrozenOutputFilePath, settledItem.OutputPath);
+
+            // Corrupt-data-only injection: the normal CHECK and immutable update trigger
+            // intentionally reject a NUL path. Keep this confined to this disposable DB.
+            started.Context.Fixture.Execute(
+                "PRAGMA ignore_check_constraints = ON; DROP TRIGGER trg_recording_run_output_evidence_immutable_update; UPDATE recording_run_output_evidence SET output_path = $path WHERE run_id = $run;",
+                ("$path", "\0"), ("$run", started.Receipt.Run.Id));
+            var persistenceError = Assert.Throws<Phase3PersistenceException>(() =>
+                query.GetHistory(planId, "S-1-5-21-task261", "session-task261", 20));
+            Assert.Equal("plan_status_data_invalid", persistenceError.Code);
+
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", apiDataDir, EnvironmentVariableTarget.Process);
+            ApiKeyAuth.InitializeForTesting(apiDataDir);
+            var audit = new AuditLogger();
+            var engine = new RecordingEngine(audit);
+            var tray = new HeadlessTrayContext(audit);
+            engine.SetTray(tray);
+            server = CreateHistoryApiServer(engine, audit, tray,
+                new StoreBackedHistoryGateway(query, "S-1-5-21-task261", "session-task261"));
+            server.Start();
+            using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(5) };
+            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+            var url = $"http://127.0.0.1:{server.BoundPort}/api/v1/plans/{planId}/history";
+            using var response = await client.GetAsync(url);
+            Assert.Equal((int)HttpStatusCode.ServiceUnavailable, (int)response.StatusCode);
+            Assert.Equal("PLAN_HISTORY_UNAVAILABLE", await ReadApiErrorCode(response));
+            var responseBody = await response.Content.ReadAsStringAsync();
+            Assert.DoesNotContain(started.Receipt.Specification.FrozenOutputFilePath, responseBody, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("S-1-5-21", responseBody, StringComparison.Ordinal);
+
+            // Cursor validation is still a client error; it runs through the formal
+            // App-style adapter that translates only the dedicated cursor exception.
+            using var badCursor = await client.GetAsync(url + "?cursor=invalid");
+            Assert.Equal((int)HttpStatusCode.BadRequest, (int)badCursor.StatusCode);
+            Assert.Equal("INVALID_ARGUMENT", await ReadApiErrorCode(badCursor));
+            using var badLimit = await client.GetAsync(url + "?limit=101");
+            Assert.Equal((int)HttpStatusCode.BadRequest, (int)badLimit.StatusCode);
+            Assert.Equal("INVALID_ARGUMENT", await ReadApiErrorCode(badLimit));
+
+            server.Stop();
+            server = CreateHistoryApiServer(engine, audit, tray,
+                new StoreBackedHistoryGateway(query, "S-1-5-21-foreign", "foreign-session"));
+            server.Start();
+            var foreignUrl = $"http://127.0.0.1:{server.BoundPort}/api/v1/plans/{planId}/history";
+            using var unknown = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/plans/unknown-plan/history");
+            using var foreign = await client.GetAsync(foreignUrl);
+            Assert.Equal((int)HttpStatusCode.NotFound, (int)unknown.StatusCode);
+            Assert.Equal((int)unknown.StatusCode, (int)foreign.StatusCode);
+            Assert.Equal("PLAN_NOT_FOUND", await ReadApiErrorCode(unknown));
+            Assert.Equal("PLAN_NOT_FOUND", await ReadApiErrorCode(foreign));
+            var foreignBody = await foreign.Content.ReadAsStringAsync();
+            Assert.DoesNotContain(started.Receipt.Specification.FrozenOutputFilePath, foreignBody, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("S-1-5-21", foreignBody, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { server?.Stop(); } catch { }
+            ApiKeyAuth.ResetForTesting(null);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", previousDataDir, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable("TEMP", previousTemp, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable("TMP", previousTmp, EnvironmentVariableTarget.Process);
+            try { if (Directory.Exists(apiDataDir)) Directory.Delete(apiDataDir, recursive: true); } catch { }
+        }
+    }
+
+    private static ApiServer CreateHistoryApiServer(
+        RecordingEngine engine, AuditLogger audit, ITrayContext tray, IPlanExecutionHistoryGateway gateway) =>
+        new(engine, audit, tray,
+            readiness: null, autoStart: null, ffmpegPrewarmer: null, tracer: null,
+            ensureContextStore: null, performanceSummaryProvider: null,
+            standingPlanSetupGateway: null, recurringPlanSetupGateway: null,
+            planExecutionStatusGateway: null, listenPort: 0,
+            planExecutionHistoryGateway: gateway);
+
+    private static async Task<string?> ReadApiErrorCode(HttpResponseMessage response)
+    {
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return document.RootElement.GetProperty("error").GetProperty("code").GetString();
+    }
+
+    private sealed class StoreBackedHistoryGateway(
+        PlanExecutionStatusQueryService query, string sid, string session) : IPlanExecutionHistoryGateway
+    {
+        public PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor)
+        {
+            PlanExecutionHistoryPageSnapshot? page;
+            try { page = query.GetHistory(planId, sid, session, limit, cursor); }
+            catch (PlanExecutionHistoryCursorException exception) { throw new ArgumentException("Invalid cursor.", exception); }
+            return page is null ? null : new PlanExecutionHistoryPageState(page.PlanId, page.Kind,
+                page.Items.Select(item => new PlanExecutionHistoryItemState(item.OccurrenceId, item.CreatedAtUtc,
+                    item.WindowStartUtc, item.WindowEndUtc, item.Status, item.TerminalReasonCode, item.RunId,
+                    item.Run is null ? null : new PlanExecutionRunState(item.Run.RunId, item.Run.Status, item.Run.TerminalReasonCode),
+                    item.ExecutionStatusCode, item.OutputPath, item.OutputPathRecorded, item.OutputFileExists)).ToArray(),
+                page.NextCursor);
+        }
     }
 
     [Theory]

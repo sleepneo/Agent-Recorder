@@ -20,6 +20,8 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 ## 人类用户如何使用
 
+当前已发布包为 v0.1.15。本工作区另已实现普通持久历史、统一索引查询、按需健康/产物元数据检查、只读保留预览，以及媒体/Bundle 发布与存储保护；这些源码增量尚未包含在该发布包中。自动删除、全盘配额、代码签名和安装器未完成。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
+
 1. 解压 Windows portable zip。
 2. 把以下文档交给本地 AI agent：
    - `AGENT-INSTRUCTIONS.zh-CN.md`
@@ -33,6 +35,14 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 4. 在弹出的选区 UI 中框选区域。
 5. 在本地确认窗口中检查录制信息，可按需更改保存目录，然后明确点击「确认」批准录制。
 6. 等待 AI agent 报告 MP4 输出路径。
+
+### 辅助查看与停止
+
+托盘中的「观察控制中心」可选用于查看当前录制、历史结果、打开保存目录及停止指定录制；它不是录屏主入口，也不是 agent 的诊断依赖。关闭只关闭该窗口。录制与诊断信息由 agent 直接读 API，用户仍通过自然语言提出录屏需求。
+
+需要查找以前的录制时，可按来源、时间和普通录制状态筛选分页历史，并复制路径或打开保存目录。停止请求、历史完成事实与当前文件是否存在分别显示，不将它们混为成片成功。
+
+观察控制中心默认允许普通 Windows 截图；如果窗口处于录制范围，可能进入录制画面，可关闭窗口或移出选区。其他录制控件和确认/授权窗口的捕获策略不变。
 
 ## AI agent 如何接入
 
@@ -58,7 +68,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 - 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
 - AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。
 
-需要托盘、本地选区或确认 UI 时，agent 应先检查宿主是否提供获准的用户桌面命令执行入口，并经该入口调用 `ensure-running`。Codex 宿主可对具体命令使用工具授权执行入口；这是宿主调用能力，不是 Recorder CLI 参数，也不代表其他 agent/宿主均支持。Recorder 不会跳出沙盒或跨 Windows 账户派发；没有适当执行面时保持 fail-closed。`host.supports_region_selection_ui` 只表示宿主具备选区 UI，不是托盘可见性的证明。
+需要托盘、本地选区或确认 UI 时，agent 应先检查宿主是否提供获准的用户桌面命令执行入口，并经该入口调用 `ensure-running`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主调用能力，不是 Recorder CLI 参数，也不代表其他 agent/宿主均支持。Recorder 不会跳出沙盒或跨 Windows 账户派发；没有适当执行面时保持 fail-closed。`host.supports_region_selection_ui` 只表示宿主具备选区 UI，不是托盘可见性的证明。
 
 `target.type` 支持：
 

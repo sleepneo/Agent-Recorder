@@ -341,8 +341,11 @@ public class RecordingEnginePreparingStateTests : IDisposable
         dynamic status = engine.GetStatusWait(rec.Id, sinceStatus: "countdown", waitMs: 5000);
 
         Assert.Equal("failed", (string)status.Status);
-        Assert.True(SpinWait.SpinUntil(() => backend.CancelCalled || backend.StopCalled, TimeSpan.FromSeconds(2)),
-            "backend Cancel/Stop must be invoked on first-frame timeout");
+        // Cancel is observable before the subsequent idle callback. Wait for both
+        // completion facts within the original two-second budget.
+        Assert.True(SpinWait.SpinUntil(() => (backend.CancelCalled || backend.StopCalled) &&
+            Volatile.Read(ref tray.SetIdleCallCount) >= 1, TimeSpan.FromSeconds(2)),
+            "backend Cancel/Stop and idle UI must complete on first-frame timeout");
         Assert.True(tray.SetIdleCallCount >= 1);
     }
 

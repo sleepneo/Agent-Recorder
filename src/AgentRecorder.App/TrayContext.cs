@@ -17,7 +17,7 @@ using AgentRecorder.Windows;
 
 namespace AgentRecorder.App;
 
-internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecordingFailureNotifier
+internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecordingFailureNotifier, IObservationActiveGateway
 {
     private static readonly TimeSpan ChapterMarkFeedbackDuration = TimeSpan.FromMilliseconds(1900);
     public string HostMode => "tray";
@@ -48,6 +48,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private bool _chapterMarkHadExactRecording;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _stopItem;
+    private readonly ToolStripMenuItem _observationItem;
     private readonly ToolStripMenuItem? _unattendedSafetyControlItem;
     private readonly ToolStripMenuItem _approveItem;
     private readonly ToolStripMenuItem _rejectItem;
@@ -69,6 +70,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     private readonly StandingLeaseSafetyControlService? _unattendedSafetyService;
     private IFutureWindowOneShotGateway? _futureWindowOneShotGateway;
     private UnattendedSafetyControlForm? _unattendedSafetyForm;
+    private IUnifiedHistoryGateway? _unifiedHistoryGateway;
+    private ObservationCenterForm? _observationForm;
+    private IObservationHealthGateway? _observationHealth;
+    private readonly int _observationOwnerThread = Environment.CurrentManagedThreadId;
 
     // Confirmation queue
     private readonly ConfirmationQueue _confirmationQueue = new();
@@ -122,6 +127,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
         _statusItem = new ToolStripMenuItem(_uiText.Get("Tray_Status_Idle")) { Enabled = false };
         _stopItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Stop"), null, (_, _) => StopAll("tray_menu")) { Enabled = false };
+        _observationItem = new ToolStripMenuItem(_uiText.Get("Observation_Title"), null, (_, _) => OpenObservationCenter());
         _unattendedSafetyControlItem = _unattendedSafetyService is null
             ? null
             : new ToolStripMenuItem(_uiText.Get("Tray_Menu_UnattendedSafety"), null, (_, _) => OpenUnattendedSafetyControl());
@@ -140,6 +146,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _exitItem = new ToolStripMenuItem(_uiText.Get("Tray_Menu_Exit"), null, (_, _) => ExitApp());
 
         menu.Items.Add(_statusItem);
+        menu.Items.Add(_observationItem);
         menu.Items.Add(_openOutputFolderItem);
         menu.Items.Add(_stopItem);
         if (_unattendedSafetyControlItem is not null)
@@ -238,10 +245,12 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         _languageZhCnItem.Text = _uiText.Get("Tray_Language_ZhCn");
         _languageEnUsItem.Text = _uiText.Get("Tray_Language_EnUs");
         _openOutputFolderItem.Text = _uiText.Get("Tray_Menu_OpenOutputDir");
+        _observationItem.Text = _uiText.Get("Observation_Title");
         _exitItem.Text = _uiText.Get("Tray_Menu_Exit");
         if (_unattendedSafetyControlItem is not null)
             _unattendedSafetyControlItem.Text = _uiText.Get("Tray_Menu_UnattendedSafety");
         _unattendedSafetyForm?.UpdateLanguage(_uiText);
+        _observationForm?.UpdateLanguage(_uiText);
 
         UpdateConfirmationMenu();
 
@@ -934,32 +943,99 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
     private void StopRecording(string recordingId, string trigger)
     {
-        if (!_activeRecordings.ContainsKey(recordingId))
-            return;
+        _ = BeginLocalStop(recordingId, trigger, requireStoppablePhase: false);
+    }
+
+    private Task<ObservationStopResult> BeginLocalStop(string recordingId, string trigger, bool requireStoppablePhase)
+    {
+        if (_disposed || !_activeRecordings.TryGetValue(recordingId, out var presentation) ||
+            requireStoppablePhase && !ObservationFormatting.CanStop(presentation))
+            return Task.FromResult(new ObservationStopResult(ObservationStopOutcome.NotStoppable));
 
         if (!_stoppingIds.Add(recordingId))
-            return; // already stopping
+            return Task.FromResult(new ObservationStopResult(ObservationStopOutcome.Busy));
 
         _audit.Log("recording_stop_control.stopping", new { recording_id = recordingId, trigger });
+        if (trigger == "observation_center")
+            _audit.Log("recording.stop_requested_local", new { trigger, active_count = _activeRecordings.Count, recording_ids = new[] { recordingId } });
         UpdateRecordingUi();
 
-        Task.Run(() =>
+        return Task.Run(() =>
         {
             try
             {
-                _engine.Stop(recordingId, trigger);
+                var response = _engine.Stop(recordingId, trigger);
+                var status = response.GetType().GetProperty("status")?.GetValue(response) as string;
+                if (requireStoppablePhase && status is "failed" or "started_unknown" or "interrupted_unknown" or "session_interrupted")
+                    return new ObservationStopResult(ObservationStopOutcome.Failed, status);
+                return new ObservationStopResult(ObservationStopOutcome.Requested);
             }
             catch (Exception ex)
             {
                 _audit.Log("recording.stop_error", new { recording_id = recordingId, trigger, error = ex.Message });
-                RunOnUi(() =>
+                try { if (!_disposed) RunOnUi(() =>
                 {
+                    if (_disposed) return;
                     _stoppingIds.Remove(recordingId);
                     _indicatorManager.ResetStopControlAfterFailure(recordingId);
                     UpdateRecordingUi();
-                });
+                }); } catch (ObjectDisposedException) { } catch (InvalidOperationException) { }
+                return new ObservationStopResult(ObservationStopOutcome.Failed, ex is ApiException api ? api.Code : "stop_failed");
             }
         });
+    }
+
+    public IReadOnlyList<ObservationActiveRecording> GetObservationSnapshot()
+    {
+        if (_disposed) return Array.Empty<ObservationActiveRecording>();
+        if (_uiInvoker.InvokeRequired) throw new InvalidOperationException("Active snapshots belong to the UI thread.");
+        return Array.AsReadOnly(_activeRecordings.Values.OrderBy(p => p.RecordingId, StringComparer.Ordinal)
+            .Select(p => new ObservationActiveRecording(p, ObservationFormatting.CanStop(p) && !_stoppingIds.Contains(p.RecordingId))).ToArray());
+    }
+
+    public Task<ObservationStopResult> StopObservationRecordingAsync(string recordingId)
+    {
+        if (_uiInvoker.InvokeRequired) throw new InvalidOperationException("Stop selection belongs to the UI thread.");
+        return BeginLocalStop(recordingId, "observation_center", requireStoppablePhase: true);
+    }
+
+    internal void SetUnifiedHistoryGateway(IUnifiedHistoryGateway gateway) => _unifiedHistoryGateway = gateway;
+
+    internal ObservationHealthOwnerDispatcher CreateHealthOwnerDispatcher(Func<ObservationHealthOwner> capture)
+    {
+        if(Environment.CurrentManagedThreadId!=_observationOwnerThread) throw new InvalidOperationException("Health dispatchers belong to the owner thread.");
+        return new(_uiInvoker,capture);
+    }
+    internal void SetObservationHealthGateway(IObservationHealthGateway gateway) => _observationHealth=gateway;
+    internal (HealthHotkey Stop, HealthHotkey Chapter) CaptureHealthHotkeys()
+    {
+        if(Environment.CurrentManagedThreadId!=_observationOwnerThread)
+            throw new InvalidOperationException("Health hotkeys must be sampled on the tray owner.");
+        return (new(SupportsGlobalStopHotkey,IsGlobalStopHotkeyRegistered,GlobalStopHotkeyGesture,"always",true,_globalStopHotkey?.LastErrorCode??0),
+            new(SupportsChapterMarksLocalHotkey,IsChapterMarksHotkeyRegistered,ChapterMarksHotkeyGesture,
+                ChapterMarksHotkeyRegistrationPolicy,_chapterMarkHadExactRecording,_chapterMarksHotkey?.LastErrorCode??0));
+    }
+
+    // Construction is separate from explicit user presentation so lifetime and
+    // language wiring can be tested without showing any recording or consent UI.
+    internal ObservationCenterForm GetObservationCenter()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(TrayContext));
+        if (_uiInvoker.InvokeRequired) throw new InvalidOperationException("Observation windows belong to the UI thread.");
+        if (_observationForm is null || _observationForm.IsDisposed)
+        {
+            var window = new ObservationCenterForm(this, _unifiedHistoryGateway ?? UnavailableObservationHistoryGateway.Instance,
+                OpenUnattendedSafetyControl, _uiText, health: _observationHealth);
+            _observationForm = window;
+            window.FormClosed += (_, _) => { if (ReferenceEquals(_observationForm, window)) _observationForm = null; };
+        }
+        return _observationForm;
+    }
+    private void OpenObservationCenter()
+    {
+        var window = GetObservationCenter();
+        if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+        window.Show(); window.BringToFront(); window.Activate();
     }
 
     private void UpdateRecordingUi()
@@ -1535,6 +1611,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         if (_disposed)
             return;
         _disposed = true;
+        var observation = _observationForm; _observationForm = null;
+        try { observation?.Close(); observation?.Dispose(); } catch { }
 
         try
         {

@@ -11,7 +11,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class StandingPlanSetupCoordinatorTests
+public sealed class StandingPlanSetupCoordinatorTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     [Fact]
     public async Task ProductionCoordinatorSeamCompletesSelectionApprovalAndScheduling()
@@ -56,6 +56,17 @@ public sealed class StandingPlanSetupCoordinatorTests
         Assert.Equal("enabled", ReadText(database.Store, "SELECT status_code FROM plans;"));
         Assert.Equal("authorized", ReadText(database.Store, "SELECT status_code FROM plan_occurrences;"));
         Assert.Equal("active", ReadText(database.Store, "SELECT status_code FROM consent_leases;"));
+        using var ordinaryHistory = new SqliteOrdinaryRecordingHistoryStore(database.Store);
+        var unifiedQuery = new UnifiedHistoryQueryService(database.Store, ordinaryHistory);
+        UnifiedHistoryIndexedSeekTests.ObserveOwnedPlanAccess(unifiedQuery, database.Store, "standing_once", output);
+        var unified = unifiedQuery.GetPage(
+            ReadText(database.Store, "SELECT current_user_sid FROM setup_intents;"),
+            ReadText(database.Store, "SELECT session_binding FROM setup_intents;"), 20, new("plan"));
+        Assert.Equal(state.OccurrenceId, Assert.Single(unified.Items).OccurrenceId);
+        Assert.Equal("authorized", unified.Items[0].OccurrenceStatus);
+        Assert.Null(unified.Items[0].RunId);
+        Assert.Equal(1, ui.SelectionCalls);
+        Assert.Equal(1, ui.ApprovalCalls);
     }
 
     [Fact]

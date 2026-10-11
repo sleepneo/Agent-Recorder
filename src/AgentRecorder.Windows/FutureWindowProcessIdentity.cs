@@ -610,8 +610,7 @@ internal static class FutureWindowProcessIdentity
         evidence = default;
         var buffer = new StringBuilder(32768);
         var size = (uint)buffer.Capacity;
-        if (GetProcessId(process) != (uint)expectedPid ||
-            !GetProcessTimes(process, out var creation, out _, out _, out _) ||
+        if (!NativeProcessLifetime.TryRead(process, expectedPid, out var creation, out var sessionId) ||
             !QueryFullProcessImageName(process, 0, buffer, ref size) || size == 0 ||
             !OpenProcessToken(process, TokenQuery, out var token))
             return false;
@@ -619,13 +618,12 @@ internal static class FutureWindowProcessIdentity
         using (token)
         using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
         {
-            if (identity.User?.Value is not { Length: > 0 } sid ||
-                !ProcessIdToSessionId((uint)expectedPid, out var sessionId))
+            if (identity.User?.Value is not { Length: > 0 } sid)
                 return false;
             var rawPath = buffer.ToString();
             var canonicalPath = Path.GetFullPath(rawPath);
             evidence = new ProcessEvidence(
-                FileTimeToLong(creation), sid, checked((int)sessionId), canonicalPath);
+                creation, sid, sessionId, canonicalPath);
             return true;
         }
     }

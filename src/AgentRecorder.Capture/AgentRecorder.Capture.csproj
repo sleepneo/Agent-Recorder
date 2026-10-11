@@ -8,12 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\AgentRecorder.Infrastructure\AgentRecorder.Infrastructure.csproj" />
     <ProjectReference Include="..\AgentRecorder.Logging\AgentRecorder.Logging.csproj" />
     <ProjectReference Include="..\AgentRecorder.Windows\AgentRecorder.Windows.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="AgentRecorder.App" />
+    <InternalsVisibleTo Include="AgentRecorder.Headless" />
     <InternalsVisibleTo Include="AgentRecorder.Core" />
     <InternalsVisibleTo Include="AgentRecorder.Persistence" />
     <InternalsVisibleTo Include="AgentRecorder.Tests" />

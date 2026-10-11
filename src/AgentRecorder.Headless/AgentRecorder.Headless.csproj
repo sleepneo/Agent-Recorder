@@ -13,6 +13,10 @@
     <ProjectReference Include="..\AgentRecorder.Api\AgentRecorder.Api.csproj" />
     <ProjectReference Include="..\AgentRecorder.Core\AgentRecorder.Core.csproj" />
     <ProjectReference Include="..\AgentRecorder.Infrastructure\AgentRecorder.Infrastructure.csproj" />
+    <ProjectReference Include="..\AgentRecorder.Persistence\AgentRecorder.Persistence.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentRecorder.Tests" />
+  </ItemGroup>
 </Project>

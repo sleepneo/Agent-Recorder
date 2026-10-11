@@ -13,8 +13,21 @@ namespace AgentRecorder.Tests;
 [Collection("HeadlessHostIntegration")]
 public sealed class PlanExecutionStatusApiTests : IDisposable
 {
-    private readonly string _dataDir = Path.Combine(Path.GetTempPath(), "AgentRecorderPlanStatusApi_" + Guid.NewGuid().ToString("N"));
+    private readonly string _dataDir;
+    private readonly string? _previousTemp;
+    private readonly string? _previousTmp;
     private ApiServer? _server;
+
+    public PlanExecutionStatusApiTests()
+    {
+        _previousTemp = Environment.GetEnvironmentVariable("TEMP");
+        _previousTmp = Environment.GetEnvironmentVariable("TMP");
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".local-data", "temp", "task310"));
+        Directory.CreateDirectory(root);
+        Environment.SetEnvironmentVariable("TEMP", root, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable("TMP", root, EnvironmentVariableTarget.Process);
+        _dataDir = Path.Combine(root, Guid.NewGuid().ToString("N"));
+    }
 
     [Fact]
     public async Task AuthenticatedEndpointReturnsDurableProjectionAndCapabilitiesTemplate()
@@ -81,6 +94,98 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
         using var response = await client.GetAsync(Url("plan-1"));
         Assert.Equal((int)HttpStatusCode.ServiceUnavailable, (int)response.StatusCode);
         Assert.Contains("PLAN_STATUS_UNAVAILABLE", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HistoryRouteIsAuthenticatedBoundedAndAdvertisedWithoutChangingHeadlessRuntime()
+    {
+        var item = new PlanExecutionHistoryItemState("occ-1", DateTimeOffset.Parse("2026-10-01T00:00:00Z"),
+            DateTimeOffset.Parse("2026-10-01T01:00:00Z"), DateTimeOffset.Parse("2026-10-01T01:05:00Z"),
+            "scheduled", null, null, null, null, null, false, null);
+        _server = CreateServer(null, new FakeHistoryGateway(new PlanExecutionHistoryPageState(
+            "plan-1", "once", new[] { item }, null)));
+        _server.Start();
+        using var client = CreateClient();
+        var url = HistoryUrl("plan-1");
+        using var unauthorized = await client.GetAsync(url);
+        Assert.Equal((int)HttpStatusCode.Unauthorized, (int)unauthorized.StatusCode);
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+
+        using var response = await client.GetAsync(url);
+        Assert.Equal((int)HttpStatusCode.OK, (int)response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var data = document.RootElement.GetProperty("data");
+        Assert.Equal("plan-1", data.GetProperty("plan_id").GetString());
+        Assert.Equal("scheduled", data.GetProperty("items")[0].GetProperty("occurrence_status").GetString());
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("items")[0].GetProperty("run_id").ValueKind);
+
+        using var capabilities = await client.GetAsync($"http://127.0.0.1:{_server.BoundPort}/api/v1/capabilities");
+        using var caps = JsonDocument.Parse(await capabilities.Content.ReadAsStringAsync());
+        var historyCapability = caps.RootElement.GetProperty("data").GetProperty("plan_execution_history");
+        Assert.True(historyCapability.GetProperty("supported").GetBoolean());
+        Assert.Equal(100, historyCapability.GetProperty("max_limit").GetInt32());
+
+        using var unknown = await client.GetAsync(HistoryPath("plan-1") + "?limit=20&unused=x");
+        Assert.Equal((int)HttpStatusCode.BadRequest, (int)unknown.StatusCode);
+        using var badLimit = await client.GetAsync(HistoryPath("plan-1") + "?limit=101");
+        Assert.Equal((int)HttpStatusCode.BadRequest, (int)badLimit.StatusCode);
+        using var duplicate = await client.GetAsync(HistoryPath("plan-1") + "?limit=2&limit=3");
+        Assert.Equal((int)HttpStatusCode.BadRequest, (int)duplicate.StatusCode);
+        using var badCursor = await client.GetAsync(HistoryPath("plan-1") + "?cursor=");
+        Assert.Equal((int)HttpStatusCode.BadRequest, (int)badCursor.StatusCode);
+    }
+
+    [Fact]
+    public async Task MissingHistoryGatewayReturns503AndCapabilityFalse()
+    {
+        _server = CreateServer(null);
+        _server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        using var response = await client.GetAsync(HistoryUrl("plan-1"));
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, (int)response.StatusCode);
+        Assert.Equal("PLAN_HISTORY_UNAVAILABLE", await ErrorCode(response));
+        using var capabilities = await client.GetAsync($"http://127.0.0.1:{_server.BoundPort}/api/v1/capabilities");
+        using var document = JsonDocument.Parse(await capabilities.Content.ReadAsStringAsync());
+        Assert.False(document.RootElement.GetProperty("data").GetProperty("plan_execution_history").GetProperty("supported").GetBoolean());
+    }
+
+    [Fact]
+    public async Task HistoryHidesForeignCorruptRowsButOwnedCorruptionIsUnavailable()
+    {
+        using var fixture = new RecurringPlanSetupTestFixture();
+        fixture.Create("history-owned-corrupt", prepared: true);
+        fixture.Activate("history-owned-corrupt");
+        fixture.Create("history-foreign-corrupt", prepared: true, sid: "S-1-5-21-history-foreign", session: "history-foreign-session");
+        fixture.Activate("history-foreign-corrupt", "S-1-5-21-history-foreign", "history-foreign-session");
+        var ownedPlan = fixture.Query.Get("history-owned-corrupt", RecurringPlanSetupTestFixture.Sid,
+            RecurringPlanSetupTestFixture.Session)!.PlanId!;
+        var foreignPlan = fixture.Query.Get("history-foreign-corrupt", "S-1-5-21-history-foreign",
+            "history-foreign-session")!.PlanId!;
+        var ownedAdvance = new SqliteRecurringAdvancementTransaction(fixture.Store).AdvanceOne(
+            ownedPlan, 1, "history-owned-advance", 0, RecurringPlanSetupTestFixture.At(0), RecurringPlanSetupTestFixture.At(10));
+        var foreignAdvance = new SqliteRecurringAdvancementTransaction(fixture.Store).AdvanceOne(
+            foreignPlan, 1, "history-foreign-advance", 0, RecurringPlanSetupTestFixture.At(0), RecurringPlanSetupTestFixture.At(10));
+        var ownedOccurrence = fixture.Text($"SELECT occurrence_id FROM recurring_occurrence_slots WHERE occurrence_identity = '{ownedAdvance.OccurrenceIdentity}';");
+        var foreignOccurrence = fixture.Text($"SELECT occurrence_id FROM recurring_occurrence_slots WHERE occurrence_identity = '{foreignAdvance.OccurrenceIdentity}';");
+        fixture.Corrupt($"UPDATE plan_occurrences SET status_code = 'corrupt_history_state' WHERE id IN ('{ownedOccurrence}', '{foreignOccurrence}');");
+
+        _server = CreateServer(null, new StoreBackedHistoryGateway(
+            new PlanExecutionStatusQueryService(fixture.Store), RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session));
+        _server.Start();
+        using var client = CreateClient();
+        client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        using var unknown = await client.GetAsync(HistoryUrl("unknown-history-plan"));
+        using var foreign = await client.GetAsync(HistoryUrl(foreignPlan));
+        using var owned = await client.GetAsync(HistoryUrl(ownedPlan));
+        Assert.Equal((int)HttpStatusCode.NotFound, (int)unknown.StatusCode);
+        Assert.Equal((int)unknown.StatusCode, (int)foreign.StatusCode);
+        Assert.Equal("PLAN_NOT_FOUND", await ErrorCode(foreign));
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, (int)owned.StatusCode);
+        Assert.Equal("PLAN_HISTORY_UNAVAILABLE", await ErrorCode(owned));
+        var body = await owned.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("corrupt_history_state", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("S-1-5-21", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,9 +314,11 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
         try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); } catch { }
         ApiKeyAuth.ResetForTesting(null);
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable("TEMP", _previousTemp, EnvironmentVariableTarget.Process);
+        Environment.SetEnvironmentVariable("TMP", _previousTmp, EnvironmentVariableTarget.Process);
     }
 
-    private ApiServer CreateServer(IPlanExecutionStatusGateway? gateway)
+    private ApiServer CreateServer(IPlanExecutionStatusGateway? gateway, IPlanExecutionHistoryGateway? historyGateway = null)
     {
         Directory.CreateDirectory(_dataDir);
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _dataDir, EnvironmentVariableTarget.Process);
@@ -230,11 +337,18 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
             standingPlanSetupGateway: null,
             recurringPlanSetupGateway: null,
             planExecutionStatusGateway: gateway,
-            listenPort: 0);
+            listenPort: 0,
+            planExecutionHistoryGateway: historyGateway);
     }
 
     private string Url(string planId) =>
         $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans/{planId}/status";
+
+    private string HistoryUrl(string planId) =>
+        HistoryPath(planId) + "?limit=20";
+
+    private string HistoryPath(string planId) =>
+        $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans/{planId}/history";
 
     private static HttpClient CreateClient() => new(new HttpClientHandler { UseProxy = false })
     {
@@ -260,6 +374,27 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
     {
         public PlanExecutionStatusState? Get(string planId) =>
             string.Equals(planId, state?.PlanId, StringComparison.Ordinal) ? state : null;
+    }
+
+    private sealed class FakeHistoryGateway(PlanExecutionHistoryPageState? state) : IPlanExecutionHistoryGateway
+    {
+        public PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor) =>
+            string.Equals(planId, state?.PlanId, StringComparison.Ordinal) ? state : null;
+    }
+
+    private sealed class StoreBackedHistoryGateway(
+        PlanExecutionStatusQueryService query, string sid, string session) : IPlanExecutionHistoryGateway
+    {
+        public PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor)
+        {
+            var page = query.GetHistory(planId, sid, session, limit, cursor);
+            return page is null ? null : new PlanExecutionHistoryPageState(page.PlanId, page.Kind,
+                page.Items.Select(item => new PlanExecutionHistoryItemState(item.OccurrenceId, item.CreatedAtUtc,
+                    item.WindowStartUtc, item.WindowEndUtc, item.Status, item.TerminalReasonCode, item.RunId,
+                    item.Run is null ? null : new PlanExecutionRunState(item.Run.RunId, item.Run.Status, item.Run.TerminalReasonCode),
+                    item.ExecutionStatusCode, item.OutputPath, item.OutputPathRecorded, item.OutputFileExists)).ToArray(),
+                page.NextCursor);
+        }
     }
 
     private sealed class StoreBackedGateway(

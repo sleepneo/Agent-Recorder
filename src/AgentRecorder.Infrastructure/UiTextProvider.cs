@@ -16,6 +16,8 @@ public sealed class UiTextProvider : IUiTextProvider
     {
         Language = language;
         _texts = language == UiLanguage.ZhCn ? CreateZhCn() : CreateEnUs();
+        ObservationUiText.Add(_texts, language);
+        ObservationHealthText.Add(_texts, language);
     }
 
     public UiLanguage Language { get; }

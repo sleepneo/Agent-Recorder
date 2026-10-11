@@ -483,7 +483,7 @@ public sealed class WindowStorageEngineTests : IDisposable
         await Until(() => rec.State == RecState.recording);
         await clock.WaitForDelay();
         var paths = cfg.WritePaths!;
-        string selected = pathKind == "output" ? paths.OutputDirectory : pathKind == "av" ? paths.AvTempDirectory! : paths.WgcTempRoot;
+        string selected = pathKind == "output" ? paths.OutputDirectory : pathKind == "av" ? paths.AvTempDirectory! : Assert.IsType<string>(paths.WgcTempRoot);
         _provider.Free = p => p == selected ? WindowStorageSafety.LowWaterBytes - 1 : 100L * 1024 * 1024 * 1024;
         if (unavailable) _provider.Query = (_, _) => throw new IOException("unavailable " + selected);
         clock.Tick();
@@ -587,6 +587,7 @@ public sealed class WindowStorageEngineTests : IDisposable
         Assert.Equal(WindowStorageSafety.LowSpaceCode, rec.Error);
         Assert.False(rec.LastMeta!.OutputFileExists);
         Assert.False(File.Exists(cfg.OutputPath));
+        AvMuxOwnershipTests.AssertNoOwnedMux(cfg.OutputPath);
         Assert.False(File.Exists(cfg.OutputPath + ".muxing.partial.mp4"));
         Assert.True(Directory.Exists(backend.FailedArtifactsDirectory));
         Assert.True(File.Exists(Path.Combine(backend.FailedArtifactsDirectory!, "video.mp4")));

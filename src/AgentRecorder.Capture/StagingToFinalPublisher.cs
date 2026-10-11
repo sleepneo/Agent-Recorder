@@ -1,3 +1,4 @@
+using AgentRecorder.Infrastructure;
 using System;
 using System.IO;
 using System.Threading;
@@ -15,6 +16,9 @@ internal sealed class PublishResult
 
     /// <summary>Size of the published file in bytes, or zero on failure.</summary>
     public long FinalSizeBytes { get; set; }
+
+    internal PublicationReceipt? Receipt { get; init; }
+    internal PublicationCleanupOutcome CleanupOutcome { get; set; }
 
     /// <summary>Stable failure category when <see cref="Success"/> is false.</summary>
     public string? FailureCategory { get; set; }
@@ -169,12 +173,32 @@ internal interface IStagingToFinalPublisher
 /// <summary>
 /// Production implementation of <see cref="IStagingToFinalPublisher"/>.
 /// </summary>
+// Only an opted-in storage gate supplies accounting for this physical copy.
+internal interface IPublicationCopyCapacityGate
+{
+    Task<IPublicationCopyReservation?> BeginCopyAsync(long bytes, CancellationToken token);
+}
+
+internal interface IPublicationCopyReservation : IDisposable
+{
+    Task WriteAsync(FileStream destination, ReadOnlyMemory<byte> bytes, CancellationToken token);
+    Task EnsureCapacityAsync(CancellationToken token);
+}
+
 internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
 {
     internal static readonly IStagingToFinalPublisher Instance = new StagingToFinalPublisher();
 
     private readonly IFileSystemOperations _fileSystem;
+    private readonly IWindowsFileMetadataApi _identityApi;
+    private readonly IPublicationFileOperations _publicationFiles;
+    private static readonly object SigningAuthority = new();
+    internal static bool IsSigningAuthority(object value) => ReferenceEquals(value, SigningAuthority);
     private readonly Func<string>? _tempPathGenerator;
+    internal Action<FileStream>? OriginalCopyCreatedForTests { get; set; }
+    internal Action<FileStream>? BeforeOriginalFlushForTests { get; set; }
+    internal Action? BeforeOriginalCommitForTests { get; set; }
+    internal Action<FileStream, long>? OriginalCopyProgressForTests { get; set; }
 
     /// <summary>Production constructor.</summary>
     public StagingToFinalPublisher()
@@ -183,9 +207,11 @@ internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
     }
 
     /// <summary>Test constructor allowing file-system failure injection and deterministic temp names.</summary>
-    internal StagingToFinalPublisher(IFileSystemOperations fileSystem, Func<string>? tempPathGenerator = null)
+    internal StagingToFinalPublisher(IFileSystemOperations fileSystem, Func<string>? tempPathGenerator = null, IWindowsFileMetadataApi? identityApi = null, IPublicationFileOperations? publicationFiles = null)
     {
         _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
+        _identityApi = identityApi ?? WindowsFileMetadataApi.Instance;
+        _publicationFiles = publicationFiles ?? WindowsPublicationFileOperations.Instance;
         _tempPathGenerator = tempPathGenerator;
     }
 
@@ -229,90 +255,152 @@ internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
             Path.GetFileName(finalPath) + ".publish-tmp-" + (_tempPathGenerator?.Invoke() ?? Guid.NewGuid().ToString("N")) + ".mp4");
 
         bool committed = false;
+        bool ownsTemp = false;
+        FileStream? originalCopy = null;
+        IPublicationCopyReservation? copyReservation = null;
+        PublicationHandleObservation? before = null;
+        PublishResult? returned = null;
+        PublishResult Complete(PublishResult value) => returned = value;
+        void CommitOriginal()
+        {
+            BeforeOriginalCommitForTests?.Invoke();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (originalCopy is not null) _publicationFiles.Rename(originalCopy.SafeFileHandle, finalPath);
+            else _fileSystem.MoveFile(tmpPath, finalPath); // unanchored legacy simulation only
+        }
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            await _fileSystem.CopyFileAsync(stagingPath, tmpPath, cancellationToken).ConfigureAwait(false);
+            if (_fileSystem is PhysicalFileSystemOperations)
+            {
+                // Accounting is scoped to the actual native copy, not a path or API input.
+                if (commitGate is IPublicationCopyCapacityGate capacity)
+                    copyReservation = await capacity.BeginCopyAsync(stagingSize, cancellationToken).ConfigureAwait(false);
+                if (copyReservation is not null)
+                    await copyReservation.EnsureCapacityAsync(cancellationToken).ConfigureAwait(false);
+                // CREATE_NEW grants ownership; retain this original write handle across commit.
+                originalCopy = _publicationFiles.CreateNew(tmpPath);
+                ownsTemp = true;
+                OriginalCopyCreatedForTests?.Invoke(originalCopy);
+                await using var source = new FileStream(stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+                if (copyReservation is null)
+                    await source.CopyToAsync(originalCopy, cancellationToken).ConfigureAwait(false);
+                else
+                {
+                    var buffer = new byte[81920];
+                    long copied = 0;
+                    int read;
+                    while ((read = await source.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
+                    {
+                        await copyReservation.WriteAsync(originalCopy, buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                        copied = checked(copied + read);
+                        OriginalCopyProgressForTests?.Invoke(originalCopy, copied);
+                    }
+                }
+            }
+            else
+            {
+                // Legacy injected file-system simulations remain explicitly unanchored.
+                if (File.Exists(tmpPath)) return Complete(Fail("temporary_path_exists"));
+                ownsTemp = true;
+                await _fileSystem.CopyFileAsync(stagingPath, tmpPath, cancellationToken).ConfigureAwait(false);
+            }
 
             cancellationToken.ThrowIfCancellationRequested();
 
             try
             {
-                _fileSystem.FlushFileToDisk(tmpPath);
+                if (originalCopy is not null)
+                {
+                    BeforeOriginalFlushForTests?.Invoke(originalCopy);
+                    originalCopy.Flush(flushToDisk: true);
+                }
+                else _fileSystem.FlushFileToDisk(tmpPath);
             }
             catch (Exception ex)
             {
-                return Fail("flush_failed: " + ex.GetType().Name);
+                return Complete(Fail("flush_failed: " + ex.GetType().Name));
             }
 
             long tmpSize;
             try
             {
-                tmpSize = _fileSystem.GetFileSize(tmpPath);
+                tmpSize = originalCopy?.Length ?? _fileSystem.GetFileSize(tmpPath);
+                if (originalCopy is not null) before = PublicationHandleObservation.Read(_identityApi, originalCopy.SafeFileHandle, tmpPath);
             }
             catch (Exception ex)
             {
-                return Fail("published_size_read_failed: " + ex.GetType().Name);
+                return Complete(Fail("published_size_read_failed: " + ex.GetType().Name));
             }
 
             if (tmpSize != stagingSize)
-                return Fail("size_mismatch");
+                return Complete(Fail("size_mismatch"));
 
             // Final gate: the atomic move must not happen if cancellation was
             // requested while the copy/flush/size-check was in flight.
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (copyReservation is not null)
+                await copyReservation.EnsureCapacityAsync(cancellationToken).ConfigureAwait(false);
+
             if (commitGate != null)
             {
-                committed = commitGate.TryCommit(() => _fileSystem.MoveFile(tmpPath, finalPath));
+                committed = commitGate.TryCommit(CommitOriginal);
                 if (!committed)
-                    return Fail("commit_closed");
+                    return Complete(Fail("commit_closed"));
             }
             else
             {
-                _fileSystem.MoveFile(tmpPath, finalPath);
+                CommitOriginal();
                 committed = true;
             }
 
-            long finalSize;
-            try
-            {
-                finalSize = _fileSystem.GetFileSize(finalPath);
-            }
-            catch
-            {
-                finalSize = stagingSize;
-            }
-
-            return new PublishResult
-            {
-                Success = true,
-                FinalSizeBytes = finalSize
-            };
+            // Never reopen the final name to manufacture a publication identity.
+            var after = originalCopy is null ? null : PublicationHandleObservation.Read(_identityApi, originalCopy.SafeFileHandle, Path.GetFullPath(finalPath));
+            PublicationReceipt? receipt = null;
+            if (before is not null && after is not null && before.Snapshot == after.Snapshot && after.Snapshot.Length == stagingSize)
+                receipt = PublicationReceipt.Sign(SigningAuthority, new(after.Path, after.Snapshot.Length, after.Snapshot.Identity!));
+            var finalSize = originalCopy is not null ? tmpSize : stagingSize;
+            if (originalCopy is null)
+                try { finalSize = _fileSystem.GetFileSize(finalPath); } catch { }
+            return Complete(new PublishResult { Success = true, FinalSizeBytes = finalSize, Receipt = receipt });
         }
         catch (OperationCanceledException)
         {
-            return Fail("cancelled");
+            return Complete(Fail("cancelled"));
         }
         catch (Exception ex)
         {
-            return Fail("publish_failed: " + ex.GetType().Name);
+            return Complete(Fail("publish_failed: " + ex.GetType().Name));
         }
         finally
         {
-            if (!committed)
+            try
             {
-                try
+                if (originalCopy is not null)
                 {
-                    _fileSystem.DeleteFile(tmpPath);
+                    try
+                    {
+                        if (!committed && ownsTemp)
+                        {
+                            PublicationCleanupOutcome cleanup;
+                            try { cleanup = _publicationFiles.DeleteOriginal(originalCopy.SafeFileHandle); }
+                            catch (ObjectDisposedException) { cleanup = PublicationCleanupOutcome.RetainedHandleUnavailable; }
+                            catch { cleanup = PublicationCleanupOutcome.RetainedDeleteFailed; }
+                            if (returned is not null) returned.CleanupOutcome = cleanup;
+                        }
+                    }
+                    finally { originalCopy.Dispose(); }
+                    // Never delete by the former name, including invalid-handle cleanup.
                 }
-                catch
+                else if (!committed && ownsTemp)
                 {
-                    // Best effort — stale tmp files are in the final directory and
-                    // will be overwritten on the next attempt by a unique name.
+                    // Legacy injected simulations have no native object/receipt.
+                    try { _fileSystem.DeleteFile(tmpPath); } catch { }
                 }
             }
+            finally { copyReservation?.Dispose(); }
         }
     }
 

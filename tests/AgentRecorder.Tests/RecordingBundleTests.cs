@@ -701,7 +701,7 @@ public class RecordingBundleTests : IDisposable
 
         if (shouldGenerate)
         {
-            SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2));
+            Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
             Assert.Equal(1, generator.CallCount);
             Assert.Equal(backendType, generator.LastRequest?.Backend);
             Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
@@ -738,7 +738,7 @@ public class RecordingBundleTests : IDisposable
 
         backend.FireNaturalExit(0, new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 });
 
-        SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2));
+        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
         Assert.Equal(1, generator.CallCount);
         Assert.Equal(backendType, generator.LastRequest?.Backend);
     }
@@ -1024,7 +1024,7 @@ public class RecordingBundleTests : IDisposable
         });
 
         Assert.Equal(RecState.completed, rec.State);
-        SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2));
+        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
         Assert.Equal(1, generator.CallCount);
         Assert.NotNull(generator.LastRequest);
         Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
@@ -1208,7 +1208,7 @@ public class RecordingBundleTests : IDisposable
     }
 
     [Fact]
-    public async Task RecordingEngine_ConfirmationOutputDirectoryOverride_BundleUsesNewPath()
+    public void RecordingEngine_ConfirmationOutputDirectoryOverride_BundleUsesNewPath()
     {
         var audit = new CaptureAuditLogger();
         var generator = new CapturingBundleGenerator();
@@ -1248,13 +1248,13 @@ public class RecordingBundleTests : IDisposable
             Height = 100
         });
 
-        await Task.Delay(100);
+        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromMilliseconds(100)));
         Assert.Equal(newPath, generator.LastRequest?.MediaPath);
         Assert.EndsWith("moved.bundle", rec.BundleSnapshot.Path!);
     }
 
     [Fact]
-    public async Task RecordingEngine_MetaOutputPath_DiffersFromRecordingOutputPath_GeneratingUsesApprovedFinalPath()
+    public void RecordingEngine_MetaOutputPath_DiffersFromRecordingOutputPath_GeneratingUsesApprovedFinalPath()
     {
         var audit = new CaptureAuditLogger();
         var generator = new CapturingBundleGenerator();
@@ -1289,7 +1289,7 @@ public class RecordingBundleTests : IDisposable
             OutputPath = metaOutputPath
         });
 
-        await Task.Delay(100);
+        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromMilliseconds(100)));
         Assert.Equal(recOutputPath, generator.LastRequest?.MediaPath);
         Assert.EndsWith("recording-output.bundle", rec.BundleSnapshot.Path!);
     }
@@ -1718,16 +1718,74 @@ public class RecordingBundleTests : IDisposable
             => Task.FromResult(RecordingBundleGenerationResult.Ready(_bundlePath));
     }
 
+    [Fact]
+    public async Task CapturingBundleGenerator_CallCountSignalsOnlyAfterRequestPublication()
+    {
+        using var releasePublication = new ManualResetEventSlim();
+        var beforePublication = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var consumerObservedCount = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var generator = new CapturingBundleGenerator(() =>
+        {
+            beforePublication.TrySetResult();
+            Assert.True(releasePublication.Wait(TimeSpan.FromSeconds(2)));
+        });
+        var request = BuildRequest(MediaPath("publication"));
+        var producer = Task.Factory.StartNew(() => generator.GenerateAsync(request),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+        Task<(int Count, RecordingBundleRequest? Request)>? consumer = null;
+        try
+        {
+            await beforePublication.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            consumer = Task.Factory.StartNew(() =>
+            {
+                consumerObservedCount.TrySetResult(generator.CallCount);
+                Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
+                return (Count: generator.CallCount, Request: generator.LastRequest);
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+            // The producer is held between storing the request and publishing its count.
+            // A consumer that has checked the signal must still be waiting here.
+            Assert.Equal(0, await consumerObservedCount.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(consumer.IsCompleted);
+            releasePublication.Set();
+
+            var observed = await consumer.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(1, observed.Count);
+            Assert.Same(request, observed.Request);
+            await producer.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var nextRequest = BuildRequest(MediaPath("publication-next"));
+            await generator.GenerateAsync(nextRequest).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(2, generator.CallCount);
+            Assert.Same(nextRequest, generator.LastRequest);
+        }
+        finally
+        {
+            releasePublication.Set();
+            await producer.WaitAsync(TimeSpan.FromSeconds(2));
+            if (consumer != null)
+                await consumer.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
     private sealed class CapturingBundleGenerator : IRecordingBundleGenerator
     {
         private int _count;
-        public int CallCount => _count;
-        public RecordingBundleRequest? LastRequest { get; private set; }
+        private RecordingBundleRequest? _lastRequest;
+        private readonly Action? _beforeCallPublished;
+
+        public CapturingBundleGenerator(Action? beforeCallPublished = null)
+            => _beforeCallPublished = beforeCallPublished;
+
+        public int CallCount => Volatile.Read(ref _count);
+        public RecordingBundleRequest? LastRequest => Volatile.Read(ref _lastRequest);
 
         public Task<RecordingBundleGenerationResult> GenerateAsync(RecordingBundleRequest request, CancellationToken cancellationToken = default)
         {
+            // Store the request before the release signal; readers acquire via CallCount.
+            Volatile.Write(ref _lastRequest, request);
+            _beforeCallPublished?.Invoke();
             Interlocked.Increment(ref _count);
-            LastRequest = request;
             var dir = Path.GetDirectoryName(request.MediaPath) ?? "";
             var stem = Path.GetFileNameWithoutExtension(request.MediaPath);
             return Task.FromResult(RecordingBundleGenerationResult.Ready(Path.Combine(dir, stem + ".bundle")));

@@ -583,14 +583,21 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                         _options.BeginSignalPath + ".tmp",
                         _options.BeginSignalPath,
                         _options.BeginToken,
+                        () => PublishPreparedBeginToken(ownerTcs.Task, linkedCts.Token),
                         linkedCts.Token).ConfigureAwait(false);
+                    // Cancellation can race the narrow synchronous rename even
+                    // when the writer itself returns successfully after commit.
+                    linkedCts.Token.ThrowIfCancellationRequested();
+                    lock (_lock)
+                        if (!_authorized && !_completed)
+                            throw new InvalidOperationException("Begin writer returned without committing publication.");
                 }
                 catch (OperationCanceledException)
                 {
                     bool canRetry;
                     lock (_lock)
                     {
-                        canRetry = !_completed && !_authorized &&
+                        canRetry = !_completed && !_authorized && !_stopRequested &&
                             _state == WgcContinuousManagedSessionState.Authorizing;
                         if (canRetry)
                         {
@@ -605,6 +612,10 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                     if (!File.Exists(_options.BeginSignalPath))
                         SafeDelete(_options.BeginSignalPath + ".tmp");
 
+                    // Cancellation after publication cannot restore retry eligibility:
+                    // the helper may already have consumed the committed token.
+                    if (!canRetry && linkedCts.IsCancellationRequested)
+                        _ = TriggerCompletionAsync(WgcContinuousManagedSessionState.Cancelled, "caller_cancelled");
                     ownerTcs.TrySetResult(false);
                     return;
                 }
@@ -627,11 +638,9 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                         authorized = false;
                     }
                     else
-                    {
-                        _authorized = true;
-                        _state = WgcContinuousManagedSessionState.Authorized;
-                        authorized = true;
-                    }
+                        // Events may already have advanced Authorized to Started.
+                        // Publication owns the state transition, never this continuation.
+                        authorized = _authorized;
                 }
 
                 ownerTcs.TrySetResult(authorized);
@@ -640,6 +649,30 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         finally
         {
             Interlocked.Decrement(ref _activeAuthorizationLinkedCtsCount);
+        }
+    }
+
+    private void PublishPreparedBeginToken(Task<bool> owner, CancellationToken cancellationToken)
+    {
+        // No await, directory creation, tmp write, observer or writer callback under
+        // this lock. Only the same-directory atomic rename and state publication.
+        // OnBlockParsed shares this lock: an event arriving as File.Move makes the
+        // token visible waits until _authorized is committed before it is classified.
+        lock (_lock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_completed || _stopRequested)
+                throw new OperationCanceledException("Begin publication no longer owns an active authorization.", cancellationToken);
+            if (_state != WgcContinuousManagedSessionState.Authorizing || _authorized ||
+                !ReferenceEquals(_authorizationTask, owner))
+                throw new InvalidOperationException("Begin publication is not owned by this authorization attempt.");
+            if (Directory.Exists(_options.BeginSignalPath))
+                throw new IOException("Begin signal path is a directory.");
+            File.Move(_options.BeginSignalPath + ".tmp", _options.BeginSignalPath, overwrite: true);
+            // The linearization point is the successful rename plus this state
+            // commit within the event gate. Never authorize before the rename.
+            _authorized = true;
+            _state = WgcContinuousManagedSessionState.Authorized;
         }
     }
 
@@ -1877,8 +1910,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
 /// <summary>
 /// Test seam for the begin-token file write so that authorization I/O can be
-/// blocked, observed, and cancelled deterministically without holding the
-/// session lock.
+/// blocked, observed, and cancelled outside the session lock. The prepared
+/// token must be published through the session's synchronous commit callback.
 /// </summary>
 internal interface IAuthorizationSignalWriter
 {
@@ -1886,11 +1919,13 @@ internal interface IAuthorizationSignalWriter
         string tmpPath,
         string finalPath,
         string token,
+        Action publishPreparedToken,
         CancellationToken cancellationToken);
 }
 
 /// <summary>
-/// Production implementation: atomic tmp-file write followed by a move.
+/// Production implementation: prepares the tmp token outside the state lock,
+/// then calls the publication arbiter for the atomic move and state commit.
 /// </summary>
 internal sealed class FileAuthorizationSignalWriter : IAuthorizationSignalWriter
 {
@@ -1898,6 +1933,7 @@ internal sealed class FileAuthorizationSignalWriter : IAuthorizationSignalWriter
         string tmpPath,
         string finalPath,
         string token,
+        Action publishPreparedToken,
         CancellationToken cancellationToken)
     {
         return Task.Run(async () =>
@@ -1920,7 +1956,7 @@ internal sealed class FileAuthorizationSignalWriter : IAuthorizationSignalWriter
 
                 await File.WriteAllTextAsync(tmpPath, token, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
-                File.Move(tmpPath, finalPath, overwrite: true);
+                publishPreparedToken();
                 committed = true;
             }
             finally

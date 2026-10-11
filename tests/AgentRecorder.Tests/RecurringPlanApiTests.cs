@@ -401,9 +401,9 @@ public sealed class RecurringPlanApiTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
     }
 
-    private const string PlanUrl = "http://127.0.0.1:37891/api/v1/plans";
-    private const string CapabilitiesUrl = "http://127.0.0.1:37891/api/v1/capabilities";
-    private static string SetupUrl(string id) => $"http://127.0.0.1:37891/api/v1/plan-setups/{Uri.EscapeDataString(id)}";
+    private string PlanUrl => $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plans";
+    private string CapabilitiesUrl => $"http://127.0.0.1:{_server!.BoundPort}/api/v1/capabilities";
+    private string SetupUrl(string id) => $"http://127.0.0.1:{_server!.BoundPort}/api/v1/plan-setups/{Uri.EscapeDataString(id)}";
 
     private void StartServer(IStandingPlanSetupGateway? standing, IRecurringPlanSetupGateway? recurring)
     {
@@ -414,9 +414,7 @@ public sealed class RecurringPlanApiTests : IDisposable
         var engine = new RecordingEngine(audit);
         var tray = new HeadlessTray();
         engine.SetTray(tray);
-        _server = new ApiServer(engine, audit, tray,
-            standingPlanSetupGateway: standing,
-            recurringPlanSetupGateway: recurring);
+        _server = new ApiServer(engine, audit, tray, null, null, null, null, null, null, standing, recurring, null, 0);
         _server.Start();
     }
 
@@ -432,7 +430,7 @@ public sealed class RecurringPlanApiTests : IDisposable
         Timeout = TimeSpan.FromSeconds(8),
     };
 
-    private static async Task<HttpResponseMessage> PostPlan(HttpClient client, string body, string? key)
+    private async Task<HttpResponseMessage> PostPlan(HttpClient client, string body, string? key)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, PlanUrl)
         {

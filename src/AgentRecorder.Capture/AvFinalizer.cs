@@ -105,44 +105,17 @@ public sealed class AvFinalizer
         CancellationToken cancellationToken,
         WindowStorageSafety? storageSafety)
     {
+        if (audioSourceKind == AudioCaptureSourceKind.None)
+            return await FinalizeVideoOnlyAsync(videoPath, outputPath, cancellationToken, storageSafety).ConfigureAwait(false);
+
+        using var storageCancellation = storageSafety is null ? null : CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, storageSafety.AbortToken);
+        cancellationToken = storageCancellation?.Token ?? cancellationToken;
+        storageSafety?.EnsureRuntimeCapacity();
         var dir = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
         var videoMeta = await ProbeAsync(videoPath, cancellationToken).ConfigureAwait(false);
-
-        // Fast path when no audio is requested: validate video and copy it to the final path.
-        if (audioSourceKind == AudioCaptureSourceKind.None)
-        {
-            if (videoMeta.DurationSeconds <= 0)
-                return Failed("video_duration_zero", "Video duration is zero; cannot finalize.", videoMeta);
-
-            try
-            {
-                if (File.Exists(outputPath)) File.Delete(outputPath);
-                File.Copy(videoPath, outputPath);
-            }
-            catch (Exception ex)
-            {
-                return Failed("copy_failed", $"Failed to copy video to output: {ex.Message}", videoMeta, -1, ex.Message);
-            }
-
-            var noAudioMeta = await ProbeAsync(outputPath, cancellationToken).ConfigureAwait(false);
-            noAudioMeta.StderrLog = "";
-            noAudioMeta.AudioStatus = "not_requested";
-            noAudioMeta.AudioContinuityStatus = "not_checked";
-            if (!TrySetPublishedOutputMetadata(noAudioMeta, outputPath))
-            {
-                return Failed("output_missing_after_copy",
-                    "The copied output was not present or had zero length after finalization.",
-                    noAudioMeta);
-            }
-            return new Result
-            {
-                Meta = noAudioMeta,
-                Stderr = "",
-                ExitCode = 0
-            };
-        }
 
         var audioMeta = await ProbeAsync(audioPath, cancellationToken).ConfigureAwait(false);
 
@@ -249,13 +222,13 @@ public sealed class AvFinalizer
 
         // Mux to a temporary path so partial/ failed output never lands at the
         // final path. Atomic rename after validation prevents false success.
-        var tempMuxPath = outputPath + ".muxing.partial.mp4";
+        var tempMuxPath = outputPath + "." + Guid.NewGuid().ToString("N") + ".muxing.partial.mp4";
         args.Add("-movflags");
         args.Add("+faststart");
         args.Add(tempMuxPath);
 
         // The mux execution, probe, post-mux validation and publish all touch
-        // <output>.muxing.partial.mp4. Wrap the entire sequence in a try/finally
+        // this operation's private mux path. Wrap the entire sequence in a try/finally
         // so every outcome — runner return, runner throwing (including caller
         // cancellation, which the production runner surfaces as
         // OperationCanceledException), probe failure, validation failure, publish
@@ -265,9 +238,15 @@ public sealed class AvFinalizer
         var muxExitCode = -1;
         var muxTimedOut = false;
         var muxStderr = "";
+        var ownsMuxPath = false;
 
         try
         {
+            storageSafety?.EnsureRuntimeCapacity();
+            // Claim only this fresh internal name. If creation collides/fails,
+            // this operation must not overwrite or delete the existing object.
+            using (new FileStream(tempMuxPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                ownsMuxPath = true;
             var muxResult = await RunFfmpegAsync(args, _muxTimeout, cancellationToken).ConfigureAwait(false);
             muxExitCode = muxResult.ExitCode;
             muxTimedOut = muxResult.TimedOut;
@@ -299,12 +278,14 @@ public sealed class AvFinalizer
             // staging file has been copied, flushed and size-verified. A
             // pre-existing valid final file is preserved when any step fails and
             // is never replaced with an unvalidated file.
+            storageSafety?.ReserveAvPublicationCopy(new FileInfo(tempMuxPath).Length);
             storageSafety?.EnsureRuntimeCapacity();
             var publishResult = await _publisher.PublishAsync(tempMuxPath, outputPath, cancellationToken,
                 storageSafety?.CreateCommitGate(null, true)).ConfigureAwait(false);
             if (!publishResult.Success)
                 return Failed("atomic_publish_failed", $"Publish failed: {publishResult.FailureCategory}", meta, -1, publishResult.FailureCategory ?? "");
 
+            meta.PublicationReceipt = publishResult.Receipt;
             if (!TrySetPublishedOutputMetadata(meta, outputPath))
             {
                 return Failed("output_missing_after_publish",
@@ -319,7 +300,7 @@ public sealed class AvFinalizer
             // `.muxing.partial.mp4` behind. On success the staging copy is no
             // longer needed either (the publisher already moved a verified copy
             // to the final path).
-            TryDeleteTempFile(tempMuxPath);
+            if (ownsMuxPath) TryDeleteTempFile(tempMuxPath);
         }
 
         if (audioSourceKind == AudioCaptureSourceKind.Microphone)
@@ -524,6 +505,97 @@ public sealed class AvFinalizer
         to.AudioTimestampCompensationGapSeconds = from.AudioTimestampCompensationGapSeconds;
     }
 
+    private async Task<Result> FinalizeVideoOnlyAsync(string videoPath, string outputPath,
+        CancellationToken cancellationToken, WindowStorageSafety? storageSafety)
+    {
+        using var linked = storageSafety is null ? null : CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, storageSafety.AbortToken);
+        var token = linked?.Token ?? cancellationToken;
+        var meta = new OutputMeta();
+        // Only fixed classifications escape this branch; neither native exceptions
+        // nor publisher diagnostics (which may contain paths) are public errors.
+        var failureCode = "atomic_publish_failed";
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            failureCode = "output_probe_failed";
+            meta = await ProbeAsync(videoPath, token).ConfigureAwait(false);
+            NormalizeVideoOnlyProbe(meta);
+            token.ThrowIfCancellationRequested();
+            var invalid = ValidateVideoOnlyMedia(meta);
+            if (invalid is not null)
+                return Failed(invalid, "The silent video failed media validation.", meta);
+
+            failureCode = "atomic_publish_failed";
+            storageSafety?.EnsureRuntimeCapacity();
+            token.ThrowIfCancellationRequested();
+            var published = await _publisher.PublishAsync(videoPath, outputPath, token,
+                storageSafety?.CreateCommitGate(null, finalPublication: true)).ConfigureAwait(false);
+            if (!published.Success)
+                return Failed(failureCode, "The silent video could not be published atomically.", meta);
+
+            // A committed file is never rolled back here. The caller owns the
+            // source, and the shared publisher alone owns its temporary copy.
+            failureCode = "output_probe_failed";
+            token.ThrowIfCancellationRequested();
+            meta = await ProbeAsync(outputPath, token).ConfigureAwait(false);
+            NormalizeVideoOnlyProbe(meta);
+            token.ThrowIfCancellationRequested();
+            invalid = ValidateVideoOnlyMedia(meta);
+            if (invalid is not null)
+                return Failed(invalid, "The published silent video failed media validation.", meta);
+
+            meta.PublicationReceipt = published.Receipt;
+            if (!TrySetPublishedOutputMetadata(meta, outputPath))
+                return Failed("output_missing_after_publish", "The published output is missing or empty.", meta);
+            meta.SizeBytes = published.Receipt?.Anchor.Length ?? published.FinalSizeBytes;
+            return new Result { Meta = meta, ExitCode = 0 };
+        }
+        catch (OperationCanceledException)
+        {
+            NormalizeVideoOnlyProbe(meta);
+            return Failed("atomic_publish_failed", "The silent video finalization was cancelled.", meta);
+        }
+        catch
+        {
+            NormalizeVideoOnlyProbe(meta);
+            return Failed(failureCode, "The silent video finalization failed.", meta);
+        }
+    }
+
+    private static void NormalizeVideoOnlyProbe(OutputMeta meta)
+    {
+        meta.PublicationReceipt = null;
+        meta.StderrLog = "";
+        meta.AudioStatus = "not_requested";
+        meta.AudioContinuityStatus = "not_checked";
+    }
+
+    private static string? ValidateVideoOnlyMedia(OutputMeta meta)
+    {
+        if (!double.IsFinite(meta.DurationSeconds)) return "output_duration_non_finite";
+        if (meta.DurationSeconds <= 0) return "output_duration_zero";
+        if (meta.ProbeStreams is null || meta.ProbeStreams.Length == 0 || meta.ProbeStreams.Any(s => s is null))
+            return "output_probe_failed";
+        var video = meta.ProbeStreams.Where(s => string.Equals(s.CodecType, "video", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (video.Length == 0) return "output_missing_video_stream";
+        if (video.Length > 1) return "output_video_stream_ambiguous";
+        if (meta.HasAudioStream || !string.IsNullOrEmpty(meta.AudioCodec) || meta.ProbeStreams.Length != 1)
+            return "output_unexpected_extra_streams";
+        if (video[0].Index != 0) return "output_video_stream_index";
+        if (string.IsNullOrEmpty(video[0].CodecName)) return "output_video_codec_missing";
+        if (!string.Equals(video[0].CodecName, "h264", StringComparison.OrdinalIgnoreCase))
+            return "output_unexpected_video_codec";
+        if (!TryGetPositiveDuration(video[0].DurationSeconds, out _)) return "output_video_duration_invalid";
+        if (video[0].StartTimeSeconds is not double start || !double.IsFinite(start))
+            return "output_video_start_time_invalid";
+        if (!meta.OutputFileExists || meta.SizeBytes <= 0 || meta.Width <= 0 || meta.Height <= 0 ||
+            meta.Fps <= 0 ||
+            !string.Equals(meta.Container, "mp4", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(meta.Codec, "h264", StringComparison.OrdinalIgnoreCase)) return "output_probe_failed";
+        return null;
+    }
+
     private static string SourceKey(AudioCaptureSourceKind kind, string key)
     {
         var prefix = kind switch
@@ -642,6 +714,7 @@ public sealed class AvFinalizer
         // A failed finalization must never inherit the presence or size of a
         // temporary mux file or a pre-existing final file. The final output
         // contract is only true after the current run publishes successfully.
+        meta.PublicationReceipt = null;
         meta.OutputPath = null;
         meta.OutputFileExists = false;
         meta.SizeBytes = 0;
@@ -671,7 +744,9 @@ public sealed class AvFinalizer
 
             meta.OutputPath = outputPath;
             meta.OutputFileExists = true;
-            meta.SizeBytes = file.Length;
+            // Keep the committed copy's length bound to its receipt. Later path
+            // changes belong to retention observation, not receipt reconstruction.
+            meta.SizeBytes = meta.PublicationReceipt?.Anchor.Length ?? file.Length;
             return true;
         }
         catch

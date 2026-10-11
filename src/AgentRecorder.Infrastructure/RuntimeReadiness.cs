@@ -15,6 +15,7 @@ public sealed class RuntimeReadiness : IDisposable
 {
     public const string NamedEventName = @"Local\AgentRecorderReady";
 
+    private readonly DateTimeOffset _desktopEvidenceReceivedAt = DateTimeOffset.UtcNow;
     private readonly Stopwatch _stopwatch;
     private readonly string _mode;
     private readonly int _pid;
@@ -39,6 +40,11 @@ public sealed class RuntimeReadiness : IDisposable
         _desktopObservation = desktopObservation;
         _stopwatch = Stopwatch.StartNew();
     }
+
+    // Observation only: no ready file read, directory resolution, token access or mutation.
+    public RuntimeReadinessObservation ReadObservation() => new(_mode, _pid, _port,
+        Volatile.Read(ref _readyFileWritten), Volatile.Read(ref _disposed),
+        _desktopObservation?.IsOnInteractiveDesktop, _desktopEvidenceReceivedAt);
 
     /// <summary>
     /// Data directory resolved the same way as Paths.DataDir (Logging).
@@ -252,3 +258,7 @@ public sealed class ReadyFileDeleteResult
     public string? Error { get; set; }
     public string? ErrorType { get; set; }
 }
+
+public sealed record RuntimeReadinessObservation(string Mode, int Pid, int ConfiguredPort,
+    string? PublishedReadyFile, bool Disposed, bool? StartupInteractiveDesktopReady,
+    DateTimeOffset StartupEvidenceReceivedAt);

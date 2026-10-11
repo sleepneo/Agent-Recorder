@@ -372,7 +372,7 @@ internal sealed class SqliteFutureWindowAuthorizationRepository
         using var reader = command.ExecuteReader(); return reader.Read() ? ReadRow(reader) : null;
     }
 
-    private static FutureWindowAuthorizationRow? ReadById(
+    internal static FutureWindowAuthorizationRow? ReadById(
         SqliteConnection connection, SqliteTransaction? transaction, string id, string sid, string session)
     {
         using var command = connection.CreateCommand(); command.Transaction = transaction;

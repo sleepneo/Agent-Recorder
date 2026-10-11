@@ -138,6 +138,14 @@ internal static class Program
         // single-instance guard. The second-instance path above must not even
         // construct the store, because construction can resolve/create paths.
         var operationalStore = InitializeOperationalStoreIfOwner(instanceGuard.IsAcquired, audit.Log)!;
+        var ordinaryRecordingHistory = new SqliteOrdinaryRecordingHistoryStore(
+            operationalStore,
+            (recordingId, errorType) => audit.Log("recording.history_write_failed", new
+            {
+                recording_id = recordingId,
+                exception_type = errorType
+            }));
+        ordinaryRecordingHistory.RecoverIncomplete(DateTimeOffset.UtcNow);
 
         // Now safe to clean up stale ready.json (we own the instance).
         readiness.CleanupOldReadyFile();
@@ -221,6 +229,7 @@ internal static class Program
             futureWindowStartSafetyValidator: (ticket, nowUtc) => futureWindowCoordinator is null
                 ? "future_window_start_safety_unavailable"
                 : futureWindowCoordinator.ValidateBackendStart(ticket, nowUtc));
+        engine.ConfigureOrdinaryRecordingHistory(ordinaryRecordingHistory);
         unattendedSafetyService = new StandingLeaseSafetyControlService(
             operationalStore,
             utcNowForTest: null,
@@ -384,6 +393,12 @@ internal static class Program
         var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(dataDir);
         var planExecutionStatusGateway = new PlanExecutionStatusGateway(
             new PlanExecutionStatusQueryService(operationalStore));
+        var unifiedHistoryQuery = new UnifiedHistoryQueryService(operationalStore, ordinaryRecordingHistory);
+        Func<(string Sid, string Session)> historyIdentity = () => (System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty,
+            CaptureAuthorizationSessionBinding.Current);
+        var unifiedHistoryGateway = new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity);
+        var retentionPreviewGateway = new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, dataDir), historyIdentity);
+        tray.SetUnifiedHistoryGateway(unifiedHistoryGateway);
         var server = new ApiServer(
             engine,
             audit,
@@ -399,7 +414,15 @@ internal static class Program
             planExecutionStatusGateway,
             requiredOncePlanSetupCoordinator,
             futureWindowCoordinator,
-            new SqliteFixedRegionProfileManagementGateway(operationalStore));
+            new SqliteFixedRegionProfileManagementGateway(operationalStore),
+            planExecutionStatusGateway,
+            unifiedHistoryGateway,
+            retentionPreviewGateway,
+            new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)));
+
+        var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
+        tray.SetObservationHealthGateway(observationHealth);
+        server.SetObservationHealthGateway(observationHealth);
 
         audit.Log("service.starting", new { mode = "tray", port = ApiServer.Port, pid = Environment.ProcessId });
         try
@@ -460,7 +483,8 @@ internal static class Program
 
             // First quiesce HTTP, then cancel setup flights while their store,
             // tray and shared UI gate are still alive.
-            SafeShutdownStep("api", server.Stop);
+            SafeShutdownStep("api_admission", server.StopAccepting);
+            SafeShutdownStep("recording_admission", () => engine.BeginHostShutdown(reason));
             SafeShutdownStep("required_once_execution_runtime", () => requiredOncePlanExecutionCoordinator?.Dispose());
             SafeShutdownStep("recurring_setup", () => recurringPlanSetupCoordinator?.Dispose());
             SafeShutdownStep("recurring_setup_wait", () => recurringPlanSetupCoordinator?.WaitForIdleAsync().GetAwaiter().GetResult());
@@ -471,7 +495,9 @@ internal static class Program
             SafeShutdownStep("future_window_authorization", () => futureWindowCoordinator?.Dispose());
             SafeShutdownStep("recurring_runtime", () => recurringNaturalWakeRuntime?.Dispose());
             SafeShutdownStep("standing_runtime", () => standingNaturalWakeRuntime?.Dispose());
-            SafeShutdownStep("recordings", () => engine.StopAllSync(reason));
+            SafeShutdownStep("recordings_and_history", () => HostRecordingShutdown.Stop(
+                server, engine, ordinaryRecordingHistory, reason,
+                (eventName, payload) => audit.Log(eventName, payload)));
             SafeShutdownStep("wgc_warmup", StopWgcWarmup);
 
             try { audit.Log("service.stopped", new { mode = "tray", reason, pid = Environment.ProcessId }); } catch { }
@@ -517,6 +543,25 @@ internal static class Program
             });
             throw;
         }
+    }
+
+    internal static IObservationHealthGateway CreateObservationHealthGateway(TrayContext tray, ApiServer server,
+        RuntimeReadiness readiness, string dataDirectory, ObservationHealthProbes? probes=null)
+    {
+        var frozenDirectory=Path.GetFullPath(dataDirectory);
+        var windowPolicy=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.WgcEnvVar));
+        var displayPolicy=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar));
+        var regionPolicy=ObservationHealthGateway.Policy(Environment.GetEnvironmentVariable(CaptureBackendSelector.RegionBackendEnvVar));
+        ObservationHealthOwner Owner()
+        {
+            var hotkeys=tray.CaptureHealthHotkeys();
+            return new(server.ReadRuntimeObservation(),readiness.ReadObservation(),frozenDirectory,
+                hotkeys.Stop,hotkeys.Chapter,DateTimeOffset.UtcNow,windowPolicy,displayPolicy,regionPolicy);
+        }
+        ObservationHealthOwner PartialOwner()=>new(server.ReadRuntimeObservation(),readiness.ReadObservation(),frozenDirectory,
+            new(false,false,null,"unknown",false,0),new(false,false,null,"unknown",false,0),DateTimeOffset.UtcNow,windowPolicy,displayPolicy,regionPolicy);
+        var dispatcher=tray.CreateHealthOwnerDispatcher(Owner);
+        return new ObservationHealthGateway(Owner,probes,dispatcher.PostAsync,PartialOwner);
     }
 
     private static void CleanupReadiness(RuntimeReadiness readiness, AuditLogger audit)

@@ -22,11 +22,15 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 - 不要静默录制敏感或隐私区域。
 - 普通录制前要说明即将录制的对象和时长，并等待本地用户逐次确认；一次性无人值守计划必须说明目标、时间、时长和输出，并等待本地用户完成固定区域选择与有界 Lease 批准。
 
+## 按需诊断
+
+发生环境诊断或失败排查需求时，直接携带 API key 读取 `GET /api/v1/health`（发现入口为 `capabilities.health`），不要求人类打开观察中心并转述状态。总等待截止 3 秒，读取可能给出 `complete/busy/timeout/failed/not_checked`；HTTP 200 不代表可以录制，路径/后端支持不代表工具、设备或实际捕获已验证。合法未知 query 被忽略，不提供 refresh/watch/自定义 timeout。普通录制仍优先 quick；任务状态、停止、结果继续通过 recordings/history/plans API 查询。health 不替代启动预检、用户授权，也不授权自动修复或自动重试失败录制。字段见 [agent API 参考](AGENT-API-REFERENCE.zh-CN.md#按需只读健康快照)。
+
 ## 启动与就绪检查（推荐使用 CLI 握手）
 
 **强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**。它验证单实例、`/capabilities` 和托盘进程的真实活动桌面；同用户桌面直接启动/复用，同用户隔离桌面只允许使用下文的显式高级恢复设置。Recorder 不会跨 Windows 账户派发启动。
 
-发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口；若有，通过该入口运行固定的 `AgentRecorder.Cli.exe ensure-running --json`。Codex 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
+发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口；若有，通过该入口运行固定的 `AgentRecorder.Cli.exe ensure-running --json`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
 
 ### 方式一：CLI 握手（推荐）
 

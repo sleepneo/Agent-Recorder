@@ -187,6 +187,7 @@ public sealed class RecurringConsentLeasePersistenceTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 
@@ -617,6 +618,7 @@ internal sealed class RecurringLeaseFixture : IDisposable
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

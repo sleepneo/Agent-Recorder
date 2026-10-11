@@ -203,25 +203,24 @@ internal static class RecordingPreflightChecker
 
     private static RecordingPreflightResult CheckDiskSpace(Recording rec, List<string> warnings)
     {
-        if (rec.Config.RequireWindowSurface)
+        if (RecordingStoragePolicy.RequiresSafety(rec))
         {
             try
             {
-                rec.Config.WritePaths ??= CaptureWritePaths.Freeze(rec.Config);
+                rec.Config.WritePaths ??= RecordingStoragePolicy.Freeze(rec);
                 rec.Config.WritePaths.ValidateOutputPath(rec.Config);
-                using var safety = new WindowStorageSafety(rec.Config.WritePaths,
-                    rec.Config.DurationSeconds ?? 0, StorageCapacityProvider);
+                using var safety = RecordingStoragePolicy.CreateSafety(rec, StorageCapacityProvider);
                 safety.EnsureAdmission();
                 return Pass(warnings);
             }
             catch (StorageSafetyException ex)
             {
                 return Fail(ex.Code, ex.Code == WindowStorageSafety.LowSpaceCode
-                    ? "Insufficient storage capacity for window recording and temporary media."
-                    : "Storage capacity could not be verified for window recording.", "check_storage_capacity");
+                    ? "Insufficient storage capacity for recording and publication."
+                    : "Storage capacity could not be verified for recording.", "check_storage_capacity");
             }
             catch { return Fail(WindowStorageSafety.UnavailableCode,
-                "Storage capacity could not be verified for window recording.", "check_storage_capacity"); }
+                "Storage capacity could not be verified for recording.", "check_storage_capacity"); }
         }
         var dir = Path.GetDirectoryName(rec.OutputPath);
         if (string.IsNullOrWhiteSpace(dir))

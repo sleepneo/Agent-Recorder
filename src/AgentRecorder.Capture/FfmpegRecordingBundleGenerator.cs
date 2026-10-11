@@ -32,6 +32,9 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         _ffmpegPathProvider = ffmpegPathProvider ?? (() => FfmpegLocator.FfmpegPath);
     }
 
+    internal Func<BundlePublicationReceipt.Publisher> PublisherFactory { get; set; } = () => new()
+    { BeginCopy = BundlePublicationCapacity.BeginHostedCopyAsync };
+
     public async Task<RecordingBundleGenerationResult> GenerateAsync(
         RecordingBundleRequest request,
         CancellationToken cancellationToken = default)
@@ -50,7 +53,9 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             if (Directory.Exists(bundlePath))
                 return RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.AlreadyExists);
 
-            Directory.CreateDirectory(tempDir);
+            using var ownedStaging = new OwnedBundleStaging(tempDir);
+            RecordingBundleGenerationResult Failed(string code, string? detail)
+            { ownedStaging.Cleanup(); return RecordingBundleGenerationResult.Failed(code, (detail ?? code) + ";" + ownedStaging.CleanupFact); }
 
             string metadataPath = Path.Combine(tempDir, "metadata.json");
             string marksPath = Path.Combine(tempDir, "marks.json");
@@ -61,61 +66,57 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             // 1. Hash the main video (streamed, bounded memory).
             string sha256;
             try { sha256 = ComputeSha256(mediaPath); }
-            catch (Exception ex) { return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.HashFailed, ex.Message); }
+            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.HashFailed, ex.Message); }
 
             long mediaSize;
             try { mediaSize = new FileInfo(mediaPath).Length; }
-            catch (Exception ex) { return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.HashFailed, ex.Message); }
+            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.HashFailed, ex.Message); }
 
             // 2. Extract representative frames.
-            var firstResult = await ExtractFirstFrameAsync(mediaPath, firstFramePath, cancellationToken);
+            var firstResult = await ExtractFirstFrameAsync(mediaPath, firstFramePath, ownedStaging, cancellationToken);
             if (!firstResult.Success)
-                return FailedAndCleanup(tempDir, firstResult.ErrorCode!, firstResult.ErrorDetail);
+                return Failed( firstResult.ErrorCode!, firstResult.ErrorDetail);
 
-            var lastResult = await ExtractLastFrameAsync(mediaPath, request.ActualDurationSeconds, lastFramePath, cancellationToken);
+            var lastResult = await ExtractLastFrameAsync(mediaPath, request.ActualDurationSeconds, lastFramePath, ownedStaging, cancellationToken);
             if (!lastResult.Success)
-                return FailedAndCleanup(tempDir, lastResult.ErrorCode!, lastResult.ErrorDetail);
+                return Failed( lastResult.ErrorCode!, lastResult.ErrorDetail);
 
-            var thumbResult = await ExtractThumbnailAsync(mediaPath, request.ActualDurationSeconds, request.Width, request.Height, thumbnailPath, cancellationToken);
+            var thumbResult = await ExtractThumbnailAsync(mediaPath, request.ActualDurationSeconds, request.Width, request.Height, thumbnailPath, ownedStaging, cancellationToken);
             if (!thumbResult.Success)
-                return FailedAndCleanup(tempDir, thumbResult.ErrorCode!, thumbResult.ErrorDetail);
+                return Failed( thumbResult.ErrorCode!, thumbResult.ErrorDetail);
 
             // 3. Validate frame files.
             if (!ValidateImageFile(firstFramePath, "png"))
-                return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.FrameOutputInvalid, "first_frame");
+                return Failed( RecordingBundleErrorCodes.FrameOutputInvalid, "first_frame");
             if (!ValidateImageFile(lastFramePath, "png"))
-                return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.FrameOutputInvalid, "last_frame");
+                return Failed( RecordingBundleErrorCodes.FrameOutputInvalid, "last_frame");
             if (!ValidateImageFile(thumbnailPath, "jpeg"))
-                return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.FrameOutputInvalid, "thumbnail");
+                return Failed( RecordingBundleErrorCodes.FrameOutputInvalid, "thumbnail");
 
             // 4. Write metadata and marks.
             var metadata = BuildMetadata(request, mediaPath, mediaSize, sha256);
-            try { await WriteJsonUtf8Async(metadataPath, metadata, cancellationToken); }
-            catch (Exception ex) { return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.MetadataWriteFailed, ex.Message); }
+            try { await WriteJsonUtf8Async(metadataPath, metadata, ownedStaging, cancellationToken); }
+            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.MetadataWriteFailed, ex.Message); }
 
             var marks = BuildMarks(request);
-            try { await WriteJsonUtf8Async(marksPath, marks, cancellationToken); }
-            catch (Exception ex) { return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.MarksWriteFailed, ex.Message); }
+            try { await WriteJsonUtf8Async(marksPath, marks, ownedStaging, cancellationToken); }
+            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.MarksWriteFailed, ex.Message); }
 
-            // 5. Atomic publish.
-            try
-            {
-                // Guard against a race where bundle appeared while we were generating.
-                if (Directory.Exists(bundlePath))
-                {
-                    Directory.Delete(tempDir, recursive: true);
-                    return RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.AlreadyExists);
-                }
-                // Retry transient Windows access-denied errors caused by file-system
-                // indexing, antivirus, or lingering handles from child processes.
-                MoveDirectoryWithRetry(tempDir, bundlePath, maxRetries: 5, delayMs: 100);
-            }
-            catch (Exception ex)
-            {
-                return FailedAndCleanup(tempDir, RecordingBundleErrorCodes.PublishFailed, ex.Message);
-            }
+            // Freeze only these verified, owned outputs; no directory enumeration.
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var path in new[] { metadataPath, thumbnailPath, firstFramePath, lastFramePath, marksPath }) ownedStaging.Validate(path);
+            var contents = new RecordingBundleContentsEvidence(new[] {
+                new RecordingBundleContentItem("metadata.json", "application/json", new FileInfo(metadataPath).Length),
+                new RecordingBundleContentItem("thumbnail.jpg", "image/jpeg", new FileInfo(thumbnailPath).Length),
+                new RecordingBundleContentItem("first_frame.png", "image/png", new FileInfo(firstFramePath).Length),
+                new RecordingBundleContentItem("last_frame.png", "image/png", new FileInfo(lastFramePath).Length),
+                new RecordingBundleContentItem("marks.json", "application/json", new FileInfo(marksPath).Length) });
 
-            return RecordingBundleGenerationResult.Ready(bundlePath);
+            // Only the five small outputs are copied. The MP4 is never recopied here.
+            var publisher = PublisherFactory();
+            try { return await publisher.PublishAsync(request, tempDir, bundlePath, contents, cancellationToken); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.PublishFailed, ex.Message + ";owned_cleanup=" + publisher.Cleanup); }
         }
         catch (OperationCanceledException)
         {
@@ -135,26 +136,6 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         return Path.Combine(dir, stem + ".bundle");
     }
 
-    private static void MoveDirectoryWithRetry(string sourceDir, string destDir, int maxRetries, int delayMs)
-    {
-        for (int attempt = 0; attempt < maxRetries; attempt++)
-        {
-            try
-            {
-                Directory.Move(sourceDir, destDir);
-                return;
-            }
-            catch (IOException) when (attempt < maxRetries - 1)
-            {
-                // Transient lock from indexer/antivirus/child process; wait and retry.
-                Thread.Sleep(delayMs);
-            }
-        }
-
-        // Final attempt: let any exception propagate.
-        Directory.Move(sourceDir, destDir);
-    }
-
     private static string DeriveTempDir(string mediaPath)
     {
         string dir = Path.GetDirectoryName(mediaPath) ?? "";
@@ -172,7 +153,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         return sb.ToString();
     }
 
-    private async Task<StepResult> ExtractFirstFrameAsync(string mediaPath, string outputPath, CancellationToken ct)
+    private async Task<StepResult> ExtractFirstFrameAsync(string mediaPath, string outputPath, OwnedBundleStaging staging, CancellationToken ct)
     {
         var args = new List<string>
         {
@@ -183,17 +164,19 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             "-update", "1",
             outputPath
         };
+        staging.Prepare(outputPath);
         var result = await RunFfmpegFrameExtractAsync(args, ct);
         if (!result.Success)
             return result;
 
+        staging.Validate(outputPath);
         if (!ValidateImageFile(outputPath, "png"))
             return StepResult.Fail(RecordingBundleErrorCodes.FrameOutputInvalid, "first_frame_signature_invalid");
 
         return StepResult.Ok();
     }
 
-    private async Task<StepResult> ExtractLastFrameAsync(string mediaPath, double durationSeconds, string outputPath, CancellationToken ct)
+    private async Task<StepResult> ExtractLastFrameAsync(string mediaPath, double durationSeconds, string outputPath, OwnedBundleStaging staging, CancellationToken ct)
     {
         // Fallback offsets from the end of the file. Older bundled FFmpeg may
         // return exit 0 with no output for seeks very close to EOF; try
@@ -203,7 +186,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
 
         foreach (var offset in offsets)
         {
-            SafeDeleteFile(outputPath);
+            // Each fallback creates its next output while retiring only its previous held object.
 
             var args = new List<string>
             {
@@ -215,6 +198,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                 outputPath
             };
 
+            staging.Prepare(outputPath);
             var result = await RunFfmpegFrameExtractAsync(args, ct);
             if (!result.Success)
             {
@@ -222,6 +206,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                 continue;
             }
 
+            try { staging.Validate(outputPath); } catch (IOException) { attemptDetails.Add($"offset={offset}: original_output_unavailable"); continue; }
             if (!ValidateImageFile(outputPath, "png"))
             {
                 attemptDetails.Add($"offset={offset}: exit_0_no_valid_png");
@@ -235,7 +220,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             "last_frame_fallback_exhausted; " + string.Join("; ", attemptDetails));
     }
 
-    private async Task<StepResult> ExtractThumbnailAsync(string mediaPath, double durationSeconds, int width, int height, string outputPath, CancellationToken ct)
+    private async Task<StepResult> ExtractThumbnailAsync(string mediaPath, double durationSeconds, int width, int height, string outputPath, OwnedBundleStaging staging, CancellationToken ct)
     {
         double midpoint = Math.Max(0.0, durationSeconds / 2.0);
 
@@ -255,10 +240,12 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             "-update", "1",
             outputPath
         };
+        staging.Prepare(outputPath);
         var result = await RunFfmpegFrameExtractAsync(args, ct);
         if (!result.Success)
             return result;
 
+        staging.Validate(outputPath);
         if (!ValidateImageFile(outputPath, "jpeg"))
             return StepResult.Fail(RecordingBundleErrorCodes.FrameOutputInvalid, "thumbnail_signature_invalid");
 
@@ -390,7 +377,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         };
     }
 
-    private static async Task WriteJsonUtf8Async(string path, object value, CancellationToken ct)
+    private static async Task WriteJsonUtf8Async(string path, object value, OwnedBundleStaging staging, CancellationToken ct)
     {
         var options = new JsonSerializerOptions
         {
@@ -398,33 +385,22 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             WriteIndented = true
         };
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value, options);
-        await File.WriteAllBytesAsync(path, bytes, ct);
+        staging.Prepare(path);
+        using var stream = staging.OpenOriginalForWrite(path);
+        await stream.WriteAsync(bytes, ct);
+        stream.Flush(true);
     }
 
     private static RecordingBundleGenerationResult FailedAndCleanup(string tempDir, string errorCode, string? detail)
     {
         SafeDelete(tempDir);
-        return RecordingBundleGenerationResult.Failed(errorCode, detail);
+        return RecordingBundleGenerationResult.Failed(errorCode, (detail ?? errorCode) + ";staging_retained_unproven_ownership");
     }
 
     private static void SafeDelete(string path)
     {
-        try
-        {
-            if (Directory.Exists(path))
-                Directory.Delete(path, recursive: true);
-        }
-        catch { }
-    }
-
-    private static void SafeDeleteFile(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-                File.Delete(path);
-        }
-        catch { }
+        // FFmpeg-created staging outputs are not original held publication objects.
+        // Conservatively retain them; never recursively delete a historical name.
     }
 
     private sealed class StepResult

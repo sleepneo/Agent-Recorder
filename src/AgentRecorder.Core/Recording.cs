@@ -7,6 +7,7 @@ using AgentRecorder.Windows;
 namespace AgentRecorder.Core;
 public sealed class Recording
 {
+    private RecState _state = RecState.created;
     public string Id { get; }
 
     public Recording()
@@ -21,7 +22,11 @@ public sealed class Recording
         Id = id;
     }
 
-    public RecState State { get; set; } = RecState.created;
+    public RecState State
+    {
+        get => _state;
+        set => _state = value;
+    }
     public string? ConfirmationId { get; set; }
     public string Agent { get; set; } = "unknown";
     public string SourceType { get; set; } = "";
@@ -39,6 +44,7 @@ public sealed class Recording
     internal Func<string?>? FixedRegionProfileEnvironmentValidator { get; set; }
     internal bool FixedRegionProfileStrictOutputConflict { get; set; }
     public DateTime StartedAtUtc { get; set; }
+    public DateTime CreatedAtUtc { get; } = DateTime.UtcNow;
     public DateTime? CompletedAtUtc { get; set; }
 
     /// <summary>
@@ -157,6 +163,9 @@ public sealed class Recording
     /// it cannot become an API/JSON field or be supplied by a helper.
     /// </summary>
     internal CaptureAuthorizationProof? AuthorizationProof { get; set; }
+    // Set by the ordinary per-request entry before preflight/confirmation.
+    // Trusted plan runners and direct backend callers keep their own policies.
+    internal bool IsOrdinaryLocalRequest { get; set; }
 
     /// <summary>
     /// Marks the direct StartCaptureForTests seam. Production API requests can
@@ -296,9 +305,14 @@ public sealed class Recording
         // if an internal caller accidentally invokes this twice.
         var published = Interlocked.CompareExchange(ref _isFinalized, 1, 0) == 0;
         if (published)
+        {
             AuthorizationProof?.Revoke();
+            try { OrdinaryHistoryPublication?.Invoke(this); } catch { }
+        }
         return published;
     }
+
+    internal Action<Recording>? OrdinaryHistoryPublication { get; set; }
 
     public string? NestedRole { get; set; }
     public string? NestedSessionId { get; set; }
@@ -316,4 +330,15 @@ public sealed class Recording
     /// Stop/natural-exit races occur.
     /// </summary>
     internal int BundleGenerationStarted;
+    internal OrdinaryRecordingBundleOperation? OrdinaryBundleOperation;
+    internal string? OrdinaryTargetKey { get; private set; }
+    private bool _ordinaryTargetFrozen;
+    internal void FreezeOrdinaryTarget(CapturePlan plan, WindowProcessMetadata? metadata = null)
+    {
+        if (_ordinaryTargetFrozen) throw new InvalidOperationException("Ordinary target was already frozen.");
+        OrdinaryTargetKey = OrdinaryScreenTargetKey.Create(plan) ??
+            (Mode == "video" && SourceType == "window" && Config.RequireWindowSurface && NestedRole is null
+                ? OrdinaryWindowTargetKey.Create(plan, metadata) : null);
+        _ordinaryTargetFrozen = true;
+    }
 }

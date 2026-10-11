@@ -63,6 +63,7 @@ public sealed class CapturePlan
         TargetWindowProcessId = targetWindowProcessId;
         TargetWindowSurfaceBounds = targetWindowSurfaceBounds;
         TargetDisplayIdentity = string.IsNullOrWhiteSpace(targetDisplayIdentity) ? null : targetDisplayIdentity;
+        HasExplicitResolvedDisplayIdentity = TargetDisplayIdentity is not null && targetDisplayIdentityStatus == DisplayIdentityResolutionStatus.Resolved;
         DisplayBounds = displayBounds;
         TargetDisplayId = string.IsNullOrWhiteSpace(targetDisplayId) ? null : targetDisplayId;
         TargetDisplayIdentityStatus = TargetDisplayIdentity == null
@@ -95,6 +96,7 @@ public sealed class CapturePlan
     /// </summary>
     public string? TargetDisplayIdentity { get; }
     public DisplayIdentityResolutionStatus TargetDisplayIdentityStatus { get; }
+    internal bool HasExplicitResolvedDisplayIdentity { get; }
     /// <summary>Public ordinal displayed in confirmation/API summaries.</summary>
     public string? TargetDisplayId { get; }
     public CapturePlanBounds? DisplayBounds { get; }

@@ -13,13 +13,20 @@ public sealed class RecordingBundleGenerationResult
     public string? BundlePath { get; }
     public string? ErrorCode { get; }
     public string? ErrorDetail { get; }
+    public RecordingBundleContentsEvidence? ContentsEvidence { get; }
+    internal BundlePublicationReceipt? PublicationReceipt { get; private init; }
 
-    private RecordingBundleGenerationResult(bool success, string? bundlePath, string? errorCode, string? errorDetail)
+    internal static RecordingBundleGenerationResult Published(string path, RecordingBundleContentsEvidence contents, BundlePublicationReceipt? receipt)
+        => new(true, path, null, null, contents) { PublicationReceipt = receipt };
+
+    private RecordingBundleGenerationResult(bool success, string? bundlePath, string? errorCode, string? errorDetail,
+        RecordingBundleContentsEvidence? contentsEvidence = null)
     {
         Success = success;
         BundlePath = bundlePath;
         ErrorCode = errorCode;
         ErrorDetail = errorDetail;
+        ContentsEvidence = contentsEvidence;
     }
 
     public static RecordingBundleGenerationResult Ready(string bundlePath)
@@ -34,5 +41,11 @@ public sealed class RecordingBundleGenerationResult
         if (string.IsNullOrWhiteSpace(errorCode))
             throw new ArgumentException("Error code cannot be empty.", nameof(errorCode));
         return new RecordingBundleGenerationResult(false, null, errorCode, errorDetail);
+    }
+
+    public static RecordingBundleGenerationResult Ready(string bundlePath, IEnumerable<RecordingBundleContentItem> contents)
+    {
+        if (string.IsNullOrWhiteSpace(bundlePath)) throw new ArgumentException("Bundle path cannot be empty.", nameof(bundlePath));
+        return new(true, bundlePath, null, null, new RecordingBundleContentsEvidence(contents));
     }
 }

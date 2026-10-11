@@ -811,7 +811,15 @@ public sealed class RecurringOccurrenceEnvironmentRecheckPersistenceTests
             new MatchingEnvironmentProvider()).Recheck(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
         Assert.Equal(RecurringOccurrenceEnvironmentRecheckResultStatus.Authorized, first.Status);
 
-        var otherLease = context.AddPendingLeaseWithEvidence("task263-other-lease", "task263-other-approval");
+        // Dedicated corrupt legacy fixture: v23 normally refuses two ownership
+        // receipts for one Plan. Restore the exact guard before testing the
+        // existing specification's cross-Lease conflict protection.
+        const string guard = "trg_history_recurring_lease_local_approvals_insert";
+        var guardSql = (string)context.Fixture.Scalar("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=$name;", ("$name", guard))!;
+        RecurringConsentLease otherLease;
+        context.Fixture.Execute("DROP TRIGGER " + guard + ";");
+        try { otherLease = context.AddPendingLeaseWithEvidence("task263-other-lease", "task263-other-approval"); }
+        finally { context.Fixture.Execute(guardSql); }
         var other = new RecurringOccurrenceEnvironmentRecheckService(
             context.Fixture.Store,
             () => now,

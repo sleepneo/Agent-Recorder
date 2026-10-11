@@ -144,7 +144,7 @@ Context files are written using a random temp file in the same directory and ato
   single-instance mutex or binds the API. `ensure-running` validates that proof
   on reuse. Before calling the CLI, an agent should check whether its host
   provides an authorized user-desktop execution surface and, when available,
-  invoke the fixed `ensure-running` command through that surface. Codex may
+  invoke the fixed `ensure-running` command through that surface. Some agent hosts may
   provide tool-authorized execution for a specific command; this is a host
   invocation mechanism, not a Recorder CLI option, and is not guaranteed for
   other agents/hosts. Recorder cannot escape a sandbox or cross Windows account
@@ -282,3 +282,54 @@ approved duration; wall-clock rollback after start cannot extend that deadline.
 If the wall clock rolls back before the run starts, or final revalidation cannot
 prove the full duration still fits, the run is rejected without calling the
 capture backend.
+
+## History And Artifact Evidence
+
+Durable ordinary-video history is registered before an accepted request can
+start capture. Registration failure blocks admission. A bounded writer records
+later transitions; terminal winners are monotonic, host shutdown drains the
+writer, and restart reconciles unfinished media or Bundle work to
+`interrupted_unknown` without restarting capture. History is a projection, never
+authorization. Existing media files cannot restore a lease or proof.
+
+Authenticated history reads use bounded indexed pages and one SQLite snapshot
+with source-specific identity/session checks. Frozen target keys describe the
+accepted target, not a permanent window identity or permission to record again.
+Health queries are optional diagnostics with shared bounded workers; agents
+read them directly, rather than asking humans to transcribe a panel. The
+auxiliary observation window can be screenshotted and may enter a recording;
+authorization and recording controls retain their separate capture policies.
+
+Formal ordinary publishers hold the originally created copy through publication
+and cleanup. Private receipts, when native identity is available, bind media
+anchors to the winning historical result. Public paths and DTOs cannot mint
+these receipts. Completion publishes the logical result and metadata before
+observers can consume it; actual output/resource settlement is separate.
+Capacity accounting covers remaining writes, not bytes already copied. Ordinary
+audio mux inputs and output staging are Run-owned. Current engine output-path
+arbitration is not a cross-process filesystem lock or a disk quota.
+
+Successful media and Bundle generation are independent. The five-file Bundle
+producer publishes a held original-object set through a bounded NTFS/TxF
+directory transaction and does not change user ACLs. Unsupported transaction
+semantics fail the Bundle explicitly without weakening evidence or rolling back
+successful MP4 publication. This has been tested on local NTFS with process
+termination, not with real power loss or every Windows/filesystem version. Old
+or compatibility results can legitimately have no trusted identity.
+
+The explicit ordinary artifact check is a sequential, point-in-time metadata
+observation, limited to six files, 64 distinct ancestors and a three-second
+deadline. Cancellation/timeout does not free shared capacity until the actual
+native worker ends. Matching size or original file identity does not prove
+unchanged contents, playability, audiovisual completeness or deletion safety.
+History queries themselves do not read artifact contents. The existing hash in
+Bundle metadata is not a durable trusted media-hash projection.
+
+Retention remains a read-only preview under the trusted host Videos root.
+Nested references, cross-source shared paths, frozen plan uses, Bundle states
+and unknown/replaced/reparse/hard-linked objects conservatively protect items.
+Reference checks precede physical probes and are not restricted to the current
+page. No API deletes media, enforces a full retention quota, or establishes a
+complete reference graph. A completed recording, ready Bundle or hash never
+grants deletion authority. Real full-disk/removable-volume fault acceptance and
+broader parallel/platform compatibility remain separate work.

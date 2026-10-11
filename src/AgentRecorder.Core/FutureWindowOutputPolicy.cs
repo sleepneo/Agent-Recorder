@@ -22,7 +22,7 @@ internal static class FutureWindowOutputPolicy
                          StringSplitOptions.RemoveEmptyEntries))
             {
                 current = Path.Combine(current, part);
-                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                if ((AgentRecorder.Infrastructure.ReadOnlyPathMetadata.Instance.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                     return "future_window_output_directory_reparse_point";
             }
 

@@ -14,7 +14,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("HeadlessHostIntegration")]
-public sealed partial class RequiredOncePlanSetupCoordinatorTests
+public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     private const string Sid = "S-1-5-21-required-once-tests";
     private const string Session = "required-once-session-1";
@@ -50,6 +50,16 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
         Assert.Equal("scheduled", execution.NextOccurrence!.Status);
         Assert.Null(execution.NextOccurrence.RunId);
         Assert.False(execution.NextOccurrence.OutputPathRecorded);
+        using (var ordinaryHistory = new SqliteOrdinaryRecordingHistoryStore(database.Store))
+        {
+            var unifiedQuery = new UnifiedHistoryQueryService(database.Store, ordinaryHistory);
+            UnifiedHistoryIndexedSeekTests.ObserveOwnedPlanAccess(unifiedQuery, database.Store, "required_once", output);
+            var unified = unifiedQuery.GetPage(Sid, Session, 20, new("plan"));
+            Assert.Equal(state.OccurrenceId, Assert.Single(unified.Items).OccurrenceId);
+            Assert.Equal("scheduled", unified.Items[0].OccurrenceStatus);
+            Assert.Null(unified.Items[0].RunId);
+            Assert.Equal(1, Count(database.Store, "plan_history_locator"));
+        }
 
         Assert.Equal(1, Count(database.Store, "plans"));
         Assert.Equal(1, Count(database.Store, "plan_occurrences"));

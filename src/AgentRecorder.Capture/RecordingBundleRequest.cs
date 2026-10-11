@@ -10,6 +10,7 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class RecordingBundleRequest
 {
+    internal string? PublicationOperationId { get; set; }
     public string RecordingId { get; }
     public string? ConfirmationId { get; }
     public string SourceType { get; }

@@ -501,6 +501,9 @@ public sealed class RecurringPlanSetupIntentTests
             history.ExecuteNonQuery();
         }
 
+        // The legacy fixture must reference a real Plan. v23 deliberately
+        // refuses dangling ownership; it never repairs the original records.
+        Execute(connection, "INSERT INTO plans(id,is_one_time,status_code,created_at_utc,updated_at_utc,version) VALUES('plan-v13',1,'scheduled',100,100,0);");
         Execute(connection, "INSERT INTO setup_intents (intent_id, intent_kind_code, idempotency_key, request_digest, current_user_sid, session_binding, status_code, requested_at_utc, expires_at_utc, plan_id, occurrence_id, lease_id, scope_id, created_at_utc, updated_at_utc, version, terminal_reason_code, scheduled_start_utc, latest_start_utc, planned_end_utc, maximum_duration_ms, lease_valid_until_utc, output_directory, frozen_file_name) VALUES ('v13-standing', 'standing_once_fixed_region', 'v13-key', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'S-1-5-21-v13', 'v13-session', 'expired', 100, 200, 'plan-v13', 'occ-v13', 'lease-v13', 'scope-v13', 100, 300, 7, 'v13_fixture_expired', 110, 120, 160, 30000, 400, 'D:\\Recordings\\', 'capture.mp4');");
     }
 

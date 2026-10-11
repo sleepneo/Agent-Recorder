@@ -2,6 +2,10 @@ using AgentRecorder.Core;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Infrastructure;
 using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Globalization;
 
 namespace AgentRecorder.Persistence;
 
@@ -21,7 +25,19 @@ public sealed record PlanExecutionStatusOccurrenceSnapshot(
     string? OutputPath,
     bool OutputPathRecorded,
     bool? OutputFileExists,
-    string? ExecutionStatusCode = null);
+    string? ExecutionStatusCode = null,
+    DateTimeOffset CreatedAtUtc = default);
+
+public sealed record PlanExecutionHistoryPageSnapshot(
+    string PlanId,
+    string Kind,
+    IReadOnlyList<PlanExecutionStatusOccurrenceSnapshot> Items,
+    string? NextCursor);
+
+internal sealed class PlanExecutionHistoryCursorException : Exception
+{
+    internal PlanExecutionHistoryCursorException() : base("The history cursor is invalid.") { }
+}
 
 public sealed record PlanExecutionStatusSnapshot(
     string PlanId,
@@ -39,10 +55,16 @@ public sealed record PlanExecutionStatusSnapshot(
 public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 {
     private const int MaximumOccurrencesPerPlan = 512;
+    private const int MaximumHistoryPageSize = 100;
+    private const int MaximumCursorLength = 1024;
+    private const int HistoryCursorVersion = 1;
     private const string OccurrenceColumns =
         "id, plan_id, status_code, window_start_utc, window_end_utc, run_id, terminal_reason_code, created_at_utc, updated_at_utc, version";
 
     public PlanExecutionStatusQueryService(SqliteOperationalStore store) : base(store) { }
+
+    internal Action<int>? HistoryCandidateRowsSelectedForTests { get; set; }
+    internal Action<int>? HistoryEvidenceRowsValidatedForTests { get; set; }
 
     public PlanExecutionStatusSnapshot? Get(string? planId, string? currentUserSid, string? sessionBinding)
     {
@@ -142,6 +164,219 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
         {
             TryRollback(transaction);
             throw new Phase3PersistenceException("plan_status_unavailable", "The persisted plan status could not be read.", exception);
+        }
+    }
+
+    public PlanExecutionHistoryPageSnapshot? GetHistory(
+        string? planId, string? currentUserSid, string? sessionBinding, int limit, string? cursor = null)
+    {
+        if (!Canonical(planId, 128))
+            throw new Phase3PersistenceException("invalid_argument", "The plan identifier is invalid.");
+        if (limit is < 1 or > MaximumHistoryPageSize)
+            throw new Phase3PersistenceException("invalid_argument", "The history page limit is invalid.");
+        if (!Canonical(currentUserSid, 256) || !Canonical(sessionBinding, 256))
+            return null;
+        if (cursor is { Length: 0 or > MaximumCursorLength })
+            throw new Phase3PersistenceException("invalid_argument", "The history cursor is invalid.");
+
+        using var connection = OpenBusinessConnection();
+        using (var readOnly = connection.CreateCommand())
+        {
+            readOnly.CommandText = "PRAGMA query_only = ON;";
+            readOnly.ExecuteNonQuery();
+        }
+        using var transaction = BeginReadTransaction(connection);
+        try
+        {
+            if (!HasOwnershipForIdentity(connection, transaction, planId!, currentUserSid!, sessionBinding!))
+            {
+                transaction.Commit();
+                return null;
+            }
+
+            var plan = ReadPlan(connection, transaction, planId!)
+                ?? throw InvalidPersistedData("Owned setup evidence points to a missing plan.");
+            string? ownerScheduleKind = null;
+            var isRequiredOnceOwner = false;
+            if (!IsOwnedByCurrentIdentity(connection, transaction, plan, currentUserSid!, sessionBinding!,
+                    out ownerScheduleKind, out isRequiredOnceOwner))
+                throw InvalidPersistedData("Plan ownership evidence changed shape during identity validation.");
+
+            var kind = plan.IsOneTime ? "once" : ownerScheduleKind
+                ?? throw InvalidPersistedData("The recurring plan has no supported schedule owner.");
+            if (!plan.IsOneTime)
+            {
+                var schedule = SqliteRecurringScheduleVersionRepository.ReadLatestSchedule(connection, transaction, plan.Id)
+                    ?? throw InvalidPersistedData("The recurring plan has no persisted schedule version.");
+                var scheduleKind = schedule.Schedule.Kind == RecurringScheduleKind.Daily ? "daily" : "weekly";
+                if (!string.Equals(scheduleKind, kind, StringComparison.Ordinal))
+                    throw InvalidPersistedData("The recurring setup schedule kind disagrees with the persisted schedule.");
+                var cursorState = SqliteRecurringAdvancementTransaction.ReadValidatedCursorWithinTransaction(
+                    connection, transaction, plan.Id, schedule.ScheduleRevision, schedule);
+                if (cursorState is null) EnsureNoAdvancementHistory(connection, transaction, plan.Id);
+            }
+            var identityDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                currentUserSid + "\0" + sessionBinding))).ToLowerInvariant();
+            HistoryCursor? state = cursor is null ? null : DecodeHistoryCursor(cursor);
+            long watermark;
+            string? afterWindow = null;
+            string? afterId = null;
+            if (state is null)
+            {
+                using var max = connection.CreateCommand();
+                max.Transaction = transaction;
+                // A table-wide rowid watermark is valid for this plan and avoids
+                // enumerating its existing occurrence rows to establish the cursor.
+                max.CommandText = "SELECT COALESCE(MAX(rowid), 0) FROM plan_occurrences;";
+                watermark = Convert.ToInt64(max.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                if (state.Version != HistoryCursorVersion || state.PlanId != plan.Id ||
+                    state.IdentityDigest != identityDigest || state.Watermark < 0 ||
+                    !long.TryParse(state.LastWindowStart, NumberStyles.None, CultureInfo.InvariantCulture, out var lastWindowTicks) ||
+                    lastWindowTicks < 0 || lastWindowTicks > DateTime.MaxValue.Ticks ||
+                    !Canonical(state.LastOccurrenceId, 128))
+                    throw new PlanExecutionHistoryCursorException();
+                watermark = state.Watermark;
+                afterWindow = state.LastWindowStart;
+                afterId = state.LastOccurrenceId;
+            }
+
+            var selected = SelectHistoryOccurrenceIds(connection, transaction, plan.Id, watermark,
+                afterWindow, afterId, limit + 1);
+            HistoryCandidateRowsSelectedForTests?.Invoke(selected.Count);
+            var hasMore = selected.Count > limit;
+            if (hasMore) selected.RemoveAt(selected.Count - 1);
+            var items = selected.Count == 0
+                ? new List<PlanExecutionStatusOccurrenceSnapshot>()
+                : ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime,
+                    isRequiredOnceOwner, out _, selected.Select(item => item.Id).ToArray());
+            HistoryEvidenceRowsValidatedForTests?.Invoke(items.Count);
+            var validatedById = items.ToDictionary(item => item.OccurrenceId, StringComparer.Ordinal);
+            // Preserve the database's exact BINARY tie-break order (which need
+            // not equal .NET UTF-16 ordinal order for arbitrary Unicode IDs).
+            items = selected.Select(item => validatedById[item.Id]).ToList();
+
+            string? nextCursor = null;
+            if (hasMore && selected.Count > 0)
+            {
+                var last = selected[^1];
+                nextCursor = EncodeHistoryCursor(new HistoryCursor(
+                    HistoryCursorVersion, plan.Id, identityDigest, watermark,
+                    last.WindowStartUtc.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture), last.Id));
+            }
+            transaction.Commit();
+            return new PlanExecutionHistoryPageSnapshot(plan.Id, kind, items, nextCursor);
+        }
+        catch (Phase3PersistenceException)
+        {
+            TryRollback(transaction);
+            throw;
+        }
+        catch (PlanExecutionHistoryCursorException)
+        {
+            TryRollback(transaction);
+            throw;
+        }
+        catch (SqliteException exception)
+        {
+            TryRollback(transaction);
+            throw new Phase3PersistenceException("plan_status_unavailable", "The persisted plan history could not be read.", exception);
+        }
+        catch (Exception exception) when (exception is PersistedSnapshotException or Phase3DomainException or InvalidCastException or FormatException or OverflowException or ArgumentException)
+        {
+            TryRollback(transaction);
+            throw InvalidPersistedData("The persisted plan history is inconsistent or invalid.");
+        }
+        catch (Exception exception)
+        {
+            TryRollback(transaction);
+            throw new Phase3PersistenceException("plan_status_data_invalid", "The persisted plan history is inconsistent or invalid.", exception);
+        }
+    }
+
+    private sealed record HistoryCursor(int Version, string PlanId, string IdentityDigest, long Watermark,
+        string LastWindowStart, string LastOccurrenceId);
+
+    private sealed record HistoryOccurrenceKey(string Id, DateTimeOffset WindowStartUtc);
+
+    internal static PlanExecutionStatusOccurrenceSnapshot ReadUnifiedOccurrence(
+        SqliteConnection connection, SqliteTransaction transaction, string planId, string occurrenceId,
+        string sid, string session)
+    {
+        if (!HasOwnershipForIdentity(connection, transaction, planId, sid, session))
+            throw InvalidPersistedData("The selected occurrence has no real identity-bound owner.");
+        var plan = ReadPlan(connection, transaction, planId)
+            ?? throw InvalidPersistedData("The selected occurrence has no plan.");
+        if (!IsOwnedByCurrentIdentity(connection, transaction, plan, sid, session, out var ownerKind, out var required))
+            throw InvalidPersistedData("The selected occurrence ownership is invalid.");
+        if (plan.IsOneTime && ownerKind is not null)
+            throw InvalidPersistedData("A one-time plan has recurring ownership.");
+        if (!plan.IsOneTime)
+        {
+            var schedule = SqliteRecurringScheduleVersionRepository.ReadLatestSchedule(connection, transaction, plan.Id)
+                ?? throw InvalidPersistedData("The recurring schedule is missing.");
+            var kind = schedule.Schedule.Kind == RecurringScheduleKind.Daily ? "daily" : "weekly";
+            if (kind != ownerKind) throw InvalidPersistedData("The recurring owner and schedule disagree.");
+            var cursor = SqliteRecurringAdvancementTransaction.ReadValidatedCursorWithinTransaction(
+                connection, transaction, plan.Id, schedule.ScheduleRevision, schedule);
+            if (cursor is null) EnsureNoAdvancementHistory(connection, transaction, plan.Id);
+        }
+        var rows = ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime, required, out _, new[] { occurrenceId });
+        if (rows.Count != 1) throw InvalidPersistedData("The selected occurrence is missing or duplicated.");
+        return rows[0];
+    }
+
+    private static List<HistoryOccurrenceKey> SelectHistoryOccurrenceIds(
+        SqliteConnection connection, SqliteTransaction transaction, string planId, long watermark,
+        string? afterWindow, string? afterId, int take)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = afterWindow is null
+            ? "SELECT id, window_start_utc FROM plan_occurrences WHERE plan_id=$plan AND rowid<=$watermark ORDER BY window_start_utc DESC, id COLLATE BINARY ASC LIMIT $take;"
+            : "SELECT id, window_start_utc FROM plan_occurrences WHERE plan_id=$plan AND rowid<=$watermark AND (window_start_utc < $window OR (window_start_utc = $window AND id COLLATE BINARY > $id)) ORDER BY window_start_utc DESC, id COLLATE BINARY ASC LIMIT $take;";
+        Add(command, "$plan", planId); Add(command, "$watermark", watermark); Add(command, "$take", take);
+        if (afterWindow is not null)
+        {
+            Add(command, "$window", long.Parse(afterWindow, CultureInfo.InvariantCulture));
+            Add(command, "$id", afterId!);
+        }
+        var result = new List<HistoryOccurrenceKey>(take);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+            result.Add(new HistoryOccurrenceKey(ReadRequiredText(reader, 0), ReadUtcDateTimeOffset(reader, 1)));
+        return result;
+    }
+
+    private static string EncodeHistoryCursor(HistoryCursor state)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(state);
+        var body = Convert.ToBase64String(payload).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var checksum = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        var cursor = body + "." + checksum;
+        if (cursor.Length > MaximumCursorLength) throw new InvalidOperationException("History cursor exceeds its bound.");
+        return cursor;
+    }
+
+    private static HistoryCursor DecodeHistoryCursor(string cursor)
+    {
+        try
+        {
+            var parts = cursor.Split('.');
+            if (parts.Length != 2 || parts[1].Length != 64) throw new ArgumentException();
+            var body = parts[0].Replace('-', '+').Replace('_', '/');
+            body += new string('=', (4 - body.Length % 4) % 4);
+            var payload = Convert.FromBase64String(body);
+            var checksum = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+            if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(checksum), Encoding.ASCII.GetBytes(parts[1])))
+                throw new ArgumentException();
+            return JsonSerializer.Deserialize<HistoryCursor>(payload) ?? throw new ArgumentException();
+        }
+        catch (Exception exception) when (exception is FormatException or JsonException or ArgumentException)
+        {
+            throw new PlanExecutionHistoryCursorException();
         }
     }
 
@@ -306,10 +541,12 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
         string planId,
         bool isOneTime,
         bool isRequiredOnceOwner,
-        out long occurrenceCount)
+        out long occurrenceCount,
+        string[]? occurrenceIds = null)
     {
-        using (var count = connection.CreateCommand())
+        if (occurrenceIds is null)
         {
+            using var count = connection.CreateCommand();
             count.Transaction = transaction;
             count.CommandText = "SELECT COUNT(*) FROM plan_occurrences WHERE plan_id = $plan_id;";
             Add(count, "$plan_id", planId);
@@ -319,6 +556,12 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
             if (total > MaximumOccurrencesPerPlan)
                 throw InvalidPersistedData("The plan occurrence count exceeds the supported query bound.");
             occurrenceCount = total;
+        }
+        else
+        {
+            if (occurrenceIds.Length > MaximumHistoryPageSize || occurrenceIds.Distinct(StringComparer.Ordinal).Count() != occurrenceIds.Length)
+                throw InvalidPersistedData("The bounded history occurrence selection is invalid.");
+            occurrenceCount = occurrenceIds.Length;
         }
 
         var result = new List<PlanExecutionStatusOccurrenceSnapshot>(checked((int)occurrenceCount));
@@ -341,10 +584,17 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
             LEFT JOIN required_once_execution_authorizations AS x ON x.plan_id = o.plan_id AND x.occurrence_id = o.id
             WHERE o.plan_id = $plan_id
             ORDER BY o.window_start_utc ASC, o.id COLLATE BINARY ASC
-            LIMIT $limit;
+            LIMIT $limit
             """;
+        if (occurrenceIds is not null)
+            command.CommandText = command.CommandText.Replace("WHERE o.plan_id = $plan_id",
+                "WHERE o.plan_id = $plan_id AND o.id IN (" + string.Join(",", occurrenceIds.Select((_, index) => "$history_id_" + index)) + ")",
+                StringComparison.Ordinal);
         Add(command, "$plan_id", planId);
-        Add(command, "$limit", MaximumOccurrencesPerPlan + 1);
+        Add(command, "$limit", occurrenceIds is null ? MaximumOccurrencesPerPlan + 1 : occurrenceIds.Length + 1);
+        if (occurrenceIds is not null)
+            for (var index = 0; index < occurrenceIds.Length; index++)
+                Add(command, "$history_id_" + index, occurrenceIds[index]);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -400,7 +650,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 outputPath = ReadNullableText(reader, 30);
                 outputPathRecorded = true;
                 var sizeBytes = ReadInt64(reader, 31);
-                outputFileExists = File.Exists(outputPath) && new FileInfo(outputPath!).Length == sizeBytes;
+                outputFileExists = OutputFileMatchesSize(outputPath, sizeBytes);
             }
             else if (isSettledSuccess)
             {
@@ -436,7 +686,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 
                     outputPath = evidencePath;
                     outputPathRecorded = true;
-                    outputFileExists = File.Exists(evidencePath);
+                    outputFileExists = OutputFileExists(evidencePath);
                 }
                 else
                 {
@@ -459,7 +709,8 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 OutputPath: outputPath,
                 OutputPathRecorded: outputPathRecorded,
                 OutputFileExists: outputFileExists,
-                ExecutionStatusCode: executionStatusCode));
+                ExecutionStatusCode: executionStatusCode,
+                CreatedAtUtc: occurrence.CreatedAtUtc));
         }
 
         if (result.Count != occurrenceCount)
@@ -676,6 +927,24 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 
     private static Phase3PersistenceException InvalidPersistedData(string message) =>
         new("plan_status_data_invalid", message);
+
+    private static bool OutputFileExists(string path)
+    {
+        try { return File.Exists(path); }
+        catch { return false; }
+    }
+
+    private static bool OutputFileMatchesSize(string? path, long expectedSize)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var file = new FileInfo(path);
+            file.Refresh();
+            return file.Exists && file.Length == expectedSize;
+        }
+        catch { return false; }
+    }
 
     private static bool IsLegalOccurrenceRunCombination(PlanOccurrence occurrence, RecordingRun? run)
     {

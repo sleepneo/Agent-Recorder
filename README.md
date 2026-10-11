@@ -22,6 +22,16 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
   unattended plans each require a fresh local fixed-region selection and bounded
   lease approval before later runs.
 
+## Source And Release Status
+
+The latest published package is v0.1.15. The current source also includes durable
+ordinary recording history, unified indexed history, on-demand health and
+artifact metadata checks, retention previews, and stronger media/Bundle
+publication and storage protection. These source changes are not yet in that
+package. Retention is read-only; automatic deletion, disk quotas, signing and
+an installer remain unfinished. Inspect `/capabilities` for the running host's
+actual scope and use [the API reference](docs/api.md) for contracts.
+
 ## Recommended Agent Path
 
 1. Start or reuse the app:
@@ -39,6 +49,11 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
    - `last_region`
 4. Treat `wait.goal_reached=true` as the trusted start signal. On timeout,
    continue with recording long-polling; then report the final MP4 path.
+
+For optional environment diagnosis, agents read authenticated `GET /api/v1/health`
+directly. Task status and results use recordings/history/plans APIs; a health
+snapshot does not authorize capture or automatic retries. See
+[the health contract](docs/api.md#on-demand-read-only-health).
 
 Advanced agents may still use the lower-level API for precise display, window,
 region, output, or nested-recording control.

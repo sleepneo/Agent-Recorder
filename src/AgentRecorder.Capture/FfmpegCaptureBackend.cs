@@ -15,7 +15,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Capture;
 
-public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IMicrophoneStatusConsumer
+public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IMicrophoneStatusConsumer
 {
     private Process? _proc;
     private string _output = "";
@@ -57,6 +57,13 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         lock (_lock)
         {
+            if (_videoOnlyRun is { } previous)
+            {
+                if (!previous.Completion.Task.IsCompleted || Volatile.Read(ref previous.OutputSettled) == 0)
+                    throw new InvalidOperationException("The video run is still active.");
+                previous.Cancellation.Dispose();
+                _videoOnlyRun = null;
+            }
             _completionMeta = null;
             _hasExited = false;
             _manualStopped = false;
@@ -72,6 +79,11 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
         var args = BuildArgs(cfg);
+        if (UsesVideoOnlyPublication(cfg))
+        {
+            PrepareVideoOnlyRun(cfg);
+            args = BuildCaptureArgs(cfg, _videoOnlyRun!.SourcePath, VideoInputArgumentsForTests?.Invoke(cfg), ownedStaging: true);
+        }
         // Render a safe, single-space-separated diagnostic string. This must
         // never be used as the actual command source; ArgumentList is.
         cfg.CommandArgs = RenderCommandArgs(args);
@@ -121,15 +133,23 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         foreach (var a in args)
             _proc.StartInfo.ArgumentList.Add(a);
 
+        var stderrRun = _videoOnlyRun;
         _proc.ErrorDataReceived += (_, e) =>
         {
+            if (e.Data is null) stderrRun?.StderrDrained.TrySetResult();
             if (!string.IsNullOrWhiteSpace(e.Data))
-                lock (_lock) _stderrLog.AppendLine(e.Data);
+                lock (_lock)
+                    if (stderrRun is null || ReferenceEquals(_videoOnlyRun, stderrRun)) _stderrLog.AppendLine(e.Data);
         };
 
-        try { _proc.Start(); }
+        try { ConfigureProcessForTests?.Invoke(_proc.StartInfo); _proc.Start(); }
         catch (Exception ex)
         {
+            if (_videoOnlyRun is { } failedRun)
+            {
+                CompleteFailedVideoOnlyStart(failedRun);
+                throw new ApiException(500, "ENCODER_ERROR", "Failed to launch the video encoder.");
+            }
             throw new ApiException(500, "ENCODER_ERROR", "Failed to launch ffmpeg: " + ex.Message);
         }
         _proc.BeginErrorReadLine();
@@ -143,18 +163,26 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         else
             timeoutMs = 4 * 3600 * 1000;
 
+        var videoOnlyRun = _videoOnlyRun;
+        var watchedProcess = _proc;
         _watcher = Task.Run(() =>
         {
-            bool exited = _proc.WaitForExit(timeoutMs);
-            lock (_lock) _hasExited = true;
+            bool exited = watchedProcess.WaitForExit(timeoutMs);
+            lock (_lock)
+                if (videoOnlyRun is null || ReferenceEquals(_videoOnlyRun, videoOnlyRun)) _hasExited = true;
             int exitCode = -1;
-            try { if (exited) exitCode = _proc.ExitCode; } catch { }
+            try { if (exited) exitCode = watchedProcess.ExitCode; } catch { }
 
             if (!exited)
             {
-                try { _proc.Kill(true); } catch { }
+                try { watchedProcess.Kill(true); } catch { }
             }
 
+            if (videoOnlyRun is not null)
+            {
+                ConvergeVideoOnly(videoOnlyRun, natural: true, exitCode);
+                return;
+            }
             RunNaturalExitLifecycle(_stdoutReader!, exitCode, _output, _stderrLog, StdoutDrainTimeout,
                 (code, meta) => _onNaturalExit?.Invoke(code, meta));
         });
@@ -296,6 +324,26 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
     private OutputMeta StopCore(CaptureAbortReason? abortReason)
     {
+        if (_videoOnlyRun is { } videoOnlyRun)
+        {
+            if (abortReason.HasValue)
+            {
+                lock (_lock)
+                    if (ReferenceEquals(_videoOnlyRun, videoOnlyRun) && videoOnlyRun.Terminal is null) _abortReason = abortReason;
+                CloseVideoOnlyAdmission(videoOnlyRun);
+            }
+            return ConvergeVideoOnly(videoOnlyRun, natural: false, naturalExitCode: null);
+        }
+        if (_cfg is { } cfg && UsesVideoOnlyPublication(cfg))
+        {
+            lock (_lock)
+            {
+                _hasExited = true;
+                return _completionMeta ??= new OutputMeta { OutputPath = _output,
+                    AudioStatus = "not_requested", AudioContinuityStatus = "not_checked", AudioSourceKind = "none",
+                    StopReason = "encoder_start_failed", Warnings = new[] { "encoder_start_failed" } };
+            }
+        }
         string stderr;
 
         lock (_lock)
@@ -354,12 +402,23 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         catch { }
     }
 
-    public bool HasExited => _proc?.HasExited ?? _hasExited;
-    public OutputMeta? LastMeta => _completionMeta;
+    public bool HasExited
+    {
+        get
+        {
+            Process? process; bool exited, videoOnly;
+            lock (_lock) { process = _proc; exited = _hasExited; videoOnly = _videoOnlyRun is not null; }
+            try { return process?.HasExited ?? exited; }
+            catch (InvalidOperationException) when (videoOnly) { return exited; } // Failed start or already disposed after cleanup.
+        }
+    }
+    public OutputMeta? LastMeta { get { lock (_lock) return _completionMeta; } }
     public int ExitCode
     {
         get
         {
+            lock (_lock)
+                if (_videoOnlyRun is { Terminal: not null } run) return run.ExitCode;
             try { if (_proc != null && _proc.HasExited) return _proc.ExitCode; } catch { }
             return -1;
         }
@@ -470,7 +529,9 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
     internal const double SilenceDetectMinDurationSeconds = 3.0;
     internal const double InternalSilenceWarningThresholdSeconds = 3.0;
 
-    internal static List<string> BuildArgs(CaptureConfig cfg)
+    internal static List<string> BuildArgs(CaptureConfig cfg) => BuildCaptureArgs(cfg, cfg.OutputPath, null);
+
+    private static List<string> BuildCaptureArgs(CaptureConfig cfg, string outputPath, IReadOnlyList<string>? videoInputArgs, bool ownedStaging = false)
     {
         DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
         var args = new List<string>();
@@ -482,7 +543,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         // the stdout reader parses to detect the first encoded/muxed frame.
         // Note: -stats_period is intentionally omitted because the bundled
         // FFmpeg (git-2019-10-22) does not recognize this option.
-        switch (cfg.OutputConflictPolicy)
+        switch (ownedStaging ? "overwrite" : cfg.OutputConflictPolicy)
         {
             case "fail_if_exists":
                 // Recurring fixed-output capture is fail-closed at the final
@@ -515,9 +576,10 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
             AppendAudioInputArgs(args, cfg);
         }
 
-        AppendVideoInputArgs(args, cfg);
+        if (videoInputArgs is null) AppendVideoInputArgs(args, cfg);
+        else args.AddRange(videoInputArgs);
 
-        AppendOutputArgs(args, cfg);
+        AppendOutputArgs(args, cfg, outputPath);
 
         return args;
     }
@@ -579,7 +641,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
         args.Add($"audio={device}");
     }
 
-    private static void AppendOutputArgs(List<string> args, CaptureConfig cfg)
+    private static void AppendOutputArgs(List<string> args, CaptureConfig cfg, string outputPath)
     {
         var (_, _, capW, capH) = cfg.Bounds;
         if (string.Equals(cfg.SourceKind, "display", StringComparison.OrdinalIgnoreCase))
@@ -638,7 +700,7 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
         args.Add("-movflags");
         args.Add("+faststart");
-        args.Add(cfg.OutputPath);
+        args.Add(outputPath);
     }
 
     /// <summary>
@@ -1135,6 +1197,14 @@ public sealed class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservabl
 
     public void Dispose()
     {
+        if (_videoOnlyRun is { } run)
+        {
+            lock (_lock) run.DisposeRequested = true;
+            CloseVideoOnlyAdmission(run);
+            ConvergeVideoOnly(run, natural: false, naturalExitCode: null);
+            if (Volatile.Read(ref run.OutputSettled) == 0) return; // The actual owner disposes after I/O ends.
+            run.Cancellation.Dispose();
+        }
         try { _proc?.Dispose(); } catch { }
         StopMicrophoneMonitor();
     }

@@ -73,7 +73,7 @@ public class QuickRecordingApiTests
         var audit = new AuditLogger();
         var engine = new RecordingEngine(audit);
         engine.SetTray(tray);
-        return new ApiServer(engine, audit, tray, futureWindowOneShotGateway: futureWindowGateway);
+        return new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0, futureWindowOneShotGateway: futureWindowGateway);
     }
 
     private static void Cleanup(string dataDir)
@@ -148,7 +148,7 @@ public class QuickRecordingApiTests
             server.Start();
             using var client = CreateClient();
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"}}"));
             Assert.Equal(401, (int)response.StatusCode);
         }
@@ -170,7 +170,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{}"));
             Assert.Equal(400, (int)response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
@@ -194,7 +194,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"invalid_type\"}}"));
             Assert.Equal(400, (int)response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
@@ -223,7 +223,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -265,7 +265,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30,\"countdown_seconds\":0}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -313,7 +313,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30,\"countdown_seconds\":0,\"video\":{\"fps\":24,\"quality\":\"high\"},\"audio\":{\"microphone\":{\"enabled\":false},\"system_audio\":{\"enabled\":false}},\"output\":{\"directory\":\"default\",\"filename_template\":\"quick-windows-{datetime}\"},\"nested\":{\"role\":\"outer\",\"session_id\":\"quick-windows-session\"}}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -362,7 +362,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent(body));
 
             Assert.Equal(400, (int)response.StatusCode);
@@ -413,7 +413,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30}"));
 
             Assert.Equal(400, (int)response.StatusCode);
@@ -459,7 +459,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2},\"duration_seconds\":30}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -497,7 +497,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent($"{{\"target\":{{\"type\":\"primary_display\"}},\"countdown_seconds\":{countdownSeconds}}}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -544,14 +544,14 @@ public class QuickRecordingApiTests
             if (targetType == "last_region")
             {
                 var seed = await client.PostAsync(
-                    $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                    $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                     JsonContent("{\"target\":{\"type\":\"selected_region\"},\"countdown_seconds\":0}"));
                 Assert.Equal(200, (int)seed.StatusCode);
             }
 
             string body = $"{{\"target\":{{\"type\":\"{targetType}\"}},\"countdown_seconds\":10}}";
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent(body));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -610,14 +610,14 @@ public class QuickRecordingApiTests
             if (targetType == "last_region")
             {
                 var seed = await client.PostAsync(
-                    $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                    $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                     JsonContent("{\"target\":{\"type\":\"selected_region\"},\"countdown_seconds\":0}"));
                 Assert.Equal(200, (int)seed.StatusCode);
             }
 
             var body = $"{{\"mode\":\"screenshot_series\",\"interval_ms\":1000,\"max_count\":2,\"countdown_seconds\":0,\"target\":{{\"type\":\"{targetType}\"}}}}";
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent(body));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -674,7 +674,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"mode\":\"screenshot_series\",\"interval_ms\":1000,\"max_count\":2,\"countdown_seconds\":0,\"target\":{\"type\":\"windows_display\",\"windows_display_number\":2}}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -723,7 +723,7 @@ public class QuickRecordingApiTests
                 ? "\"duration_seconds\":10"
                 : "\"stop_condition\":{\"type\":\"manual\"}";
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent($"{{\"mode\":\"screenshot_series\",\"target\":{{\"type\":\"selected_region\"}},{fieldJson}}}"));
 
             Assert.Equal(400, (int)response.StatusCode);
@@ -752,7 +752,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"}}"));
             Assert.Equal(400, (int)response.StatusCode);
 
@@ -781,7 +781,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"active_window\"}}"));
             Assert.Equal(400, (int)response.StatusCode);
 
@@ -823,7 +823,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"active_window\"},\"duration_seconds\":10}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -888,7 +888,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -936,7 +936,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\"}}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -969,7 +969,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/confirmations/test-id/approve",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/confirmations/test-id/approve",
                 JsonContent("{}"));
             Assert.Equal(405, (int)response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
@@ -996,7 +996,7 @@ public class QuickRecordingApiTests
             server.Start();
             using var client = CreateClient();
             var response = await client.GetAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1039,7 +1039,7 @@ public class QuickRecordingApiTests
         {
             server.Start();
             using var client = CreateClient();
-            var createUri = $"http://127.0.0.1:{ApiServer.Port}/api/v1/future-window-authorizations";
+            var createUri = $"http://127.0.0.1:{server.BoundPort}/api/v1/future-window-authorizations";
             const string validBody = "{\"executable_path\":\"C:\\\\Player\\\\player.exe\",\"audio\":{\"mode\":\"none\"},\"maximum_duration_seconds\":30,\"validity_seconds\":60,\"output_directory\":\"D:\\\\Recordings\"}";
 
             var unauthenticated = await client.PostAsync(createUri, JsonContent(validBody));
@@ -1091,7 +1091,7 @@ public class QuickRecordingApiTests
             Assert.True(revokedJson.RootElement.GetProperty("data").GetProperty("revocation_accepted").GetBoolean());
             Assert.Equal(1, gateway.RevokeCount);
 
-            var capabilities = await client.GetAsync("http://127.0.0.1:" + ApiServer.Port + "/api/v1/capabilities");
+            var capabilities = await client.GetAsync("http://127.0.0.1:" + server.BoundPort + "/api/v1/capabilities");
             Assert.Equal(200, (int)capabilities.StatusCode);
             using var capabilityJson = JsonDocument.Parse(await capabilities.Content.ReadAsStringAsync());
             Assert.True(capabilityJson.RootElement.GetProperty("data").GetProperty("future_window_one_shot")
@@ -1165,7 +1165,7 @@ public class QuickRecordingApiTests
             SetThreeWindowsDisplayProviders();
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1225,7 +1225,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -1261,7 +1261,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"nested\":{\"role\":\"outer\",\"session_id\":\"test-session\"},\"duration_seconds\":60}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -1293,7 +1293,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
             Assert.Equal(200, (int)response.StatusCode);
 
@@ -1340,7 +1340,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1396,7 +1396,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1450,7 +1450,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1495,7 +1495,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1540,7 +1540,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1594,11 +1594,11 @@ public class QuickRecordingApiTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
             var createResponse = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
             Assert.Equal(200, (int)createResponse.StatusCode);
 
-            var capsResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var capsResponse = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)capsResponse.StatusCode);
 
             var body = await capsResponse.Content.ReadAsStringAsync();
@@ -1635,7 +1635,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"last_region\"},\"duration_seconds\":60}"));
             Assert.Equal(404, (int)response.StatusCode);
 
@@ -1682,7 +1682,7 @@ public class QuickRecordingApiTests
 
             // First call selected_region to establish the persisted last region.
             var selectedResponse = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
             Assert.Equal(200, (int)selectedResponse.StatusCode);
 
@@ -1690,7 +1690,7 @@ public class QuickRecordingApiTests
 
             // Now call last_region - it should not open the selection UI again.
             var lastRegionResponse = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"last_region\"},\"duration_seconds\":60}"));
             Assert.Equal(200, (int)lastRegionResponse.StatusCode);
 
@@ -1746,7 +1746,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
 
             // Before any selection, record_last_region should be unavailable.
-            var beforeResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var beforeResponse = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)beforeResponse.StatusCode);
             var beforeBody = await beforeResponse.Content.ReadAsStringAsync();
             using var beforeDoc = JsonDocument.Parse(beforeBody);
@@ -1758,12 +1758,12 @@ public class QuickRecordingApiTests
             // Create a selection to persist last region.
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var createResponse = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
             Assert.Equal(200, (int)createResponse.StatusCode);
 
             // After selection, record_last_region should be available.
-            var afterResponse = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var afterResponse = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)afterResponse.StatusCode);
             var afterBody = await afterResponse.Content.ReadAsStringAsync();
             using var afterDoc = JsonDocument.Parse(afterBody);
@@ -1823,7 +1823,7 @@ public class QuickRecordingApiTests
             using var client = CreateClient();
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\"},\"duration_seconds\":120}"));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -1869,7 +1869,7 @@ public class QuickRecordingApiTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
             var createResponse = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\",\"selection_timeout_seconds\":30},\"duration_seconds\":120}"));
             Assert.Equal(200, (int)createResponse.StatusCode);
 
@@ -1879,12 +1879,12 @@ public class QuickRecordingApiTests
             var audit = new AuditLogger();
             var engine = new RecordingEngine(audit);
             engine.SetTray(tray);
-            var newServer = new ApiServer(engine, audit, tray);
+            var newServer = new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0);
             newServer.Start();
             try
             {
                 using var newClient = CreateClient();
-                var capsResponse = await newClient.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+                var capsResponse = await newClient.GetAsync($"http://127.0.0.1:{newServer.BoundPort}/api/v1/capabilities");
                 Assert.Equal(200, (int)capsResponse.StatusCode);
 
                 var body = await capsResponse.Content.ReadAsStringAsync();
@@ -1930,7 +1930,7 @@ public class QuickRecordingApiTests
 
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -2004,7 +2004,7 @@ public class QuickRecordingApiTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\"},\"countdown_seconds\":1.5}"));
 
             Assert.Equal(400, (int)response.StatusCode);

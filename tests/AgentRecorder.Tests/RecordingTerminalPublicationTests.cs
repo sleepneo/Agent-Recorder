@@ -75,13 +75,30 @@ public sealed class RecordingTerminalPublicationTests
     }
 
     [Fact]
+    public void StateSetterDoesNotPublishTerminalBeforeMetadataIsComplete()
+    {
+        var rec = new Recording();
+        var publications = 0;
+        rec.OrdinaryHistoryPublication = _ => publications++;
+
+        rec.State = RecState.cancelled;
+        rec.StopReason = "user_requested";
+        rec.CompletedAtUtc = DateTime.UtcNow;
+        Assert.Equal(0, publications);
+
+        lock (rec)
+            Assert.True(rec.PublishFinalized());
+        Assert.Equal(1, publications);
+    }
+
+    [Fact]
     public void RecordingEngine_UsesOnlyControlledTerminalPublicationEntryPoint()
     {
         var sourcePath = FindRepositoryFile("src", "AgentRecorder.Core", "RecordingEngine.cs");
         var source = File.ReadAllText(sourcePath);
 
         Assert.DoesNotContain("rec.IsFinalized = true", source, StringComparison.Ordinal);
-        Assert.Equal(7, source.Split("PublishFinalized()", StringSplitOptions.None).Length - 1);
+        Assert.Equal(12, source.Split("PublishFinalized()", StringSplitOptions.None).Length - 1);
     }
 
     private static string FindRepositoryFile(params string[] parts)
