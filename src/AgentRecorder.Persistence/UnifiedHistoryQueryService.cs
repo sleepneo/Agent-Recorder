@@ -211,18 +211,20 @@ public sealed class UnifiedHistoryQueryService
             var entries = new List<UnifiedHistoryEntry>();
             var ordinaryRows=new List<OrdinaryRecordingHistorySnapshot>();
             var futureRows = new List<FutureWindowAuthorizationRow>();
+            var planRows = new List<PlanMediaPublicationRow>();
             foreach (var key in selected)
             {
                 entries.Add(key.Source switch
                 {
                     "ordinary" => ReadOrdinary(connection, transaction, key, false,ordinaryRows),
-                    "plan" => ReadPlan(connection, transaction, key, sid, session),
+                    "plan" => ReadPlan(connection, transaction, key, sid, session, planRows),
                     _ => ReadFuture(connection, transaction, key, sid, session, futureRows),
                 });
             }
             foreach (var group in selected.GroupBy(k => k.Source)) EntriesValidatedForTests?.Invoke(group.Key, group.Count());
             var next = hasMore && selected.Length > 0 ? Encode(state with
             { LastTicks = selected[^1].Ticks, LastSource = selected[^1].Source, LastId = selected[^1].Id }) : null;
+            PlanMediaPublicationStorage.Read(connection, transaction, planRows, 100, PlanPublicationCommandForTests);
             FutureWindowPublicationStorage.Read(connection, transaction, futureRows, FuturePublicationCommandForTests);
             if (retention is null) PublicationAnchorStorage.Read(connection, transaction, ordinaryRows);
             var bundles = OrdinaryRecordingBundleStorage.Read(connection, transaction, ordinaryRows, BundleContentsCommandForTests, BundleIdentityCommandForTests, MediaHashCommandForTests, AttachmentHashCommandForTests);
@@ -387,7 +389,7 @@ public sealed class UnifiedHistoryQueryService
             ProfileId: row.ProfileId, ProfileVersion: row.ProfileVersion, SourceType: row.SourceType);
     }
 
-    private static UnifiedHistoryEntry ReadPlan(SqliteConnection connection, SqliteTransaction transaction, Key key, string sid, string session)
+    internal static UnifiedHistoryEntry ReadPlan(SqliteConnection connection, SqliteTransaction transaction, Key key, string sid, string session, List<PlanMediaPublicationRow> publicationRows, bool probeFiles = true)
     {
         using (var relation = connection.CreateCommand())
         {
@@ -401,7 +403,7 @@ public sealed class UnifiedHistoryQueryService
             Add(relation, "$time", key.Ticks); Add(relation, "$sid", sid); Add(relation, "$session", session); Add(relation, "$kind", key.OwnerKind!);
             if (relation.ExecuteScalar() is not long count || count != 1) throw new InvalidDataException("The directory and original owner disagree.");
         }
-        var row = PlanExecutionStatusQueryService.ReadUnifiedOccurrence(connection, transaction, key.PlanId!, key.Id, sid, session);
+        var row = PlanExecutionStatusQueryService.ReadUnifiedOccurrence(connection, transaction, key.PlanId!, key.Id, sid, session, publicationRows, probeFiles);
         if (row.CreatedAtUtc.UtcTicks != key.Ticks) throw new InvalidDataException("The occurrence creation time disagrees.");
         return new("plan:" + row.OccurrenceId, "plan", "plan_occurrence", row.CreatedAtUtc,
             PlanId: key.PlanId, OccurrenceId: row.OccurrenceId, RunId: row.RunId,
@@ -410,6 +412,8 @@ public sealed class UnifiedHistoryQueryService
             OutputPath: row.OutputPath, OutputPathRecorded: row.OutputPathRecorded, OutputFileExists: row.OutputFileExists,
             WindowStartUtc: row.WindowStartUtc, WindowEndUtc: row.WindowEndUtc);
     }
+
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? PlanPublicationCommandForTests { get; set; }
 
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? FuturePublicationCommandForTests { get; set; }
 

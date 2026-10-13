@@ -420,7 +420,8 @@ internal static class Program
             retentionPreviewGateway,
             new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
             new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
-            new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)));
+            new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),
+            new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity));
 
         var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
         tray.SetObservationHealthGateway(observationHealth);

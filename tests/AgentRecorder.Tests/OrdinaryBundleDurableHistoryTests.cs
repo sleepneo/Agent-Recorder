@@ -249,7 +249,7 @@ public sealed class OrdinaryBundleDurableHistoryTests(ITestOutputHelper output)
             {cmd.CommandText=m.Definition;cmd.ExecuteNonQuery();cmd.CommandText="INSERT INTO schema_migrations VALUES($v,$n,$c,$at);";cmd.Parameters.AddWithValue("$v",m.Version);cmd.Parameters.AddWithValue("$n",m.Name);cmd.Parameters.AddWithValue("$c",m.Checksum);cmd.Parameters.AddWithValue("$at",1000+m.Version);cmd.ExecuteNonQuery();cmd.Parameters.Clear();}
             cmd.CommandText="SELECT MAX(version) FROM schema_migrations;";Assert.Equal(30L,cmd.ExecuteScalar());
         }
-        var oldReceipts=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30);var store=new SqliteOperationalStore(path);store.Initialize();store.Initialize();Assert.Equal(40,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(oldReceipts,UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30));
+        var oldReceipts=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30);var store=new SqliteOperationalStore(path);store.Initialize();store.Initialize();Assert.Equal(41,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(oldReceipts,UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30));
         using var reader=new SqliteOrdinaryRecordingHistoryStore(store);var legacy=f.Row("legacy");reader.Register(legacy);Assert.Null(reader.Read("legacy")!.Bundle);Assert.Null(Assert.Single(reader.ReadPage(1,null).Items).Bundle);Assert.Null(Assert.Single(new UnifiedHistoryQueryService(store,reader).GetPage(UnifiedHistoryTestDatabase.Sid,UnifiedHistoryTestDatabase.Session,1,new("ordinary")).Items).Bundle);
     }
 

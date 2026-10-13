@@ -276,12 +276,12 @@ public sealed class PendingOutputUseProtectionTests(ITestOutputHelper output)
         }
         var before=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:37);var definitions=Definitions(path);var store=new SqliteOperationalStore(path);store.Initialize();
         Assert.Equal(before,UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:37));Assert.Equal(definitions,Definitions(path));var once=UnifiedHistoryProfileFilterTests.RawSnapshot(path);store.Initialize();Assert.Equal(once,UnifiedHistoryProfileFilterTests.RawSnapshot(path));
-        Assert.Equal(40,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(3,SqliteSchemaV38.Indexes.Count);
+        Assert.Equal(41,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(3,SqliteSchemaV38.Indexes.Count);
         using var c2=store.OpenReadOnlyConnection();using var cmd2=c2.CreateCommand();cmd2.CommandText="PRAGMA integrity_check;";Assert.Equal("ok",cmd2.ExecuteScalar());
     }
     private static string Definitions(string path)
     {
-        using var c=new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");c.Open();using var cmd=c.CreateCommand();cmd.CommandText="SELECT name,sql FROM sqlite_master WHERE tbl_name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'idx_future_window_publication%' AND name NOT IN ('idx_setup_intents_pending_output_path','idx_setup_intents_pending_output_template','idx_recurring_profiles_pending_output_template','idx_required_once_setup_pending_output_path') ORDER BY name;";
+        using var c=new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly");c.Open();using var cmd=c.CreateCommand();cmd.CommandText="SELECT name,sql FROM sqlite_master WHERE tbl_name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'idx_future_window_publication%' AND tbl_name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'idx_plan_media_publication%' AND name NOT IN ('idx_setup_intents_pending_output_path','idx_setup_intents_pending_output_template','idx_recurring_profiles_pending_output_template','idx_required_once_setup_pending_output_path') ORDER BY name;";
         using var r=cmd.ExecuteReader();var lines=new List<string>();while(r.Read())lines.Add(r.GetString(0)+":"+(r.IsDBNull(1)?"":r.GetString(1)));return string.Join("\n",lines);
     }
     private sealed class ThrowingTray:ITrayContext

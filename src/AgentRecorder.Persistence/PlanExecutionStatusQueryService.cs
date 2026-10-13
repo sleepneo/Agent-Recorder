@@ -129,8 +129,10 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 }
             }
 
+            var publicationRows = new List<PlanMediaPublicationRow>();
             var occurrences = ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime,
-                isRequiredOnceOwner, out var occurrenceCount);
+                isRequiredOnceOwner, out var occurrenceCount, publicationRows: publicationRows);
+            PlanMediaPublicationStorage.Read(connection, transaction, publicationRows, 512, PublicationCommandForTests);
             var latest = occurrences.Count == 0 ? null : occurrences[^1];
             var next = occurrences.FirstOrDefault(item => !Phase3TransitionGuards.IsTerminal(
                 Phase3StateCodes.ParsePlanOccurrence(item.Status)));
@@ -248,10 +250,12 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
             HistoryCandidateRowsSelectedForTests?.Invoke(selected.Count);
             var hasMore = selected.Count > limit;
             if (hasMore) selected.RemoveAt(selected.Count - 1);
+            var publicationRows = new List<PlanMediaPublicationRow>();
             var items = selected.Count == 0
                 ? new List<PlanExecutionStatusOccurrenceSnapshot>()
                 : ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime,
-                    isRequiredOnceOwner, out _, selected.Select(item => item.Id).ToArray());
+                    isRequiredOnceOwner, out _, selected.Select(item => item.Id).ToArray(), publicationRows);
+            PlanMediaPublicationStorage.Read(connection, transaction, publicationRows, 100, PublicationCommandForTests);
             HistoryEvidenceRowsValidatedForTests?.Invoke(items.Count);
             var validatedById = items.ToDictionary(item => item.OccurrenceId, StringComparer.Ordinal);
             // Preserve the database's exact BINARY tie-break order (which need
@@ -303,7 +307,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 
     internal static PlanExecutionStatusOccurrenceSnapshot ReadUnifiedOccurrence(
         SqliteConnection connection, SqliteTransaction transaction, string planId, string occurrenceId,
-        string sid, string session)
+        string sid, string session, List<PlanMediaPublicationRow> publicationRows, bool probeFiles = true)
     {
         if (!HasOwnershipForIdentity(connection, transaction, planId, sid, session))
             throw InvalidPersistedData("The selected occurrence has no real identity-bound owner.");
@@ -323,7 +327,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 connection, transaction, plan.Id, schedule.ScheduleRevision, schedule);
             if (cursor is null) EnsureNoAdvancementHistory(connection, transaction, plan.Id);
         }
-        var rows = ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime, required, out _, new[] { occurrenceId });
+        var rows = ReadOccurrences(connection, transaction, plan.Id, plan.IsOneTime, required, out _, new[] { occurrenceId }, publicationRows, probeFiles);
         if (rows.Count != 1) throw InvalidPersistedData("The selected occurrence is missing or duplicated.");
         return rows[0];
     }
@@ -535,6 +539,8 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
         return true;
     }
 
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? PublicationCommandForTests { get; set; }
+
     private static List<PlanExecutionStatusOccurrenceSnapshot> ReadOccurrences(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -542,7 +548,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
         bool isOneTime,
         bool isRequiredOnceOwner,
         out long occurrenceCount,
-        string[]? occurrenceIds = null)
+        string[]? occurrenceIds = null, List<PlanMediaPublicationRow>? publicationRows = null, bool probeFiles = true)
     {
         if (occurrenceIds is null)
         {
@@ -650,7 +656,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 outputPath = ReadNullableText(reader, 30);
                 outputPathRecorded = true;
                 var sizeBytes = ReadInt64(reader, 31);
-                outputFileExists = OutputFileMatchesSize(outputPath, sizeBytes);
+                outputFileExists = probeFiles ? OutputFileMatchesSize(outputPath, sizeBytes) : null;
             }
             else if (isSettledSuccess)
             {
@@ -686,7 +692,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 
                     outputPath = evidencePath;
                     outputPathRecorded = true;
-                    outputFileExists = OutputFileExists(evidencePath);
+                    outputFileExists = probeFiles ? OutputFileExists(evidencePath) : null;
                 }
                 else
                 {
@@ -698,6 +704,9 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                 throw InvalidPersistedData("Output-path evidence exists without a completed settled run.");
             }
 
+            if (run is not null) publicationRows?.Add(new(planId, occurrence.Id, run.Id,
+                isRequiredOnceOwner ? "required_once" : isOneTime ? "standing" : "recurring", isSettledSuccess, outputPath,
+                isSettledSuccess && hasRequiredExecution ? ReadInt64(reader, 31) : null));
             result.Add(new PlanExecutionStatusOccurrenceSnapshot(
                 occurrence.Id,
                 occurrence.WindowStartUtc,

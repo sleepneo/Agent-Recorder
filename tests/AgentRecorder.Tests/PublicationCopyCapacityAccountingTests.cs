@@ -102,6 +102,10 @@ public sealed class PublicationCopyCapacityAccountingTests(ITestOutputHelper out
         PublishResult result;
         try { result = await pub.PublishAsync(f.Source, f.Final, local.Token, g.CreateCommitGate(gate, true)).WaitAsync(TimeSpan.FromSeconds(10)); }
         finally { denied?.Dispose(); }
+        // Logical query timeout can precede the provider's cancellation and the
+        // protected reservation's actual retirement. Assert the original cleanup
+        // guarantees only after that real owner barrier, without changing budgets.
+        await g.ProbeRetirementCompletion.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(result.Success); Assert.Null(result.Receipt); Assert.False(g.Committed); Preserved(f, old); Assert.Equal(0, g.RemainingPublicationCopyBytes); Assert.Equal(0, native.Renames);
         if (native.Handle is not null) { Assert.True(native.Handle.IsClosed); Assert.Equal(1, native.Deletes); Assert.False(File.Exists(native.CopyPath)); }
         Assert.Equal(fault == "large_source" ? 120 * MiB : 100 * MiB, new FileInfo(f.Source).Length);

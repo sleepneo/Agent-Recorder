@@ -26,7 +26,7 @@ namespace AgentRecorder.Tests;
 // Synthetic target and helper events; real authorization, session, publication,
 // mux, SQLite transactions and coordinator terminal handoff.
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
+public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
 {
     private sealed class Events : Stream
     {
@@ -140,7 +140,8 @@ public sealed class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
     private sealed class Fixture : IDisposable
     {
         private static readonly string Parent = Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task347"));
-        internal readonly string Root = Path.Combine(Parent, Guid.NewGuid().ToString("N"));
+        private string OwnedParent=Parent;
+        internal string Root = Path.Combine(Parent, Guid.NewGuid().ToString("N"));
         internal readonly Tray Tray = new();
         internal SqliteFutureWindowAuthorizationRepository Future = null!; internal UnifiedHistoryQueryService Query = null!;
         internal FutureWindowOneShotAuthorizationCoordinator Coordinator = null!; private AuditLogger? audit;
@@ -161,10 +162,11 @@ public sealed class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
         private readonly Func<List<SystemQuery.DisplayTopologyInfo>>? topology = Provider<Func<List<SystemQuery.DisplayTopologyInfo>>>("_displayTopologyProvider");
         private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? windows = Provider<Func<bool, bool, List<SystemQuery.WindowInfo>>>("_windowProvider");
         private bool disposed;
-        internal Fixture(bool failConstruction = false)
+        internal Fixture(bool failConstruction = false,string? ownedParent=null)
         {
             try
             {
+                if(ownedParent is not null){OwnedParent=Path.GetFullPath(ownedParent);Root=Path.Combine(OwnedParent,Guid.NewGuid().ToString("N"));}
                 Directory.CreateDirectory(Root);
                 Set("AGENT_RECORDER_DATA_DIR", Root); Set("AGENT_RECORDER_TEST_MODE", null);
                 Set(CaptureBackendSelector.DisplayBackendEnvVar, "wgc-continuous"); Set(CaptureBackendSelector.RegionBackendEnvVar, "wgc-continuous");
@@ -322,7 +324,7 @@ public sealed class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
             Clean(() => { if (priorDir is null) DataDirResolver.ClearOverride(); else DataDirResolver.SetOverride(priorDir); });
             foreach (var pair in environment) Clean(() => Environment.SetEnvironmentVariable(pair.Key, pair.Value));
             Clean(() => ApiKeyAuth.ResetForTesting(null)); Clean(SqliteConnection.ClearAllPools);
-            if (errors.Count == 0) Clean(() => { Assert.Equal(Parent, Path.GetDirectoryName(Path.GetFullPath(Root))); if (Directory.Exists(Root)) Directory.Delete(Root, true); });
+            if (errors.Count == 0) Clean(() => { Assert.Equal(OwnedParent, Path.GetDirectoryName(Path.GetFullPath(Root))); if (Directory.Exists(Root)) Directory.Delete(Root, true); });
             if (errors.Count != 0) throw new AggregateException(errors);
         }
     }
@@ -584,7 +586,7 @@ public sealed class FutureWindowPublicationAnchorTests(ITestOutputHelper output)
         using var connection = legacy.OpenReadOnlyConnection(); using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: true);
         Assert.Null(FutureWindowPublicationStorage.Read(connection, transaction, new[] { repo.Get("old", f.Sid, f.Session)! })["old"]);
         Assert.Equal(1L, SqliteSchemaV40.Validate(connection, transaction)); transaction.Commit();
-        Assert.Equal(40, SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
+        Assert.Equal(41, SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
     }
 
     [Fact]

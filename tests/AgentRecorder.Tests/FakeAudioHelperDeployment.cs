@@ -17,12 +17,14 @@ internal sealed class FakeAudioHelperDeployment : IDisposable
 {
     private readonly string _sourceDirectory;
     private bool _disposed;
+    private readonly bool _stopOwnedProcesses;
 
-    public FakeAudioHelperDeployment(string ownerDirectory, Action<string>? afterCopyForTests = null)
+    public FakeAudioHelperDeployment(string ownerDirectory, Action<string>? afterCopyForTests = null, bool stopOwnedProcesses = true)
     {
         if (string.IsNullOrWhiteSpace(ownerDirectory))
             throw new ArgumentException("An owner directory is required.", nameof(ownerDirectory));
 
+        _stopOwnedProcesses = stopOwnedProcesses;
         var testOutputDirectory = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(
             Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         var outputConfiguration = testOutputDirectory.Parent?.Name;
@@ -88,7 +90,7 @@ internal sealed class FakeAudioHelperDeployment : IDisposable
             return;
 
         _disposed = true;
-        StopOwnedProcesses();
+        if (_stopOwnedProcesses) StopOwnedProcesses();
         TestDirectoryCleanup.DeleteOwnedDirectory(Root);
     }
 

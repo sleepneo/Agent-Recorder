@@ -26,11 +26,12 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
 
 The latest published package is v0.1.15. The current source also includes durable
 ordinary recording history, unified indexed history, on-demand health and
-artifact metadata checks, explicit main-video and five-attachment content
-verification, read-only retention previews, ordinary WGC Bundle generation,
-and durable future-window publication identity. These source changes are not
-yet in that package. Retention is read-only; automatic deletion, disk quotas, signing and
-an installer remain unfinished. Inspect `/capabilities` for the running host's
+ordinary, plan and future-window artifact metadata checks, explicit ordinary
+main-video and five-attachment content verification, read-only retention
+previews, ordinary WGC Bundle generation, and durable plan and future-window
+publication identity. These source changes are not yet in that package.
+Retention is read-only; automatic deletion, disk quotas, signing and an
+installer remain unfinished. Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 ## Recommended Agent Path

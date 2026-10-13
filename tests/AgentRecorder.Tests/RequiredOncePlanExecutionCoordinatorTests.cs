@@ -777,7 +777,7 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
         Assert.Equal(0, Count(database.Store, "recording_runs"));
     }
 
-    private static RequiredOncePlanExecutionCoordinator CreateExecutionCoordinator(
+    internal static RequiredOncePlanExecutionCoordinator CreateExecutionCoordinator(
         TemporaryDatabase database,
         Fixture setup,
         RecordingEngine engine,
@@ -792,9 +792,9 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
             pollIntervalForTest: TimeSpan.FromMilliseconds(10),
             beforeAtomicEnvironmentRecheckForTest: beforeAtomicEnvironmentRecheckForTest);
 
-    private static RecordingEngine CreateRequiredOnceEngine(
+    internal static RecordingEngine CreateRequiredOnceEngine(
         Fixture setup,
-        FakeRequiredOnceBackend backend,
+        ICaptureBackend backend,
         string backendType = "fake-required-once")
     {
         var engine = new RecordingEngine(new NoopAuditLogger(), displayTopologyProvider: new FixedDisplayTopologyProvider(new[]
@@ -851,7 +851,7 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
         public override void Log(string evt, object payload) { }
     }
 
-    private sealed class FakeExecutionUi : IRequiredOncePlanExecutionUi
+    internal sealed class FakeExecutionUi : IRequiredOncePlanExecutionUi
     {
         private readonly TaskCompletionSource<RequiredOnceExecutionApprovalResult> _approval =
             new(TaskCreationOptions.RunContinuationsAsynchronously);

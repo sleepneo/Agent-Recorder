@@ -399,10 +399,10 @@ internal sealed class RecurringLeaseFixture : IDisposable
         int maxOccurrences = 10,
         TimeSpan latestStartGrace = default,
         int countdownSeconds = 3,
-        TimeSpan? recordingDuration = null)
+        TimeSpan? recordingDuration = null, string? ownedRoot = null)
     {
         var exactRecordingDuration = recordingDuration ?? TimeSpan.FromMinutes(2);
-        var root = Path.Combine(Path.GetTempPath(), "agent-recorder-task259-" + Guid.NewGuid().ToString("N"));
+        var root = ownedRoot ?? Path.Combine(Path.GetTempPath(), "agent-recorder-task259-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var store = new SqliteOperationalStore(Path.Combine(root, "state.db"));
         store.Initialize();

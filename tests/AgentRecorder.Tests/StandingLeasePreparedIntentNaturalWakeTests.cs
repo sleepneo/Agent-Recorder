@@ -1436,14 +1436,14 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
             idGenerator ?? (() => new StandingLeaseGeneratedExecutionIds("run-generated", "use-generated")),
             afterHandoffBeforeEligibilityForTest);
 
-    private static PreparedDatabase CreateActivatedDatabase(
+    internal static PreparedDatabase CreateActivatedDatabase(
         string? sessionBinding = null,
-        string currentUserSid = "S-1-5-21-test")
+        string currentUserSid = "S-1-5-21-test", string? ownedRoot = null)
     {
         sessionBinding ??= "session-1";
         var database = CreatePreparedDatabase(
             sessionBinding: sessionBinding,
-            currentUserSid: currentUserSid);
+            currentUserSid: currentUserSid, ownedRoot: ownedRoot);
         var digest = ReadText(database.Store, "SELECT scope_digest FROM authorized_capture_scopes;");
         var receipt = StandingLeaseLocalApprovalReceipt.CreateForTest(
             "approval-1", "plan-1", "occurrence-1", "lease-1", "scope-1", digest,
@@ -1454,12 +1454,12 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         return database;
     }
 
-    private static PreparedDatabase CreatePreparedDatabase(
+    internal static PreparedDatabase CreatePreparedDatabase(
         bool prepare = true,
         string sessionBinding = "session-1",
-        string currentUserSid = "S-1-5-21-test")
+        string currentUserSid = "S-1-5-21-test", string? ownedRoot = null)
     {
-        var database = new PreparedDatabase();
+        var database = new PreparedDatabase(ownedRoot);
         var intent = StandingSetupIntentSnapshot.CreateForTrustedSetupAdapter(
             "intent-1", "request-1", currentUserSid, sessionBinding, At(0), At(300),
             At(10), At(20), At(80), TimeSpan.FromSeconds(30), At(3600),
@@ -1656,7 +1656,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         public void StopAll(string reason) => _stop();
     }
 
-    private static (StandingLeaseCaptureSpecification Specification,
+    internal static (StandingLeaseCaptureSpecification Specification,
         StandingLeaseCaptureExecutionTicket Ticket,
         AuthorizedFixedRegionScope Scope) CreateStandingTicket(PreparedDatabase database)
     {
@@ -2253,12 +2253,13 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         return (engine, safety);
     }
 
-    private sealed class PreparedDatabase : IDisposable
+    internal sealed class PreparedDatabase : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "AgentRecorderPreparedNaturalWake_" + Guid.NewGuid().ToString("N"));
 
-        internal PreparedDatabase()
+        internal PreparedDatabase(string? ownedRoot = null)
         {
+            if (ownedRoot is not null) _directory = ownedRoot;
             Directory.CreateDirectory(_directory);
             Store = new SqliteOperationalStore(Path.Combine(_directory, "state", "agent-recorder.db"));
             Store.Initialize();

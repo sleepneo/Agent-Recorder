@@ -1,6 +1,6 @@
 # Agent Recorder API 手册
 
-本文描述当前源码合同（SQLite v40，公开包仍 v0.1.15），包含尚未进入该发布包的历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、未来窗口成片原始身份与只读保留预览。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，保留删除尚未实现。
+本文描述当前源码合同（SQLite v41，公开包仍 v0.1.15），包含尚未进入该发布包的历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、计划和未来窗口成片原始身份与只读保留预览。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，保留删除尚未实现。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
@@ -2526,7 +2526,7 @@ evaluated_count 是本页历史候选数，age_candidate_count 是通过年龄�
 
 缺服务、调用方身份/数据库/证据错误、writer 屏障失败/超时或字节溢出返回整页 503 RETENTION_PREVIEW_UNAVAILABLE，不回成功空页/部分页；文件级缺失或保护保留在条目评价中。错误只返回白名单，无凭证和任意异常原文。详细字段与 reason_code 白名单见 docs/api.md 的 Retention preview 节。
 
-capabilities.retention_preview 以及每页均明确 read_only=true、deletion_supported=false、reference_protection_ready=false、physical_identity_protection_ready=false、bundle_included=false，并公布范围及分页/路径上限。普通 completed 输出仅接受共享发布器原始 CREATE_NEW 副本句柄签发的私有收据：WGC continuous 最终发布、AvFinalizer 有音频 mux 和已验证的 None 最终发布（包括 AV split 和默认 FFmpeg 无音频视频终态路径）传递收据；AV 中间视频、FFmpeg legacy 直接音频、截图序列和计划/future 独立历史保持未锚定。旧记录不回填，预览观察不会转成发布 ID。 Windows 物理发布器以写入、读属性及 DELETE 访问打开原始副本，分享读/删除而不分享写。既有 gate 内按原句柄 rename/replace；副本已改名时仍提交被验证的原对象，不移动旧名上的替换文件。失败时先对原句柄设置 disposition 再关闭；句柄无效或 disposition 失败则保守留残，不重开/删除旧路径。原对象确实提交后的可选身份故障可以无收据，提交失败不回退到路径移动；这不证明父目录链或提交后的外部变化原子安全。
+capabilities.retention_preview 以及每页均明确 read_only=true、deletion_supported=false、reference_protection_ready=false、physical_identity_protection_ready=false、bundle_included=false，并公布范围及分页/路径上限。普通 completed 输出仅接受共享发布器原始 CREATE_NEW 副本句柄签发的私有收据：WGC continuous 最终发布、AvFinalizer 有音频 mux 和已验证的 None 最终发布（包括 AV split 和默认 FFmpeg 无音频视频终态路径）传递收据；AV 中间视频、FFmpeg legacy 直接音频、截图序列尚未锚定；计划/future 成片各自保留私有身份，但不纳入 ordinary 保留预览。旧记录不回填，预览观察不会转成发布 ID。 Windows 物理发布器以写入、读属性及 DELETE 访问打开原始副本，分享读/删除而不分享写。既有 gate 内按原句柄 rename/replace；副本已改名时仍提交被验证的原对象，不移动旧名上的替换文件。失败时先对原句柄设置 disposition 再关闭；句柄无效或 disposition 失败则保守留残，不重开/删除旧路径。原对象确实提交后的可选身份故障可以无收据，提交失败不回退到路径移动；这不证明父目录链或提交后的外部变化原子安全。
 
 本页 ordinary 行、嵌套/shared/planned 引用及私有锚点在同一只读 SQLite 快照获取，锚点最多100项批量索引读取。既有时间/词法/引用原因之后，未锚定返回 protected / publication_identity_missing、observed_file_bytes=null，在祖先及叶探针之前保护并计入未知字节。已锚定且 Bundle 已登记 not_applicable 时，仍执行原祖先、单句柄、硬链接、稳定性及解析路径检查，再比较卷与完整128位 file ID；任一位不同返回 publication_identity_mismatch，字节未知。身份匹配后才比较可靠当前长度，保留 file_length_changed 的可靠字节统计。锚点 schema/编码/关联损坏沿用整页安全503，不只读修复，也不公开身份材料。
 
@@ -2728,3 +2728,24 @@ capabilities.ordinary_attachment_verification单独声明 supported/endpoint/sco
 ```json
 {"recording_id":"rec_example","check_started_at_utc":"2026-10-12T01:00:00Z","check_completed_at_utc":"2026-10-12T01:00:00Z","check_state":"busy","comparison":"not_checked","reason_code":"verification_busy","bytes_read":0,"items":[],"content_verified":false,"scope":"bundle_attachments","read_only":true,"deletion_supported":false,"observation_semantics":"sequential_read_handle_point_in_time_comparisons_not_simultaneous_or_atomic_snapshot_earlier_files_may_change_before_response_not_future_integrity_guarantee"}
 ```
+
+### 计划成片的原始发布身份
+
+standing、recurring 和 required_once 成功 MP4 在原赢家事务内保存正式最终 publisher 的原始 receipt；native 身份仅内部保存，旧记录或合法无法取得 native 身份的成功仍为未知。计划详情、分页历史和统一 source=plan 历史在原只读快照内批量验证选中事实，保留 512/100/100 上限。现代缺失或损坏沿既有 unavailable/503 合同返回经过清理的错误。公开 DTO、cursor、端点和 capability 不变；历史 GET 不读取媒体字节、不计算摘要、不回填身份。原始身份只表示发布时事实，不能证明当前字节、可播放性或删除权限。此源码增量已通过独立验收，公开包仍为 v0.1.15。
+
+
+### 计划与未来窗口主视频检查（工作区源码，未发布）
+
+`GET /api/v1/history/{entry_id}/artifacts/check` 必须带 API key，仅支持当前 SID/session 的 `plan:<occurrence_id>` 与 `future_window:<authorization_id>`，只检查主 MP4。把完整 entry ID 编码成一个 URI segment，且只编码一次；周期 ID 自带的 `recurring-occurrence/v1:<64位小写hex>` 前缀按其固定格式接受，任意分隔符、剩余百分号或双重编码都不能变成其他 ID/路径。无 query、无 body；ordinary 继续原 recording-history 入口。
+
+401 为鉴权失败；400 `INVALID_ARGUMENT` 为格式/来源/参数不支持；404 `HISTORY_NOT_FOUND` 为不存在或身份/会话不符；503 `HISTORY_UNAVAILABLE` 为 gateway 缺失或可信事实损坏。错误不返回 SQL、路径、原生身份或 proof/nonce，均先于媒体探测。
+
+精确 indexed lookup 在一个只读 SQLite 快照核对原 owner、目录索引、生命周期、冻结输出、成功大小与 V40/V41 私有身份；新 facts 不触发旧存在性投影、不 flush writer、不初始化/迁移/恢复/补写。standing/recurring 即使 native anchor 未知也从验证后的 V41 取成功大小；required_once/future 与自身结算交叉核对。现代 marker/关联/类型/原 TEXT NUL/receipt/DDL 损坏失败关闭。未完成或媒体证据不足为 not_checked/unknown；历史大小未知不冒造，合法旧/原生未知有已知成功大小时 identity=unverified。
+
+返回 envelope 的 data 包含 entry_id/source、UTC 起止、probe_state、media_history_status 和 media（name、recorded_size_bytes、observed_size_bytes、observation、reason_code、sampled_at_utc、identity_state）。无路径、原始 volume/file ID 或 Bundle。固定 scope=main_media、read_only=true、metadata_only=true、content_verification=false、bundle_included=false、deletion_supported=false。complete 只表示处理完毕；缺文件不改历史 completed。
+
+新旧 metadata 入口共享宿主一个实际 worker、不排队；3 秒包含数据库派发及资源释放、最多64祖先，新入口最多1叶句柄且拒绝多链接。超时/明确断线/宿主停止冻结不可变响应，真实工作退休前继续占额度，busy 不读 DB/文件。两类30秒内容核验保持独立，旧 ordinary 六文件 DTO 不变。READ_ATTRIBUTES 元数据句柄可与某些数据写者并存，share-read 不构成内容写入锁。
+
+capabilities.history_artifact_check 给出 gateway supported、supported_sources 两种来源、endpoint、main_media、max_files=1、max_distinct_ancestors=64、deadline_ms=3000、max_concurrent=1、host_metadata_check 和共享 ordinary 入口及固定 flags。缺 gateway 时 sources 为空。Headless 可只读历史 Plan/future，不扩展捕获授权，其统一分页 ordinary-only 仍保持。
+
+observation_semantics=sequential_point_in_time_metadata_not_atomic_snapshot：数据库事实与后续文件采样是两个时间点边界，不读内容、不列目录、不启动进程/捕获，不证明声音完整、可播放、未来不变、无引用或可安全删除。本源码增量已通过独立验收，尚未包含在公开 v0.1.15 包中。

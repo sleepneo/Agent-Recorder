@@ -1007,6 +1007,7 @@ public sealed class RecurringOccurrenceReservationTests
 
         internal static ReservationContext Create(
             int slotCount = 1,
+            string? ownedRoot = null,
             string targetStatus = "authorized",
             DateTimeOffset? validFrom = null,
             DateTimeOffset? validUntil = null,
@@ -1024,7 +1025,7 @@ public sealed class RecurringOccurrenceReservationTests
                 maxOccurrences: Math.Max(3, slotCount + 1),
                 latestStartGrace: latestStartGrace ?? TimeSpan.Zero,
                 countdownSeconds: countdownSeconds,
-                recordingDuration: recordingDuration);
+                recordingDuration: recordingDuration, ownedRoot: ownedRoot);
             var slots = MaterializeSlots(fixture, slotCount);
             var shouldCreateSpecification = targetStatus == "authorized" &&
                 (validFrom is null || validFrom.Value <= slots[0].ScheduledStartUtc!.Value) &&

@@ -414,6 +414,8 @@ internal sealed class SqliteRequiredOnceExecutionRepository : SqliteRepositoryBa
             return new(true, reasonCode);
         });
 
+    internal Action<SqliteConnection, SqliteTransaction>? BeforePublicationCommitForTests { get; set; }
+
     internal RequiredOnceExecutionWriteResult SettleFinalization(
         string executionId,
         bool succeeded,
@@ -512,7 +514,10 @@ internal sealed class SqliteRequiredOnceExecutionRepository : SqliteRepositoryBa
             Add(update, "$duration", checked((long)Math.Round(meta.DurationSeconds * 1000d, MidpointRounding.AwayFromZero)));
             Add(update, "$now", UtcTicksInput(atUtc)); Add(update, "$id", executionId);
             Add(update, "$run", chain.Run.Id); Add(update, "$version", executionForSettlement.Version);
-            if (update.ExecuteNonQuery() != 1) return new(false, "required_once_settlement_conflict");
+            if (update.ExecuteNonQuery() != 1) throw ConcurrencyConflict();
+            PlanMediaPublicationStorage.Write(connection, transaction, chain.Specification.PlanId, chain.Occurrence.Id,
+                chain.Run.Id, "required_once", executionId, expectedPath, meta);
+            BeforePublicationCommitForTests?.Invoke(connection, transaction);
             return new(true, "media_settled");
         });
 

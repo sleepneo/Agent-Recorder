@@ -51,6 +51,8 @@ internal interface IStorageCapacityProvider
 internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
 {
     internal int LastProbeProcessId { get; private set; }
+    internal StorageProbeLifetime? LastProbe { get; private set; }
+    internal StorageProbeHooks? HooksForTests { get; init; }
     internal Func<string> ExecutablePath { get; init; } = () =>
         Path.Combine(AppContext.BaseDirectory,
             System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name == "AgentRecorder.Headless"
@@ -59,7 +61,7 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
     public async Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(
         IReadOnlyList<string> paths, CancellationToken token)
     {
-        using var process = new Process
+        var process = new Process
         {
             StartInfo = new ProcessStartInfo(ExecutablePath())
             {
@@ -69,11 +71,36 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
                 Arguments = "--internal-storage-capacity-probe"
             }
         };
-        process.Start();
-        LastProbeProcessId = process.Id;
-        using var registration = token.Register(() => { try { process.Kill(); } catch { } });
+        var lifetime = new StorageProbeLifetime(process);
+        LastProbe = lifetime;
+        CancellationTokenRegistration registration = default;
+        Exception? primary = null;
+        IReadOnlyList<StorageVolumeSample>? samples = null;
+        void KillExact()
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    if (HooksForTests?.Kill is { } kill) kill(process);
+                    else process.Kill();
+                }
+            }
+            catch (Exception error) { lifetime.RecordCleanupFailure(error); }
+        }
         try
         {
+            HooksForTests?.BeforeStart?.Invoke(process.StartInfo);
+            if (!process.Start()) throw new IOException("storage_probe_start_failed");
+            lifetime.Started = true;
+            // Cache the original native handle before cancellation can run. All
+            // termination and exit observation use this instance, never a PID lookup.
+            _ = process.SafeHandle;
+            lifetime.ProcessId = LastProbeProcessId = process.Id;
+            lifetime.StartTime = process.StartTime;
+            HooksForTests?.Started?.Invoke(process);
+            registration = token.Register(KillExact);
+            if (HooksForTests?.BeforeRead is { } beforeRead) await beforeRead().ConfigureAwait(false);
             await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(paths).AsMemory(), token).ConfigureAwait(false);
             process.StandardInput.Close();
             // Input and response are bounded (at most three directory samples).
@@ -88,15 +115,100 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
             if (count == buffer.Length) throw new IOException("storage_probe_response_too_large");
             await process.WaitForExitAsync(token).ConfigureAwait(false);
             if (process.ExitCode != 0) throw new IOException("storage_capacity_unavailable");
-            return JsonSerializer.Deserialize<StorageVolumeSample[]>(new string(buffer, 0, count))
+            samples = JsonSerializer.Deserialize<StorageVolumeSample[]>(new string(buffer, 0, count))
                 ?? throw new IOException("storage_capacity_unavailable");
         }
+        catch (Exception error) { primary = error; }
         finally
         {
-            try { if (!process.HasExited) process.Kill(); } catch { }
-            try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false); } catch { }
+            try { if (HooksForTests?.BeforeCleanup is { } before) await before().ConfigureAwait(false); }
+            catch (Exception error) { lifetime.RecordCleanupFailure(error); }
+            // Retire the registration before disposing the Process or pipes.
+            try { await registration.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception error) { lifetime.RecordCleanupFailure(error); }
+            if (lifetime.Started)
+            {
+                KillExact();
+                Task? exitWait = null;
+                try
+                {
+                    exitWait = HooksForTests?.WaitForExit?.Invoke(process) ?? process.WaitForExitAsync();
+                    await exitWait.WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                }
+                catch (Exception error)
+                {
+                    lifetime.RecordCleanupFailure(error);
+                    try { HooksForTests?.CleanupWarning?.Invoke(error); }
+                    catch (Exception observerError) { lifetime.RecordCleanupFailure(observerError); }
+                }
+                // 500 ms is the original cleanup warning budget, not proof of
+                // retirement. The outer caller remains bounded while this exact
+                // owner retains its handle and sampling protection until exit.
+                try
+                {
+                    await process.WaitForExitAsync().ConfigureAwait(false);
+                    if (!process.HasExited) throw new IOException("storage_probe_exit_not_observed");
+                    lifetime.SignalExit();
+                }
+                catch (Exception error)
+                {
+                    lifetime.RecordCleanupFailure(error);
+                    // An unobservable exit must not free the protected sample.
+                    // Keep the exact owner pending; no replacement worker starts.
+                    await lifetime.ExitCompletion.ConfigureAwait(false);
+                }
+                // Observe the original wait as well, including a fault delivered
+                // after its warning deadline. No detached faulted wait task.
+                if (exitWait is not null)
+                    try { await exitWait.ConfigureAwait(false); }
+                    catch (Exception error) { lifetime.RecordCleanupFailure(error); }
+            }
+            try { if (HooksForTests?.BeforeDispose is { } before) await before().ConfigureAwait(false); }
+            catch (Exception error) { lifetime.RecordCleanupFailure(error); }
+            try { process.Dispose(); }
+            catch (Exception error)
+            {
+                lifetime.RecordCleanupFailure(error);
+                await lifetime.RetirementCompletion.ConfigureAwait(false);
+            }
+            lifetime.SignalRetirement();
         }
+        if (lifetime.CleanupFailure is { } cleanup)
+            throw primary is null ? cleanup : new AggregateException("Storage probe query and retirement failed.", primary, cleanup);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        return samples!;
     }
+}
+
+// Internal observations refer to a single started instance. Completion signals
+// are facts; CleanupFailure separately prevents a failed cleanup being called success.
+internal sealed class StorageProbeLifetime(Process process)
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<Exception> _errors = new();
+    private readonly TaskCompletionSource _exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _retired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Process Process { get; } = process;
+    internal bool Started { get; set; }
+    internal int ProcessId { get; set; }
+    internal DateTime StartTime { get; set; }
+    internal Task ExitCompletion => _exit.Task;
+    internal Task RetirementCompletion => _retired.Task;
+    internal AggregateException? CleanupFailure => _errors.IsEmpty ? null : new AggregateException(_errors);
+    internal void RecordCleanupFailure(Exception error) => _errors.Enqueue(error);
+    internal void SignalExit() => _exit.TrySetResult();
+    internal void SignalRetirement() => _retired.TrySetResult();
+}
+
+internal sealed class StorageProbeHooks
+{
+    internal Action<ProcessStartInfo>? BeforeStart { get; init; }
+    internal Action<Process>? Started { get; init; }
+    internal Func<Task>? BeforeRead { get; init; }
+    internal Func<Task>? BeforeCleanup { get; init; }
+    internal Action<Process>? Kill { get; init; }
+    internal Func<Process, Task>? WaitForExit { get; init; }
+    internal Action<Exception>? CleanupWarning { get; init; }
+    internal Func<Task>? BeforeDispose { get; init; }
 }
 
 internal sealed class StorageSafetyException(string code) : IOException(code)
@@ -132,10 +244,15 @@ internal sealed class WindowStorageSafety : IDisposable
     private string? _failure;
     private Task? _monitor;
     private Action<string>? _onFailure;
+    private int _retirementOwners;
+    private TaskCompletionSource _retired = CompletedRetirement();
+    private readonly List<Exception> _retirementErrors = new();
     internal Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
     internal TimeSpan QueryTimeout { get; init; } = TimeSpan.FromSeconds(2);
     internal Action? BeforeFailureClaimForTests { get; set; }
     internal Task MonitorCompletion => _monitor ?? Task.CompletedTask;
+    internal Task ProbeRetirementCompletion { get { lock (_gate) return _retired.Task; } }
+    internal AggregateException? ProbeRetirementFailure { get { lock (_gate) return _retirementErrors.Count == 0 ? null : new AggregateException(_retirementErrors); } }
     internal string? FailureCode { get { lock (_gate) return _failure; } }
     internal bool Committed { get { lock (_gate) return _committed; } }
     internal CancellationToken AbortToken => _abortToken;
@@ -213,6 +330,7 @@ internal sealed class WindowStorageSafety : IDisposable
 
     private sealed class CopyReservation(WindowStorageSafety owner) : IPublicationCopyReservation
     {
+        private int _disposeRequested;
         public async Task WriteAsync(FileStream destination, ReadOnlyMemory<byte> bytes, CancellationToken token)
         {
             await owner._copySamplingGate.WaitAsync(token).ConfigureAwait(false);
@@ -220,7 +338,7 @@ internal sealed class WindowStorageSafety : IDisposable
             {
                 lock (owner._gate)
                 {
-                    if (owner._disposed || owner._failure is not null || !ReferenceEquals(owner._activeCopy, this)) throw new OperationCanceledException();
+                    if (_disposeRequested != 0 || owner._disposed || owner._failure is not null || !ReferenceEquals(owner._activeCopy, this)) throw new OperationCanceledException();
                     if (bytes.Length > owner._publicationCopyBytes) throw new IOException("Publication source length changed.");
                 }
                 await destination.WriteAsync(bytes, token).ConfigureAwait(false);
@@ -247,15 +365,22 @@ internal sealed class WindowStorageSafety : IDisposable
 
         public void Dispose()
         {
-            owner._copySamplingGate.Wait();
+            if (Interlocked.Exchange(ref _disposeRequested, 1) != 0) return;
+            // A timed-out provider may still own the sample. Do not block the
+            // stop/UI thread or prematurely remove its protected copy demand.
+            lock (owner._gate) owner.AddRetirementOwner();
+            _ = RetireAsync();
+        }
+
+        private async Task RetireAsync()
+        {
+            await owner._copySamplingGate.WaitAsync().ConfigureAwait(false);
             try
             {
                 lock (owner._gate)
-                {
                     if (ReferenceEquals(owner._activeCopy, this)) { owner._activeCopy = null; owner._publicationCopyBytes = 0; }
-                }
             }
-            finally { owner._copySamplingGate.Release(); }
+            finally { owner._copySamplingGate.Release(); owner.FinishRetirementOwner(); }
         }
     }
 
@@ -300,19 +425,25 @@ internal sealed class WindowStorageSafety : IDisposable
     private async Task<string?> ProbeAsync(bool admission, CancellationToken token)
     {
         bool samplingHeld = false;
+        CancellationTokenSource timeout;
+        Task<IReadOnlyList<StorageVolumeSample>>? query = null;
+        lock (_gate)
+        {
+            if (_disposed || _committed) return null;
+            if (_retirementErrors.Count != 0) return UnavailableCode;
+            timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _cts.Token);
+            AddRetirementOwner();
+        }
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _cts.Token);
             timeout.CancelAfter(QueryTimeout);
-            // Serialize only this copy's native writes with its capacity sample. No recording/UI lock is held.
-            if (TracksCopy)
-            {
-                await _copySamplingGate.WaitAsync(timeout.Token).ConfigureAwait(false);
-                samplingHeld = true;
-            }
+            // One actual query at a time, including after its caller times out.
+            // This same gate protects copy writes; no recording/UI lock is held.
+            await _copySamplingGate.WaitAsync(timeout.Token).ConfigureAwait(false);
+            samplingHeld = true;
             var paths = _paths.Directories.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var samples = await _provider.QueryAsync(paths, timeout.Token)
-                .WaitAsync(timeout.Token).ConfigureAwait(false);
+            query = _provider.QueryAsync(paths, timeout.Token);
+            var samples = await query.WaitAsync(timeout.Token).ConfigureAwait(false);
             if (samples.Count != paths.Length || samples.Any(s => s is null ||
                 s.AvailableBytes < 0 || string.IsNullOrWhiteSpace(s.VolumeIdentity)) ||
                 paths.Any(p => samples.Count(s => string.Equals(s.Path, p, StringComparison.OrdinalIgnoreCase)) != 1))
@@ -341,8 +472,46 @@ internal sealed class WindowStorageSafety : IDisposable
             return null;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested || _cts.IsCancellationRequested) { return null; }
-        catch { return UnavailableCode; }
-        finally { if (samplingHeld) _copySamplingGate.Release(); }
+        catch (OperationCanceledException) { return UnavailableCode; }
+        catch (Exception error) { RecordRetirementError(error); return UnavailableCode; }
+        finally { _ = RetireProbeAsync(query, timeout, samplingHeld); }
+    }
+
+    private static TaskCompletionSource CompletedRetirement()
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        completion.SetResult(); return completion;
+    }
+
+    // Called with _gate held. Each owner remains registered through actual
+    // query/pipe/handle retirement rather than the outer deadline result.
+    private void AddRetirementOwner()
+    {
+        if (_retirementOwners++ == 0) _retired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private void FinishRetirementOwner()
+    {
+        lock (_gate) if (--_retirementOwners == 0) _retired.TrySetResult();
+    }
+
+    private void RecordRetirementError(Exception error)
+    {
+        lock (_gate) if (!_retirementErrors.Contains(error)) _retirementErrors.Add(error);
+    }
+
+    private async Task RetireProbeAsync(Task<IReadOnlyList<StorageVolumeSample>>? query,
+        CancellationTokenSource timeout, bool samplingHeld)
+    {
+        try { if (query is not null) await query.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { RecordRetirementError(error); }
+        finally
+        {
+            timeout.Dispose();
+            if (samplingHeld) _copySamplingGate.Release();
+            FinishRetirementOwner();
+        }
     }
 
     internal void EnsureAdmission() => EnsureCapacity(admission: true);
@@ -474,7 +643,14 @@ internal sealed class WindowStorageSafety : IDisposable
         if (!_committed) CancelSafely(_abortCts);
         // CTS resources are released after the monitor/probe finishes, without
         // any synchronous wait or self-await on the stop/UI thread.
-        _ = MonitorCompletion.ContinueWith(_ => { _cts.Dispose(); _abortCts.Dispose(); }, TaskScheduler.Default);
+        _ = DisposeSourcesAsync(MonitorCompletion, ProbeRetirementCompletion);
+    }
+
+    private async Task DisposeSourcesAsync(Task monitor, Task retirement)
+    {
+        try { await Task.WhenAll(monitor, retirement).ConfigureAwait(false); }
+        catch (Exception error) { RecordRetirementError(error); }
+        finally { _cts.Dispose(); _abortCts.Dispose(); }
     }
 
     private static void CancelSafely(CancellationTokenSource source)

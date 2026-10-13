@@ -331,6 +331,8 @@ internal sealed class SqliteStandingLeaseLifecycleTransaction : SqliteRepository
                 chain.Occurrence.Id,
                 meta!.OutputPath!,
                 terminatedAtUtc);
+            PlanMediaPublicationStorage.Write(connection, transaction, chain.Occurrence.PlanId, chain.Occurrence.Id,
+                chain.Run.Id, "standing", _leaseId, _authorizedOutputPath, meta!);
             return StandingLeaseLifecycleActionResult.Applied("media_settled", terminal: true);
         });
     }

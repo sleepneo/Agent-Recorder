@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 
 namespace AgentRecorder.AudioHelper.Fake;
 
@@ -27,6 +28,15 @@ internal static class Program
         {
             Thread.Sleep(Timeout.Infinite);
             return 1;
+        }
+
+        if (args.Length == 1 && args[0] == "--internal-storage-capacity-probe")
+        {
+            // Synthetic capacity protocol only; no device/runtime initialization.
+            var paths = JsonSerializer.Deserialize<string[]>(Console.ReadLine()!)!;
+            Console.Write(JsonSerializer.Serialize(paths.Select(path => new
+                { Path = path, VolumeIdentity = "fake-storage-volume", AvailableBytes = 1L << 40 })));
+            return 0;
         }
 
         // Test hook: control the AudioSourceKind reported in the STARTED event.

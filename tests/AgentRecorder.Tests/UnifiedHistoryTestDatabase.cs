@@ -89,7 +89,7 @@ internal sealed class UnifiedHistoryTestDatabase : IDisposable
     internal void DowngradeToV22()
     {
         using var c = Store.OpenConnection(); using var cmd = c.CreateCommand();
-        cmd.CommandText="DROP TRIGGER future_window_publication_initial; DROP TABLE future_window_publication_anchors; DROP TABLE future_window_publication_boundary; DELETE FROM schema_migrations WHERE version=40;";cmd.ExecuteNonQuery();
+        cmd.CommandText="DROP TRIGGER plan_media_publication_initial; DROP TABLE plan_media_publication_anchors; DROP TABLE plan_media_publication_boundary; DELETE FROM schema_migrations WHERE version=41; DROP TRIGGER future_window_publication_initial; DROP TABLE future_window_publication_anchors; DROP TABLE future_window_publication_boundary; DELETE FROM schema_migrations WHERE version=40;";cmd.ExecuteNonQuery();
         foreach(var index in SqliteSchemaV39.Indexes) {cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}
         cmd.CommandText="DELETE FROM schema_migrations WHERE version=39;";cmd.ExecuteNonQuery();
         foreach(var index in SqliteSchemaV38.Indexes) {cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}

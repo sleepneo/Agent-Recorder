@@ -382,7 +382,7 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
             string.Equals(planId, state?.PlanId, StringComparison.Ordinal) ? state : null;
     }
 
-    private sealed class StoreBackedHistoryGateway(
+    internal sealed class StoreBackedHistoryGateway(
         PlanExecutionStatusQueryService query, string sid, string session) : IPlanExecutionHistoryGateway
     {
         public PlanExecutionHistoryPageState? GetPage(string planId, int limit, string? cursor)
@@ -397,7 +397,7 @@ public sealed class PlanExecutionStatusApiTests : IDisposable
         }
     }
 
-    private sealed class StoreBackedGateway(
+    internal sealed class StoreBackedGateway(
         PlanExecutionStatusQueryService query,
         string sid,
         string session) : IPlanExecutionStatusGateway

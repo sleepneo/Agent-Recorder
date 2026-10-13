@@ -16,8 +16,8 @@ namespace AgentRecorder.Tests;
 [Collection("HeadlessHostIntegration")]
 public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstractions.ITestOutputHelper output)
 {
-    private const string Sid = "S-1-5-21-required-once-tests";
-    private const string Session = "required-once-session-1";
+    internal const string Sid = "S-1-5-21-required-once-tests";
+    internal const string Session = "required-once-session-1";
 
     [Fact]
     public async Task ApprovalAtomicallyCreatesScheduledPlanAndFrozenSpecWithoutLeaseProofOrRun_AndDueRemainsInert()
@@ -361,7 +361,7 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstract
         Assert.Throws<Phase3PersistenceException>(() => new PlanExecutionStatusQueryService(database.Store).Get(planId, Sid, Session));
     }
 
-    private static Fixture CreateFixture(
+    internal static Fixture CreateFixture(
         TemporaryDatabase database,
         MutableClock clock,
         FakeUi ui,
@@ -410,27 +410,27 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstract
         return (long)command.ExecuteScalar()!;
     }
 
-    private sealed record Fixture(RequiredOncePlanSetupCoordinator Coordinator, RequiredOncePlanApiRequest Request, string OutputPath,
+    internal sealed record Fixture(RequiredOncePlanSetupCoordinator Coordinator, RequiredOncePlanApiRequest Request, string OutputPath,
         ReadyOutputReadiness OutputReadiness, MutableDisplaySet Displays, MutableClock Clock)
     {
         internal RequiredOncePlanApiRequest ApiRequest(string key, TimeSpan? duration = null) =>
             RequiredOncePlanSetupCoordinatorTests.ApiRequest(key, OutputPath, Request.ScheduledStartUtc.AddMinutes(-2), duration);
     }
 
-    private sealed class MutableDisplaySet(IReadOnlyList<StandingLeaseDisplayMetadata> initial)
+    internal sealed class MutableDisplaySet(IReadOnlyList<StandingLeaseDisplayMetadata> initial)
     {
         internal IReadOnlyList<StandingLeaseDisplayMetadata> Current { get; private set; } = initial;
         internal void Set(IReadOnlyList<StandingLeaseDisplayMetadata> displays) => Current = displays;
     }
 
-    private sealed class MutableClock(DateTimeOffset initial)
+    internal sealed class MutableClock(DateTimeOffset initial)
     {
         private long _ticks = initial.UtcDateTime.Ticks;
         internal DateTimeOffset Now => new(new DateTime(Interlocked.Read(ref _ticks), DateTimeKind.Utc));
         internal void Set(DateTimeOffset value) => Interlocked.Exchange(ref _ticks, value.UtcDateTime.Ticks);
     }
 
-    private sealed class FakeUi : IRequiredOncePlanSetupUi
+    internal sealed class FakeUi : IRequiredOncePlanSetupUi
     {
         private readonly TaskCompletionSource<RequiredOnceCreationApprovalResult> _approval = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool IsAvailable { get; set; } = true;
@@ -466,7 +466,7 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstract
         internal void CompleteApproval(RequiredOnceCreationApprovalResult result) => _approval.TrySetResult(result);
     }
 
-    private sealed class ReadyOutputReadiness(string expectedPath) : IStandingLeaseOutputReadinessProvider
+    internal sealed class ReadyOutputReadiness(string expectedPath) : IStandingLeaseOutputReadinessProvider
     {
         internal string? ReasonCode { get; set; }
         public StandingLeaseOutputReadinessResult Check(string outputDirectory, string frozenFileName, TimeSpan reservedDuration)
@@ -491,11 +491,12 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests(Xunit.Abstract
         internal void Start() => StartCount++;
     }
 
-    private sealed class TemporaryDatabase : IDisposable
+    internal sealed class TemporaryDatabase : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "AgentRecorderRequiredOnce_" + Guid.NewGuid().ToString("N"));
-        internal TemporaryDatabase()
+        internal TemporaryDatabase(string? ownedRoot = null)
         {
+            if (ownedRoot is not null) _directory = ownedRoot;
             Directory.CreateDirectory(_directory);
             OutputPath = Path.Combine(_directory, "output");
             Directory.CreateDirectory(OutputPath);

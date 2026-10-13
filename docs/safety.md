@@ -317,9 +317,11 @@ successful MP4 publication. This has been tested on local NTFS with process
 termination, not with real power loss or every Windows/filesystem version. Old
 or compatibility results can legitimately have no trusted identity.
 
-The explicit ordinary artifact check is a sequential, point-in-time metadata
-observation, limited to six files, 64 distinct ancestors and a three-second
-deadline. Cancellation/timeout does not free shared capacity until the actual
+Explicit ordinary, plan and future-window artifact checks are sequential,
+point-in-time metadata observations. Ordinary checks allow up to six files;
+plan/future checks allow only the main MP4 and validate current SID/session
+ownership. Both share one host metadata worker, at most 64 ancestors per request
+and a three-second deadline. Cancellation/timeout does not free capacity until the actual
 native worker ends. Matching size or original file identity does not prove
 unchanged contents, playability, audiovisual completeness or deletion safety.
 History queries themselves do not read artifact contents. Formal generation
@@ -339,7 +341,21 @@ transaction. Revoked, failed and uncertain starts cannot gain an anchor from
 late callbacks. Missing modern markers or inconsistent private associations
 fail closed; legacy or unavailable-native observations remain unknown. This
 does not expand the grant, record ordinary history, verify current content or
-authorize deletion. Plan recording publication identities are still unfinished.
+authorize deletion. Standing, recurring and required-once plan executions also
+preserve their final publisher identity with their existing successful settlement
+transaction; required-once execution facts stay separate from Lease output evidence.
+Plan status and history validate bounded private batches in the same read snapshot.
+Legacy or unavailable native identity stays unknown; modern corruption fails closed.
+These facts do not add content verification, Bundle generation or deletion authority
+for plan recordings.
+
+A storage-probe deadline is separate from actual worker retirement. The host
+retains the original query and exact child-process instance until its exit and
+cleanup are observed, keeping sampling protection after an outer timeout.
+Copy reservation disposal is nonblocking but does not release protected demand
+before its actual cleanup. If native termination or disposal cannot be confirmed,
+the owner can remain pending rather than falsely reporting successful retirement.
+This does not authorize killing unrelated processes or changing a publication winner.
 
 Retention remains a read-only preview under the trusted host Videos root.
 Nested references, cross-source shared paths, frozen plan uses, Bundle states

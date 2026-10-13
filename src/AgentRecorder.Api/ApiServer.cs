@@ -49,6 +49,7 @@ public sealed class ApiServer
     private readonly IUnifiedHistoryGateway? _unifiedHistoryGateway;
     private readonly IRetentionPreviewGateway? _retentionPreviewGateway;
     private readonly IOrdinaryArtifactCheckGateway? _artifactCheckGateway;
+    private readonly IHistoryArtifactCheckGateway? _historyArtifactCheckGateway;
     private readonly IOrdinaryMediaVerificationGateway? _mediaVerificationGateway;
     private readonly IOrdinaryAttachmentVerificationGateway? _attachmentVerificationGateway;
     private IObservationHealthGateway? _observationHealth;
@@ -123,11 +124,12 @@ public sealed class ApiServer
         IRetentionPreviewGateway? retentionPreviewGateway = null,
         IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
-        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null)
+        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
+        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
             planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
-            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway)
+            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway, historyArtifactCheckGateway)
     {
     }
 
@@ -151,7 +153,8 @@ public sealed class ApiServer
         IRetentionPreviewGateway? retentionPreviewGateway = null,
         IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
-        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null)
+        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
+        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -170,6 +173,7 @@ public sealed class ApiServer
         _unifiedHistoryGateway = unifiedHistoryGateway;
         _retentionPreviewGateway = retentionPreviewGateway;
         _artifactCheckGateway = artifactCheckGateway;
+        _historyArtifactCheckGateway = historyArtifactCheckGateway;
         _mediaVerificationGateway = mediaVerificationGateway;
         _attachmentVerificationGateway = attachmentVerificationGateway;
         _requiredOncePlanSetupGateway = requiredOncePlanSetupGateway;
@@ -384,7 +388,8 @@ public sealed class ApiServer
         }
     }
 
-    private static bool IsArtifactCheckPath(string path)=>path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)&&
+    private static bool IsArtifactCheckPath(string path)=>(path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)||
+        path.StartsWith(Prefix+"/history/",StringComparison.Ordinal))&&
         path.EndsWith("/artifacts/check",StringComparison.Ordinal);
     private static bool IsMediaVerificationPath(string path)=>path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)&&
         (path.EndsWith("/artifacts/verify-media",StringComparison.Ordinal) || path.EndsWith("/artifacts/verify-attachments",StringComparison.Ordinal));
@@ -616,6 +621,10 @@ public sealed class ApiServer
 
         var seg = sub.Trim('/').Split('/');
 
+        if(method=="GET" && seg[0]=="history" && sub.EndsWith("/artifacts/check",StringComparison.Ordinal) && seg.Length!=4)
+            throw new ApiException(400,"INVALID_ARGUMENT","The history entry id must be one encoded segment.");
+        if (seg.Length == 4 && seg[0] == "history" && seg[2] == "artifacts" && seg[3] == "check" && method == "GET")
+            return GetHistoryArtifactsCheck(seg[1], req, reqBody, reqId, cancellation);
         if (seg.Length == 4 && seg[0] == "recording-history" && seg[2] == "artifacts" && seg[3] == "check" && method == "GET")
             return GetOrdinaryArtifactsCheck(seg[1], req, reqId, cancellation);
 
@@ -942,6 +951,34 @@ public sealed class ApiServer
         {
             throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE", "Durable ordinary recording history is temporarily unavailable.");
         }
+    }
+
+    private string GetHistoryArtifactsCheck(string entryId,HttpRequest request,string body,string requestId,CancellationToken cancellation)
+    {
+        if(request.Query.Count!=0 || body.Length!=0)
+            throw new ApiException(400,"INVALID_ARGUMENT","History artifact checks do not accept query or body parameters.");
+        string source;
+        try {entryId=Uri.UnescapeDataString(entryId);source=HistoryArtifactCheckService.ParseEntryId(entryId).Source;}
+        catch(ArgumentException){throw new ApiException(400,"INVALID_ARGUMENT","The history entry id or source is unsupported.");}
+        if(_historyArtifactCheckGateway is null)
+            throw new ApiException(503,"HISTORY_UNAVAILABLE","History artifact checks are not configured.");
+        if(!_historyArtifactCheckGateway.SupportedSources.Contains(source,StringComparer.Ordinal))
+            throw new ApiException(400,"INVALID_ARGUMENT","The history entry source is unsupported.");
+        try
+        {
+            var result=_historyArtifactCheckGateway.ReadAsync(entryId,cancellation).GetAwaiter().GetResult();
+            if(result is null)throw new ApiException(404,"HISTORY_NOT_FOUND","No history entry exists for this id.");
+            var item=result.Media;
+            return ApiResponse.Ok(new {
+                entry_id=result.EntryId,source=result.Source,check_started_at_utc=result.CheckStartedAtUtc,check_completed_at_utc=result.CheckCompletedAtUtc,
+                probe_state=result.ProbeState,media_history_status=result.MediaHistoryStatus,
+                media=new {name=item.Name,recorded_size_bytes=item.RecordedSizeBytes,observed_size_bytes=item.ObservedSizeBytes,
+                    observation=item.Observation,reason_code=item.ReasonCode,sampled_at_utc=item.SampledAtUtc,identity_state=item.IdentityState},
+                scope="main_media",read_only=true,metadata_only=true,content_verification=false,bundle_included=false,deletion_supported=false,
+                observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot" },requestId);
+        }
+        catch(ApiException){throw;}
+        catch {throw new ApiException(503,"HISTORY_UNAVAILABLE","Artifact history is temporarily unavailable.");}
     }
 
     private string GetOrdinaryArtifactsCheck(string recordingId,HttpRequest request,string requestId,CancellationToken cancellation)
@@ -3621,6 +3658,16 @@ public sealed class ApiServer
                 max_concurrent = OrdinaryAttachmentVerificationService.MaxConcurrent, concurrency_scope = "host_content_verification",
                 shared_with = "/api/v1/recording-history/{recording_id}/artifacts/verify-media",
                 read_only = true, deletion_supported = false, observation_semantics = OrdinaryAttachmentVerificationService.ObservationSemantics
+            },
+            history_artifact_check = new
+            {
+                supported = _historyArtifactCheckGateway is not null,
+                endpoint = "/api/v1/history/{entry_id}/artifacts/check",
+                supported_sources = _historyArtifactCheckGateway?.SupportedSources ?? Array.Empty<string>(),
+                scope = "main_media", max_files = 1, max_distinct_ancestors = 64, deadline_ms = 3000, max_concurrent = 1,
+                concurrency_scope = "host_metadata_check", shared_with = "/api/v1/recording-history/{recording_id}/artifacts/check",
+                read_only = true, metadata_only = true, content_verification = false, bundle_included = false, deletion_supported = false,
+                observation_semantics = "sequential_point_in_time_metadata_not_atomic_snapshot"
             },
             ordinary_artifact_check = new
             {

@@ -349,6 +349,8 @@ internal sealed class SqliteRecurringLeaseLifecycleTransaction : SqlitePeriodicO
                 snapshot.Occurrence.Id,
                 meta!.OutputPath!,
                 terminatedAtUtc);
+            PlanMediaPublicationStorage.Write(connection, transaction, snapshot.Plan.Id, snapshot.Occurrence.Id,
+                snapshot.Run.Id, "recurring", snapshot.Lease.LeaseId, snapshot.Specification.FrozenOutputFilePath, meta!);
             FinalReadback(connection, transaction, snapshot, "media_settled");
             return RecurringLeaseLifecycleActionResult.Applied("media_settled", terminal: true);
         });

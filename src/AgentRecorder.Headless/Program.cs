@@ -365,7 +365,8 @@ internal static class Program
             retentionPreviewGateway: new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, _dataDir), historyIdentity),
             artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
             mediaVerificationGateway: new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
-            attachmentVerificationGateway: new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)));
+            attachmentVerificationGateway: new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),
+            historyArtifactCheckGateway: new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity));
 
         server.SetObservationHealthGateway(CreateObservationHealthGateway(server,_readiness!,_dataDir));
 

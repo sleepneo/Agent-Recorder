@@ -764,21 +764,51 @@ public sealed class WindowStorageEngineTests : IDisposable
     [Fact]
     public async Task ProductionProbeTimeoutKillsOnlyItsHungTestChildAndReleasesDeployment()
     {
-        using var helper = new FakeAudioHelperDeployment(_temp.Path);
+        using var helper = new FakeAudioHelperDeployment(_temp.Path, stopOwnedProcesses: false);
         var saved = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG");
         Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG", "1");
+        Process? originalChild = null;
+        WindowStorageSafety? guard = null;
         try
         {
-            var provider = new ProcessStorageCapacityProvider { ExecutablePath = () => helper.ExecutablePath };
-            using var guard = new WindowStorageSafety(CaptureWritePaths.Freeze(Config(false)), 60, provider)
+            var provider = new ProcessStorageCapacityProvider
+            {
+                ExecutablePath = () => helper.ExecutablePath,
+                HooksForTests = new StorageProbeHooks { Started = child =>
+                {
+                    originalChild = Process.GetProcessById(child.Id);
+                    _ = originalChild.SafeHandle; // Bound while this exact child is still owned.
+                    Assert.Equal(child.StartTime, originalChild.StartTime);
+                } }
+            };
+            guard = new WindowStorageSafety(CaptureWritePaths.Freeze(Config(false)), 60, provider)
                 { QueryTimeout = TimeSpan.FromMilliseconds(100) };
             var watch = Stopwatch.StartNew();
             Assert.Equal(WindowStorageSafety.UnavailableCode, await guard.CheckAsync(false));
             Assert.True(watch.Elapsed < TimeSpan.FromSeconds(3));
             Assert.True(provider.LastProbeProcessId > 0);
-            Assert.Throws<ArgumentException>(() => Process.GetProcessById(provider.LastProbeProcessId));
+            // A deadline is not retirement, and a numeric PID lookup is not an
+            // exit signal. Await the real owner, then inspect its original handle.
+            await guard.ProbeRetirementCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(provider.LastProbe!.ExitCompletion.IsCompletedSuccessfully);
+            Assert.True(provider.LastProbe.RetirementCompletion.IsCompletedSuccessfully);
+            Assert.Null(provider.LastProbe.CleanupFailure);
+            Assert.True(originalChild!.HasExited);
+            helper.Dispose();
+            Assert.False(Directory.Exists(helper.Root));
         }
-        finally { Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG", saved); }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_HANG", saved);
+            guard?.Dispose();
+            if (originalChild is not null)
+            {
+                if (!originalChild.HasExited) originalChild.Kill();
+                await originalChild.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                originalChild.Dispose();
+            }
+            if (guard is not null) await guard.ProbeRetirementCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+        }
     }
 
     [Theory]

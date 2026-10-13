@@ -1,6 +1,6 @@
 # Agent Recorder API
 
-This reference describes the current source contracts through SQLite v40:
+This reference describes the current source contracts through SQLite v41:
 history, health, artifacts, generation digests and read-only retention preview.
 The published v0.1.15 package predates those increments; inspect `/capabilities`
 on the running host. Generation-time durable media hashes are described at the
@@ -2710,7 +2710,7 @@ publisher's original CREATE_NEW copy handle can supply a private publication
 anchor. WGC continuous final publication and AvFinalizer audio mux and validated
 None final publication (including AV split and default FFmpeg video-only terminal
 paths) propagate that receipt; intermediate AV video, legacy FFmpeg direct audio, screenshot sequences
-and independent plan/future history remain unanchored.
+remain unanchored. Independent plan/future history now has its own private publication identity, outside the ordinary retention-preview scope.
 No existing row is backfilled and no preview observation becomes a publication ID. The Windows physical publisher opens the original copy with write,
 read-attributes and DELETE access, sharing read/delete but not write. Commit uses
 handle-bound rename/replace inside the existing commit gate; a renamed source
@@ -2874,6 +2874,27 @@ One process/host lease permits at most one worker, with no waiting queue; excess
 Bundle identity matching does not change retention protection: registered Bundle protection is applied before physical sampling and never becomes delete permission. This API does not expose receipt or identity material and does not perform content hashing or playback checks.
 
 
+### Plan and future main-media check (workspace source, not released)
+
+```http
+GET /api/v1/history/{entry_id}/artifacts/check
+X-Agent-Recorder-Key: <key>
+```
+
+App and Headless support `plan:<occurrence_id>` and `future_window:<authorization_id>` from the current SID/session. Encode the complete entry ID as **one URI segment**, exactly once. Canonical recurring IDs include `recurring-occurrence/v1:<64 lowercase hex>`; its slash is encoded in the URI, then accepted only as part of that exact ID format. Arbitrary separators, remaining percent escapes, double encoding, unsupported sources, query parameters and any body are rejected. Ordinary entries use their existing endpoint above.
+
+Authentication failures are 401; invalid/unsupported arguments are 400 `INVALID_ARGUMENT`; absent or foreign identity/session entries are 404 `HISTORY_NOT_FOUND`; a missing gateway or invalid durable facts is 503 `HISTORY_UNAVAILABLE`. Error messages disclose no paths, native identities, SQL or private authorization material. These failures precede media probes.
+
+An exact indexed read-only SQLite snapshot validates original ownership, lifecycle, the Plan locator and frozen output, V40/V41 publication evidence and original successful size. The new fact read disables old existence projections. Standing/recurring sizes come from verified V41 facts even when native identity is unknown; required-once and future sizes are cross-checked against their own successful execution. Modern damaged/missing markers fail closed; legacy unknown evidence is not repaired. Non-completed or insufficient evidence is not sampled; an unknown historical size is never invented.
+
+`data` contains `entry_id`, `source`, `check_started_at_utc`, `check_completed_at_utc`, `probe_state`, `media_history_status` and `media` with the same file-check fields described above. There is no Bundle object or output path. Fixed flags are `scope="main_media"`, `read_only=true`, `metadata_only=true`, `content_verification=false`, `bundle_included=false`, `deletion_supported=false`. `complete` means processing finished. Identity is `match`, `mismatch`, `unverified` or `unknown`; missing media does not change historical completion.
+
+New and ordinary metadata checks share **one actual host worker without a queue**, a 3-second deadline starting before database dispatch and up to 64 ancestors. The new request opens at most one READ_ATTRIBUTES leaf; it also rejects multiple links. Timeout, disconnect or shutdown freezes the returned result while the actual worker keeps its slot until resources retire. The separate 30-second content-verification worker and ordinary six-file DTO remain unchanged. A metadata handle can coexist with some data writers despite share-read; stable samples do not establish content integrity.
+
+`capabilities.history_artifact_check` reports gateway support, supported sources, endpoint, `scope="main_media"`, `max_files=1`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `max_concurrent=1`, `concurrency_scope="host_metadata_check"`, the shared ordinary endpoint and fixed flags. A missing gateway advertises no supported sources. Headless can read historical Plan/future facts without gaining capture authorization; its ordinary-only unified page capability remains unchanged.
+
+`observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`: this is a current metadata observation after a database snapshot. It reads no media content, enumerates no directory and starts no process/capture. It does not prove audio completeness, playback, future stability, absence of references or safe deletion. This source increment has passed independent acceptance; it is not in the public v0.1.15 package.
+
 ### Durable ordinary media generation digest (workspace V36)
 
 The ordinary entries returned by `GET /api/v1/recording-history`, its `/{recording_id}` detail (`data.recording`), and `GET /api/v1/history` include a top-level nullable `media_hash`:
@@ -2930,3 +2951,7 @@ Example admission response (no snapshot acquired while the shared worker is busy
 ```json
 {"recording_id":"rec_example","check_started_at_utc":"2026-10-12T01:00:00Z","check_completed_at_utc":"2026-10-12T01:00:00Z","check_state":"busy","comparison":"not_checked","reason_code":"verification_busy","bytes_read":0,"items":[],"content_verified":false,"scope":"bundle_attachments","read_only":true,"deletion_supported":false,"observation_semantics":"sequential_read_handle_point_in_time_comparisons_not_simultaneous_or_atomic_snapshot_earlier_files_may_change_before_response_not_future_integrity_guarantee"}
 ```
+
+### Plan Media Publication Identity
+
+Successful standing, recurring and required_once Plan MP4 executions preserve the original final publisher receipt inside the existing winner transaction. Native identity remains private; legacy or legitimately unavailable native identity stays unknown. Plan status, paged Plan history and unified source=plan history validate selected private facts in their existing read snapshot (512/100/100 bounds); modern missing or corrupt facts fail closed through the existing sanitized unavailable/503 contract. Public DTOs, cursors, endpoints and capabilities are unchanged. History GET does not read media bytes, hash or backfill identity. A recorded original identity is a publication-time fact; it does not prove current bytes, playback or deletion authority. This source increment has passed independent acceptance; the public v0.1.15 package is unchanged.

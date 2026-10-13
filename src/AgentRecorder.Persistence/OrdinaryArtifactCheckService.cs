@@ -5,7 +5,6 @@ namespace AgentRecorder.Persistence;
 /// <summary>On-demand metadata only. One process/host lease survives API/service recreation.</summary>
 public sealed class OrdinaryArtifactCheckService
 {
-    private static int _hostBusy;
     private readonly Func<string,OrdinaryArtifactFacts?> _read;
     private readonly OrdinaryArtifactMetadataSampler _sampler;
     internal Func<CancellationToken,Task> DeadlineForTests { get; set; } = token=>Task.Delay(TimeSpan.FromSeconds(3),token);
@@ -17,40 +16,12 @@ public sealed class OrdinaryArtifactCheckService
     public static void ValidateRecordingId(string id)
     { SqliteOrdinaryRecordingHistoryStore.ValidateRecordingId(id);if(id.Any(char.IsControl))throw new ArgumentException("Invalid recording id."); }
 
-    public async Task<OrdinaryArtifactCheckResult?> ReadAsync(string id,CancellationToken cancellation=default)
+    public Task<OrdinaryArtifactCheckResult?> ReadAsync(string id,CancellationToken cancellation=default)
     {
         ValidateRecordingId(id);
         var progress=new Progress(id);
-        if(cancellation.IsCancellationRequested)return progress.Snapshot("cancelled");
-        if(Interlocked.CompareExchange(ref _hostBusy,1,0)!=0)return progress.Snapshot("busy");
-        var workCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        using var deadlineCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        Task deadline; Task<OrdinaryArtifactCheckResult?> work;
-        try
-        {
-            // Start before DB dispatch, not after snapshot acquisition.
-            deadline=DeadlineForTests(deadlineCancellation.Token);
-            work=Task.Run(()=>
-            {
-                try { return Run(id,progress,workCancellation.Token); }
-                finally
-                {
-                    workCancellation.Dispose(); Volatile.Write(ref _hostBusy,0);
-                    WorkerExitedForTests?.Invoke();
-                }
-            });
-        }
-        catch
-        { workCancellation.Dispose();Volatile.Write(ref _hostBusy,0);return progress.Snapshot("failed"); }
-        try
-        {
-            if(await Task.WhenAny(work,deadline).ConfigureAwait(false)==work)return await work.ConfigureAwait(false);
-            try {workCancellation.Cancel();}catch(ObjectDisposedException){ }
-            // Never release the host lease here: synchronous native/SQLite work may still be running.
-            _=work.ContinueWith(t=>{_ = t.Exception;},CancellationToken.None,TaskContinuationOptions.OnlyOnFaulted,TaskScheduler.Default);
-            return progress.Snapshot(cancellation.IsCancellationRequested?"cancelled":"timeout");
-        }
-        finally { deadlineCancellation.Cancel(); }
+        return ArtifactMetadataWorker.ReadAsync(token=>Run(id,progress,token),progress.Snapshot,
+            DeadlineForTests,WorkerExitedForTests,cancellation);
     }
 
     private OrdinaryArtifactCheckResult? Run(string id,Progress progress,CancellationToken cancellation)

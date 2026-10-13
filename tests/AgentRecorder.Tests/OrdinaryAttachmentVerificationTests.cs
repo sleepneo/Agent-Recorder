@@ -501,8 +501,9 @@ public sealed class OrdinaryAttachmentVerificationTests(ITestOutputHelper output
         Assert.Equal("bundle_publication",a.GetProperty("reference_basis").GetString());Assert.Equal("bundle_attachments",a.GetProperty("scope").GetString());Assert.Contains("verify-media",a.GetProperty("shared_with").GetString());Assert.Equal(OrdinaryAttachmentVerificationService.ObservationSemantics,a.GetProperty("observation_semantics").GetString());
         Assert.Equal(1073741824,caps.GetProperty("ordinary_media_verification").GetProperty("max_bytes").GetInt64());var before=f.Snapshot();var result=await Verify(c,body:"");Assert.True(result.GetProperty("content_verified").GetBoolean());Assert.Equal(5,result.GetProperty("items").GetArrayLength());Assert.Equal(before,f.Snapshot());
         Assert.DoesNotContain(f.Root,result.GetRawText());
-        File.WriteAllText(Path.Combine(TestHelper.ProjectRoot,".local-data/task343/sample-response.json"),result.GetRawText());
-        File.WriteAllText(Path.Combine(TestHelper.ProjectRoot,".local-data/task343/sample-capabilities.json"),a.GetRawText());
+        var evidence=Path.Combine(Path.GetTempPath(),"task343-verification-evidence");Directory.CreateDirectory(evidence);
+        File.WriteAllText(Path.Combine(evidence,"sample-response.json"),result.GetRawText());
+        File.WriteAllText(Path.Combine(evidence,"sample-capabilities.json"),a.GetRawText());
     }
 
     [Theory]

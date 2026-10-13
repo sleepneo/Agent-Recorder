@@ -21,7 +21,7 @@ internal sealed class OrdinaryArtifactMetadataSampler(IReadOnlyPathMetadata ance
             var stem=part.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
             if(stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" or "CLOCK$" ||
                (stem.Length==4 && (stem.StartsWith("COM",StringComparison.Ordinal)||stem.StartsWith("LPT",StringComparison.Ordinal)) &&
-                (stem[3] is >= '1' and <= '9' or '¹' or '²' or '³'))) return "path_invalid";
+                (stem[3] is >= '1' and <= '9' or '\u00B9' or '\u00B2' or '\u00B3'))) return "path_invalid";
         }
         var list=new List<string>{path[..3]}; var current=path[..3];
         foreach(var part in parts[..^1]){current=Path.Combine(current,part);list.Add(current);}
@@ -29,7 +29,7 @@ internal sealed class OrdinaryArtifactMetadataSampler(IReadOnlyPathMetadata ance
     }
 
     internal OrdinaryArtifactFileCheck Sample(string name,string path,long size,PublicationIdentityAnchor? anchor,
-        string[] parents,Dictionary<string,(string Observation,string Reason)?> cache,CancellationToken cancellation)
+        string[] parents,Dictionary<string,(string Observation,string Reason)?> cache,CancellationToken cancellation,bool requireSingleLink=false)
     {
         var at=DateTimeOffset.UtcNow;
         OrdinaryArtifactFileCheck Result(string observation,string reason,long? observed=null,string identity="unknown") =>
@@ -77,6 +77,7 @@ internal sealed class OrdinaryArtifactMetadataSampler(IReadOnlyPathMetadata ance
         if((first.Attributes&FileAttributes.Directory)!=0||(second.Attributes&FileAttributes.Directory)!=0||first.Directory==1||second.Directory==1)
             return Result("unsafe_path","output_not_file");
         if(!Valid(first)||!Valid(second))return Result("unavailable","metadata_unavailable");
+        if(requireSingleLink && (first.Links!=1 || second.Links!=1))return Result("unsafe_path","multiple_links");
         if(first.DeletePending==1||second.DeletePending==1||first!=second)
             return Result("changed_during_probe","metadata_changed");
         if(!WindowsReadOnlyFileMetadataProbe.IsCanonicalLocalPath(sample.BeforePath)||
