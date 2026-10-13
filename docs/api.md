@@ -1,10 +1,10 @@
 # Agent Recorder API
 
-This reference describes the current source contracts, including accepted
-history, health, artifact and retention-preview increments through SQLite v35.
+This reference describes the current source contracts through SQLite v40:
+history, health, artifacts, generation digests and read-only retention preview.
 The published v0.1.15 package predates those increments; inspect `/capabilities`
-on the running host. Generation-time durable media hashes, content verification
-and retention deletion are not implemented.
+on the running host. Generation-time durable media hashes are described at the
+end of this reference. Explicit main-media and five-attachment verification have passed independent source acceptance. They share one host content-verification worker; retention deletion is not implemented.
 
 Base URL: `http://127.0.0.1:37891/api/v1`
 
@@ -1727,7 +1727,9 @@ on the recording's trusted first-frame monotonic timeline.
 
 ## Recording Bundle
 
-Successful FFmpeg MP4 recordings automatically produce a structured bundle next
+Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Source acceptance covers synthetic inputs with the production session/publication pipeline; dedicated native-capture acceptance remains pending. The public v0.1.15 package predates this increment.
+
+Successful supported FFmpeg and ordinary WGC MP4 recordings produce a structured bundle next
 to the video file. For `D:\Videos\demo.mp4` the bundle is:
 
 ```text
@@ -2251,6 +2253,9 @@ proof, or authorization records.
 
 This contract is implemented in the current source tree; it is not a released
 package announcement. Inspect `capabilities.unified_history` before using it.
+
+The current source persists successful future-window MP4 completion and the original private publisher identity with the exact authorization/run and frozen output in the same SQLite transaction (append-only v40). Native identity unavailable at publication remains explicitly unknown; pre-v40 rows remain legacy unknown without scanning or backfilling media. Unified history validates selected private facts in one bounded indexed batch within its existing SQLite snapshot. Missing modern markers or inconsistent bindings return the existing unavailable response. No public fields, endpoints, capabilities, Bundle delivery, content verification, or authorization scope are added. This records historical publication identity; it does not verify current media bytes or announce a released portable package.
+
 App supports `ordinary`, `plan`, and `future_window`. Headless advertises only
 `["ordinary"]` and does not start Plan or future-window runtimes. `source=all`
 means all sources advertised by that host. An explicit unsupported source
@@ -2537,6 +2542,7 @@ the file is missing, inaccessible, linked or changed. Reasons are a whitelist: `
 `file_inaccessible`, `metadata_unavailable`, `metadata_changed`,
 `file_length_changed`, `nested_relationship`, `nested_parent_referenced`,
 `nested_reference_invalid`, `shared_output_path`, `planned_output_path`,
+`setup_output_path`, `planned_output_template`, `pending_output_use_unknown`,
 `hard_linked_output`, `file_identity_unavailable`, `file_identity_changed`,
 `resolved_path_mismatch`, `publication_identity_missing`,
 `publication_identity_mismatch`, `bundle_evidence_unknown`,
@@ -2578,6 +2584,14 @@ A directory alone, a filename alone or a template for an ungenerated future
 file does not match. Matching sources, counts, IDs and proof remain private.
 The branch precedes every file probe and contributes an unknown-byte candidate.
 
+The same batch also protects `required_once_setup_intents.output_directory + frozen_file_name` with `setup_output_path`, including before selection/creation approval and without an authorized specification. All identities, sessions, dates and persisted statuses (including rejected/expired) retain conservative use protection. Valid different names do not match but consume the shared bound. V39 adds only the required-once directory/name composite index (original raw path collation on both columns) and its receipt; V1–V38 definitions/checksums/indexes remain unchanged. Four sources share one deduplicated requested-directory batch/read snapshot and a total 500/LIMIT501 before probes, with the existing complete type/byte/NUL/character projection and exact > unknown > template priority. Missing/damaged V39 index/receipt fails closed without read repair. This is potential output use, not current approval, authorization or deletion permission.
+
+Pending output-use protection: after frozen-target protection and before publication-anchor, Bundle and all file probes, `setup_output_path` protects an exact `setup_intents.output_directory + frozen_file_name` even before an authorized specification exists. Early intents with no output fields invent no path. `planned_output_template` conservatively protects names expressible by a recurring setup intent or any immutable recurring Profile version: `prefix-yyyyMMddTHHmmssZ-<64 hex occurrence digest>.mp4`. It means possible configuration output, not a frozen file reference, current authorization or permission to execute. Expired intents and logically deleted/nonlatest Profile versions retain this range protection.
+
+Only the direct parent directory matches, using the existing raw OrdinalIgnoreCase collation and two trailing-separator forms; no LIKE/glob, foreign GetFullPath, schedule enumeration or disk resolution is used. Prefixes follow the renderer's bounded domain rules (including hyphens, underscores and Chinese letters), timestamps must be real dates/times, and Windows case aliases match without Unicode normalization. Different directories, subdirectories, Videos2, drives, prefixes, malformed digests and ordinary old filenames do not match a valid template. Invalid selected filename/prefix/template evidence is locally `pending_output_use_unknown`; exact setup evidence wins over that unknown, which wins over a template. The previous nested/shared/frozen reasons retain precedence. No source IDs, configured prefix fields, counts, proofs or referrer lists are exposed.
+
+V38 adds only three directory-leading indexes and its migration receipt; V1-V37 definitions/checksums/triggers and business data remain unchanged. One parameterized UNION ALL batch selects the three sources in the same SQLite snapshot as the page, nested/shared/frozen facts and anchors. Requested directory forms are deduplicated; a configuration is not joined once per candidate. A page selects at most 500 related output uses in total, and LIMIT 501 fails the entire request with `RETENTION_PREVIEW_UNAVAILABLE` before any file probe. Fixed setup rows in a requested directory also consume this bound even if their valid filename differs. SQL projects only text fields within 255 (fixed name), 128 (prefix) and 200 (template) SQLite characters; oversized/nontext values become local unknown evidence before materialization. SQL projection rejects NUL in complete selected directory/name/prefix/template fields in SQLite before GetString; damaged suffixes cannot be interpreted as truncated valid text. A rejected related row remains unknown and consumes the same 500-row bound. The indexed raw collation alone selects relations; a selected damaged directory is associated through the trusted requested directory and is never treated as canonical evidence. Projection requires text, at most four UTF-8 bytes per permitted SQLite character, no NUL and the existing character limit (directory 1025 including a trailing separator); subsequent UTF-16/domain limits remain unchanged, including 64-Rune Unicode prefixes. Schema/index/collation/receipt faults also fail closed. Unrelated dirty directories are not parsed. Protected items retain age_candidate=true with unknown observed bytes; the original metadata budgets and both explicit content-verification APIs are unchanged. This is a snapshot preview, not a complete reference graph or future deletion lock.
+
 Standing and the required-once API normalize directories with a trailing
 separator; future-window ordinarily removes it, preserving the drive root.
 The query slices only the candidate raw text into filename and two bounded
@@ -2590,7 +2604,7 @@ rows occurs. Only these existing canonical storage forms are covered. Historical
 noncanonical text, textual/physical aliases and not-yet-concrete targets are not
 proved free of use. No such preview result grants cleanup permission.
 
-The current ordinary page, nested flags and four explicit plus four frozen-path existence checks are read
+The current ordinary page, nested flags, four explicit plus four frozen-path existence checks and bounded pending output uses are read
 in one read-only SQLite transaction/snapshot after the existing writer barrier.
 Parameterized batches contain at most 100 candidates; reverse checks use the
 v25 parent index, four v28 path indexes and four v29 frozen-target indexes. Missing, invalid or untrustworthy
@@ -2748,27 +2762,32 @@ This describes workspace code, not a released v0.1.15 capability.
       {
         "name": "metadata.json",
         "media_type": "application/json",
-        "size_bytes": 1234
+        "size_bytes": 1234,
+        "content_hash": null
       },
       {
         "name": "thumbnail.jpg",
         "media_type": "image/jpeg",
-        "size_bytes": 5678
+        "size_bytes": 5678,
+        "content_hash": null
       },
       {
         "name": "first_frame.png",
         "media_type": "image/png",
-        "size_bytes": 9012
+        "size_bytes": 9012,
+        "content_hash": null
       },
       {
         "name": "last_frame.png",
         "media_type": "image/png",
-        "size_bytes": 3456
+        "size_bytes": 3456,
+        "content_hash": null
       },
       {
         "name": "marks.json",
         "media_type": "application/json",
-        "size_bytes": 78
+        "size_bytes": 78,
+        "content_hash": null
       }
     ]
   }
@@ -2785,6 +2804,13 @@ The ordinary history Bundle `contents_evidence_version` is `1` only when its fir
 Legacy ready results and compatibility generators without explicit evidence, plus generating/failed/interrupted_unknown/not_applicable, expose both added fields as `null`, not an empty list. Older Bundle facts themselves remain null. Schema v33 is additive; it does not inspect or backfill old attachments. A newly required registration, partial list, wrong version/count/type/size or operation/media/directory association is unavailable/503, not an unknown legacy list. Initial registration and ready status/contents commit atomically; value-equal same-operation replay is idempotent, conflicting or late evidence cannot replace a terminal. Writer queue acceptance is not a durable acknowledgement. Startup recovery revokes unfinished operations without regeneration; existing ready contents survive restart.
 
 History reads batch at most 100 ordinary entries / 500 attachment rows in the existing SQLite snapshot with targets/media/Bundle, without directory enumeration or attachment reads. Auth, queries, target filters and cursors are unchanged. `capabilities.unified_history` publishes `bundle_contents_supported_sources=["ordinary"]` only when ordinary is served, `bundle_contents_evidence_version=1`, `bundle_contents_max=5`, and `bundle_contents_semantics="recorded_generation_bytes_not_current_file_identity"`. Retention still protects ready Bundles and fails on damaged evidence before file probes; `bundle_included=false` and all deletion/reference/physical readiness flags remain false. Recorded attachment sizes do not contribute to observed reclaimable bytes.
+
+
+Each ordinary history `bundle.contents` item additionally has nullable `content_hash`. A trusted value has exactly four fields: `{"algorithm":"sha256","value":"<64 lowercase hex>","basis":"bundle_publication","size_bytes":9012}`. All five hashes cover the actual bytes successfully copied into the original attachment objects by the formal publisher, using its existing fixed buffer. The complete set is issued only after Flush, continuous original-handle holds, whole-directory no-overwrite commit and post-commit identity checks. It is bound to the recording, exact operation, paths, fixed ordinal/name/size and each original physical identity, then saved atomically with Bundle status, contents, identity and the independent main media digest in SQLite V37.
+
+V37 does not scan files or backfill old rows, including metadata containing a hash. Pre-migration facts, public `Ready(...)`/contents-only results, unbound publication or unavailable native identity remain `content_hash: null`; a missing required modern marker or corrupt/incomplete/cross-bound set fails closed. Ordinary list, detail and unified ordinary projections read one indexed batch in the same SQLite snapshot (at most 100 parents / 500 attachment items, with row 501 detecting overflow), without attachment reads. Other unified sources have no ordinary Bundle evidence.
+
+`bundle_publication` is a historical publication observation. It does not establish a shared video/frame timestamp, capture-original bytes, current attachment integrity, playability, future integrity or deletion authority. Explicit attachment comparisons are described below. `artifacts/check` remains metadata-only; `verify-media` still covers only the main MP4 with its existing 1 GiB / 30 second / one worker contract. Retention remains read-only and protects ready Bundles. This source increment is not included in the public v0.1.15 package.
 
 ### On-demand ordinary artifact availability
 
@@ -2846,3 +2872,61 @@ One process/host lease permits at most one worker, with no waiting queue; excess
 `capabilities.ordinary_artifact_check` publishes `supported`, this `endpoint`, `scope="ordinary_video"`, `max_files=6`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `metadata_only=true`, `content_verification=false`, `deletion_supported=false`, `observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`, and `identity_scope="media_and_five_bundle_publication_anchors"`. This describes workspace code, not a released capability. SQLite facts and subsequent file observations are separate snapshots; ancestor chains are not atomically locked. Changes after sampling, in-place same-size writes, ID reuse, aliases and directory TOCTOU remain outside the result. Retention still protects ready Bundles, preserves unknown-byte accounting and all deletion/reference/physical-readiness flags; a check cannot authorize cleanup or bypass references.
 
 Bundle identity matching does not change retention protection: registered Bundle protection is applied before physical sampling and never becomes delete permission. This API does not expose receipt or identity material and does not perform content hashing or playback checks.
+
+
+### Durable ordinary media generation digest (workspace V36)
+
+The ordinary entries returned by `GET /api/v1/recording-history`, its `/{recording_id}` detail (`data.recording`), and `GET /api/v1/history` include a top-level nullable `media_hash`:
+
+```json
+{"media_hash":{"algorithm":"sha256","value":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","basis":"bundle_generation","size_bytes":1048576}}
+```
+
+The value records the main MP4 bytes observed during successful Bundle generation. It requires the internal ordinary MP4 publication receipt (the FFmpeg paths and ordinary WGC paths above), the registered recording/Bundle operation, and before/after native metadata on the same content read handle. The existing hash pass streams a fixed 64 KiB buffer with cancellation and denies shared writes/deletes. Its result is committed with the successful Bundle status, manifest and identities in one history transaction. It agrees with the existing `metadata.json` `media.sha256` for that generation; reading metadata alone cannot grant trusted evidence.
+
+Legacy history, absent or failed Bundles, public fake results and unavailable trusted native bindings return `null`; no media is scanned or backfilled during migration or history queries. A damaged stored marker or digest makes the history request unavailable rather than returning a trusted value. Queries use the same SQLite snapshot and an indexed batch of at most 100 entries. Other unified sources return `null`. No hash filter is provided. Content comparison requires the explicit POST described below.
+
+`capabilities.recording_history.media_hash_supported` and `capabilities.unified_history.media_hash_supported_sources` advertise ordinary support, with `media_hash_algorithm="sha256"` and `media_hash_basis="bundle_generation"`. This is a generation observation, not capture-original bytes or a current integrity/playability assertion. Changes after the hash pass, the three separate frame extractions and all attachments are outside this digest. Artifact checks retain `metadata_only=true`, `content_verification=false`; retention remains read-only and protects ready Bundles. The digest grants no deletion authority and is not in the public v0.1.15 package.
+
+### Explicit ordinary main-media verification
+
+`POST /api/v1/recording-history/{recording_id}/artifacts/verify-media` requires the configured API key and current loopback host. Send no body or `{}`. Query parameters and all object fields (including paths, algorithms, hashes and budgets) are rejected with `400 INVALID_ARGUMENT` before verification. Invalid IDs use the existing ordinary-history rules; missing entries return `404 RECORDING_HISTORY_NOT_FOUND`. Unconfigured or damaged history returns `503 RECORDING_HISTORY_UNAVAILABLE` without exposing native errors or paths.
+
+The usual envelope contains:
+
+```json
+{"ok":true,"data":{"recording_id":"...","check_started_at_utc":"...","check_completed_at_utc":"...","check_state":"completed","comparison":"match","reason_code":"digest_match","bytes_read":160003,"recorded_hash":{"algorithm":"sha256","value":"<64 lowercase hex>","basis":"bundle_generation","size_bytes":160003},"observed_hash":{"algorithm":"sha256","value":"<64 lowercase hex>","size_bytes":160003},"content_verified":true,"scope":"main_media","read_only":true,"deletion_supported":false,"observation_semantics":"single_read_handle_point_in_time_comparison_not_future_integrity_guarantee"},"request_id":"..."}
+```
+
+`check_state` is `completed`, `busy`, `timeout`, `cancelled` or `failed`. `comparison` is `match`, `mismatch` or `not_checked`. Only a complete bounded SHA-256 read with stable before/after native metadata, canonical final path, original physical identity and matching generation digest returns `content_verified=true`. A complete stable read of the original object with different bytes returns `digest_mismatch` / `mismatch`. Replacement objects and changed lengths instead return `publication_identity_mismatch` or `file_size_mismatch`, with `not_checked`, no observed digest and zero content reads. Missing trusted generation evidence returns `recorded_hash_unavailable` without opening the media. Unfinished/non-MP4 history returns `media_not_applicable`.
+
+Other stable reasons include `publication_anchor_unavailable`, `media_evidence_unknown`, `media_byte_limit`, `path_invalid`, `path_check_limit`, `ancestor_check_limit`, `ancestor_reparse_point`, `parent_not_directory`, `local_drive_unavailable`, `file_missing`, `file_inaccessible`, `unsafe_or_unknown_handle_metadata`, `metadata_unavailable`, `read_length_mismatch`, `metadata_changed`, `verification_failed`, `verification_busy`, `verification_deadline` and `verification_cancelled`. A reason describes this attempt, not permanent file health. Partial, unstable, cancelled or timed-out work has `observed_hash=null`, `comparison=not_checked`, `content_verified=false`; `bytes_read` is progress frozen at the response, not an assurance of a full read. `recorded_hash` can be null if facts were unavailable before the deadline or no trusted digest exists.
+
+`capabilities.ordinary_media_verification` separately publishes `supported`, `endpoint`, `scope="main_media"`, `algorithm="sha256"`, `reference_basis="bundle_generation"`, `max_bytes=1073741824`, `deadline_ms=30000`, `max_concurrent=1`, `read_only=true`, `deletion_supported=false` and the observation semantics above. The deadline starts before SQLite dispatch and covers handle validation and disposal. One process-wide worker does not queue; a timed-out or cancelled worker retains its slot until actual exit, including across service/gateway recreation. Confirmed client disconnects and host shutdown request cancellation. A send-only FIN cannot prove that the receiving peer abandoned its response, so it remains bounded by the total deadline.
+
+One existing leaf is opened read-only with `OPEN_REPARSE_POINT` and sharing only READ, then native facts are checked on that very content handle before any content read. The fixed 64 KiB buffer streams at most 1 GiB; the final read is bounded to the frozen remaining length. Unsafe paths, reparse points, directories, hard links and unknown native evidence fail closed. At most 64 ancestors are checked; those checks do not atomically lock directories or eliminate namespace TOCTOU or future ID reuse. The comparison only covers bytes observed on this handle against `basis=bundle_generation`. It does not establish capture-original bytes, playability, audio/video completeness, attachment integrity, a future integrity guarantee or safe deletion. No result is persisted or used to repair/backfill history. Existing history GETs, metadata-only artifacts/check and retention preview do not invoke this operation. No FFmpeg, playback, capture or new human confirmation is involved.
+
+
+### Explicit on-demand Bundle attachment verification (source V37)
+
+`POST /api/v1/recording-history/{recording_id}/artifacts/verify-attachments` compares the fixed ordered five attachments (`metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) with their durable `bundle_publication` SHA-256 evidence. Send an empty body or `{}` with `X-Agent-Recorder-Key`. A configured key is required even when ordinary authentication is disabled. The current loopback host owns the request. All query parameters and JSON fields, including duplicate fields and caller paths, names, algorithms, hashes or budgets, are rejected before database dispatch. Invalid input/ID returns 400; absent ordinary ID returns 404; unconfigured or corrupt history returns 503 with sanitized errors.
+
+Only a completed ordinary MP4 with a ready Bundle and the complete trusted V37 attachment hash/identity tuple can enter file reads. One SQLite transaction freezes terminal, contents, hash and original publication identities. Legacy/unknown/nonready facts return `not_checked` without reading or reconstructing evidence from metadata or directories. Verification does not persist a permanent verified flag.
+
+The **whole request** admits at most five files, 64 distinct ancestors, **67,108,864 bytes (64 MiB)** and **30,000 ms**, including SQLite dispatch, native calls, reads and actual handle closure. Checked trusted sizes exceeding the aggregate limit are refused before opens. Local canonical paths and drive policy apply; reparse points, non-directory ancestors, non-file leaves, hardlinks, delete-pending or unknown native facts are rejected. Each item uses one sequential OPEN_REPARSE_POINT/OVERLAPPED handle with FileShare.Read, a 64 KiB buffer and SHA-256. Original identity and length are checked before reading; foreign replacements or wrong lengths are not hashed. The same handle's pre/post native metadata, actual Position/Length and closure must be stable before an observed hash is exposed.
+
+Attachments and `verify-media` share **one host-wide worker without a queue**. Either endpoint may return `busy` while the other works, including after gateway/service recreation. Timeout, explicit disconnect/RST or host stop cancels the request; ambiguous send-only FIN retains the existing receive-side semantics. Timed-out/cancelled blocked SQLite/native/read work retains the slot until its actual worker exits and all handles close. Main MP4 limits remain 1 GiB / 30 seconds.
+
+The response contains `recording_id`, UTC `check_started_at_utc`/`check_completed_at_utc`, `check_state` (`completed`, `busy`, `timeout`, `cancelled`, `failed`), `comparison` (`match`, `mismatch`, `not_checked`), `reason_code`, aggregate `bytes_read`, `items`, `content_verified`, `scope="bundle_attachments"`, `read_only=true`, `deletion_supported=false` and `observation_semantics`. Items are empty before facts are available and thereafter have the fixed five names/order. Each item exposes its state/comparison/reason, bytes, optional UTC read-observation bounds, a recorded hash `{algorithm,value,basis:"bundle_publication",size_bytes}`, a complete stable observed hash `{algorithm,value,size_bytes}` or null, and `content_verified`. No private file/volume ID, operation, receipt, path or native exception is returned.
+
+`digest_match` means that item's full stable read matched its recorded digest; `digest_mismatch` identifies a same-object, same-length byte change. Replacement/size/unsafe/missing/inaccessible/short-read/metadata-drift conditions remain unverified. The first nonmatch stops subsequent reads; earlier closed complete observations may be retained and remaining items are `not_checked`. Timeout/cancellation freezes progress: later worker completion cannot mutate it or expose an unfinished item's prefix hash. The request is verified/match only when all five matched, closed and remained within its deadline/cancellation scope.
+
+These are **sequential handle observations**, not a simultaneous or atomic five-file snapshot; earlier files may change before the response. They do not prove a shared frame timestamp, playability, future integrity or deletion authority, and combining them with the main endpoint does not create an atomic six-file snapshot. History GET, retention and `artifacts/check` do not invoke content verification; the latter remains metadata-only.
+
+`capabilities.ordinary_attachment_verification` separately publishes support, endpoint, scope, `algorithm="sha256"`, `reference_basis="bundle_publication"`, `max_files=5`, `max_distinct_ancestors=64`, `max_bytes=67108864`, `deadline_ms=30000`, `max_concurrent=1`, `concurrency_scope="host_content_verification"`, `shared_with` pointing to `verify-media`, read-only/deletion flags and sequential observation semantics. This describes workspace source, not the public v0.1.15 package.
+
+Example admission response (no snapshot acquired while the shared worker is busy):
+
+```json
+{"recording_id":"rec_example","check_started_at_utc":"2026-10-12T01:00:00Z","check_completed_at_utc":"2026-10-12T01:00:00Z","check_state":"busy","comparison":"not_checked","reason_code":"verification_busy","bytes_read":0,"items":[],"content_verified":false,"scope":"bundle_attachments","read_only":true,"deletion_supported":false,"observation_semantics":"sequential_read_handle_point_in_time_comparisons_not_simultaneous_or_atomic_snapshot_earlier_files_may_change_before_response_not_future_integrity_guarantee"}
+```

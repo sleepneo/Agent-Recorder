@@ -26,9 +26,10 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
 
 The latest published package is v0.1.15. The current source also includes durable
 ordinary recording history, unified indexed history, on-demand health and
-artifact metadata checks, retention previews, and stronger media/Bundle
-publication and storage protection. These source changes are not yet in that
-package. Retention is read-only; automatic deletion, disk quotas, signing and
+artifact metadata checks, explicit main-video and five-attachment content
+verification, read-only retention previews, ordinary WGC Bundle generation,
+and durable future-window publication identity. These source changes are not
+yet in that package. Retention is read-only; automatic deletion, disk quotas, signing and
 an installer remain unfinished. Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
@@ -248,6 +249,13 @@ claim lateness excluding the frame's own capture/encode time, and
 `capture_duration_ms` is the monotonic claim-to-valid-submit duration. These
 fields describe timing truthfully; they are not a fixed desktop latency or
 real-time guarantee.
+
+## Documentation
+
+- [Quick start](QUICKSTART.md): getting started with a local AI agent.
+- [Agent instructions](AGENT-INSTRUCTIONS.zh-CN.md): startup, API workflow and safety (Chinese).
+- [API reference](docs/api.md): contracts and limits; [Chinese reference](AGENT-API-REFERENCE.zh-CN.md).
+- [Safety](docs/safety.md): authorization and evidence boundaries.
 
 ## Project Layout
 

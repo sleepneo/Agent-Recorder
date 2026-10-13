@@ -93,6 +93,9 @@ internal sealed class FutureWindowOneShotExecutionTicket
     internal bool TryClaim() => Interlocked.CompareExchange(ref _claimed, 1, 0) == 0;
 }
 
+internal sealed record FutureWindowMediaPublication(
+    string Path, long Length, long DurationMs, PublicationReceipt? Receipt);
+
 internal sealed record FutureWindowCaptureStartResult(
     bool Accepted,
     string? RunId,

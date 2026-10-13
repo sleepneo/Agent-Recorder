@@ -373,6 +373,7 @@ public sealed class CodexProfileRecordingRegressionTests : IDisposable
         using var verify = new SqliteConnection(new SqliteConnectionStringBuilder
             { DataSource = Path.Combine(_temp.Path, "state.db"), Pooling = false }.ToString());
         verify.Open();
+        SqliteOutputPathCollation.Register(verify);
         foreach (var table in new[] { "recurring_fixed_region_profile_versions", "fixed_region_profile_directory", "fixed_region_profile_create_idempotency" })
         {
             using var count = verify.CreateCommand();

@@ -49,6 +49,8 @@ public sealed class ApiServer
     private readonly IUnifiedHistoryGateway? _unifiedHistoryGateway;
     private readonly IRetentionPreviewGateway? _retentionPreviewGateway;
     private readonly IOrdinaryArtifactCheckGateway? _artifactCheckGateway;
+    private readonly IOrdinaryMediaVerificationGateway? _mediaVerificationGateway;
+    private readonly IOrdinaryAttachmentVerificationGateway? _attachmentVerificationGateway;
     private IObservationHealthGateway? _observationHealth;
     internal void SetObservationHealthGateway(IObservationHealthGateway gateway)=>_observationHealth=gateway;
     private ObservationHealthSnapshot PartialHealth(HealthProbeState state)
@@ -119,11 +121,13 @@ public sealed class ApiServer
         IPlanExecutionHistoryGateway? planExecutionHistoryGateway = null,
         IUnifiedHistoryGateway? unifiedHistoryGateway = null,
         IRetentionPreviewGateway? retentionPreviewGateway = null,
-        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null)
+        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
+        IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
+        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
             planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
-            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway)
+            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway)
     {
     }
 
@@ -145,7 +149,9 @@ public sealed class ApiServer
         IPlanExecutionHistoryGateway? planExecutionHistoryGateway = null,
         IUnifiedHistoryGateway? unifiedHistoryGateway = null,
         IRetentionPreviewGateway? retentionPreviewGateway = null,
-        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null)
+        IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
+        IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
+        IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -164,6 +170,8 @@ public sealed class ApiServer
         _unifiedHistoryGateway = unifiedHistoryGateway;
         _retentionPreviewGateway = retentionPreviewGateway;
         _artifactCheckGateway = artifactCheckGateway;
+        _mediaVerificationGateway = mediaVerificationGateway;
+        _attachmentVerificationGateway = attachmentVerificationGateway;
         _requiredOncePlanSetupGateway = requiredOncePlanSetupGateway;
         _futureWindowOneShotGateway = futureWindowOneShotGateway;
         _profileManagementGateway = profileManagementGateway;
@@ -342,7 +350,7 @@ public sealed class ApiServer
                 if (RequiresAuth(method, path))
                 {
                     var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
-                    if(method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)))
+                    if(method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
                     {
                         // The new diagnostic endpoint requires authentication even in an
                         // unconfigured host. Preserve the shared validator and existing codes.
@@ -355,7 +363,7 @@ public sealed class ApiServer
                 }
 
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                var disconnect=method=="GET" && IsArtifactCheckPath(path)?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
+                var disconnect=(method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
                 try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
                 finally { requestCancellation.Cancel(); await disconnect; }
@@ -378,6 +386,8 @@ public sealed class ApiServer
 
     private static bool IsArtifactCheckPath(string path)=>path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)&&
         path.EndsWith("/artifacts/check",StringComparison.Ordinal);
+    private static bool IsMediaVerificationPath(string path)=>path.StartsWith(Prefix+"/recording-history/",StringComparison.Ordinal)&&
+        (path.EndsWith("/artifacts/verify-media",StringComparison.Ordinal) || path.EndsWith("/artifacts/verify-attachments",StringComparison.Ordinal));
     internal Action<bool>? ArtifactTransportObservedForTests { get; set; }
     private async Task MonitorArtifactDisconnect(TcpClient client,CancellationTokenSource cancellation)
     {
@@ -608,6 +618,11 @@ public sealed class ApiServer
 
         if (seg.Length == 4 && seg[0] == "recording-history" && seg[2] == "artifacts" && seg[3] == "check" && method == "GET")
             return GetOrdinaryArtifactsCheck(seg[1], req, reqId, cancellation);
+
+        if (seg.Length == 4 && seg[0] == "recording-history" && seg[2] == "artifacts" && seg[3] == "verify-attachments" && method == "POST")
+            return VerifyOrdinaryAttachments(seg[1], req, reqBody, reqId, cancellation);
+        if (seg.Length == 4 && seg[0] == "recording-history" && seg[2] == "artifacts" && seg[3] == "verify-media" && method == "POST")
+            return VerifyOrdinaryMedia(seg[1], req, reqBody, reqId, cancellation);
 
         if (seg.Length == 2 && seg[0] == "recording-history" && method == "GET")
             return GetOrdinaryRecordingHistoryDetail(seg[1], reqId);
@@ -852,6 +867,7 @@ public sealed class ApiServer
                 output_file_exists = item.OutputFileExists, output_size_bytes = item.OutputSizeBytes,
                 output_duration_seconds = item.OutputDurationSeconds,
                 bundle = item.Source == "ordinary" ? HistoryBundleObject(item.Bundle) : null,
+                media_hash = HistoryMediaHashObject(item.MediaHash),
                 started_at_utc = item.StartedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
                 completed_at_utc = item.CompletedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
                 window_start_utc = item.WindowStartUtc?.ToString("O", CultureInfo.InvariantCulture),
@@ -953,12 +969,83 @@ public sealed class ApiServer
         catch {throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Artifact history is temporarily unavailable.");}
     }
 
+    private string VerifyOrdinaryMedia(string id,HttpRequest request,string body,string requestId,CancellationToken cancellation)
+    {
+        if(request.Query.Count!=0)throw new ApiException(400,"INVALID_ARGUMENT","Media verification does not accept query parameters.");
+        if(body.Length!=0)
+        {
+            try
+            {
+                using var json=JsonDocument.Parse(body);
+                if(json.RootElement.ValueKind!=JsonValueKind.Object || json.RootElement.EnumerateObject().Any())
+                    throw new ApiException(400,"INVALID_ARGUMENT","Only an empty JSON object is accepted.");
+            }
+            catch(JsonException) { throw new ApiException(400,"INVALID_ARGUMENT","Only an empty JSON object is accepted."); }
+        }
+        try {id=Uri.UnescapeDataString(id);OrdinaryArtifactCheckService.ValidateRecordingId(id);}
+        catch(ArgumentException) { throw new ApiException(400,"INVALID_ARGUMENT","The recording history id is invalid."); }
+        if(_mediaVerificationGateway is null)throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Media verification is not configured.");
+        try
+        {
+            var result=_mediaVerificationGateway.VerifyAsync(id,cancellation).GetAwaiter().GetResult();
+            if(result is null)throw new ApiException(404,"RECORDING_HISTORY_NOT_FOUND","No ordinary recording history entry exists for this id.");
+            return ApiResponse.Ok(new {
+                recording_id=result.RecordingId,check_started_at_utc=result.CheckStartedAtUtc,check_completed_at_utc=result.CheckCompletedAtUtc,
+                check_state=result.CheckState,comparison=result.Comparison,reason_code=result.ReasonCode,bytes_read=result.BytesRead,
+                recorded_hash=HistoryMediaHashObject(result.RecordedHash),observed_hash=result.ObservedHash is null?null:new {
+                    algorithm=result.ObservedHash.Algorithm,value=result.ObservedHash.Value,size_bytes=result.ObservedHash.SizeBytes},
+                content_verified=result.ContentVerified,scope="main_media",read_only=true,deletion_supported=false,
+                observation_semantics=OrdinaryMediaVerificationService.ObservationSemantics },requestId);
+        }
+        catch(ApiException) { throw; }
+        catch { throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Media verification history is temporarily unavailable."); }
+    }
+
+    private string VerifyOrdinaryAttachments(string id,HttpRequest request,string body,string requestId,CancellationToken cancellation)
+    {
+        if(request.Query.Count!=0)throw new ApiException(400,"INVALID_ARGUMENT","Attachment verification does not accept query parameters.");
+        if(body.Length!=0)
+        {
+            try
+            {
+                using var json=JsonDocument.Parse(body);
+                if(json.RootElement.ValueKind!=JsonValueKind.Object || json.RootElement.EnumerateObject().Any())
+                    throw new ApiException(400,"INVALID_ARGUMENT","Only an empty JSON object is accepted.");
+            }
+            catch(JsonException) { throw new ApiException(400,"INVALID_ARGUMENT","Only an empty JSON object is accepted."); }
+        }
+        try {id=Uri.UnescapeDataString(id);OrdinaryArtifactCheckService.ValidateRecordingId(id);}
+        catch(ArgumentException) { throw new ApiException(400,"INVALID_ARGUMENT","The recording history id is invalid."); }
+        if(_attachmentVerificationGateway is null)throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Attachment verification is not configured.");
+        try
+        {
+            var result=_attachmentVerificationGateway.VerifyAsync(id,cancellation).GetAwaiter().GetResult();
+            if(result is null)throw new ApiException(404,"RECORDING_HISTORY_NOT_FOUND","No ordinary recording history entry exists for this id.");
+            return ApiResponse.Ok(new {
+                recording_id=result.RecordingId,check_started_at_utc=result.CheckStartedAtUtc,check_completed_at_utc=result.CheckCompletedAtUtc,
+                check_state=result.CheckState,comparison=result.Comparison,reason_code=result.ReasonCode,bytes_read=result.BytesRead,
+                items=result.Items.Select(item=>new {
+                    name=item.Name,check_state=item.CheckState,comparison=item.Comparison,reason_code=item.ReasonCode,bytes_read=item.BytesRead,
+                    recorded_hash=HistoryMediaHashObject(item.RecordedHash),observed_hash=item.ObservedHash is null?null:new {
+                        algorithm=item.ObservedHash.Algorithm,value=item.ObservedHash.Value,size_bytes=item.ObservedHash.SizeBytes},
+                    content_verified=item.ContentVerified,check_started_at_utc=item.CheckStartedAtUtc,check_completed_at_utc=item.CheckCompletedAtUtc }),
+                content_verified=result.ContentVerified,scope="bundle_attachments",read_only=true,deletion_supported=false,
+                observation_semantics=OrdinaryAttachmentVerificationService.ObservationSemantics },requestId);
+        }
+        catch(ApiException) { throw; }
+        catch { throw new ApiException(503,"RECORDING_HISTORY_UNAVAILABLE","Attachment verification history is temporarily unavailable."); }
+    }
+
+    private static object? HistoryMediaHashObject(OrdinaryMediaHashSnapshot? hash) => hash is null ? null : new
+    { algorithm = hash.Algorithm, value = hash.Value, basis = hash.Basis, size_bytes = hash.SizeBytes };
+
     private static object? HistoryBundleObject(OrdinaryRecordingBundleSnapshot? bundle) => bundle is null ? null : new
     {
         status = bundle.Status, path = bundle.Path, error_code = bundle.ErrorCode,
         contents_evidence_version = bundle.ContentsEvidence is null ? (int?)null : RecordingBundleContentsEvidence.EvidenceVersion,
-        contents = bundle.ContentsEvidence?.Contents.Select(item => new {
-            name = item.Name, media_type = item.MediaType, size_bytes = item.SizeBytes }).ToArray()
+        contents = bundle.ContentsEvidence?.Contents.Select((item, ordinal) => new {
+            name = item.Name, media_type = item.MediaType, size_bytes = item.SizeBytes,
+            content_hash = HistoryMediaHashObject(bundle.ContentHash(ordinal)) }).ToArray()
     };
 
     private static object HistoryEntryObject(OrdinaryRecordingHistorySnapshot item, bool includeFileMetadata) => new
@@ -983,6 +1070,7 @@ public sealed class ApiServer
         output_size_bytes = item.OutputSizeBytes,
         output_duration_seconds = item.OutputDurationSeconds,
         bundle = HistoryBundleObject(item.Bundle),
+        media_hash = HistoryMediaHashObject(item.MediaHash),
         output_file = includeFileMetadata ? ReadOutputFileMetadata(item.OutputPath) : null,
         started_at = item.StartedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
         completed_at = item.CompletedAtUtc?.ToString("O", CultureInfo.InvariantCulture),
@@ -3466,6 +3554,8 @@ public sealed class ApiServer
                 target_key_window_semantics = "window_surface",
                 target_key_window_match = "exact_frozen_window_facts_v1",
                 bundle_contents_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                media_hash_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
+                media_hash_algorithm = "sha256", media_hash_basis = "bundle_generation",
                 bundle_contents_evidence_version = 1,
                 bundle_contents_max = 5,
                 bundle_contents_semantics = "recorded_generation_bytes_not_current_file_identity",
@@ -3501,6 +3591,8 @@ public sealed class ApiServer
             {
                 supported = _engine.OrdinaryRecordingHistory is not null,
                 scope = "ordinary_video",
+                media_hash_supported = _engine.OrdinaryRecordingHistory is not null,
+                media_hash_algorithm = "sha256", media_hash_basis = "bundle_generation",
                 cross_restart_readable = _engine.OrdinaryRecordingHistory is not null,
                 pagination = "keyset",
                 page_size_default = 20,
@@ -3509,6 +3601,26 @@ public sealed class ApiServer
                 detail_endpoint = "/api/v1/recording-history/{recording_id}",
                 auto_execution_supported = false,
                 screenshot_series_supported = false
+            },
+            ordinary_media_verification = new
+            {
+                supported = _mediaVerificationGateway is not null,
+                endpoint = "/api/v1/recording-history/{recording_id}/artifacts/verify-media", scope = "main_media",
+                algorithm = "sha256", reference_basis = "bundle_generation",
+                max_bytes = OrdinaryMediaVerificationService.MaxBytes, deadline_ms = OrdinaryMediaVerificationService.DeadlineMs,
+                max_concurrent = OrdinaryMediaVerificationService.MaxConcurrent, read_only = true, deletion_supported = false,
+                observation_semantics = OrdinaryMediaVerificationService.ObservationSemantics
+            },
+            ordinary_attachment_verification = new
+            {
+                supported = _attachmentVerificationGateway is not null,
+                endpoint = "/api/v1/recording-history/{recording_id}/artifacts/verify-attachments", scope = "bundle_attachments",
+                algorithm = "sha256", reference_basis = "bundle_publication",
+                max_files = OrdinaryAttachmentVerificationService.MaxFiles, max_distinct_ancestors = OrdinaryAttachmentVerificationService.MaxDistinctAncestors,
+                max_bytes = OrdinaryAttachmentVerificationService.MaxBytes, deadline_ms = OrdinaryAttachmentVerificationService.DeadlineMs,
+                max_concurrent = OrdinaryAttachmentVerificationService.MaxConcurrent, concurrency_scope = "host_content_verification",
+                shared_with = "/api/v1/recording-history/{recording_id}/artifacts/verify-media",
+                read_only = true, deletion_supported = false, observation_semantics = OrdinaryAttachmentVerificationService.ObservationSemantics
             },
             ordinary_artifact_check = new
             {

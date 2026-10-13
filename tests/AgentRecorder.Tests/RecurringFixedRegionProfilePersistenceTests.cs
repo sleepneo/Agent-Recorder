@@ -590,6 +590,7 @@ public sealed class RecurringFixedRegionProfilePersistenceTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

@@ -42,7 +42,7 @@ public sealed class SqliteOperationalStoreTests
 
         using var connection = database.Store.OpenConnection();
         Assert.Equal(
-            new[] { "authorized_capture_scopes", "consent_leases", "fixed_region_profile_create_idempotency", "fixed_region_profile_directory", "future_window_authorizations", "lease_uses", "ordinary_bundle_contents", "ordinary_bundle_contents_boundary", "ordinary_bundle_contents_items", "ordinary_bundle_identity", "ordinary_bundle_identity_boundary", "ordinary_bundle_identity_items", "ordinary_publication_anchors", "ordinary_recording_bundles", "ordinary_recording_history", "ordinary_recording_target_boundary", "ordinary_recording_targets", "ordinary_recording_window_targets", "ordinary_window_target_boundary", "plan_history_locator", "plan_occurrences", "plans", "recording_run_output_evidence", "recording_runs", "recurring_advancement_operations", "recurring_consent_leases", "recurring_fixed_region_profile_versions", "recurring_lease_local_approvals", "recurring_lease_uses", "recurring_occurrence_execution_specs", "recurring_occurrence_slots", "recurring_plan_profile_bindings", "recurring_schedule_cursors", "recurring_schedule_versions", "recurring_setup_preparations", "required_once_authorized_specs", "required_once_execution_authorizations", "required_once_setup_intents", "schema_migrations", "setup_intents", "standing_lease_safety_operations", "unattended_safety_state" },
+            new[] { "authorized_capture_scopes", "consent_leases", "fixed_region_profile_create_idempotency", "fixed_region_profile_directory", "future_window_authorizations", "future_window_publication_anchors", "future_window_publication_boundary", "lease_uses", "ordinary_bundle_attachment_hash", "ordinary_bundle_attachment_hash_boundary", "ordinary_bundle_attachment_hash_items", "ordinary_bundle_contents", "ordinary_bundle_contents_boundary", "ordinary_bundle_contents_items", "ordinary_bundle_identity", "ordinary_bundle_identity_boundary", "ordinary_bundle_identity_items", "ordinary_media_hash", "ordinary_media_hash_boundary", "ordinary_publication_anchors", "ordinary_recording_bundles", "ordinary_recording_history", "ordinary_recording_target_boundary", "ordinary_recording_targets", "ordinary_recording_window_targets", "ordinary_window_target_boundary", "plan_history_locator", "plan_occurrences", "plans", "recording_run_output_evidence", "recording_runs", "recurring_advancement_operations", "recurring_consent_leases", "recurring_fixed_region_profile_versions", "recurring_lease_local_approvals", "recurring_lease_uses", "recurring_occurrence_execution_specs", "recurring_occurrence_slots", "recurring_plan_profile_bindings", "recurring_schedule_cursors", "recurring_schedule_versions", "recurring_setup_preparations", "required_once_authorized_specs", "required_once_execution_authorizations", "required_once_setup_intents", "schema_migrations", "setup_intents", "standing_lease_safety_operations", "unattended_safety_state" },
             GetTables(connection).OrderBy(name => name));
 
         Assert.Equal(new[]
@@ -833,7 +833,7 @@ public sealed class SqliteOperationalStoreTests
 
         using var connection = database.Store.OpenConnection();
         Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, ScalarInt64(connection, "SELECT COUNT(*) FROM schema_migrations;"));
-        Assert.Equal(41, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
+        Assert.Equal(48, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
         Assert.Contains("lease_uses", GetTables(connection));
         Assert.Contains("ordinary_recording_history", GetTables(connection));
     }
@@ -1032,6 +1032,11 @@ public sealed class SqliteOperationalStoreTests
             (33, "schema_v33_ordinary_bundle_contents", "5c6d8b87ed8746296bedf6d8c5c39807f4108de86e278b87600b26696fc205ec"),
             (34, SqliteSchemaV34.MigrationName, SqliteSchemaV34.MigrationChecksum),
             (35, SqliteSchemaV35.MigrationName, SqliteSchemaV35.MigrationChecksum),
+            (36, SqliteSchemaV36.MigrationName, SqliteSchemaV36.MigrationChecksum),
+            (37, SqliteSchemaV37.MigrationName, SqliteSchemaV37.MigrationChecksum),
+            (38, SqliteSchemaV38.MigrationName, SqliteSchemaV38.MigrationChecksum),
+            (39, SqliteSchemaV39.MigrationName, SqliteSchemaV39.MigrationChecksum),
+            (40, SqliteSchemaV40.MigrationName, SqliteSchemaV40.MigrationChecksum),
         };
 
         var actual = SqliteSchemaCatalog.Migrations

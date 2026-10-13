@@ -7,6 +7,13 @@ public sealed record OrdinaryRecordingBundleSnapshot(string Status, string? Path
     RecordingBundleContentsEvidence? ContentsEvidence = null)
 {
     internal BundleIdentityEvidence? IdentityEvidence { get; init; }
+    internal BundleMediaHashEvidence? MediaHashEvidence { get; init; }
+    internal BundlePublicationReceipt.AttachmentHashes? ContentHashEvidence { get; init; }
+    internal OrdinaryMediaHashSnapshot? ContentHash(int ordinal) => ContentHashEvidence is { } hashes
+        ? new(BundlePublicationReceipt.AttachmentHashes.Algorithm, hashes.Values[ordinal],
+            BundlePublicationReceipt.AttachmentHashes.Basis, hashes.Identity.Anchors[ordinal].Length) : null;
+    internal OrdinaryMediaHashSnapshot? MediaHash => MediaHashEvidence is { } hash
+        ? new(BundleMediaHashEvidence.Algorithm, hash.Value, BundleMediaHashEvidence.Basis, hash.Anchor.Length) : null;
     public RecordingBundleContentsEvidence? ContentsEvidence { get; init; } =
         ContentsEvidence is null ? null : new(ContentsEvidence.Contents);
 }

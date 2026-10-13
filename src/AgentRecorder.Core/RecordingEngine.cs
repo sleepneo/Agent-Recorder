@@ -282,6 +282,7 @@ public sealed class RecordingEngine : IDisposable
             FutureWindowProcessIdentity.GetCurrentSessionId() ?? -1);
     };
 
+    internal Func<FutureWindowIdentityHold, FutureWindowAuthorizationScope, string?>? FutureWindowPinnedTargetValidatorForTests { get; set; }
     internal Func<FutureWindowOneShotExecutionTicket, string?>? FutureWindowEnvironmentValidatorForTests { get; set; }
 
     /// <summary>
@@ -459,6 +460,32 @@ public sealed class RecordingEngine : IDisposable
             return rec.IsFinalized && rec.State == RecState.failed &&
                 rec.TrustedLifecycleAbortReason is CaptureAbortReason.StorageSpaceLow or CaptureAbortReason.StorageCapacityUnavailable
                 ? rec.Config.StorageSafety?.FailureCode : null;
+    }
+
+    // Only the exact committed future run can read its arbitrated canonical
+    // terminal media. The private receipt stays in-process; no DTO signs it.
+    internal FutureWindowMediaPublication? ReadFutureWindowPublication(FutureWindowStartCommitReceipt start)
+    {
+        if (!_recs.TryGetValue(start.RunId, out var rec)) return null;
+        lock (rec)
+        {
+            var ticket = rec.FutureWindowOneShotTicket;
+            var meta = rec.LastMeta;
+            if (!rec.IsFutureWindowOneShotExecution || rec.IsOrdinaryLocalRequest ||
+                !rec.IsFinalized || rec.State != RecState.completed || ticket is null ||
+                !ReferenceEquals(ticket.Receipt, start) || rec.Id != start.RunId ||
+                rec.OutputPath != start.Authorization.OutputFilePath || rec.Config.OutputPath != rec.OutputPath ||
+                meta is null || !string.Equals(meta.Container, "mp4", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(meta.OutputPath, rec.OutputPath, StringComparison.OrdinalIgnoreCase) ||
+                meta.SizeBytes <= 0 || !double.IsFinite(meta.DurationSeconds) || meta.DurationSeconds <= 0 ||
+                meta.DurationSeconds > start.Authorization.MaximumDurationSeconds + 2)
+                return null;
+            if (meta.PublicationReceipt is { } receipt && (!receipt.Anchor.Valid ||
+                receipt.Anchor.Length != meta.SizeBytes ||
+                !string.Equals(receipt.Anchor.Path, rec.OutputPath, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("Future media publication binding is invalid.");
+            return new(rec.OutputPath, meta.SizeBytes, checked((long)Math.Round(meta.DurationSeconds * 1000)), meta.PublicationReceipt);
+        }
     }
 
     /// <summary>
@@ -3120,7 +3147,12 @@ public sealed class RecordingEngine : IDisposable
         if (FutureWindowEnvironmentValidatorForTests?.Invoke(ticket) is { Length: > 0 } injectedFailure)
             throw new CaptureAuthorizationStartException(injectedFailure);
 
-        if (!FutureWindowProcessIdentity.RevalidatePinnedTarget(
+        if (FutureWindowPinnedTargetValidatorForTests is { } targetValidator)
+        {
+            if (targetValidator(hold, authorization) is { Length: > 0 } targetFailure)
+                throw new CaptureAuthorizationStartException(targetFailure);
+        }
+        else if (!FutureWindowProcessIdentity.RevalidatePinnedTarget(
                 hold,
                 authorization.ExecutableIdentity,
                 approvedAt.Value,
@@ -6401,11 +6433,13 @@ public sealed class RecordingEngine : IDisposable
     {
         request = null!;
 
-        // Bundle is only for successful FFmpeg MP4 recordings.
-        bool isFfmpegMp4 = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) &&
-                           string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
+        // Keep FFmpeg's existing scope; WGC Bundle delivery is ordinary local video only.
+        bool isEligibleBackend = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
+            rec.IsOrdinaryLocalRequest && rec.Mode == "video" &&
+            rec.BackendType is "wgc-continuous" or "wgc-window-av-split";
+        bool isMp4 = string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
 
-        if (_bundleGenerator == null || !isFfmpegMp4)
+        if (_bundleGenerator == null || !isEligibleBackend || !isMp4)
             return false;
 
         // Exactly-once guard: natural exit and Stop() may both reach here.
@@ -6446,6 +6480,7 @@ public sealed class RecordingEngine : IDisposable
         {
             rec.OrdinaryBundleOperation = OrdinaryRecordingBundleOperation.Create(rec.Id, request.MediaPath);
             request.PublicationOperationId = rec.OrdinaryBundleOperation.OperationId;
+            if (meta.PublicationReceipt is { } receipt) request.BindMediaPublication(receipt);
         }
         return true;
     }
@@ -6482,7 +6517,8 @@ public sealed class RecordingEngine : IDisposable
             // Persist only the frozen, registered directory and stable failure code.
             var durable = result.Success && string.Equals(result.BundlePath, operation.BundlePath, StringComparison.Ordinal)
                 ? new OrdinaryRecordingBundleSnapshot("ready", operation.BundlePath, null, result.ContentsEvidence)
-                    { IdentityEvidence = result.PublicationReceipt?.Evidence }
+                    { IdentityEvidence = result.PublicationReceipt?.Evidence, MediaHashEvidence = result.MediaHashEvidence,
+                        ContentHashEvidence = result.PublicationReceipt?.ContentHashes }
                 : new OrdinaryRecordingBundleSnapshot("failed", operation.BundlePath,
                     OrdinaryRecordingBundleOperation.IsErrorCode(result.ErrorCode) ? result.ErrorCode : RecordingBundleErrorCodes.GenerationFailed);
             writer.TryPublishBundle(new(operation, durable));

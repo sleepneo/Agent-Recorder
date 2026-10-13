@@ -1,6 +1,6 @@
 # Agent Recorder API 手册
 
-本文描述当前源码合同（SQLite v35），包含已验收但尚未进入 v0.1.15 发布包的历史、健康、产物元数据检查与只读保留预览。调用前读取当前实例 `/capabilities`；生成阶段持久媒体摘要、内容核验和保留删除尚未实现。
+本文描述当前源码合同（SQLite v40，公开包仍 v0.1.15），包含尚未进入该发布包的历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、未来窗口成片原始身份与只读保留预览。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，保留删除尚未实现。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
@@ -1741,7 +1741,9 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 10. 结构化录制产物（Recording Bundle）
 
-成功的 FFmpeg MP4 录制完成后，会在视频文件旁自动生成结构化产物包。例如 `D:\Videos\demo.mp4` 对应：
+普通本地逐次确认 video 的成功 MP4，明确后端 `wgc-continuous`（无声显示器、选区或严格窗口）及 `wgc-window-av-split`（严格窗口固定系统 loopback）也复用下述五附件 Bundle 和持久生成摘要链。既有 raw/quick/Profile/nested 请求规则、后端资格、实验开关和音频矩阵继续有效；不扩大 standing/recurring/required/future 独立执行。Bundle 异步生成，失败保留已完成 MP4。历史 GET 不哈希或补填内容，显式核验复用既有端点和预算；native 证据不可用时保持原兼容未知合同。源码验收使用合成输入与正式会话/发布链；native helper真实采集下的专项交付验收尚待进行。公开v0.1.15包不包含本增量。
+
+上述支持范围内的FFmpeg及普通WGC MP4录制成功后，会在视频文件旁自动生成结构化产物包。例如 `D:\Videos\demo.mp4` 对应：
 
 ```text
 D:\Videos\demo.bundle\
@@ -2304,6 +2306,8 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 统一只读任务历史
 
+当前源码已持久保存未来窗口成功 MP4 终态与正式 publisher 的私有原始身份，按精确 authorization/run 和冻结输出绑定，在同一 SQLite 事务提交（append-only v40）。发布时 native 身份不可得为显式未知；v40 前旧行保留旧未知，不扫描或回填媒体。统一历史在既有快照内对所选行进行有界 indexed 批量验证；现代缺标记或绑定损坏沿既有 unavailable 响应失败关闭。公共字段、端点、capability、Bundle 交付、内容核验及授权范围均未增加。这是历史发布身份，不代表当前媒体字节完整性，也不是已发布 portable 包的版本公告。
+
 用户说“查看最近做过的录制任务”“查看某段时间的任务”时，先读
 `GET /api/v1/capabilities` 的 `unified_history`。App 支持 ordinary、plan、future_window；
 Headless 本轮只支持 ordinary，不启动另外两类 runtime。`source=all` 是该宿主声明的
@@ -2498,9 +2502,17 @@ shared_output_path 之后，若 standing 的 authorized_capture_scopes.output_di
 
 standing 与 required-once API 的目录规范带尾分隔符；future-window 通常去尾分隔符、盘根保留。查询仅对候选原始文本切出文件名及父目录有尾/无尾两种有界形式（盘根两种均保留如 C:\），使用v29复合索引的两列比较；recurring 直接用冻结完整路径单列索引。复用既有版本化 OrdinalIgnoreCase collation，不LIKE、不解析全部scope/proof、不调用输出readiness、不规范化全部引用者、不读媒体/遍历目录。仅适配已有规范存储形式；非规范历史文本、别名及尚未具体冻结的用途不在无引用证明内，不能从预览推导可清理。
 
+同一批查覆盖required_once_setup_intents.output_directory + frozen_file_name，完整精确用途复用setup_output_path；尚未选区/创建批准、无authorized spec、跨身份/会话、页外/日期外及rejected/expired等状态均保守保护。有效不同名称不匹配但仍计入全页上限。V39仅新增逐次确认setup目录/名称复合索引（两列原raw路径collation）及receipt，V1–V38定义/checksum/索引不变。四来源共用去重requested目录、同只读快照与全页500/LIMIT501，在任何探针前完成；复用类型/完整字节/NUL/字符投影检查、exact > unknown > template优先级。V39索引/receipt缺失或损坏失败关闭，读请求不修复。这是潜在输出用途，不是当前批准、授权或删除许可。
+
+前置输出用途保护：在原 nested/shared_output_path/planned_output_path 之后、锚点/Bundle及全部文件探针之前，setup_intents.output_directory + frozen_file_name 的完整精确用途返回 setup_output_path，即使尚未生成 authorized spec。早期无输出字段 intent 不创造路径。周期 setup 的 recurring_output_directory/recurring_filename_prefix，以及 recurring_fixed_region_profile_versions 全部不可变版本的目录/prefix/template，仅对 renderer 可表达的 prefix-yyyyMMddTHHmmssZ-64位hex摘要.mp4 返回 planned_output_template。这是配置可能覆盖范围，不是已冻结文件引用、当前录制授权或执行许可；过期 intent、非latest版本及逻辑删除 Profile 仍保守保护。
+
+只比较候选直接父目录的两种尾分隔形式及既有 raw OrdinalIgnoreCase collation；不LIKE/glob、不GetFullPath外来记录、不解析磁盘、不枚举未来occurrences。命名按有界prefix/domain及真实日期验证，支持连字符、下划线、中文及Windows大小写别名，不做Unicode规范化。其他盘、Videos2、子目录、不同prefix、无效日期/摘要及同目录普通旧文件不匹配有效模板。相关已选中固定文件名/prefix/template缺失、非法或冲突时，局部返回 pending_output_use_unknown；精确setup用途优先于局部未知，未知优先于模板，原nested/shared/frozen保护优先级不变。只公开稳定reason，不公开其他用户ID、Profile ID、配置prefix字段、用途数量或引用者清单。
+
+V38仅新增三个目录前导索引和receipt，不改V1–V37定义/checksum/trigger、表或业务数据。去重候选目录尾分隔形式后，一次参数化UNION ALL索引批查三来源，与当前页/原关系/anchors共享SQLite只读事务。全页最多选中500输出用途，LIMIT501整页503且在任何FS probe前失败，不截断返回无用途；同目录固定setup行即使有效文件名不同也计入该保守上限。一条配置不随100候选重复计数。SQL仅投影255字符以内固定文件名、128以内prefix及200以内template；超长或非text字段在物化前变成局部未知证据。SQL投影在SQLite层、GetString前拒绝完整相关目录/文件名/prefix/template中的NUL，不能将坏后缀截短后解释为有效事实。坏关联行保留未知用途并计入500总量；仍仅用原索引raw collation选关系，选中的坏目录通过可信requested目录关联，不当作canonical证据。SQL要求text、UTF-8字节数不超过原字符上限的四倍、无NUL及原SQLite字符上限（目录含尾分隔最多1025）；后续UTF-16/domain上限不变，保留64 Rune合法Unicode前缀。schema/index/collation/receipt损坏整页503；无关目录坏行不解析。新保护项age_candidate=true、observed_file_bytes=null，原元数据预算及两个显式核验API不变。快照不承诺完整引用图、未来无用途或删除授权。
+
 当前页、嵌套标志、四来源明确路径及四来源冻结用途标志在同一只读 SQLite 事务快照中，经既有 writer 屏障读取；最多100候选的参数化有界批量 EXISTS 使用 v25 parent 索引、v28 四个路径索引及v29四个冻结用途索引。缺失/非法私有 evidence、provider/query/schema/receipt/collation 故障整页503，不默认无引用、不提前探针、不在读请求修复。v28与v29各仅增加四索引及receipt，v1–v28既有定义/checksum、表列、触发器、业务内容不变。OperationalStore 集中建连注册固定版本 AGENTRECORDER_PATH_ORDINAL_IGNORE_CASE_V1，使用原始路径的纯 StringComparer.OrdinalIgnoreCase（含非ASCII大小写），不回退 SQLite NOCASE；不trim/补全相对路径/Unicode规范化/解析链接或8.3/UNC/扩展路径别名。大小写敏感目录可能保守过度保护；不同文本别名指向同一物理文件仍不在本轮证明内。
 
-上述嵌套、共享路径或冻结用途项的 evaluation=protected；若已满足时间和词法范围，age_candidate 仍为 true，但 observed_file_bytes=null，计入 unknown_candidate_file_count、不加入 observed_candidate_bytes。时间候选计数不是可删计数，字节统计不是可释放空间。关系在快照结束后及跨页仍可变化；预览不冻结或授权未来删除。本轮覆盖 ordinary 嵌套、四个明确路径列和四类已具体冻结用途；尚未具体生成的计划/待执行预留、Profile配置引用、Bundle/marks/缩略图和物理身份仍后置。快照之后新增引用不在本次预览中，未来清理仍须重新验证完整引用与物理身份；未发现引用不代表无任何引用。
+上述嵌套、共享路径或冻结用途项的 evaluation=protected；若已满足时间和词法范围，age_candidate 仍为 true，但 observed_file_bytes=null，计入 unknown_candidate_file_count、不加入 observed_candidate_bytes。时间候选计数不是可删计数，字节统计不是可释放空间。关系在快照结束后及跨页仍可变化；预览不冻结或授权未来删除。此关系层覆盖 ordinary 嵌套、四个明确路径列、四类已具体冻结用途，以及 前置setup固定输出和两类模板范围；其他尚未具体生成的计划用途不构成完整无引用证明。Bundle与物理身份沿已有后续保护判断。快照之后新增引用不在本次预览中，未来清理仍须重新验证完整引用与物理身份；未发现引用不代表无任何引用。
 
 路径按 Windows 大小写不敏感及分隔符边界比较；相似前缀目录不算 Videos。设备/UNC/保留名称及非规范请求路径不探测。最多1024字符、从盘根起32个组件；保留盘根、Videos及各父目录的有界属性检查（最多32次），遇祖先链接/异常即保护。叶文件随后只开一个短生命周期 Windows SafeFileHandle：OPEN_EXISTING、FILE_READ_ATTRIBUTES、OPEN_REPARSE_POINT，不请求内容读取/写入/删除权限。叶最终属性、逻辑长度、链接数、删除状态、卷标识+完整128位file ID和写入时间来自同一句柄前后两次采样，不混入FileInfo.Length或第二次按路径取叶属性。每次查询basic/standard/id及最终路径；两个最终路径调用使用固定2048字符缓冲，不重试。仅明确移除系统标准\\?\盘符前缀后接受受支持的规范本地盘符路径，且两次都须与请求路径相等并满足Videos边界。
 
@@ -2549,27 +2561,32 @@ age_rule_match 仅增加有限的发布副本身份比较，不证明上游内�
       {
         "name": "metadata.json",
         "media_type": "application/json",
-        "size_bytes": 1234
+        "size_bytes": 1234,
+        "content_hash": null
       },
       {
         "name": "thumbnail.jpg",
         "media_type": "image/jpeg",
-        "size_bytes": 5678
+        "size_bytes": 5678,
+        "content_hash": null
       },
       {
         "name": "first_frame.png",
         "media_type": "image/png",
-        "size_bytes": 9012
+        "size_bytes": 9012,
+        "content_hash": null
       },
       {
         "name": "last_frame.png",
         "media_type": "image/png",
-        "size_bytes": 3456
+        "size_bytes": 3456,
+        "content_hash": null
       },
       {
         "name": "marks.json",
         "media_type": "application/json",
-        "size_bytes": 78
+        "size_bytes": 78,
+        "content_hash": null
       }
     ]
   }
@@ -2586,6 +2603,14 @@ age_rule_match 仅增加有限的发布副本身份比较，不证明上游内�
 旧 ready、没有明确清单的兼容 generator，以及 generating/failed/interrupted_unknown/not_applicable 两个新字段均为 null，不是假装已证实空集合；原未登记 Bundle 仍为 bundle:null。v33 增量迁移不读取或回填旧附件。新增必要登记丢失、残缺清单、错误版本/计数/类型/尺寸或录制/媒体/目录/operation 绑定损坏沿原 unavailable/503，不降级为旧未知。首次登记及 ready 状态/清单同事务提交；同 operation 同值重放幂等，冲突或终态迟到补清单拒绝。TryPublishBundle 的队列接受不等于持久成功。恢复只撤销生成中操作，不重新生成，已有 ready 清单重启后保留。
 
 三个历史投影在原 SQLite 读快照批量读取最多100项普通媒体/500项附件，与媒体、目标键、Bundle 及引用一致，不扫描目录或读取附件。鉴权、参数、target 筛选及 cursor 不变。capabilities.unified_history 根据普通服务公布 bundle_contents_supported_sources=["ordinary"]、bundle_contents_evidence_version=1、bundle_contents_max=5、bundle_contents_semantics="recorded_generation_bytes_not_current_file_identity"；未服务普通历史时支持来源列表为空。ready 仍被保留预览保护，损坏先于文件探针失败；bundle_included=false 和删除/reference/physical readiness=false 保持，记录大小不加入实测可回收字节。
+
+
+每项普通历史 `bundle.contents` 新增 nullable `content_hash`，可信时恰好四字段：`{"algorithm":"sha256","value":"<64 小写 hex>","basis":"bundle_publication","size_bytes":9012}`。五项摘要覆盖正式 Publisher 实际成功复制进原始附件对象的完整字节，复用原固定缓冲；Flush、连续 original holds、整目录无覆盖提交及提交后身份核对全部成功后才签发完整集合。私有证据绑定 recording、exact operation、媒体/Bundle 路径、固定 ordinal/name/size 和各项原始物理身份，在 SQLite V37 与 Bundle 状态、contents、identity 及独立主媒体摘要同事务保存。
+
+V37 不扫描文件、不回填旧行，metadata 内已有 hash 也不能补齐可信摘要。迁移前事实、公共 `Ready(...)`/仅清单结果、未绑定操作或缺原生身份保持 `content_hash: null`；新行缺必需标记、损坏/缺项/跨绑定集合 fail closed。普通列表、详情和 unified ordinary 从同一 SQLite 快照 indexed batch 读取，最多100个父项/500项附件，以第501行检测越界，不读取附件内容；其他 unified 来源没有此普通 Bundle 证据。
+
+`bundle_publication` 是生成发布时历史观察，不代表截图与视频共享时刻、捕获原始字节、附件当前完整性、可播放、未来完整性保证或删除授权。附件按需内容比较见下文；`artifacts/check` 仍仅元数据，`verify-media` 仍仅主 MP4，1 GiB/30秒/单 worker 合同不变。保留预览仍只读并保护 ready Bundle。本源码增量不在公开 v0.1.15 包中。
+
 
 ### 普通产物按需可用性检查
 
@@ -2647,3 +2672,59 @@ reason_code完整白名单为：
 capabilities.ordinary_artifact_check公布 supported、endpoint、scope=ordinary_video、max_files=6、max_distinct_ancestors=64、deadline_ms=3000、metadata_only=true、content_verification=false、deletion_supported=false、observation_semantics=sequential_point_in_time_metadata_not_atomic_snapshot、identity_scope=media_and_five_bundle_publication_anchors。描述当前源码能力，未表示已发布版本。DB快照与随后文件观察不是原子快照，祖先链未原子锁定，采样后变化、同大小原地写入、ID复用、别名及目录TOCTOU不能据此排除。保留预览继续保护ready Bundle，未知字节及deletion/reference/physical readiness不变，本检查不能授权清理或绕过引用保护。
 
 附件身份match不改变保留保护：原Bundle保护仍先于物理采样，不能自动获得删除权限。本接口不公开收据或身份材料，不执行内容哈希或播放检查。
+
+
+### 普通媒体生成阶段持久摘要（源码 V36）
+
+`GET /api/v1/recording-history`、其 `/{recording_id}` 详情的 `data.recording`、以及统一 `GET /api/v1/history` 的 ordinary 条目新增顶层 nullable `media_hash`：
+
+```json
+{"media_hash":{"algorithm":"sha256","value":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","basis":"bundle_generation","size_bytes":1048576}}
+```
+
+该值记录成功 Bundle 生成阶段观察到的主 MP4 字节。内部接线要求正式普通 MP4 媒体发布收据（FFmpeg路径及上述普通WGC路径）、已登记 recording/Bundle operation，以及同一实际读句柄上的读前/读后原生路径、物理身份、长度和属性核对。复用原来一次 SHA-256 流式读取，固定 64 KiB 缓冲并支持取消，读取期间拒绝共享写入/删除；成功后与 Bundle 状态、清单和身份事实同事务保存，并与本次 metadata.json 的 media.sha256 一致。重新读 metadata.json 不能签发可信摘要。
+
+旧历史、没有或失败的 Bundle、公共假 Ready 结果、无法取得可信原生绑定均返回 null。V36 不回填、不扫描媒体；历史查询沿现有一致 SQLite 快照按索引批量读取，最多 100 项，不读取媒体或附件内容。新登记缺标记、摘要类型/算法/hex/长度损坏及媒体/操作绑定错误使查询不可用，不降级为可信值；其他统一来源为 null，不增加 hash 筛选。当前内容比较必须显式调用下述 POST 核验端点。
+
+capabilities.recording_history.media_hash_supported 与 capabilities.unified_history.media_hash_supported_sources 声明 ordinary 支持，media_hash_algorithm=sha256、media_hash_basis=bundle_generation。摘要不代表捕获原始字节、当前完整性或可播放；哈希之后的变化、三次独立抽帧及附件内容不在此证据内。artifact-check 继续 metadata_only=true、content_verification=false；retention 仍只读并保护 ready Bundle，摘要不是删除授权。本功能未进入公开 v0.1.15 包。
+
+### 普通主视频显式内容核验
+
+`POST /api/v1/recording-history/{recording_id}/artifacts/verify-media` 使用现有 loopback、已配置 API key 和当前宿主隔离。请求体只能为空或 `{}`，查询参数及任何对象字段（路径、算法、期望 hash、预算等）均在派发前以 `400 INVALID_ARGUMENT` 拒绝；ID 沿用普通历史校验。不存在返回 `404 RECORDING_HISTORY_NOT_FOUND`，无配置或损坏事实返回 `503 RECORDING_HISTORY_UNAVAILABLE`，不泄露原生异常、物理 ID 或额外路径。
+
+既有 envelope 的 data 含 recording_id、check_started_at_utc、check_completed_at_utc、check_state、comparison、reason_code、bytes_read、recorded_hash、observed_hash、content_verified、scope=main_media、read_only=true、deletion_supported=false、observation_semantics=single_read_handle_point_in_time_comparison_not_future_integrity_guarantee。recorded_hash 为生成阶段持久保存的 algorithm/value/basis/size_bytes；完整稳定读取时 observed_hash 为 algorithm/value/size_bytes，算法固定 sha256、value 为64位小写hex。未知或部分读取的 observed_hash 为 null。
+
+check_state 为 completed/busy/timeout/cancelled/failed，comparison 为 match/mismatch/not_checked。只有完整有界读取、前后原生元数据及路径稳定、匹配原始物理身份、生成摘要相等时 content_verified=true。原对象同长度原地修改会返回 digest_mismatch/mismatch；同长度替代对象或大小变化分别为 publication_identity_mismatch/file_size_mismatch，comparison=not_checked，零内容读取。无可信摘要返回 recorded_hash_unavailable，不打开媒体；未完成或非MP4为 media_not_applicable。
+
+其余稳定 reason_code 包含 publication_anchor_unavailable、media_evidence_unknown、media_byte_limit、path_invalid、path_check_limit、ancestor_check_limit、ancestor_reparse_point、parent_not_directory、local_drive_unavailable、file_missing、file_inaccessible、unsafe_or_unknown_handle_metadata、metadata_unavailable、read_length_mismatch、metadata_changed、verification_failed、verification_busy、verification_deadline、verification_cancelled。它们描述本次尝试，不表示永久健康状态。部分、不稳定、取消及超时结果均为 not_checked、observed_hash=null、content_verified=false；bytes_read 是响应时冻结的进度。未取得可信事实前超时或无摘要时 recorded_hash 可为 null。
+
+capabilities 新增独立 ordinary_media_verification：supported、endpoint、scope=main_media、algorithm=sha256、reference_basis=bundle_generation、max_bytes=1073741824、deadline_ms=30000、max_concurrent=1、read_only=true、deletion_supported=false 及上述观测时间语义。截止从数据库派发前开始，包含实际句柄核对和释放。整个宿主最多一个 worker、不排队；超时或取消返回后仍挂起的 SQLite/native/读操作继续占用额度，真正退出才回收，重建 service/gateway 不能绕过。确认连接错误和宿主关闭关联取消；仅发送方向 FIN 不足以证明对端放弃接收，仍由总截止约束。
+
+同一 SQLite 快照冻结终态、Bundle、摘要和原锚点，无 V37、迁移、回填或修补。既有叶文件以 OPEN_REPARSE_POINT 只读打开，仅共享读；内容读取前在该实际句柄核实最终规范路径、长度、属性及完整物理身份。固定64 KiB缓冲流式读取，尾读不超过冻结剩余长度，最多1 GiB。ADS/UNC/device/reparse/目录/硬链接及未知原生证据保守拒绝，祖先最多64项；祖先不是原子锁，不声称消除目录TOCTOU或未来ID复用。
+
+结果仅比较本次句柄观察到的主媒体字节与 bundle_generation 摘要，不证明捕获原始字节、可播放、音画完整、附件完整、未来持续一致或安全删除。结果不持久保存，不调用 FFmpeg/ffprobe、播放、捕获或人工确认。旧三个历史投影、GET artifacts/check、retention preview 不触发核验；旧 ordinary_artifact_check 继续 metadata_only=true/content_verification=false，ready Bundle 与引用保护不变。
+
+
+### 显式按需核验五项 Bundle 附件（源码 V37）
+
+`POST /api/v1/recording-history/{recording_id}/artifacts/verify-attachments` 将固定顺序五项 metadata.json、thumbnail.jpg、first_frame.png、last_frame.png、marks.json 当前字节与持久 `bundle_publication` SHA-256 比较。带 `X-Agent-Recorder-Key`，请求体仅空体或 `{}`。即使普通 auth 关闭也必须配置并提供 key，沿当前 loopback/宿主隔离。所有 query 和 JSON 字段（包括重复字段、路径、名字、算法、hash、预算）均在 DB 派发前拒绝。参数/ID非法400，不存在404，无配置或损坏事实503，不泄露原生异常。
+
+只有 ordinary completed MP4、ready Bundle、完整可信 V37 五项 hash/身份集合才进入读取。`ReadArtifactFacts` 同一 SQLite 读事务冻结终态、contents、摘要和发布物理锚点。旧/未知/非ready/不适用返回 not_checked，不从目录、metadata 或附件重建证据，不回填 DB；不新增迁移，仍 V37。
+
+**整请求**上限五文件、64个去重祖先、**64 MiB（67,108,864字节）及30秒**，包含 DB 派发、祖先/native、读取和实际关闭。可信长度 checked 累加超限先于内容 open 拒绝。沿已有 canonical 本地路径/drive policy，拒绝 UNC/device/ADS、reparse、非目录祖先/非文件叶、硬链接、删除待决或未知 native 事实。逐项一个 OPEN_REPARSE_POINT/OVERLAPPED、FileShare.Read 实际句柄，64 KiB缓冲完整SHA-256；读取前核对原身份和长度，替换/长度不符不hash。读取后同句柄事实、实际Position/Length及关闭完成后才确认该项 observed_hash。
+
+附件与 `verify-media` 共享**宿主总并发1、无队列**，双向busy，重建service/gateway不能绕过。超时、明确断线/RST、host stop取消；单向FIN保持既有语义。挂起DB/native/read的超时/取消请求继续占名额，到实际句柄全部关闭、worker退出才释放。主MP4原1 GiB/30秒预算保持。
+
+响应含 recording_id、UTC check_started_at_utc/check_completed_at_utc、check_state（completed/busy/timeout/cancelled/failed）、comparison（match/mismatch/not_checked）、reason_code、总bytes_read、items、content_verified、scope=bundle_attachments、read_only=true、deletion_supported=false 和 observation_semantics。事实尚未取得时 items可为空，取得后固定五项顺序。每项仅 name、check_state/comparison/reason_code、bytes_read、可空UTC观察开始/结束、recorded_hash（algorithm/value/basis=bundle_publication/size_bytes）、完整稳定时的observed_hash（algorithm/value/size_bytes）及content_verified；不公开额外路径、物理ID、operation、receipt、异常文本。
+
+digest_match表示该项完整稳定读取匹配；digest_mismatch区分身份相同/同长原对象内容改写。publication_identity_mismatch、file_size_mismatch、unsafe_or_unknown_handle_metadata、file_missing、file_inaccessible、read_length_mismatch、metadata_changed等不能确认内容。第一项非匹配后停止，已关闭完整前缀观察可保留，后续项not_checked；不能用前缀或可访问当整集合成功。超时/取消冻结返回进度，后台后来结束不改变已返回结果，未完成项不返回prefix observed_hash。仅五项全匹配、关闭且未超过截止/取消时整请求content_verified=true/comparison=match。
+
+这些是**顺序读句柄各自时间点观察，不是同时/原子五文件快照**，前项在响应时可能已变化；不代表共享截图时刻、可播放、未来完整性或删除授权。与主MP4端点组合也不是原子六文件快照。history GET、retention和旧artifacts/check不触发内容核验，旧check继续metadata-only。
+
+capabilities.ordinary_attachment_verification单独声明 supported/endpoint/scope=bundle_attachments、algorithm=sha256、reference_basis=bundle_publication、max_files=5、max_distinct_ancestors=64、max_bytes=67108864、deadline_ms=30000、max_concurrent=1、concurrency_scope=host_content_verification、shared_with指向verify-media、read_only/deletion_supported及顺序观察语义。本节是工作区源码能力，未进入公开v0.1.15发布包。
+
+示例：共享名额占用、尚未读取事实时返回：
+
+```json
+{"recording_id":"rec_example","check_started_at_utc":"2026-10-12T01:00:00Z","check_completed_at_utc":"2026-10-12T01:00:00Z","check_state":"busy","comparison":"not_checked","reason_code":"verification_busy","bytes_read":0,"items":[],"content_verified":false,"scope":"bundle_attachments","read_only":true,"deletion_supported":false,"observation_semantics":"sequential_read_handle_point_in_time_comparisons_not_simultaneous_or_atomic_snapshot_earlier_files_may_change_before_response_not_future_integrity_guarantee"}
+```

@@ -43,6 +43,7 @@ public sealed class RetentionPreviewQueryService
                     e.NestedReference is null || !Enum.IsDefined(e.NestedReference.Value) ||
                     e.SharedOutputReference is null || !Enum.IsDefined(e.SharedOutputReference.Value) ||
                     e.PlannedOutputReference is null || !Enum.IsDefined(e.PlannedOutputReference.Value) ||
+                    !Enum.IsDefined(e.PendingOutputUse) ||
                     e.PublicationAnchor is { } anchor && (!anchor.Valid || e.Entry.Status != "completed" ||
                         e.Entry.CompletedAtUtc is null || anchor.Length != e.Entry.OutputSizeBytes ||
                         !string.Equals(anchor.Path, e.Entry.OutputPath, StringComparison.OrdinalIgnoreCase))) ||
@@ -96,6 +97,15 @@ public sealed class RetentionPreviewQueryService
             throw new InvalidDataException("Retention planned path matching is unavailable.");
         if (evidence.PlannedOutputReference == PlannedOutputPathReferenceState.Referenced)
             return Result("protected", "planned_output_path", true, path);
+
+        var pendingReason = evidence.PendingOutputUse switch
+        {
+            PendingOutputUseState.SetupExact => "setup_output_path",
+            PendingOutputUseState.Template => "planned_output_template",
+            PendingOutputUseState.Unknown => "pending_output_use_unknown",
+            _ => null
+        };
+        if (pendingReason is not null) return Result("protected", pendingReason, true, path);
 
         if (evidence.PublicationAnchor is null) return Result("protected", "publication_identity_missing", true, path);
         if (!evidence.PublicationAnchor.Valid || evidence.PublicationAnchor.Length != item.OutputSizeBytes ||

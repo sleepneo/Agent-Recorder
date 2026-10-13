@@ -1,4 +1,5 @@
 using AgentRecorder.Infrastructure;
+using System.Security.Cryptography;
 
 namespace AgentRecorder.Capture;
 
@@ -6,8 +7,31 @@ namespace AgentRecorder.Capture;
 internal sealed class BundlePublicationReceipt
 {
     internal BundleIdentityEvidence Evidence { get; }
-    private BundlePublicationReceipt(BundleIdentityEvidence evidence) => Evidence = evidence;
+    internal AttachmentHashes ContentHashes { get; }
+    private BundlePublicationReceipt(BundleIdentityEvidence evidence, IReadOnlyList<string> values)
+    { Evidence = evidence; ContentHashes = AttachmentHashes.FromStored(evidence, values); }
     public override string ToString() => "BundlePublicationReceipt(private)";
+
+    // Issuance stays inside Publisher; reconstruction requires the fully validated durable identity set.
+    internal sealed class AttachmentHashes : IEquatable<AttachmentHashes>
+    {
+        internal const string Algorithm = "sha256";
+        internal const string Basis = "bundle_publication";
+        internal BundleIdentityEvidence Identity { get; }
+        internal IReadOnlyList<string> Values { get; }
+        private AttachmentHashes(BundleIdentityEvidence identity, IEnumerable<string> values)
+        {
+            var copy = values.Take(6).ToArray();
+            if (copy.Length != 5 || copy.Any(v => !BundleMediaHashEvidence.ValidValue(v)))
+                throw new InvalidDataException("Invalid attachment digest set.");
+            Identity = identity; Values = Array.AsReadOnly(copy);
+        }
+        internal static AttachmentHashes FromStored(BundleIdentityEvidence identity, IEnumerable<string> values) => new(identity, values);
+        public bool Equals(AttachmentHashes? other) => other is not null && Identity.Equals(other.Identity) && Values.SequenceEqual(other.Values);
+        public override bool Equals(object? other) => other is AttachmentHashes hashes && Equals(hashes);
+        public override int GetHashCode() { var hash = new HashCode(); hash.Add(Identity); foreach (var value in Values) hash.Add(value); return hash.ToHashCode(); }
+        public override string ToString() => "AttachmentHashes(private)";
+    }
 
     internal sealed class Publisher
     {
@@ -24,6 +48,7 @@ internal sealed class BundlePublicationReceipt
         {
             var streams = new List<FileStream>(5);
             var observations = new List<PublicationHandleObservation?>(5);
+            var hashes = new List<string>(5);
             var originalPaths = new List<string>(5);
             var operation = request.PublicationOperationId; // Freeze before any producer await.
             var originalHolds = new List<BundleOriginalAccess>(5);
@@ -50,11 +75,13 @@ internal sealed class BundlePublicationReceipt
                     originalPaths.Add(path);
                     StageForTests?.Invoke("create", output);
                     var buffer = new byte[81920]; long copied = 0; int read;
+                    using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                     while ((read = await source.ReadAsync(buffer, token).ConfigureAwait(false)) != 0)
                     {
                         if (checked(copied + read) > item.SizeBytes) throw new IOException("bundle_source_length_changed");
                         if (reservation is null) await output.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
                         else await reservation.WriteAsync(output, buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                        digest.AppendData(buffer, 0, read); // Only bytes whose write has completed.
                         copied += read; CopiedBytes += read; StageForTests?.Invoke("copy", output);
                     }
                     if (copied != item.SizeBytes || source.Length != copied) throw new IOException("bundle_source_length_changed");
@@ -62,6 +89,7 @@ internal sealed class BundlePublicationReceipt
                     // Structural checks are mandatory; optional physical evidence has a separate API seam.
                     RequireOriginal(output.SafeFileHandle, path, item.SizeBytes);
                     observations.Add(PublicationHandleObservation.Read(IdentityApi, output.SafeFileHandle, path));
+                    hashes.Add(Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant());
                 }
                 if (reservation is not null) await reservation.EnsureCapacityAsync(token).ConfigureAwait(false);
                 StageForTests?.Invoke("before_commit", null);
@@ -100,7 +128,7 @@ internal sealed class BundlePublicationReceipt
                 }
                 publication.ValidateAll(finalPaths, contents);
                 BundlePublicationReceipt? receipt = anchors.Count == 5 && operation is not null
-                    ? new(new(request.RecordingId, operation, request.MediaPath, finalPath, contents, anchors)) : null;
+                    ? new(new(request.RecordingId, operation, request.MediaPath, finalPath, contents, anchors), hashes) : null;
                 return RecordingBundleGenerationResult.Published(finalPath, contents, receipt);
             }
             finally

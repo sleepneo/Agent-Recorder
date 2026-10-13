@@ -363,7 +363,9 @@ internal static class Program
         var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider,
             unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity),
             retentionPreviewGateway: new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, _dataDir), historyIdentity),
-            artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)));
+            artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
+            mediaVerificationGateway: new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
+            attachmentVerificationGateway: new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)));
 
         server.SetObservationHealthGateway(CreateObservationHealthGateway(server,_readiness!,_dataDir));
 

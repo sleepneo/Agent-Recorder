@@ -1,3 +1,4 @@
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
@@ -317,28 +318,67 @@ internal sealed class SqliteFutureWindowAuthorizationRepository
         command.ExecuteNonQuery();
     }
 
-    internal void CompleteRun(
+    internal Action<SqliteConnection, SqliteTransaction>? BeforePublicationCommitForTests { get; set; }
+
+    internal bool CompleteRun(
         string authorizationId, string runId, bool success, string reasonCode,
-        string? outputPath, long? outputSizeBytes, long? actualDurationMs, DateTimeOffset nowUtc)
+        string? outputPath, long? outputSizeBytes, long? actualDurationMs, DateTimeOffset nowUtc,
+        PublicationReceipt? publicationReceipt = null, FutureWindowStartCommitReceipt? publicationRun = null)
     {
-        var terminalStatus = success ? "completed" : "failed";
         if (success && (string.IsNullOrWhiteSpace(outputPath) || outputSizeBytes is null or <= 0 || actualDurationMs is null or < 0))
             throw new ArgumentException("Successful future-window completion requires verified output evidence.");
+        if (!success && publicationReceipt is not null) throw new InvalidDataException("Failed runs cannot publish identity.");
         using var connection = _store.OpenConnection();
-        using var command = connection.CreateCommand();
+        using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: false);
+        FutureWindowAuthorizationRow? current;
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction; read.CommandText = "SELECT * FROM future_window_authorizations WHERE authorization_id=$id;";
+            Add(read, "$id", authorizationId); using var reader = read.ExecuteReader(); current = reader.Read() ? ReadRow(reader) : null;
+        }
+        if (current is null || current.RunId != runId) return false;
+        if (publicationReceipt is not null && (publicationRun is null || publicationRun.RunId != runId ||
+            publicationRun.Authorization.AuthorizationId != authorizationId ||
+            publicationRun.Authorization.AuthorizationDigest != current.ToScope().AuthorizationDigest ||
+            publicationRun.ProofId != current.ProofId || publicationRun.ProofNonce != current.ProofNonce ||
+            publicationRun.Process.WindowId != current.WindowId || publicationRun.Process.ProcessId != current.ProcessId ||
+            publicationRun.Process.ProcessCreationFileTimeUtc != current.ProcessCreationFileTimeUtc))
+            throw new InvalidDataException("Future publication start binding is invalid.");
+        var prior = FutureWindowPublicationStorage.Read(connection, transaction, new[] { current })[authorizationId];
+        if (current.StatusCode != "used" || current.RunStatus == "started_unknown")
+        {
+            // Identical accepted facts are idempotent; conflicting callbacks
+            // neither mutate the terminal winner nor upgrade unknown evidence.
+            return success && current.StatusCode == "completed" &&
+                current.OutputPath == outputPath && current.OutputSizeBytes == outputSizeBytes && current.ActualDurationMs == actualDurationMs &&
+                Equals(prior, publicationReceipt?.Anchor);
+        }
+        if (success && (!string.Equals(outputPath, current.ToScope().OutputFilePath, StringComparison.OrdinalIgnoreCase) ||
+            actualDurationMs > (current.MaximumDurationSeconds + 2L) * 1000 ||
+            publicationReceipt is { } receipt && (!receipt.Anchor.Valid || receipt.Anchor.Length != outputSizeBytes ||
+                !string.Equals(receipt.Anchor.Path, outputPath, StringComparison.OrdinalIgnoreCase))))
+            throw new InvalidDataException("Future publication does not match the frozen run.");
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
         command.CommandText = """
             UPDATE future_window_authorizations
             SET status_code=$status, reason_code=$reason, run_status=$run_status,
                 output_path=$output, output_size_bytes=$size, actual_duration_ms=$duration,
                 updated_at_utc=MAX(updated_at_utc,$now), version=version+1
-            WHERE authorization_id=$id AND run_id=$run AND status_code='used';
+            WHERE authorization_id=$id AND run_id=$run AND status_code='used'
+                AND run_status IN ('start_committed','recording','finalizing');
             """;
-        Add(command, "$status", terminalStatus); Add(command, "$reason", success ? null : reasonCode);
+        Add(command, "$status", success ? "completed" : "failed"); Add(command, "$reason", success ? null : reasonCode);
         Add(command, "$run_status", success ? "completed" : reasonCode == "authorization_revoked" ? "stopped" : "failed");
         Add(command, "$output", success ? outputPath : null); Add(command, "$size", success ? outputSizeBytes : null);
         Add(command, "$duration", success ? actualDurationMs : null); Add(command, "$now", ToDb(nowUtc));
         Add(command, "$id", authorizationId); Add(command, "$run", runId);
-        command.ExecuteNonQuery();
+        if (command.ExecuteNonQuery() != 1) return false;
+        if (success) FutureWindowPublicationStorage.Write(connection, transaction, current with {
+            StatusCode = "completed", RunStatus = "completed", OutputPath = outputPath, OutputSizeBytes = outputSizeBytes,
+            ActualDurationMs = actualDurationMs }, publicationReceipt);
+        BeforePublicationCommitForTests?.Invoke(connection, transaction);
+        transaction.Commit();
+        return true;
     }
 
     internal void MarkRevokedRunStopped(string authorizationId, string runId, DateTimeOffset nowUtc)

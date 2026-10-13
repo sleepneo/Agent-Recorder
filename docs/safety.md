@@ -322,8 +322,24 @@ observation, limited to six files, 64 distinct ancestors and a three-second
 deadline. Cancellation/timeout does not free shared capacity until the actual
 native worker ends. Matching size or original file identity does not prove
 unchanged contents, playability, audiovisual completeness or deletion safety.
-History queries themselves do not read artifact contents. The existing hash in
-Bundle metadata is not a durable trusted media-hash projection.
+History queries themselves do not read artifact contents. Formal generation
+persists media and attachment SHA-256 facts with the original publication
+identity and exact Bundle operation. Reading a hash from metadata alone cannot
+mint those private facts. Explicit verification compares current bytes through
+bounded read handles: main media is limited to 1 GiB, the five attachments to
+64 MiB total, and each request to 30 seconds and 64 ancestors. Both share one
+host content worker; timeout/cancellation retains admission until actual work
+ends. Sequential matches are not an atomic six-file snapshot or a promise of
+future integrity or deletion safety. Verification does not persist a permanent
+verified flag, and old unknown facts are not backfilled.
+
+Future-window successful completion separately commits its exact authorized
+Run, frozen output and original final publisher identity in one SQLite
+transaction. Revoked, failed and uncertain starts cannot gain an anchor from
+late callbacks. Missing modern markers or inconsistent private associations
+fail closed; legacy or unavailable-native observations remain unknown. This
+does not expand the grant, record ordinary history, verify current content or
+authorize deletion. Plan recording publication identities are still unfinished.
 
 Retention remains a read-only preview under the trusted host Videos root.
 Nested references, cross-source shared paths, frozen plan uses, Bundle states

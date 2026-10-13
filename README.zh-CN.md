@@ -20,7 +20,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 ## 人类用户如何使用
 
-当前已发布包为 v0.1.15。本工作区另已实现普通持久历史、统一索引查询、按需健康/产物元数据检查、只读保留预览，以及媒体/Bundle 发布与存储保护；这些源码增量尚未包含在该发布包中。自动删除、全盘配额、代码签名和安装器未完成。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
+当前已发布包为 v0.1.15。本工作区另已实现普通持久历史、统一索引查询、按需健康/产物元数据检查、主视频与五附件显式内容核验、普通 WGC Bundle 生成、未来窗口成片原始身份与只读保留预览；这些源码增量尚未包含在该发布包中。自动删除、全盘配额、代码签名和安装器未完成。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
 
 1. 解压 Windows portable zip。
 2. 把以下文档交给本地 AI agent：
@@ -165,6 +165,13 @@ data-dir 下 recording-specific 的 `temp` staging，完成签名、非零大小
 （`t=0`）；`captured_offset_ms` 是有效提交偏移，`lateness_ms` 是不包含本帧捕获/编码耗时
 的非负认领迟到，`capture_duration_ms` 是从认领到有效 PNG 提交的单调时钟耗时。这些字段
 用于诚实描述时序，不承诺固定桌面毫秒延迟或实时保证。
+
+## 文档入口
+
+- [快速开始](QUICKSTART.zh-CN.md)：人类用户与本地 AI agent 的首次使用流程。
+- [Agent 指南](AGENT-INSTRUCTIONS.zh-CN.md)：启动、API 编排与安全边界。
+- [API 手册](AGENT-API-REFERENCE.zh-CN.md)：字段、错误和限额；[英文版](docs/api.md)。
+- [安全说明](docs/safety.md)：授权和产物证据的不变量。
 
 ## 项目结构
 

@@ -640,6 +640,7 @@ public sealed class RecurringPlanProfileBindingTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

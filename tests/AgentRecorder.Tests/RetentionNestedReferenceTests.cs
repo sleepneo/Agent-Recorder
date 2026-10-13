@@ -87,7 +87,7 @@ public sealed class RetentionNestedReferenceTests
         using var f=new Fixture();f.Seed("target","outer");
         // Legacy evidence has neither an anchor nor a Bundle registration.
         // Corrupt bound facts are tested separately and must fail the page.
-        f.Db.Execute("DELETE FROM ordinary_bundle_identity_items; DELETE FROM ordinary_bundle_identity; DELETE FROM ordinary_bundle_contents_items; DELETE FROM ordinary_bundle_contents; DELETE FROM ordinary_recording_bundles; DELETE FROM ordinary_publication_anchors;");
+        f.Db.Execute("DELETE FROM ordinary_bundle_attachment_hash_items; DELETE FROM ordinary_bundle_attachment_hash; DELETE FROM ordinary_media_hash; DELETE FROM ordinary_bundle_identity_items; DELETE FROM ordinary_bundle_identity; DELETE FROM ordinary_bundle_contents_items; DELETE FROM ordinary_bundle_contents; DELETE FROM ordinary_recording_bundles; DELETE FROM ordinary_publication_anchors;");
         var sql=fault switch{"status"=>"status_code='recording'","completion"=>"completed_at_utc=NULL","evidence"=>"output_size_bytes=0","cutoff"=>"completed_at_utc="+f.Before.UtcTicks,_=>"output_path='C:\\External\\target.mp4'"};
         f.Db.Corrupt("UPDATE ordinary_recording_history SET "+sql+";");var item=Assert.Single(f.Page().Items);Assert.Equal(reason,item.ReasonCode);Assert.False(item.AgeCandidate);f.NoProbes();
     }
@@ -162,7 +162,7 @@ public sealed class RetentionNestedReferenceTests
     private static byte[] OldBytes(SqliteOperationalStore store)
     {
         using var c=new SqliteConnection($"Data Source={store.DatabasePath};Pooling=False;Mode=ReadOnly");c.Open();var parts=new List<string>();
-        foreach(var sql in new[]{"SELECT * FROM ordinary_recording_history ORDER BY recording_id;","SELECT * FROM schema_migrations WHERE version<=24 ORDER BY version;","SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT IN ('ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_bundle_contents','ordinary_bundle_contents_boundary','ordinary_bundle_contents_items','ordinary_publication_anchors','ordinary_recording_bundles','ordinary_recording_targets','ordinary_recording_target_boundary') ORDER BY name;"})
+        foreach(var sql in new[]{"SELECT * FROM ordinary_recording_history ORDER BY recording_id;","SELECT * FROM schema_migrations WHERE version<=24 ORDER BY version;","SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT IN ('future_window_publication_anchors','future_window_publication_boundary','ordinary_bundle_attachment_hash','ordinary_bundle_attachment_hash_boundary','ordinary_bundle_attachment_hash_items','ordinary_media_hash','ordinary_media_hash_boundary','ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_bundle_contents','ordinary_bundle_contents_boundary','ordinary_bundle_contents_items','ordinary_publication_anchors','ordinary_recording_bundles','ordinary_recording_targets','ordinary_recording_target_boundary') ORDER BY name;"})
         {using var cmd=c.CreateCommand();cmd.CommandText=sql;using var r=cmd.ExecuteReader();while(r.Read())parts.Add(string.Join("|",Enumerable.Range(0,r.FieldCount).Select(i=>r.GetValue(i).ToString())));}
         return Encoding.UTF8.GetBytes(string.Join("\n",parts));
     }

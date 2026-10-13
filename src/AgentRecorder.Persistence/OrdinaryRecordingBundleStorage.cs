@@ -13,6 +13,8 @@ internal static class OrdinaryRecordingBundleStorage
     internal static bool ValidSnapshot(OrdinaryRecordingBundleSnapshot? snapshot, string? mediaPath, string? mediaStatus)
     {
         if (snapshot is null) return true;
+        if (snapshot.ContentHashEvidence is not null && (snapshot.Status != "ready" || snapshot.ContentsEvidence is null || snapshot.IdentityEvidence is null)) return false;
+        if (snapshot.MediaHashEvidence is not null && (snapshot.Status != "ready" || snapshot.ContentsEvidence is null || snapshot.IdentityEvidence is null)) return false;
         if (snapshot.IdentityEvidence is not null && (snapshot.Status != "ready" || snapshot.ContentsEvidence is null)) return false;
         if (snapshot.ContentsEvidence is not null && snapshot.Status != "ready") return false;
         if (snapshot.Status == "not_applicable") return snapshot.Path is null && snapshot.ErrorCode is null;
@@ -53,6 +55,8 @@ internal static class OrdinaryRecordingBundleStorage
     internal static void ValidateUpdate(OrdinaryRecordingBundleUpdate update)
     {
         OrdinaryBundleIdentityStorage.ValidateUpdate(update);
+        OrdinaryMediaHashStorage.ValidateUpdate(update);
+        OrdinaryBundleAttachmentHashStorage.ValidateUpdate(update);
         ValidateOperation(update.Operation);
         var result = update.Result;
         if (result.Path != update.Operation.BundlePath || result.Status is not ("ready" or "failed") ||
@@ -66,6 +70,8 @@ internal static class OrdinaryRecordingBundleStorage
         ValidateRegistration(row);
         SqliteSchemaV33.Validate(connection, transaction);
         SqliteSchemaV35.Validate(connection, transaction);
+        SqliteSchemaV36.Validate(connection, transaction);
+        SqliteSchemaV37.Validate(connection, transaction);
         using var cmd = connection.CreateCommand(); cmd.Transaction = transaction;
         cmd.CommandText = "INSERT INTO ordinary_recording_bundles VALUES($id,$media,$op,$status,$path,NULL);";
         cmd.Parameters.AddWithValue("$id", row.RecordingId); cmd.Parameters.AddWithValue("$media", row.OutputPath);
@@ -109,6 +115,8 @@ internal static class OrdinaryRecordingBundleStorage
         if (cmd.ExecuteNonQuery() != 1) return false;
         OrdinaryBundleContentsStorage.Persist(connection, transaction, update);
         OrdinaryBundleIdentityStorage.Persist(connection, transaction, update);
+        OrdinaryMediaHashStorage.Persist(connection, transaction, update, row);
+        OrdinaryBundleAttachmentHashStorage.Persist(connection, transaction, update);
         return true;
     }
 
@@ -117,6 +125,8 @@ internal static class OrdinaryRecordingBundleStorage
         SqliteSchemaV31.Validate(connection, transaction);
         OrdinaryBundleContentsStorage.PrepareRecovery(connection, transaction);
         OrdinaryBundleIdentityStorage.PrepareRecovery(connection, transaction);
+        OrdinaryMediaHashStorage.PrepareRecovery(connection, transaction);
+        OrdinaryBundleAttachmentHashStorage.PrepareRecovery(connection, transaction);
         using var cmd = connection.CreateCommand(); cmd.Transaction = transaction;
         // Revoking the operation binding permanently rejects the pre-restart producer.
         cmd.CommandText = "UPDATE ordinary_recording_bundles SET status_code='interrupted_unknown',error_code='bundle_interrupted_unknown',operation_id=NULL WHERE status_code='generating';";
@@ -126,12 +136,16 @@ internal static class OrdinaryRecordingBundleStorage
     internal static Dictionary<string, OrdinaryRecordingBundleSnapshot?> Read(SqliteConnection connection, SqliteTransaction transaction,
         IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows,
         Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? observer = null,
-        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? identityObserver = null) => ReadFacts(connection, transaction, rows, observer, identityObserver)
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? identityObserver = null,
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? hashObserver = null,
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? attachmentHashObserver = null) => ReadFacts(connection, transaction, rows, observer, identityObserver, hashObserver, attachmentHashObserver)
             .ToDictionary(p => p.Key, p => p.Value?.Snapshot, StringComparer.Ordinal);
 
     private static Dictionary<string, Fact?> ReadFacts(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows,
         Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? observer = null,
-        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? identityObserver = null)
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? identityObserver = null,
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? hashObserver = null,
+        Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? attachmentHashObserver = null)
     {
         try
         {
@@ -160,6 +174,8 @@ internal static class OrdinaryRecordingBundleStorage
             reader.Dispose();
             OrdinaryBundleContentsStorage.Read(connection, transaction, rows, facts, observer);
             OrdinaryBundleIdentityStorage.Read(connection, transaction, rows, facts, identityObserver);
+            OrdinaryMediaHashStorage.Read(connection, transaction, rows, facts, hashObserver);
+            OrdinaryBundleAttachmentHashStorage.Read(connection, transaction, rows, facts, attachmentHashObserver);
             return facts;
         }
         catch (Exception e) when (e is not OrdinaryRecordingHistoryUnavailableException)

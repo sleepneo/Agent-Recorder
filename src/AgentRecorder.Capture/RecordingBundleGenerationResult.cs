@@ -15,6 +15,16 @@ public sealed class RecordingBundleGenerationResult
     public string? ErrorDetail { get; }
     public RecordingBundleContentsEvidence? ContentsEvidence { get; }
     internal BundlePublicationReceipt? PublicationReceipt { get; private init; }
+    internal BundleMediaHashEvidence? MediaHashEvidence { get; private init; }
+    internal RecordingBundleGenerationResult WithMediaHash(BundleMediaHashEvidence? evidence)
+    {
+        var bundle = PublicationReceipt?.Evidence;
+        var bound = Success && bundle is not null && evidence is not null &&
+            evidence.RecordingId == bundle.RecordingId && evidence.OperationId == bundle.OperationId &&
+            evidence.MediaPath == bundle.MediaPath && evidence.BundlePath == bundle.BundlePath;
+        return new(Success, BundlePath, ErrorCode, ErrorDetail, ContentsEvidence)
+            { PublicationReceipt = PublicationReceipt, MediaHashEvidence = bound ? evidence : null };
+    }
 
     internal static RecordingBundleGenerationResult Published(string path, RecordingBundleContentsEvidence contents, BundlePublicationReceipt? receipt)
         => new(true, path, null, null, contents) { PublicationReceipt = receipt };

@@ -44,6 +44,7 @@ public sealed record OrdinaryRecordingHistorySnapshot(
     double? OutputDurationSeconds = null)
 {
     public OrdinaryRecordingBundleSnapshot? Bundle { get; internal init; }
+    public OrdinaryMediaHashSnapshot? MediaHash => Bundle?.MediaHash;
     public string? TargetKey { get; internal init; }
     [System.Text.Json.Serialization.JsonIgnore]
     internal OrdinaryRecordingBundleRegistration? BundleRegistration { get; init; }

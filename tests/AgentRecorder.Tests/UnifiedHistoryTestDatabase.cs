@@ -57,11 +57,11 @@ internal sealed class UnifiedHistoryTestDatabase : IDisposable
         var time = at ?? At;
         new SqlitePlanOccurrenceRepository(Store).Insert(new PlanOccurrence(id, planId, time, time.AddMinutes(1), time));
     }
-    internal FutureWindowAuthorizationScope SeedFuture(string id, DateTimeOffset? at = null, string sid = Sid, string session = Session)
+    internal FutureWindowAuthorizationScope SeedFuture(string id, DateTimeOffset? at = null, string sid = Sid, string session = Session, string? outputPath = null)
     {
         var scope = new FutureWindowAuthorizationScope(id, "key-" + id, new string('a', 64), sid, session,
             new FutureWindowExecutableIdentity(1, @"C:\Nonexistent\Player.exe", "fixture-file-identity", new string('a', 64), null, null),
-            null, null, 60, 300, Root, id + ".mp4", "pending", at ?? At, null, null, null, null, 0);
+            null, null, 60, 300, outputPath is null ? Root : Path.GetDirectoryName(outputPath)!, outputPath is null ? id + ".mp4" : Path.GetFileName(outputPath), "pending", at ?? At, null, null, null, null, 0);
         Future.CreateOrGet(scope); return scope;
     }
     internal FutureWindowStartCommitReceipt StartFuture(FutureWindowAuthorizationScope scope, int seconds = 2)
@@ -89,7 +89,12 @@ internal sealed class UnifiedHistoryTestDatabase : IDisposable
     internal void DowngradeToV22()
     {
         using var c = Store.OpenConnection(); using var cmd = c.CreateCommand();
-        cmd.CommandText="DROP TRIGGER ordinary_bundle_identity_initial; DROP TABLE ordinary_bundle_identity_items; DROP TABLE ordinary_bundle_identity; DROP TABLE ordinary_bundle_identity_boundary; DELETE FROM schema_migrations WHERE version=35; DROP TRIGGER ordinary_window_target_initial; DROP TABLE ordinary_recording_window_targets; DROP TABLE ordinary_window_target_boundary; DELETE FROM schema_migrations WHERE version=34; DROP TRIGGER ordinary_bundle_contents_initial; DROP TABLE ordinary_bundle_contents_items; DROP TABLE ordinary_bundle_contents; DROP TABLE ordinary_bundle_contents_boundary; DELETE FROM schema_migrations WHERE version=33; DROP TRIGGER ordinary_recording_target_initial; DROP TABLE ordinary_recording_targets; DROP TABLE ordinary_recording_target_boundary; DELETE FROM schema_migrations WHERE version=32; DROP TABLE ordinary_recording_bundles; DELETE FROM schema_migrations WHERE version=31; DROP TABLE ordinary_publication_anchors; DELETE FROM schema_migrations WHERE version=30;";cmd.ExecuteNonQuery();
+        cmd.CommandText="DROP TRIGGER future_window_publication_initial; DROP TABLE future_window_publication_anchors; DROP TABLE future_window_publication_boundary; DELETE FROM schema_migrations WHERE version=40;";cmd.ExecuteNonQuery();
+        foreach(var index in SqliteSchemaV39.Indexes) {cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}
+        cmd.CommandText="DELETE FROM schema_migrations WHERE version=39;";cmd.ExecuteNonQuery();
+        foreach(var index in SqliteSchemaV38.Indexes) {cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}
+        cmd.CommandText="DELETE FROM schema_migrations WHERE version=38;";cmd.ExecuteNonQuery();
+        cmd.CommandText="DROP TRIGGER ordinary_bundle_attachment_hash_initial; DROP TABLE ordinary_bundle_attachment_hash_items; DROP TABLE ordinary_bundle_attachment_hash; DROP TABLE ordinary_bundle_attachment_hash_boundary; DELETE FROM schema_migrations WHERE version=37; DROP TRIGGER ordinary_media_hash_initial; DROP INDEX idx_ordinary_media_hash_recording; DROP TABLE ordinary_media_hash; DROP TABLE ordinary_media_hash_boundary; DELETE FROM schema_migrations WHERE version=36; DROP TRIGGER ordinary_bundle_identity_initial; DROP TABLE ordinary_bundle_identity_items; DROP TABLE ordinary_bundle_identity; DROP TABLE ordinary_bundle_identity_boundary; DELETE FROM schema_migrations WHERE version=35; DROP TRIGGER ordinary_window_target_initial; DROP TABLE ordinary_recording_window_targets; DROP TABLE ordinary_window_target_boundary; DELETE FROM schema_migrations WHERE version=34; DROP TRIGGER ordinary_bundle_contents_initial; DROP TABLE ordinary_bundle_contents_items; DROP TABLE ordinary_bundle_contents; DROP TABLE ordinary_bundle_contents_boundary; DELETE FROM schema_migrations WHERE version=33; DROP TRIGGER ordinary_recording_target_initial; DROP TABLE ordinary_recording_targets; DROP TABLE ordinary_recording_target_boundary; DELETE FROM schema_migrations WHERE version=32; DROP TABLE ordinary_recording_bundles; DELETE FROM schema_migrations WHERE version=31; DROP TABLE ordinary_publication_anchors; DELETE FROM schema_migrations WHERE version=30;";cmd.ExecuteNonQuery();
         foreach(var index in SqliteSchemaV29.Indexes){cmd.CommandText=$"DROP INDEX {index.Name};";cmd.ExecuteNonQuery();}
         cmd.CommandText="DELETE FROM schema_migrations WHERE version=29;";cmd.ExecuteNonQuery();
         foreach(var index in SqliteSchemaV28.Indexes){cmd.CommandText=$"DROP INDEX {index.Name};";cmd.ExecuteNonQuery();}

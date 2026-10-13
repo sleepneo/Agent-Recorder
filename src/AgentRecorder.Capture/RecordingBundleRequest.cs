@@ -11,6 +11,8 @@ namespace AgentRecorder.Capture;
 public sealed class RecordingBundleRequest
 {
     internal string? PublicationOperationId { get; set; }
+    internal BundleMediaHashBinding? MediaHashBinding { get; private set; }
+    internal void BindMediaPublication(PublicationReceipt receipt) => MediaHashBinding = BundleMediaHashBinding.Bind(this, receipt);
     public string RecordingId { get; }
     public string? ConfirmationId { get; }
     public string SourceType { get; }

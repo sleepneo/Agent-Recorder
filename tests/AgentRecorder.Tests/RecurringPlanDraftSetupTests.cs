@@ -401,6 +401,7 @@ public sealed class RecurringPlanDraftSetupTests
             Pooling = false,
         }.ToString());
         connection.Open();
+        SqliteOutputPathCollation.Register(connection);
         return connection;
     }
 

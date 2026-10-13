@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
+using AgentRecorder.Infrastructure;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -34,6 +34,10 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
 
     internal Func<BundlePublicationReceipt.Publisher> PublisherFactory { get; set; } = () => new()
     { BeginCopy = BundlePublicationCapacity.BeginHostedCopyAsync };
+    internal IWindowsFileMetadataApi MediaHashMetadataApi { get; set; } = WindowsFileMetadataApi.Instance;
+    internal Action<RecordingBundleRequest>? BeforeMediaHashForTests { get; set; }
+    internal Action<FileStream>? MediaHashOpenedForTests { get; set; }
+    internal Func<FileStream, Memory<byte>, CancellationToken, ValueTask<int>>? MediaHashReadForTests { get; set; }
 
     public async Task<RecordingBundleGenerationResult> GenerateAsync(
         RecordingBundleRequest request,
@@ -64,13 +68,15 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
             string thumbnailPath = Path.Combine(tempDir, "thumbnail.jpg");
 
             // 1. Hash the main video (streamed, bounded memory).
-            string sha256;
-            try { sha256 = ComputeSha256(mediaPath); }
-            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.HashFailed, ex.Message); }
-
-            long mediaSize;
-            try { mediaSize = new FileInfo(mediaPath).Length; }
-            catch (Exception ex) { return Failed( RecordingBundleErrorCodes.HashFailed, ex.Message); }
+            (string Value, long Size, BundleMediaHashEvidence? Evidence) hash;
+            try
+            {
+                BeforeMediaHashForTests?.Invoke(request);
+                hash = await BundleMediaHashEvidence.ReadAsync(request, MediaHashMetadataApi, cancellationToken,
+                    MediaHashOpenedForTests, MediaHashReadForTests).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { return Failed(RecordingBundleErrorCodes.HashFailed, ex.Message); }
 
             // 2. Extract representative frames.
             var firstResult = await ExtractFirstFrameAsync(mediaPath, firstFramePath, ownedStaging, cancellationToken);
@@ -94,7 +100,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
                 return Failed( RecordingBundleErrorCodes.FrameOutputInvalid, "thumbnail");
 
             // 4. Write metadata and marks.
-            var metadata = BuildMetadata(request, mediaPath, mediaSize, sha256);
+            var metadata = BuildMetadata(request, mediaPath, hash.Size, hash.Value);
             try { await WriteJsonUtf8Async(metadataPath, metadata, ownedStaging, cancellationToken); }
             catch (Exception ex) { return Failed( RecordingBundleErrorCodes.MetadataWriteFailed, ex.Message); }
 
@@ -114,7 +120,7 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
 
             // Only the five small outputs are copied. The MP4 is never recopied here.
             var publisher = PublisherFactory();
-            try { return await publisher.PublishAsync(request, tempDir, bundlePath, contents, cancellationToken); }
+            try { return (await publisher.PublishAsync(request, tempDir, bundlePath, contents, cancellationToken)).WithMediaHash(hash.Evidence); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { return Failed( RecordingBundleErrorCodes.PublishFailed, ex.Message + ";owned_cleanup=" + publisher.Cleanup); }
         }
@@ -141,16 +147,6 @@ public sealed class FfmpegRecordingBundleGenerator : IRecordingBundleGenerator
         string dir = Path.GetDirectoryName(mediaPath) ?? "";
         string stem = Path.GetFileNameWithoutExtension(mediaPath);
         return Path.Combine(dir, $".{stem}.bundle.tmp-{Guid.NewGuid():N}");
-    }
-
-    private static string ComputeSha256(string path)
-    {
-        using var sha = SHA256.Create();
-        using var stream = File.OpenRead(path);
-        var hash = sha.ComputeHash(stream);
-        var sb = new StringBuilder(hash.Length * 2);
-        foreach (var b in hash) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
-        return sb.ToString();
     }
 
     private async Task<StepResult> ExtractFirstFrameAsync(string mediaPath, string outputPath, OwnedBundleStaging staging, CancellationToken ct)

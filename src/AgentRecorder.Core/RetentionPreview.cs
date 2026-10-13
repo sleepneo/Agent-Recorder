@@ -16,9 +16,12 @@ public sealed class RetentionPreviewUnavailableException(Exception? inner = null
 public enum OrdinaryNestedReferenceState { None, Relationship, ParentReferenced, Invalid }
 public enum SharedOutputPathReferenceState { None, Referenced }
 public enum PlannedOutputPathReferenceState { None, Referenced, Indeterminate }
+internal enum PendingOutputUseState { None, SetupExact, Template, Unknown }
 public sealed record OrdinaryRetentionEvidence(UnifiedHistoryEntry Entry, OrdinaryNestedReferenceState? NestedReference,
     SharedOutputPathReferenceState? SharedOutputReference, PlannedOutputPathReferenceState? PlannedOutputReference)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal PendingOutputUseState PendingOutputUse { get; init; }
     [System.Text.Json.Serialization.JsonIgnore]
     internal AgentRecorder.Infrastructure.PublicationIdentityAnchor? PublicationAnchor { get; init; }
 }

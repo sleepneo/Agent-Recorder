@@ -253,7 +253,7 @@ public sealed class BundlePublicationIdentityTests(ITestOutputHelper output)
     [InlineData("App")] [InlineData("Headless")]
     public async Task ActualCapacityChildProtectsRealAttachmentCopyWithoutCapture(string host)
     {
-        var f = new Fixture(); var executable = Path.Combine(TestHelper.ProjectRoot, "src", "AgentRecorder." + host, "bin/Task337R/Release/net8.0-windows10.0.19041.0", "AgentRecorder." + host + ".exe");
+        var f = new Fixture(); var executable = Path.Combine(AppContext.BaseDirectory, "AgentRecorder." + host + ".exe");
         Assert.True(File.Exists(executable));
         var provider = new ProcessStorageCapacityProvider { ExecutablePath = () => executable };
         var publisher = new BundlePublicationReceipt.Publisher { BeginCopy = (bytes, _) => Task.FromResult<IPublicationCopyReservation?>(new BundlePublicationCapacity.Reservation(bytes, provider)) };

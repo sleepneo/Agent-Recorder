@@ -12,7 +12,7 @@ namespace AgentRecorder.Infrastructure;
 /// </summary>
 public sealed class SqliteOperationalStore
 {
-    public const int CurrentSchemaVersion = 35;
+    public const int CurrentSchemaVersion = 40;
     public const int BusyTimeoutMilliseconds = 5_000;
     public const string DatabaseFileName = "agent-recorder.db";
     public const string StateDirectoryName = "state";
@@ -143,6 +143,9 @@ public sealed class SqliteOperationalStore
             SqliteSchemaV33.Validate(connection, transaction);
             SqliteSchemaV34.Validate(connection, transaction);
             SqliteSchemaV35.Validate(connection, transaction);
+        SqliteSchemaV36.Validate(connection, transaction);
+        SqliteSchemaV37.Validate(connection, transaction);
+        SqliteSchemaV40.Validate(connection, transaction);
             using (var directoryCheck = connection.CreateCommand())
             {
                 directoryCheck.Transaction = transaction;
@@ -315,13 +318,13 @@ public sealed class SqliteOperationalStore
                     "The SQLite operational store has not applied the current schema.");
             }
 
-            // Preserve the former current v31 business-connection failure contract
-            // while validating target and contents receipts. At most three rows.
+            // Preserve the former v31 and v35 business-connection failure contracts
+            // and v37/v38/v39 receipts while adding future publication identity. At most seven rows.
             using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT version, name, definition_checksum
                 FROM schema_migrations
-                WHERE version = 31 OR version = 32 OR version = $version
+                WHERE version = 31 OR version = 32 OR version = 35 OR version = 37 OR version = 38 OR version = 39 OR version = $version
                 ORDER BY version;
                 """;
             command.Parameters.AddWithValue("$version", SqliteOperationalStore.CurrentSchemaVersion);
@@ -343,7 +346,7 @@ public sealed class SqliteOperationalStore
                         $"SQLite migration version {version} does not match the compiled migration definition.");
                 }
             }
-            if (count != 3)
+            if (count != 7)
             {
                 throw new SqliteOperationalStoreException(
                     "sqlite_not_initialized",
@@ -548,6 +551,8 @@ public sealed class SqliteOperationalStore
 
     private static void ValidateSchemaShapeCore(SqliteConnection connection, SqliteTransaction transaction)
     {
+        ValidateRetentionPendingOutputSchema(connection, transaction);
+        ValidateRetentionRequiredOnceSetupOutputSchema(connection, transaction);
         foreach (var table in SqliteSchemaCatalog.Tables)
         {
             if (!TableExists(connection, transaction, table.Name))
@@ -685,12 +690,47 @@ public sealed class SqliteOperationalStore
             throw new InvalidDataException("Retention planned path schema is unavailable.");
     }
 
+    internal static void ValidateRetentionPendingOutputSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        foreach (var index in SqliteSchemaV38.Indexes)
+        {
+            ValidateExplicitIndex(connection, transaction, index);
+            if (!GetIndexCollations(connection, transaction, index.Name).SequenceEqual(
+                Enumerable.Repeat(SqliteOutputPathCollation.Name, index.Columns.Count), StringComparer.OrdinalIgnoreCase))
+                throw new InvalidDataException("Retention pending output index collation is unavailable.");
+        }
+        using var receipt = connection.CreateCommand(); receipt.Transaction = transaction;
+        receipt.CommandText = "SELECT name,definition_checksum FROM schema_migrations WHERE version=38;";
+        using var reader = receipt.ExecuteReader();
+        if (!reader.Read() || reader.GetString(0) != SqliteSchemaV38.MigrationName || reader.GetString(1) != SqliteSchemaV38.MigrationChecksum || reader.Read())
+            throw new InvalidDataException("Retention pending output schema is unavailable.");
+    }
+
+    internal static void ValidateRetentionRequiredOnceSetupOutputSchema(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        foreach (var index in SqliteSchemaV39.Indexes)
+        {
+            ValidateExplicitIndex(connection, transaction, index);
+            if (!GetIndexCollations(connection, transaction, index.Name).SequenceEqual(
+                Enumerable.Repeat(SqliteOutputPathCollation.Name, index.Columns.Count), StringComparer.OrdinalIgnoreCase))
+                throw new InvalidDataException("Retention required-once setup output index collation is unavailable.");
+        }
+        using var receipt = connection.CreateCommand(); receipt.Transaction = transaction;
+        receipt.CommandText = "SELECT name,definition_checksum FROM schema_migrations WHERE version=39;";
+        using var reader = receipt.ExecuteReader();
+        if (!reader.Read() || reader.GetString(0) != SqliteSchemaV39.MigrationName || reader.GetString(1) != SqliteSchemaV39.MigrationChecksum || reader.Read())
+            throw new InvalidDataException("Retention required-once setup output schema is unavailable.");
+    }
+
     internal static void ValidateUnifiedHistorySchema(SqliteConnection connection, SqliteTransaction transaction)
     {
         SqliteSchemaV32.Validate(connection, transaction);
         SqliteSchemaV33.Validate(connection, transaction);
         SqliteSchemaV34.Validate(connection, transaction);
         SqliteSchemaV35.Validate(connection, transaction);
+        SqliteSchemaV36.Validate(connection, transaction);
+        SqliteSchemaV37.Validate(connection, transaction);
+        SqliteSchemaV40.Validate(connection, transaction);
         foreach (var table in SqliteSchemaV23.Tables) ValidateColumns(connection, transaction, table);
         foreach (var index in SqliteSchemaV23.Indexes.Concat(SqliteSchemaV24.Indexes).Concat(SqliteSchemaV26.Indexes).Concat(SqliteSchemaV27.Indexes)) ValidateExplicitIndex(connection, transaction, index);
         ValidateExplicitIndex(connection, transaction, new SqliteIndexDefinition(
@@ -2681,13 +2721,13 @@ internal static class SqliteSchemaV10
 internal static class SqliteSchemaCatalog
 {
     public static IReadOnlyList<SqliteMigrationDefinition> Migrations { get; } =
-        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).Concat(SqliteSchemaV19.Migrations).Concat(SqliteSchemaV20.Migrations).Concat(SqliteSchemaV21.Migrations).Concat(SqliteSchemaV22.Migrations).Concat(SqliteSchemaV23.Migrations).Concat(SqliteSchemaV24.Migrations).Concat(SqliteSchemaV25.Migrations).Concat(SqliteSchemaV26.Migrations).Concat(SqliteSchemaV27.Migrations).Concat(SqliteSchemaV28.Migrations).Concat(SqliteSchemaV29.Migrations).Concat(SqliteSchemaV30.Migrations).Concat(SqliteSchemaV31.Migrations).Concat(SqliteSchemaV32.Migrations).Concat(SqliteSchemaV33.Migrations).Concat(SqliteSchemaV34.Migrations).Concat(SqliteSchemaV35.Migrations).ToArray();
+        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).Concat(SqliteSchemaV19.Migrations).Concat(SqliteSchemaV20.Migrations).Concat(SqliteSchemaV21.Migrations).Concat(SqliteSchemaV22.Migrations).Concat(SqliteSchemaV23.Migrations).Concat(SqliteSchemaV24.Migrations).Concat(SqliteSchemaV25.Migrations).Concat(SqliteSchemaV26.Migrations).Concat(SqliteSchemaV27.Migrations).Concat(SqliteSchemaV28.Migrations).Concat(SqliteSchemaV29.Migrations).Concat(SqliteSchemaV30.Migrations).Concat(SqliteSchemaV31.Migrations).Concat(SqliteSchemaV32.Migrations).Concat(SqliteSchemaV33.Migrations).Concat(SqliteSchemaV34.Migrations).Concat(SqliteSchemaV35.Migrations).Concat(SqliteSchemaV36.Migrations).Concat(SqliteSchemaV37.Migrations).Concat(SqliteSchemaV38.Migrations).Concat(SqliteSchemaV39.Migrations).Concat(SqliteSchemaV40.Migrations).ToArray();
 
     public static IReadOnlyList<SqliteTableDefinition> Tables { get; } =
         SqliteSchemaV1.Tables.Concat(SqliteSchemaV2.Tables).Concat(SqliteSchemaV3.Tables.Where(table => table.Name != "setup_intents")).Concat(SqliteSchemaV5.Tables).Concat(SqliteSchemaV7.Tables).Concat(SqliteSchemaV8.Tables).Concat(SqliteSchemaV9.Tables).Concat(SqliteSchemaV10.Tables).Concat(SqliteSchemaV11.Tables).Concat(SqliteSchemaV12.Tables).Concat(SqliteSchemaV13.Tables).Concat(SqliteSchemaV14.Tables).Concat(SqliteSchemaV15.Tables).Concat(SqliteSchemaV16.Tables).Concat(SqliteSchemaV17.Tables).Concat(SqliteSchemaV18.Tables).Concat(SqliteSchemaV19.Tables).Concat(SqliteSchemaV21.Tables).Concat(SqliteSchemaV22.Tables).Concat(SqliteSchemaV23.Tables).ToArray();
 
     public static IReadOnlyList<SqliteIndexDefinition> Indexes { get; } =
-        SqliteSchemaV1.Indexes.Concat(SqliteSchemaV2.Indexes).Concat(SqliteSchemaV3.Indexes).Concat(SqliteSchemaV5.Indexes).Concat(SqliteSchemaV7.Indexes).Concat(SqliteSchemaV8.Indexes).Concat(SqliteSchemaV9.Indexes).Concat(SqliteSchemaV10.Indexes).Concat(SqliteSchemaV11.Indexes).Concat(SqliteSchemaV12.Indexes).Concat(SqliteSchemaV13.Indexes).Concat(SqliteSchemaV14.Indexes).Concat(SqliteSchemaV15.Indexes).Concat(SqliteSchemaV16.Indexes).Concat(SqliteSchemaV17.Indexes).Concat(SqliteSchemaV18.Indexes).Concat(SqliteSchemaV19.Indexes).Concat(SqliteSchemaV21.Indexes).Concat(SqliteSchemaV22.Indexes).Concat(SqliteSchemaV23.Indexes).Concat(SqliteSchemaV24.Indexes).Concat(SqliteSchemaV25.Indexes).Concat(SqliteSchemaV26.Indexes).Concat(SqliteSchemaV27.Indexes).Concat(SqliteSchemaV28.Indexes).Concat(SqliteSchemaV29.Indexes).ToArray();
+        SqliteSchemaV1.Indexes.Concat(SqliteSchemaV2.Indexes).Concat(SqliteSchemaV3.Indexes).Concat(SqliteSchemaV5.Indexes).Concat(SqliteSchemaV7.Indexes).Concat(SqliteSchemaV8.Indexes).Concat(SqliteSchemaV9.Indexes).Concat(SqliteSchemaV10.Indexes).Concat(SqliteSchemaV11.Indexes).Concat(SqliteSchemaV12.Indexes).Concat(SqliteSchemaV13.Indexes).Concat(SqliteSchemaV14.Indexes).Concat(SqliteSchemaV15.Indexes).Concat(SqliteSchemaV16.Indexes).Concat(SqliteSchemaV17.Indexes).Concat(SqliteSchemaV18.Indexes).Concat(SqliteSchemaV19.Indexes).Concat(SqliteSchemaV21.Indexes).Concat(SqliteSchemaV22.Indexes).Concat(SqliteSchemaV23.Indexes).Concat(SqliteSchemaV24.Indexes).Concat(SqliteSchemaV25.Indexes).Concat(SqliteSchemaV26.Indexes).Concat(SqliteSchemaV27.Indexes).Concat(SqliteSchemaV28.Indexes).Concat(SqliteSchemaV29.Indexes).Concat(SqliteSchemaV38.Indexes).Concat(SqliteSchemaV39.Indexes).ToArray();
 
     public static IReadOnlyList<SqliteUniqueConstraintDefinition> UniqueConstraints { get; } =
         SqliteSchemaV1.UniqueConstraints.Concat(SqliteSchemaV2.UniqueConstraints).Concat(SqliteSchemaV3.UniqueConstraints.Where(unique => unique.TableName != "setup_intents")).Concat(SqliteSchemaV5.UniqueConstraints).Concat(SqliteSchemaV7.UniqueConstraints).Concat(SqliteSchemaV8.UniqueConstraints).Concat(SqliteSchemaV9.UniqueConstraints).Concat(SqliteSchemaV10.UniqueConstraints).Concat(SqliteSchemaV11.UniqueConstraints).Concat(SqliteSchemaV12.UniqueConstraints).Concat(SqliteSchemaV13.UniqueConstraints).Concat(SqliteSchemaV14.UniqueConstraints).Concat(SqliteSchemaV15.UniqueConstraints).Concat(SqliteSchemaV16.UniqueConstraints).Concat(SqliteSchemaV17.UniqueConstraints).Concat(SqliteSchemaV18.UniqueConstraints).Concat(SqliteSchemaV19.UniqueConstraints).Concat(SqliteSchemaV22.UniqueConstraints).Concat(SqliteSchemaV23.UniqueConstraints).ToArray();

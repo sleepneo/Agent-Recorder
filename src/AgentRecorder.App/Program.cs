@@ -418,7 +418,9 @@ internal static class Program
             planExecutionStatusGateway,
             unifiedHistoryGateway,
             retentionPreviewGateway,
-            new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)));
+            new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
+            new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
+            new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)));
 
         var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
         tray.SetObservationHealthGateway(observationHealth);

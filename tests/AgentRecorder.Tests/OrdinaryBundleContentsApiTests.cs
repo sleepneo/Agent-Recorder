@@ -35,12 +35,12 @@ public sealed class OrdinaryBundleContentsApiTests(ITestOutputHelper output) : I
     { Assert.Equal(HttpStatusCode.OK,response.StatusCode);using var d=JsonDocument.Parse(await response.Content.ReadAsStringAsync());return d.RootElement.GetProperty("data").Clone(); }
     private static async Task<JsonElement> Get(HttpClient client,string path)
     { using var response=await client.GetAsync(path);return await Data(response); }
-    private static void Contents(JsonElement bundle,RecordingBundleContentsEvidence? expected)
+    private static void Contents(JsonElement bundle,RecordingBundleContentsEvidence? expected,BundlePublicationReceipt.AttachmentHashes? hashes=null)
     {
         Assert.Equal(5,bundle.EnumerateObject().Count());Assert.DoesNotContain("operation",bundle.ToString());
         if(expected is null){Assert.Equal(JsonValueKind.Null,bundle.GetProperty("contents_evidence_version").ValueKind);Assert.Equal(JsonValueKind.Null,bundle.GetProperty("contents").ValueKind);return;}
         Assert.Equal(1,bundle.GetProperty("contents_evidence_version").GetInt32());var items=bundle.GetProperty("contents").EnumerateArray().ToArray();Assert.Equal(5,items.Length);
-        for(var i=0;i<5;i++){Assert.Equal(3,items[i].EnumerateObject().Count());Assert.Equal(expected.Contents[i].Name,items[i].GetProperty("name").GetString());Assert.Equal(expected.Contents[i].MediaType,items[i].GetProperty("media_type").GetString());Assert.Equal(expected.Contents[i].SizeBytes,items[i].GetProperty("size_bytes").GetInt64());}
+        for(var i=0;i<5;i++){Assert.Equal(4,items[i].EnumerateObject().Count());var hash=items[i].GetProperty("content_hash");if(hashes is null)Assert.Equal(JsonValueKind.Null,hash.ValueKind);else{Assert.Equal(4,hash.EnumerateObject().Count());Assert.Equal("sha256",hash.GetProperty("algorithm").GetString());Assert.Equal(hashes.Values[i],hash.GetProperty("value").GetString());Assert.Equal("bundle_publication",hash.GetProperty("basis").GetString());Assert.Equal(expected.Contents[i].SizeBytes,hash.GetProperty("size_bytes").GetInt64());}Assert.Equal(expected.Contents[i].Name,items[i].GetProperty("name").GetString());Assert.Equal(expected.Contents[i].MediaType,items[i].GetProperty("media_type").GetString());Assert.Equal(expected.Contents[i].SizeBytes,items[i].GetProperty("size_bytes").GetInt64());}
     }
 
     [Theory]
@@ -116,10 +116,10 @@ public sealed class OrdinaryBundleContentsApiTests(ITestOutputHelper output) : I
         {
             Auth(client);
             foreach(var path in new[]{"/api/v1/recording-history","/api/v1/recording-history/"+rec.Id,"/api/v1/history?source=ordinary&target_key="+row.TargetKey})
-            { var d=await Get(client,path);var item=path.Contains("/recording-history/")?d.GetProperty("recording"):Assert.Single(d.GetProperty("items").EnumerateArray());Contents(item.GetProperty("bundle"),result.ContentsEvidence); }
+            { var d=await Get(client,path);var item=path.Contains("/recording-history/")?d.GetProperty("recording"):Assert.Single(d.GetProperty("items").EnumerateArray());Contents(item.GetProperty("bundle"),result.ContentsEvidence,result.PublicationReceipt!.ContentHashes); }
         }
         _api!.Stop();_api=null;_engine!.Dispose();_engine=null;_f.Reopen();_f.Writer.RecoverIncomplete(At.AddHours(1));Assert.Equal(row,_f.Writer.Read(rec.Id));
-        using(var client=Start(headless)){Auth(client);Contents((await Get(client,"/api/v1/recording-history/"+rec.Id)).GetProperty("recording").GetProperty("bundle"),result.ContentsEvidence);}
+        using(var client=Start(headless)){Auth(client);Contents((await Get(client,"/api/v1/recording-history/"+rec.Id)).GetProperty("recording").GetProperty("bundle"),result.ContentsEvidence,result.PublicationReceipt!.ContentHashes);}
         output.WriteLine("Formal authorized Core + synthetic lavfi MP4 + real Ffmpeg generator five positive file lengths -> atomic writer -> three APIs -> reopen; altered metadata is not reread.");
     }
 

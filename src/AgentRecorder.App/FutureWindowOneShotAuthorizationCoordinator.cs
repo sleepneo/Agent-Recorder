@@ -285,7 +285,8 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
                     ReleasePin(authorizationId);
                     return new(false, receipt.RunId, start.ReasonCode ?? "future_window_engine_start_failed");
                 }
-                _ = TrackRunAsync(receipt);
+                _ = TrackRunAsync(receipt).ContinueWith(task => { _ = task.Exception; },
+                    CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 _audit.Log("future_window_authorization.start_committed", new
                 {
                     authorization_id = authorizationId,
@@ -887,15 +888,8 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
                 var state = status.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
                 if (state is not ("completed" or "failed" or "stopped" or "cancelled" or "rejected")) continue;
 
-                var outputPath = status.TryGetProperty("output", out var output) && output.TryGetProperty("path", out var path)
-                    ? path.GetString() : null;
-                var bytes = status.TryGetProperty("output", out output) && output.TryGetProperty("bytes_written", out var byteCount) && byteCount.TryGetInt64(out var count)
-                    ? count : 0;
-                var durationSeconds = status.TryGetProperty("output", out output) && output.TryGetProperty("duration_seconds", out var duration) && duration.TryGetDouble(out var seconds)
-                    ? seconds : 0;
-                var success = state == "completed" &&
-                    string.Equals(outputPath, row.OutputFilePath, StringComparison.OrdinalIgnoreCase) &&
-                    bytes > 0 && durationSeconds > 0 && durationSeconds <= row.MaximumDurationSeconds + 2;
+                var media = state == "completed" ? _engine.ReadFutureWindowPublication(receipt) : null;
+                var success = media is not null;
                 var current = _repository.Get(row.AuthorizationId, row.CurrentUserSid, row.SessionBinding);
                 if (current?.StatusCode == "revoked")
                     _repository.MarkRevokedRunStopped(row.AuthorizationId, receipt.RunId, DateTimeOffset.UtcNow);
@@ -903,15 +897,21 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
                     _repository.CompleteRun(row.AuthorizationId, receipt.RunId, success,
                         success ? "" : _engine.GetTrustedStorageFailureReason(receipt.RunId) ??
                             (state == "stopped" ? "stopped_before_duration" : "recording_failed"),
-                        success ? outputPath : null, success ? bytes : null,
-                        success ? checked((long)Math.Round(durationSeconds * 1000)) : null,
-                        DateTimeOffset.UtcNow);
+                        media?.Path, media?.Length, media?.DurationMs,
+                        DateTimeOffset.UtcNow, media?.Receipt, receipt);
                 ReleasePin(row.AuthorizationId);
                 return;
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch { }
+        catch
+        {
+            // A failed durable settlement must remain uncertain, never trusted.
+            AuditApprovalUi(row.AuthorizationId, "run_settlement_unavailable",
+                new { reason_code = "future_window_persistence_unavailable", run_id = receipt.RunId });
+            throw;
+        }
+        finally { ReleasePin(row.AuthorizationId); }
     }
 
     private bool TryCanonicalOutputDirectory(string input, out string canonical, out string reason)

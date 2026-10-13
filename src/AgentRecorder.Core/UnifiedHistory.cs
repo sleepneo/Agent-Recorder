@@ -37,7 +37,10 @@ public sealed record UnifiedHistoryEntry(
     long? OutputSizeBytes = null, double? OutputDurationSeconds = null,
     DateTimeOffset? StartedAtUtc = null, DateTimeOffset? CompletedAtUtc = null,
     DateTimeOffset? WindowStartUtc = null, DateTimeOffset? WindowEndUtc = null,
-    string? ProfileId = null, long? ProfileVersion = null, string? SourceType = null, OrdinaryRecordingBundleSnapshot? Bundle = null, string? TargetKey = null);
+    string? ProfileId = null, long? ProfileVersion = null, string? SourceType = null, OrdinaryRecordingBundleSnapshot? Bundle = null, string? TargetKey = null)
+{
+    public OrdinaryMediaHashSnapshot? MediaHash => Source == "ordinary" ? Bundle?.MediaHash : null;
+}
 
 public static class UnifiedHistoryFilterCodes
 {

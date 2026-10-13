@@ -26,6 +26,8 @@ public sealed class UnifiedHistoryQueryService
     internal Action<string, IReadOnlyList<KeyValuePair<string, object>>>? TargetCommandForTests { get; set; }
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? BundleContentsCommandForTests { get; set; }
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? BundleIdentityCommandForTests { get; set; }
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? AttachmentHashCommandForTests { get; set; }
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? MediaHashCommandForTests { get; set; }
 
     public UnifiedHistoryQueryService(SqliteOperationalStore store, SqliteOrdinaryRecordingHistoryStore ordinary, bool ordinaryOnly = false)
     {
@@ -58,6 +60,8 @@ public sealed class UnifiedHistoryQueryService
         SqliteOperationalStore.ValidateRetentionReferenceSchema(connection,transaction);
         SqliteOperationalStore.ValidateRetentionOutputPathSchema(connection,transaction);
         SqliteOperationalStore.ValidateRetentionPlannedOutputSchema(connection,transaction);
+        SqliteOperationalStore.ValidateRetentionPendingOutputSchema(connection,transaction);
+        SqliteOperationalStore.ValidateRetentionRequiredOnceSetupOutputSchema(connection,transaction);
         if(entries.Count!=rows.Count || rows.Count>100) throw new InvalidDataException("Invalid retention relation page.");
         var anchors = PublicationAnchorStorage.Read(connection, transaction, rows);
         if(rows.Count==0) return Array.Empty<OrdinaryRetentionEvidence>();
@@ -79,9 +83,11 @@ public sealed class UnifiedHistoryQueryService
         if(references.Count!=rows.Count) throw new InvalidDataException("Missing retention relation result.");
         var shared = ReadSharedOutputReferences(connection, transaction, rows);
         var planned = ReadPlannedOutputReferences(connection, transaction, rows);
+        var pending = PendingOutputUseStorage.Read(connection, transaction, rows, RetentionPendingOutputCommandForTests);
         return entries.Select((entry,i)=>new OrdinaryRetentionEvidence(entry,NestedState(rows[i],references[rows[i].RecordingId]),
-            shared[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId] }).ToArray();
+            shared[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId], PendingOutputUse = pending[rows[i].RecordingId] }).ToArray();
     }
+    internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPendingOutputCommandForTests { get; set; }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPathCommandForTests { get; set; }
     private Dictionary<string,bool> ReadSharedOutputReferences(SqliteConnection connection,SqliteTransaction transaction,
         IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
@@ -204,20 +210,22 @@ public sealed class UnifiedHistoryQueryService
             var selected = candidates.Take(limit).ToArray();
             var entries = new List<UnifiedHistoryEntry>();
             var ordinaryRows=new List<OrdinaryRecordingHistorySnapshot>();
+            var futureRows = new List<FutureWindowAuthorizationRow>();
             foreach (var key in selected)
             {
                 entries.Add(key.Source switch
                 {
                     "ordinary" => ReadOrdinary(connection, transaction, key, false,ordinaryRows),
                     "plan" => ReadPlan(connection, transaction, key, sid, session),
-                    _ => ReadFuture(connection, transaction, key, sid, session),
+                    _ => ReadFuture(connection, transaction, key, sid, session, futureRows),
                 });
             }
             foreach (var group in selected.GroupBy(k => k.Source)) EntriesValidatedForTests?.Invoke(group.Key, group.Count());
             var next = hasMore && selected.Length > 0 ? Encode(state with
             { LastTicks = selected[^1].Ticks, LastSource = selected[^1].Source, LastId = selected[^1].Id }) : null;
+            FutureWindowPublicationStorage.Read(connection, transaction, futureRows, FuturePublicationCommandForTests);
             if (retention is null) PublicationAnchorStorage.Read(connection, transaction, ordinaryRows);
-            var bundles = OrdinaryRecordingBundleStorage.Read(connection, transaction, ordinaryRows, BundleContentsCommandForTests, BundleIdentityCommandForTests);
+            var bundles = OrdinaryRecordingBundleStorage.Read(connection, transaction, ordinaryRows, BundleContentsCommandForTests, BundleIdentityCommandForTests, MediaHashCommandForTests, AttachmentHashCommandForTests);
             var targets = OrdinaryRecordingTargetStorage.Read(connection, transaction, ordinaryRows, TargetCommandForTests);
             for (var i = 0; i < entries.Count; i++)
                 if (entries[i].Source == "ordinary") entries[i] = entries[i] with {
@@ -403,11 +411,14 @@ public sealed class UnifiedHistoryQueryService
             WindowStartUtc: row.WindowStartUtc, WindowEndUtc: row.WindowEndUtc);
     }
 
-    private static UnifiedHistoryEntry ReadFuture(SqliteConnection connection, SqliteTransaction transaction, Key key, string sid, string session)
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? FuturePublicationCommandForTests { get; set; }
+
+    private static UnifiedHistoryEntry ReadFuture(SqliteConnection connection, SqliteTransaction transaction, Key key, string sid, string session, List<FutureWindowAuthorizationRow> rows)
     {
         var row = SqliteFutureWindowAuthorizationRepository.ReadById(connection, transaction, key.Id, sid, session)
             ?? throw new InvalidDataException("The selected authorization disappeared.");
         FutureHistoryValidation.Validate(row);
+        rows.Add(row);
         if (row.CreatedAtUtc.UtcTicks != key.Ticks) throw new InvalidDataException("The authorization creation time disagrees.");
         var evidence = row.StatusCode == "completed";
         return new("future_window:" + row.AuthorizationId, "future_window", "future_window_authorization", row.CreatedAtUtc,
