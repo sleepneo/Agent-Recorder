@@ -25,7 +25,7 @@ public sealed class RetentionPreviewQueryTests
             query.CandidatesSelectedForTests = (s, c) => { Assert.Equal("ordinary", s); Selected += c; };
             query.EntriesValidatedForTests = (s, c) => { Assert.Equal("ordinary", s); Validated += c; };
             Service = new((sid, session, limit, cutoff, cursor) => { Reads++; return query.GetOrdinaryEvidencePage(sid, session, limit, cutoff, cursor); },
-                Db.Root, realFiles ? ReadOnlyPathMetadata.Instance : Files, realFiles ? WindowsReadOnlyFileMetadataProbe.Instance : Files, () => At.AddDays(2));
+                Db.Root, realFiles ? ReadOnlyPathMetadata.Instance : Files, realFiles ? WindowsReadOnlyFileMetadataProbe.Instance : Files, () => At.AddDays(2), TestRuntimeOutputUse.None);
         }
         internal OrdinaryRecordingHistorySnapshot Seed(string id, string status = "completed", DateTimeOffset? completed = null, string? path = null)
         {
@@ -60,7 +60,7 @@ public sealed class RetentionPreviewQueryTests
             Lengths.Add(path);var length=Length?.Invoke(path)??DefaultLength;
             ProbeAttributes.Add(path);var second=Attribute?.Invoke(path)??FileAttributes.Normal;
             if((second&(FileAttributes.ReparsePoint|FileAttributes.Directory))!=0)return new(FileObservationOutcome.MetadataChanged);
-            var a=new HandleMetadataSnapshot(length,0,1,first,0,0,133000000000000000,new(0x123456789abcdef0,0xfedcba9876543210,0x876543210abcdef0));
+            var a=new HandleMetadataSnapshot(length,0,1,first,0,0,133000000000000000,PublicationAnchorTestFixture.SyntheticObject(path));
             return new(FileObservationOutcome.Sampled,a,a with{Attributes=second},path,path);
         }
     }
@@ -180,7 +180,7 @@ public sealed class RetentionPreviewQueryTests
         Assert.Throws<UnifiedHistoryArgumentException>(() => f.Page(1, first.NextCursor, sid: "different-owner"));
         Assert.Throws<UnifiedHistoryArgumentException>(() => f.Page(1, first.NextCursor, session: "different-session"));
         Assert.Throws<UnifiedHistoryArgumentException>(() => f.Page(1, "bad")); Assert.Throws<UnifiedHistoryArgumentException>(() => f.Page(1, ""));
-        var headless = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(f.Db.Store,f.Db.Ordinary,true),f.Db.Root);
+        var headless = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(f.Db.Store,f.Db.Ordinary,true),f.Db.Root, TestRuntimeOutputUse.None);
         Assert.Throws<UnifiedHistoryArgumentException>(() => headless.GetPage(Sid,Session,20,f.Before,first.NextCursor));
         f.Seed("bb"); f.Files.DefaultLength = 25; var next = f.Page(100, first.NextCursor);
         Assert.Equal(new[] { "ordinary:b", "ordinary:c" }, next.Items.Select(e => e.EntryId)); Assert.All(next.Items, e => Assert.Equal("file_length_changed", e.ReasonCode));
@@ -235,7 +235,7 @@ public sealed class RetentionPreviewQueryTests
     {
         var root = Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task325r/synthetic")); var files = new MetadataFake { DefaultLength = long.MaxValue };
         var entries = Enumerable.Range(0, overflow ? 2 : 1).Select(i => new UnifiedHistoryEntry("ordinary:"+i,"ordinary","ordinary_video",At,RecordingId:i.ToString(),Status:"completed",OutputPath:Path.Combine(root,"Videos",i+".mp4"),OutputPathRecorded:true,OutputSizeBytes:long.MaxValue,CompletedAtUtc:At.AddSeconds(1),Bundle:new("not_applicable",null,null))).ToArray();
-        var service = new RetentionPreviewQueryService((_,_,limit,before,_) => new(entries.Select(e=>new OrdinaryRetentionEvidence(e,OrdinaryNestedReferenceState.None,SharedOutputPathReferenceState.None,PlannedOutputPathReferenceState.None) { PublicationAnchor = new(e.OutputPath!,e.OutputSizeBytes!.Value,new(0x123456789abcdef0,0xfedcba9876543210,0x876543210abcdef0)) }).ToArray(),null,limit,new("ordinary",CreatedBefore:before)), root, files, files, () => At.AddDays(2));
+        var service = new RetentionPreviewQueryService((_,_,limit,before,_) => new(entries.Select(e=>new OrdinaryRetentionEvidence(e,OrdinaryNestedReferenceState.None,SharedOutputPathReferenceState.None,PlannedOutputPathReferenceState.None) { PublicationAnchor = new(e.OutputPath!,e.OutputSizeBytes!.Value,PublicationAnchorTestFixture.SyntheticObject(e.OutputPath!)), PublicationIdentityReference = PublicationIdentityReferenceState.None }).ToArray(),null,limit,new("ordinary",CreatedBefore:before)), root, files, files, () => At.AddDays(2), TestRuntimeOutputUse.None);
         if (overflow) Assert.Throws<RetentionPreviewUnavailableException>(() => service.GetPage(Sid,Session,20,At.AddHours(1)));
         else Assert.Equal(long.MaxValue, service.GetPage(Sid,Session,20,At.AddHours(1)).ObservedCandidateBytes);
     }

@@ -496,8 +496,7 @@ internal sealed class FutureWindowAuthorizationApprovalForm : Form
         try
         {
             TopMost = true;
-            _windowPlatform.ShowNormal(Handle);
-            var state = _windowPlatform.Inspect(Handle);
+            var state = LocalApprovalWindowPresentation.ShowAndInspect(this, _windowPlatform);
             if (!state.IsVisible || state.IsMinimized || !state.IsWithinWorkingArea)
             {
                 _outcome = FutureWindowApprovalOutcome.Unavailable;
@@ -556,27 +555,7 @@ internal sealed class FutureWindowAuthorizationApprovalForm : Form
 
     private void ApplySafeBounds()
     {
-        Rectangle workArea;
-        try
-        {
-            workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
-            if (workArea.Width <= 0 || workArea.Height <= 0)
-                throw new InvalidOperationException("No usable monitor working area.");
-        }
-        catch
-        {
-            workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1024, 768);
-        }
-
-        var width = Math.Clamp(Size.Width, 1, Math.Max(1, workArea.Width - 24));
-        var height = Math.Clamp(Size.Height, 1, Math.Max(1, workArea.Height - 24));
-        MinimumSize = new Size(Math.Min(520, width), Math.Min(420, height));
-        Size = new Size(width, height);
-        Bounds = new Rectangle(
-            workArea.Left + Math.Max(0, (workArea.Width - width) / 2),
-            workArea.Top + Math.Max(0, (workArea.Height - height) / 2),
-            width,
-            height);
+        LocalApprovalWindowPresentation.Fit(this);
     }
 
     private static object NativePayload(FutureWindowApprovalNativeState state, string? reasonCode = null) => new

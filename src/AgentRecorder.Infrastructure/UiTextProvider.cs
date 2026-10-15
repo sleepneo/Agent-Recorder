@@ -18,6 +18,7 @@ public sealed class UiTextProvider : IUiTextProvider
         _texts = language == UiLanguage.ZhCn ? CreateZhCn() : CreateEnUs();
         ObservationUiText.Add(_texts, language);
         ObservationHealthText.Add(_texts, language);
+        LocalRetentionUiText.Add(_texts, language);
     }
 
     public UiLanguage Language { get; }
@@ -81,6 +82,9 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Confirmation_Info_CaptureSemantics"] = "捕获语义",
             ["Confirmation_Info_SourceTitle"] = "来源标题",
             ["Confirmation_Info_Duration"] = "时长",
+            ["Confirmation_Info_Artifacts"] = "录制产物",
+            ["Confirmation_Value_MediaOnly"] = "仅MP4",
+            ["Confirmation_Value_MediaAndBundle"] = "MP4与录制说明包",
             ["Confirmation_Info_Countdown"] = "开始前倒计时",
             ["Confirmation_Info_Countdown_Seconds"] = "{0} 秒",
             ["Confirmation_Info_Countdown_Off"] = "关闭",
@@ -404,6 +408,9 @@ public sealed class UiTextProvider : IUiTextProvider
             ["Confirmation_Info_CaptureSemantics"] = "Capture semantics",
             ["Confirmation_Info_SourceTitle"] = "Source title",
             ["Confirmation_Info_Duration"] = "Duration",
+            ["Confirmation_Info_Artifacts"] = "Recording artifacts",
+            ["Confirmation_Value_MediaOnly"] = "MP4 only",
+            ["Confirmation_Value_MediaAndBundle"] = "MP4 and recording bundle",
             ["Confirmation_Info_Countdown"] = "Pre-capture countdown",
             ["Confirmation_Info_Countdown_Seconds"] = "{0} seconds",
             ["Confirmation_Info_Countdown_Off"] = "Off",

@@ -105,7 +105,7 @@ public sealed class OrdinaryMediaVerificationTests(ITestOutputHelper output)
             var audit=new RetentionSharedOutputPathTests.QuietAudit();Engine=engine??new(audit);Engine.ConfigureOrdinaryRecordingHistory(f.Writer);
             if(engine is null)Engine.BackendFactory=_=>throw new InvalidOperationException("Capture forbidden");
             var q=new UnifiedHistoryQueryService(f.Store,f.Writer,headless);var files=new RetentionPreviewQueryTests.MetadataFake();
-            var retention=new RetentionPreviewQueryService(q.GetOrdinaryEvidencePage,f.Root,files,files,()=>DateTimeOffset.UtcNow.AddDays(1));
+            var retention=new RetentionPreviewQueryService(q.GetOrdinaryEvidencePage,f.Root,files,files,()=>DateTimeOffset.UtcNow.AddDays(1), TestRuntimeOutputUse.None);
             Api=new(Engine,audit,new Tray(headless),null,null,null,null,null,null,null,null,null,0,
                 unifiedHistoryGateway:new SqliteUnifiedHistoryGateway(q,()=>(Sid,Session)),
                 artifactCheckGateway:new SqliteOrdinaryArtifactCheckGateway(new(f.Writer)),

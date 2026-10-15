@@ -173,7 +173,11 @@ public sealed class OrdinaryBundleContentsHistoryTests(ITestOutputHelper output)
     {
         using var c=new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");c.Open();
         var result=new List<string>();var tables=new List<string>();using var cmd=c.CreateCommand();
-        cmd.CommandText="SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'idx_future_window_publication%' AND tbl_name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'idx_plan_media_publication%' AND name NOT IN ('idx_setup_intents_pending_output_path','idx_setup_intents_pending_output_template','idx_recurring_profiles_pending_output_template','idx_required_once_setup_pending_output_path') AND name NOT LIKE 'ordinary_bundle_attachment_hash%' AND name NOT LIKE 'idx_ordinary_bundle_attachment_hash%' AND name NOT LIKE 'ordinary_media_hash%' AND name NOT LIKE 'idx_ordinary_media_hash%' AND name NOT LIKE 'ordinary_bundle_identity%' AND name NOT LIKE 'idx_ordinary_bundle_identity%' AND name NOT LIKE 'ordinary_bundle_contents%' AND name NOT LIKE 'idx_ordinary_bundle_contents%' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_window_target_initial','idx_ordinary_window_targets_key_created') ORDER BY name;";
+        cmd.CommandText="SELECT name,type,sql FROM sqlite_master WHERE name!='idx_ordinary_publication_identity' AND name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'idx_future_window_publication%' AND tbl_name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'idx_plan_media_publication%' AND name NOT IN ('idx_setup_intents_pending_output_path','idx_setup_intents_pending_output_template','idx_recurring_profiles_pending_output_template','idx_required_once_setup_pending_output_path') AND name NOT LIKE 'ordinary_bundle_attachment_hash%' AND name NOT LIKE 'idx_ordinary_bundle_attachment_hash%' AND name NOT LIKE 'ordinary_media_hash%' AND name NOT LIKE 'idx_ordinary_media_hash%' AND name NOT LIKE 'ordinary_bundle_identity%' AND name NOT LIKE 'idx_ordinary_bundle_identity%' AND name NOT LIKE 'ordinary_bundle_contents%' AND name NOT LIKE 'idx_ordinary_bundle_contents%' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_window_target_initial','idx_ordinary_window_targets_key_created') ORDER BY name;";
+        // This is the v32 projection, not a current-schema snapshot. Exclude
+        // exactly v43 objects by their owning table; preserve all old assertions.
+        cmd.CommandText=cmd.CommandText.Replace("WHERE name!=","WHERE tbl_name<>'ordinary_deletion_operations' AND name!=",StringComparison.Ordinal);
+        cmd.CommandText=cmd.CommandText.Replace("WHERE ","WHERE tbl_name<>'ordinary_deletion_requests' AND ",StringComparison.Ordinal);
         using(var r=cmd.ExecuteReader())while(r.Read()){result.Add(string.Join("|",Enumerable.Range(0,3).Select(i=>r.GetValue(i).ToString())));if(r.GetString(1)=="table")tables.Add(r.GetString(0));}
         foreach(var table in tables)
         {
@@ -213,7 +217,7 @@ public sealed class OrdinaryBundleContentsHistoryTests(ITestOutputHelper output)
         var query=f.Query;var probes=0;query.OrdinaryFileProbeForTests=_=>{probes++;return true;};
         Assert.Throws<UnifiedHistoryUnavailableException>(()=>query.GetPage(Sid,Session,20,new("ordinary")));
         var error=Record.Exception(()=>f.Writer.Read("r"));Assert.True(error is OrdinaryRecordingHistoryUnavailableException or SqliteOperationalStoreException);
-        var files=new RetentionPreviewQueryTests.MetadataFake();var preview=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Root,files,files,()=>At.AddDays(5));
+        var files=new RetentionPreviewQueryTests.MetadataFake();var preview=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Root,files,files,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         Assert.Throws<RetentionPreviewUnavailableException>(()=>preview.GetPage(Sid,Session,20,At.AddHours(1),null));
         Assert.Equal(0,probes);Assert.Empty(files.Attributes);Assert.Empty(files.Observations);Assert.Empty(files.Lengths);
     }
@@ -223,7 +227,7 @@ public sealed class OrdinaryBundleContentsHistoryTests(ITestOutputHelper output)
     {
         using var f=new Fixture();var(_,op)=f.Seed(anchor:true);f.Complete(op);var query=f.Query;
         query.OrdinaryFileProbeForTests=_=>throw new InvalidOperationException("No early probe");
-        var files=new RetentionPreviewQueryTests.MetadataFake();var preview=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Root,files,files,()=>At.AddDays(5));
+        var files=new RetentionPreviewQueryTests.MetadataFake();var preview=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Root,files,files,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         var page=preview.GetPage(Sid,Session,20,At.AddHours(1),null);var item=Assert.Single(page.Items);
         Assert.Equal("bundle_artifact_reference",item.ReasonCode);Assert.Null(item.ObservedFileBytes);
         Assert.True(item.AgeCandidate);Assert.Equal(1,page.UnknownCandidateFileCount);Assert.Equal(0,page.ObservedCandidateFileCount);Assert.Equal(0,page.ObservedCandidateBytes);

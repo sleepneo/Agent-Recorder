@@ -624,6 +624,8 @@ public sealed class PlanExecutionStatusQueryTests
         using (var command = connection.CreateCommand())
         {
             // Reconstruct the legacy fixture before reapplying append-only migrations.
+            foreach (var index in SqliteSchemaV42.Indexes) { command.CommandText = "DROP INDEX " + index.Name + ";"; command.ExecuteNonQuery(); }
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=42;"; command.ExecuteNonQuery();
             command.CommandText = "DROP TRIGGER plan_media_publication_initial; DROP TABLE plan_media_publication_anchors; DROP TABLE plan_media_publication_boundary; DELETE FROM schema_migrations WHERE version=41;";
             command.ExecuteNonQuery();
             foreach (var index in SqliteSchemaV29.Indexes.Concat(SqliteSchemaV28.Indexes))

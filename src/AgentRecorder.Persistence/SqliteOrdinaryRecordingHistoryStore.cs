@@ -413,7 +413,9 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
         return changed == 1;
     }
 
-    internal void FlushBeforeRead()
+    internal void FlushBeforeRead() => FlushBeforeRead(ReadFlushTimeout);
+
+    private void FlushBeforeRead(TimeSpan timeout)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
@@ -424,7 +426,7 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
             return;
         }
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_queue.Writer.TryWrite(new BarrierWork(completion)) || !completion.Task.Wait(ReadFlushTimeout))
+        if (timeout <= TimeSpan.Zero || !_queue.Writer.TryWrite(new BarrierWork(completion)) || !completion.Task.Wait(timeout))
             throw new OrdinaryRecordingHistoryUnavailableException("Ordinary recording history is temporarily unavailable.");
         lock (_writeFailureGate)
         {
@@ -435,9 +437,11 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
 
     internal string DatabasePath => _store.DatabasePath;
 
-    internal void FlushBeforeUnifiedRead()
+    internal void FlushBeforeUnifiedRead() => FlushBeforeUnifiedRead(ReadFlushTimeout);
+
+    internal void FlushBeforeUnifiedRead(TimeSpan timeout)
     {
-        FlushBeforeRead();
+        FlushBeforeRead(timeout);
         // The old read method permits disposed reads. Unified reads must still
         // honor a known terminal write failure after a failed shutdown drain.
         lock (_writeFailureGate)

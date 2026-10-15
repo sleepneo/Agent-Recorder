@@ -27,7 +27,7 @@ public sealed class RetentionHandleMetadataApiTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",_db.Root);ApiKeyAuth.InitializeForTesting(_db.Root);
         var query=new UnifiedHistoryQueryService(_db.Store,_db.Ordinary,headless);query.CandidatesSelectedForTests=(_,_)=>_reads++;
         _synthetic.Observation=p=>contract switch{"null"=>null,"enum"=>new((FileObservationOutcome)999),_=>observation=="normal"?RetentionHandleMetadataTests.Good(p):observation=="changed_length"?RetentionHandleMetadataTests.Good(p,13):RetentionHandleMetadataTests.Alter(observation??"hard_link",p)};
-        var service=native?new RetentionPreviewQueryService(query,_db.Root):new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,_db.Root,_synthetic,contract=="provider"?null:_synthetic,()=>At.AddDays(5));
+        var service=native?new RetentionPreviewQueryService(query,_db.Root, TestRuntimeOutputUse.None):new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,_db.Root,_synthetic,contract=="provider"?null:_synthetic,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         var audit=new RetentionSharedOutputPathTests.QuietAudit();var tray=new HeadlessTrayContext(audit);var engine=new RecordingEngine(audit);engine.SetTray(tray);engine.BackendFactory=_=>throw new InvalidOperationException("SECRET_CAPTURE");
         _server=new ApiServer(engine,audit,tray,null,null,null,null,null,null,null,null,null,0,retentionPreviewGateway:new SqliteRetentionPreviewGateway(service,()=> (Sid,Session)));_server.Start();
         return new HttpClient(new HttpClientHandler{UseProxy=false}){BaseAddress=new Uri($"http://127.0.0.1:{_server.BoundPort}"),Timeout=TimeSpan.FromSeconds(10)};

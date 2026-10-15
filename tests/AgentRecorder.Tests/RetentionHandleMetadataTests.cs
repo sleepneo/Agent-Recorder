@@ -11,7 +11,9 @@ public sealed class RetentionHandleMetadataTests
 {
     internal static HandleMetadataSnapshot Stable(long length = 12) => new(length, 0, 1, FileAttributes.Normal, 0, 0,
         133000000000000000, new(0x123456789abcdef0, 0xfedcba9876543210, 0x876543210abcdef0));
-    internal static FileMetadataObservation Good(string path, long length = 12) => new(FileObservationOutcome.Sampled, Stable(length), Stable(length), path, path);
+    internal static FileMetadataObservation Good(string path, long length = 12) => new(FileObservationOutcome.Sampled,
+        Stable(length) with { Identity = PublicationAnchorTestFixture.SyntheticObject(path) },
+        Stable(length) with { Identity = PublicationAnchorTestFixture.SyntheticObject(path) }, path, path);
     internal static FileMetadataObservation Alter(string kind, string path)
     {
         var observation=Good(path);var a=observation.Before!;var b=a;
@@ -95,7 +97,7 @@ public sealed class RetentionHandleMetadataTests
     public void ObservationContractDamageFailsWholePageWithoutLeakingMaterials(string fault)
     {
         using var f=RetentionPlannedOutputPathTests.Fixture();f.Seed();f.Files.Observation=_=>fault switch{"null_result"=>null,"invalid_enum"=>new((FileObservationOutcome)999),_=>new(FileObservationOutcome.Missing,Stable())};
-        var service=new RetentionPreviewQueryService(f.Query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,fault=="missing_provider"?null:f.Files,()=>At.AddDays(5));
+        var service=new RetentionPreviewQueryService(f.Query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,fault=="missing_provider"?null:f.Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         var before=f.Snapshot();Assert.Throws<RetentionPreviewUnavailableException>(()=>service.GetPage(Sid,Session,20,f.Before));Assert.Equal(before,f.Snapshot());if(fault=="missing_provider")f.NoProbes();
     }
     [Theory]

@@ -22,7 +22,7 @@ public sealed class RetentionNestedReferenceApiTests : IDisposable
         _fixture=new(headless){KeepFixtureForDiagnostics=true};Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",_fixture.Db.Root);ApiKeyAuth.InitializeForTesting(_fixture.Db.Root);
         var audit=new AuditFake();var tray=new HeadlessTrayContext(audit);var engine=new RecordingEngine(audit);engine.SetTray(tray);engine.BackendFactory=_=>throw new InvalidOperationException("SECRET_CAPTURE_FORBIDDEN");
         // Both actual hosts construct this public service/gateway combination.
-        var service=new RetentionPreviewQueryService(_fixture.Query,_fixture.Db.Root);
+        var service=new RetentionPreviewQueryService(_fixture.Query,_fixture.Db.Root, TestRuntimeOutputUse.None);
         _server=new ApiServer(engine,audit,tray,null,null,null,null,null,null,null,null,null,0,retentionPreviewGateway:configured?new SqliteRetentionPreviewGateway(service,()=> (Sid,Session)):null);_server.Start();
         return new HttpClient(new HttpClientHandler{UseProxy=false}){BaseAddress=new Uri($"http://127.0.0.1:{_server.BoundPort}"),Timeout=TimeSpan.FromSeconds(10)};
     }

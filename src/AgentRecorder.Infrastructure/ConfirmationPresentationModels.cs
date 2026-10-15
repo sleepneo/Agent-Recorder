@@ -25,9 +25,12 @@ public sealed record RecordingSeriesPresentation
 /// Typed request summary produced by the configuration layer without using an
 /// anonymous object or reflection-based field lookup.
 /// </summary>
+public sealed record RecordingArtifactPolicy(bool Bundle);
+
 public sealed record RecordingRequestSummary
 {
     public string Mode { get; init; } = "video";
+    public RecordingArtifactPolicy? Artifacts { get; init; } = new(true);
     public string Source { get; init; } = "";
     public string Audio { get; init; } = "No audio";
     public string AudioSourceKind { get; init; } = "none";

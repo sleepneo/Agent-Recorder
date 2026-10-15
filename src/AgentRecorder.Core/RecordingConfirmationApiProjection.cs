@@ -19,6 +19,7 @@ internal static class RecordingConfirmationApiProjection
         return new
         {
             mode = summary.Mode,
+            artifacts = summary.Artifacts is null ? null : new { bundle = summary.Artifacts.Bundle },
             source = summary.Source,
             audio = summary.Audio,
             audio_source_kind = summary.AudioSourceKind,

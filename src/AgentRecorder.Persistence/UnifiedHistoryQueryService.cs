@@ -54,7 +54,9 @@ public sealed class UnifiedHistoryQueryService
         return new(evidence??throw new InvalidDataException("Retention relation evidence is missing."),page.NextCursor,page.PageSize,page.Filters);
     }
     internal Action<string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionReferenceCommandForTests {get;set;}
-    private IReadOnlyList<OrdinaryRetentionEvidence> ReadRetentionRelations(SqliteConnection connection,SqliteTransaction transaction,
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? RetentionIdentityCommandForTests { get; set; }
+    internal Func<IReadOnlyList<(object CandidateId, object Flag)>, IReadOnlyList<(object CandidateId, object Flag)>>? RetentionIdentityResultsForTests { get; set; }
+    internal IReadOnlyList<OrdinaryRetentionEvidence> ReadRetentionRelations(SqliteConnection connection,SqliteTransaction transaction,
         IReadOnlyList<UnifiedHistoryEntry> entries,IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
     {
         SqliteOperationalStore.ValidateRetentionReferenceSchema(connection,transaction);
@@ -64,6 +66,8 @@ public sealed class UnifiedHistoryQueryService
         SqliteOperationalStore.ValidateRetentionRequiredOnceSetupOutputSchema(connection,transaction);
         if(entries.Count!=rows.Count || rows.Count>100) throw new InvalidDataException("Invalid retention relation page.");
         var anchors = PublicationAnchorStorage.Read(connection, transaction, rows);
+        var identities = PublicationIdentityReferenceStorage.Read(connection, transaction, anchors,
+            RetentionIdentityCommandForTests, RetentionIdentityResultsForTests);
         if(rows.Count==0) return Array.Empty<OrdinaryRetentionEvidence>();
         using var command=connection.CreateCommand();command.Transaction=transaction;
         var parameters=rows.Select((row,i)=>"($parent"+i+")").ToArray();
@@ -85,7 +89,7 @@ public sealed class UnifiedHistoryQueryService
         var planned = ReadPlannedOutputReferences(connection, transaction, rows);
         var pending = PendingOutputUseStorage.Read(connection, transaction, rows, RetentionPendingOutputCommandForTests);
         return entries.Select((entry,i)=>new OrdinaryRetentionEvidence(entry,NestedState(rows[i],references[rows[i].RecordingId]),
-            shared[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId], PendingOutputUse = pending[rows[i].RecordingId] }).ToArray();
+            shared[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId], PublicationIdentityReference = identities[rows[i].RecordingId], PendingOutputUse = pending[rows[i].RecordingId] }).ToArray();
     }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPendingOutputCommandForTests { get; set; }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPathCommandForTests { get; set; }
@@ -370,7 +374,7 @@ public sealed class UnifiedHistoryQueryService
         return keys;
     }
 
-    private UnifiedHistoryEntry ReadOrdinary(SqliteConnection connection, SqliteTransaction transaction, Key key, bool probeFiles,List<OrdinaryRecordingHistorySnapshot>? retentionRows=null)
+    internal UnifiedHistoryEntry ReadOrdinary(SqliteConnection connection, SqliteTransaction transaction, Key key, bool probeFiles,List<OrdinaryRecordingHistorySnapshot>? retentionRows=null)
     {
         var row = SqliteOrdinaryRecordingHistoryStore.ReadById(connection, transaction, key.Id, readTarget: false)
             ?? throw new InvalidDataException("The selected ordinary recording disappeared.");
@@ -448,7 +452,7 @@ public sealed class UnifiedHistoryQueryService
     { using var command = c.CreateCommand(); command.Transaction = t; command.CommandText = $"SELECT COALESCE(MAX({column}),0) FROM {table};"; return (long)command.ExecuteScalar()!; }
     private static void Add(SqliteCommand c, string name, object value) => c.Parameters.AddWithValue(name, value);
     internal static bool ValidId(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 128 && value == value.Trim() && !value.Contains('\0');
-    private static bool ValidIdentity(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 256 && value == value.Trim() && !value.Contains('\0');
+    internal static bool ValidIdentity(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 256 && value == value.Trim() && !value.Contains('\0');
     public static void ValidateArguments(int limit, UnifiedHistoryFilters filters)
     {
         if (filters is null || !filters.HasValidStatus || !filters.HasValidProfile || !filters.HasValidSourceType || !filters.HasValidPlanId || !filters.HasValidTargetKey || limit is < 1 or > 100 || filters.Source is not ("all" or "ordinary" or "plan" or "future_window") ||

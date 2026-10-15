@@ -24,6 +24,25 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-AgentRecorderDataDir")]
 public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("display",false,false)][InlineData("display",false,true)]
+    [InlineData("region",false,false)][InlineData("region",false,true)]
+    [InlineData("window",false,false)][InlineData("window",false,true)]
+    [InlineData("window",true,false)][InlineData("window",true,true)]
+    public async Task MediaOnlyPolicyUsesActualWgcAndAvPublishersWithoutGeneratingBundle(string source,bool audio,bool manual)
+    {
+        using var f=new Fixture(mediaOnlyEvidence:true);await f.Prepare(audio);var rec=f.Create(source,audio,bundle:false);await f.Approve(rec);await f.Terminal(rec,manual);
+        var row=f.Writer.Read(rec.Id)!;Assert.Equal("not_applicable",row.Bundle!.Status);Assert.Null(row.MediaHash);Assert.NotNull(rec.LastMeta!.PublicationReceipt);Assert.Null(rec.OrdinaryBundleOperation);Assert.Equal(0,f.Generator.Calls);Assert.False(Directory.Exists(Path.ChangeExtension(rec.OutputPath,".bundle")));
+        await Until(()=>((IOrdinaryRuntimeOutputUseProvider)f.Engine).ReadSnapshot(new[]{rec.OutputPath})?.Paths.Single().InUse==false);
+        var probe=FfmpegCaptureBackend.Probe(rec.OutputPath);Assert.True(probe.DurationSeconds>0);Assert.Equal(64,probe.Width);Assert.Equal(64,probe.Height);Assert.Equal(rec.LastMeta.PublicationReceipt.Anchor.Identity,WindowsReadOnlyFileMetadataProbe.Instance.Observe(rec.OutputPath).Before!.Identity);
+        File.WriteAllText(Path.Combine(f.Root,"media-only-wgc.json"),JsonSerializer.Serialize(new{recording_id=rec.Id,source,audio,manual,backend=rec.BackendType,formal_publisher=rec.LastMeta.PublicationReceipt.Anchor,bundle=row.Bundle.Status,generator_calls=f.Generator.Calls,main_output_retired=true,media=rec.OutputPath}),new UTF8Encoding(false));
+    }
+    [Theory][InlineData(false)][InlineData(true)]
+    public async Task MediaOnlyPolicyDoesNotTurnFailedSyntheticWgcMediaIntoCompleted(bool manual)
+    {
+        using var f=new Fixture(mediaOnlyEvidence:true);await f.Prepare();var rec=f.Create("display",bundle:false);await f.Approve(rec);f.Process!.FailMedia=true;
+        if(manual)f.Engine.Stop(rec.Id,"user_requested");else f.Process.Finish.TrySetResult();await Until(()=>rec.IsFinalized);Assert.Equal(RecState.failed,rec.State);Assert.Equal("not_applicable",f.Writer.Read(rec.Id)!.Bundle!.Status);Assert.Null(rec.LastMeta!.PublicationReceipt);Assert.Equal(0,f.Generator.Calls);
+    }
     private sealed class Events : Stream
     {
         private readonly Channel<byte[]> channel = Channel.CreateUnbounded<byte[]>();
@@ -96,7 +115,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
 
     private sealed class HeldGenerator : IRecordingBundleGenerator
     {
-        internal readonly FfmpegRecordingBundleGenerator Real = new();
+        internal readonly FfmpegRecordingBundleGenerator Real = AgentRecorder.App.Program.CreateRecordingBundleGenerator();
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<RecordingBundleRequest> Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Func<RecordingBundleRequest, Task<RecordingBundleGenerationResult>>? Fault;
@@ -151,8 +170,9 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
 
     private sealed class Fixture : IDisposable
     {
-        private static readonly string Parent = Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task346"));
-        internal readonly string Root = Path.Combine(Parent, Guid.NewGuid().ToString("N"));
+        private readonly string Parent;
+        internal readonly string Root;
+        private readonly bool keepEvidence;
         internal readonly HeldGenerator Generator = new(); internal readonly Tray Tray = new();
         internal SqliteOperationalStore Store = null!; internal SqliteOrdinaryRecordingHistoryStore Writer = null!;
         internal RecordingEngine Engine = null!; internal ApiServer? Api;
@@ -169,8 +189,11 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
         private readonly Func<List<SystemQuery.DisplayTopologyInfo>>? topology = Provider<Func<List<SystemQuery.DisplayTopologyInfo>>>("_displayTopologyProvider");
         private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? windows = Provider<Func<bool, bool, List<SystemQuery.WindowInfo>>>("_windowProvider");
         private bool disposed;
-        internal Fixture(bool generator = true, bool failConstruction = false)
+        internal Fixture(bool generator = true, bool failConstruction = false,bool mediaOnlyEvidence=false)
         {
+            keepEvidence=mediaOnlyEvidence;
+            Parent=Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot,mediaOnlyEvidence?".local-data/temp/task362":".local-data/temp/task346"));
+            Root=Path.Combine(Parent,(mediaOnlyEvidence?"wgc-":"")+Guid.NewGuid().ToString("N"));
             try
             {
                 Directory.CreateDirectory(Root);
@@ -221,7 +244,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
             await AvMuxOwnershipTests.Generate(Clip, "color=c=blue:s=64x64:r=15", false);
             if (audio) await AvMuxOwnershipTests.Generate(Wav, "sine=frequency=440:sample_rate=48000", true);
         }
-        internal JsonObject Request(string source, bool audio = false)
+        internal JsonObject Request(string source, bool audio = false,bool? bundle=null)
         {
             var s = new JsonObject { ["type"] = source };
             if (source == "window") s["window_id"] = "window_42"; else s["display_id"] = "display_1";
@@ -230,11 +253,12 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
                 ["output"] = new JsonObject { ["directory"] = Path.Combine(Root, "Videos"), ["filename"] = "capture.mp4", ["conflict_policy"] = "fail" } };
             if (source == "window") { cfg["required_capture_semantics"] = "window_surface"; cfg["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 1 }; }
             if (audio) cfg["audio"] = new JsonObject { ["system_audio"] = new JsonObject { ["enabled"] = true } };
+            if(bundle.HasValue)cfg["artifacts"]=new JsonObject{["bundle"]=bundle.Value};
             return cfg;
         }
-        internal Recording Create(string source, bool audio = false, string origin = "raw")
+        internal Recording Create(string source, bool audio = false, string origin = "raw",bool? bundle=null)
         {
-            var cfg = Request(source, audio);
+            var cfg = Request(source, audio,bundle);
             if (origin == "profile") Engine.CreateRecordingFromFixedRegionProfile(cfg, "task346", Tray, new("P", 2, RecurringFixedRegionProfileVersion.DigestPrefix + new string('a', 64)), () => null);
             else
             {
@@ -305,7 +329,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
             foreach (var pair in environment) Clean(() => Environment.SetEnvironmentVariable(pair.Key, pair.Value));
             Clean(() => ApiKeyAuth.ResetForTesting(null)); Clean(SqliteConnection.ClearAllPools);
             // Never erase evidence when an owned worker failed to settle.
-            if (errors.Count == 0) Clean(() => { Assert.Equal(Parent, Path.GetDirectoryName(Path.GetFullPath(Root))); if (Directory.Exists(Root)) Directory.Delete(Root, true); });
+            if (errors.Count == 0&&!keepEvidence) Clean(() => { Assert.Equal(Parent, Path.GetDirectoryName(Path.GetFullPath(Root))); if (Directory.Exists(Root)) Directory.Delete(Root, true); });
             if (errors.Count != 0) throw new AggregateException(errors);
         }
     }

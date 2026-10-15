@@ -265,7 +265,8 @@ public sealed class ConfirmationPresentationContractTests
     /// <summary>
     /// Independent characterization constructor for the legacy
     /// RecordingEngine summaryWithMeta contract. It preserves the old
-    /// GetSummaryField(value).ToString() ?? "" behavior and deliberately does
+    /// GetSummaryField(value).ToString() ?? "" behavior, plus the explicit
+    /// Task362 artifacts policy field, and deliberately does
     /// not call the production projection to build expected values.
     /// </summary>
     private static object LegacySummary(RecordingConfirmationPresentation presentation)
@@ -285,6 +286,7 @@ public sealed class ConfirmationPresentationContractTests
         return new
         {
             mode = summary.Mode,
+            artifacts = summary.Artifacts is null ? null : new { bundle = summary.Artifacts.Bundle },
             source = summary.Source,
             audio = summary.Audio,
             audio_source_kind = summary.AudioSourceKind,

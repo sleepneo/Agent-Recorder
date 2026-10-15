@@ -586,7 +586,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
         using var connection = legacy.OpenReadOnlyConnection(); using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: true);
         Assert.Null(FutureWindowPublicationStorage.Read(connection, transaction, new[] { repo.Get("old", f.Sid, f.Session)! })["old"]);
         Assert.Equal(1L, SqliteSchemaV40.Validate(connection, transaction)); transaction.Commit();
-        Assert.Equal(41, SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
+        Assert.Equal(44, SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
     }
 
     [Fact]

@@ -23,7 +23,7 @@ public sealed class RetentionNestedReferenceTests
         {
             Query=headless?new(Db.Store,Db.Ordinary,true):Db.Query;
             Query.OrdinaryFileProbeForTests=_=>{OldProbes++;throw new InvalidOperationException("SECRET_EARLY_FILE_PROBE");};
-            Service=new((sid,session,limit,before,cursor)=>{Reads++;return Query.GetOrdinaryEvidencePage(sid,session,limit,before,cursor);},Db.Root,Files,Files,()=>At.AddDays(5));
+            Service=new((sid,session,limit,before,cursor)=>{Reads++;return Query.GetOrdinaryEvidencePage(sid,session,limit,before,cursor);},Db.Root,Files,Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         }
         internal OrdinaryRecordingHistorySnapshot Seed(string id,string? role=null,string? parent=null,string? session=null,string status="completed",DateTimeOffset? at=null)
         {
@@ -120,7 +120,7 @@ public sealed class RetentionNestedReferenceTests
         using var f=new Fixture();f.Seed("target");var actual=f.Query.GetOrdinaryEvidencePage(Sid,Session,20,f.Before,null);var item=actual.Items[0];
         var altered=actual with{Items=fault=="duplicate"?new[]{item,item}:new[]{item with{NestedReference=fault=="missing"?null:(OrdinaryNestedReferenceState)999}}};
         Func<string,string,int,DateTimeOffset,string?,OrdinaryRetentionEvidencePage> read=(_,_,_,_,_)=>fault=="throwing"?throw new IOException("SECRET_SQL"):altered;
-        var service=new RetentionPreviewQueryService(fault=="null_provider"?null!:read,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5));Assert.Throws<RetentionPreviewUnavailableException>(()=>service.GetPage(Sid,Session,20,f.Before));f.NoProbes();
+        var service=new RetentionPreviewQueryService(fault=="null_provider"?null!:read,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);Assert.Throws<RetentionPreviewUnavailableException>(()=>service.GetPage(Sid,Session,20,f.Before));f.NoProbes();
     }
     [Fact]
     public void LargeFixtureUsesOneBoundedBatchWithIndexedParentExists()
@@ -157,13 +157,17 @@ public sealed class RetentionNestedReferenceTests
         }
         var store=new SqliteOperationalStore(path);var before=OldBytes(store);store.Initialize();store.Initialize();Assert.Equal(before,OldBytes(store));
         using var read=store.OpenReadOnlyConnection();using var check=read.CreateCommand();check.CommandText="SELECT name,definition_checksum FROM schema_migrations WHERE version=25;";using var r=check.ExecuteReader();Assert.True(r.Read());Assert.Equal(SqliteSchemaV25.MigrationName,r.GetString(0));Assert.Equal("67593a68f47a292736305488562badfe2656c3eef45d8c88c2298db9a4427a5a",r.GetString(1));Assert.False(r.Read());
-        using var writer=new SqliteOrdinaryRecordingHistoryStore(store);var query=new UnifiedHistoryQueryService(store,writer);var service=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5));Assert.All(service.GetPage(Sid,Session,20,f.Before).Items,x=>Assert.Equal("nested_relationship",x.ReasonCode));f.NoProbes();
+        using var writer=new SqliteOrdinaryRecordingHistoryStore(store);var query=new UnifiedHistoryQueryService(store,writer);var service=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);Assert.All(service.GetPage(Sid,Session,20,f.Before).Items,x=>Assert.Equal("nested_relationship",x.ReasonCode));f.NoProbes();
     }
     private static byte[] OldBytes(SqliteOperationalStore store)
     {
         using var c=new SqliteConnection($"Data Source={store.DatabasePath};Pooling=False;Mode=ReadOnly");c.Open();var parts=new List<string>();
         foreach(var sql in new[]{"SELECT * FROM ordinary_recording_history ORDER BY recording_id;","SELECT * FROM schema_migrations WHERE version<=24 ORDER BY version;","SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT IN ('plan_media_publication_anchors','plan_media_publication_boundary','future_window_publication_anchors','future_window_publication_boundary','ordinary_bundle_attachment_hash','ordinary_bundle_attachment_hash_boundary','ordinary_bundle_attachment_hash_items','ordinary_media_hash','ordinary_media_hash_boundary','ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_bundle_contents','ordinary_bundle_contents_boundary','ordinary_bundle_contents_items','ordinary_publication_anchors','ordinary_recording_bundles','ordinary_recording_targets','ordinary_recording_target_boundary') ORDER BY name;"})
-        {using var cmd=c.CreateCommand();cmd.CommandText=sql;using var r=cmd.ExecuteReader();while(r.Read())parts.Add(string.Join("|",Enumerable.Range(0,r.FieldCount).Select(i=>r.GetValue(i).ToString())));}
+        {using var cmd=c.CreateCommand();cmd.CommandText=sql;using var r=cmd.ExecuteReader();while(r.Read()){
+            // This projection is specifically v24; retain every v24 field and
+            // definition, excluding only the newly introduced v43 table DDL.
+            if(r.FieldCount==2&&r.GetValue(0) is string name&&(name==SqliteSchemaV43.Table||name==SqliteSchemaV44.Table))continue;
+            parts.Add(string.Join("|",Enumerable.Range(0,r.FieldCount).Select(i=>r.GetValue(i).ToString())));}}
         return Encoding.UTF8.GetBytes(string.Join("\n",parts));
     }
 }

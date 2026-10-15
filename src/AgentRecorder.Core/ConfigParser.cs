@@ -13,7 +13,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Core;
 
-public static class ConfigParser
+public static partial class ConfigParser
 {
     public const int DefaultCountdownSeconds = CaptureConfig.DefaultCountdownSeconds;
     public const int MinCountdownSeconds = CaptureConfig.MinCountdownSeconds;
@@ -37,6 +37,7 @@ public static class ConfigParser
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
     {
+        bool generateBundle = NormalizeArtifactBundle(cfg);
         // Normalize this before audio/device/source resolution so malformed
         // countdown input cannot trigger enumeration, region UI, output-path
         // creation, or any other request side effect.
@@ -124,7 +125,7 @@ public static class ConfigParser
         // This allows Phase-4 concurrency guard testing without real displays.
         bool testMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE") == "1";
 
-        var rec = new Recording { Agent = agent };
+        var rec = new Recording(generateBundle) { Agent = agent };
         var src = cfg["source"] ?? throw Inv("source is required");
         var type = Str(src["type"]) ?? throw Inv("source.type is required");
         var cap = new CaptureConfig();
@@ -426,6 +427,7 @@ public static class ConfigParser
         summary = new RecordingRequestSummary
         {
             Mode = rec.Mode,
+            Artifacts = seriesConfig is null ? new RecordingArtifactPolicy(rec.GenerateBundle) : null,
             Source = $"{rec.SourceType}: {rec.SourceTitle}",
             Audio = rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback
                 ? rec.SystemAudioEndpointIsDefault == true

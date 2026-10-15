@@ -22,7 +22,7 @@ using ApiException = AgentRecorder.Infrastructure.ApiException;
 
 namespace AgentRecorder.Api;
 
-public sealed class ApiServer
+public sealed partial class ApiServer
 {
     public const int Port = 37891;
     private const string Prefix = "/api/v1";
@@ -48,6 +48,7 @@ public sealed class ApiServer
     private readonly IPlanExecutionHistoryGateway? _planExecutionHistoryGateway;
     private readonly IUnifiedHistoryGateway? _unifiedHistoryGateway;
     private readonly IRetentionPreviewGateway? _retentionPreviewGateway;
+    private readonly IRetentionDeletionGateway? _retentionDeletionGateway;
     private readonly IOrdinaryArtifactCheckGateway? _artifactCheckGateway;
     private readonly IHistoryArtifactCheckGateway? _historyArtifactCheckGateway;
     private readonly IOrdinaryMediaVerificationGateway? _mediaVerificationGateway;
@@ -125,11 +126,12 @@ public sealed class ApiServer
         IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
         IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
-        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null)
+        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null,
+        IRetentionDeletionGateway? retentionDeletionGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
             planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
-            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway, historyArtifactCheckGateway)
+            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway, historyArtifactCheckGateway, retentionDeletionGateway)
     {
     }
 
@@ -154,7 +156,8 @@ public sealed class ApiServer
         IOrdinaryArtifactCheckGateway? artifactCheckGateway = null,
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
         IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
-        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null)
+        IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null,
+        IRetentionDeletionGateway? retentionDeletionGateway = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -172,6 +175,7 @@ public sealed class ApiServer
         _planExecutionHistoryGateway = planExecutionHistoryGateway;
         _unifiedHistoryGateway = unifiedHistoryGateway;
         _retentionPreviewGateway = retentionPreviewGateway;
+        _retentionDeletionGateway = retentionDeletionGateway;
         _artifactCheckGateway = artifactCheckGateway;
         _historyArtifactCheckGateway = historyArtifactCheckGateway;
         _mediaVerificationGateway = mediaVerificationGateway;
@@ -241,6 +245,7 @@ public sealed class ApiServer
             try { _cts.Cancel(); } catch { }
             try { _listener.Stop(); } catch { }
         }
+        try { _retentionDeletionGateway?.Stop(); } catch { }
     }
 
     public void Stop() => StopCore(Timeout.InfiniteTimeSpan);
@@ -269,7 +274,10 @@ public sealed class ApiServer
 
         CloseActiveClientsAndSnapshot(out var clients);
         BeforeStopClientDrainWaitForTests?.Invoke();
-        return WaitForTask(Task.WhenAll(clients), Remaining(timeout, startedAt));
+        if(!WaitForTask(Task.WhenAll(clients), Remaining(timeout, startedAt)))return false;
+        var deletionDrain=_retentionDeletionGateway?.WaitForIdleAsync();
+        if(deletionDrain is null)return true;
+        return WaitForTask(deletionDrain,Remaining(timeout,startedAt))&&deletionDrain.GetAwaiter().GetResult();
     }
 
     private void CloseActiveClientsAndSnapshot(out Task[] clients)
@@ -354,7 +362,7 @@ public sealed class ApiServer
                 if (RequiresAuth(method, path))
                 {
                     var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
-                    if(method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
+                    if(IsDeletionPath(path)||method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
                     {
                         // The new diagnostic endpoint requires authentication even in an
                         // unconfigured host. Preserve the shared validator and existing codes.
@@ -367,7 +375,7 @@ public sealed class ApiServer
                 }
 
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                var disconnect=(method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
+                var disconnect=(IsDeletionPath(path)||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
                 try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
                 finally { requestCancellation.Cancel(); await disconnect; }
@@ -478,6 +486,9 @@ public sealed class ApiServer
         if (requestLine.Length < 2) return null;
         var method = requestLine[0].ToUpperInvariant();
         var rawPath = requestLine[1];
+        var deletion=IsDeletionPath(rawPath);
+        if(deletion)
+        {try{_=new UTF8Encoding(false,true).GetString(headerBytes,0,headerEnd);}catch(DecoderFallbackException){throw InvalidDeletion();}}
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var duplicateHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -491,7 +502,7 @@ public sealed class ApiServer
             if (!headers.TryAdd(name, value))
             {
                 if (name.Equals("If-Match", StringComparison.OrdinalIgnoreCase) ||
-                    name.Equals("Idempotency-Key", StringComparison.OrdinalIgnoreCase))
+                    name.Equals("Idempotency-Key", StringComparison.OrdinalIgnoreCase)||name.Equals("Content-Length",StringComparison.OrdinalIgnoreCase))
                     duplicateHeaders.Add(name);
                 headers[name] = value;
             }
@@ -500,10 +511,13 @@ public sealed class ApiServer
         int contentLength = 0;
         if (headers.TryGetValue("Content-Length", out var clValue) && int.TryParse(clValue, out var parsed))
             contentLength = parsed;
+        if(deletion&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
+            contentLength is <0 or >2048||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidDeletion();
 
         byte[] bodyBytes = Array.Empty<byte>();
         var bodyStart = headerEnd;
         var alreadyRead = headerBytes.Length - bodyStart;
+        if(deletion&&alreadyRead>contentLength)throw InvalidDeletion();
         var remaining = contentLength - alreadyRead;
         if (remaining < 0) remaining = 0;
 
@@ -515,7 +529,7 @@ public sealed class ApiServer
             while (remaining > 0)
             {
                 int r;
-                try { r = await stream.ReadAsync(bodyBytes.AsMemory(offset, remaining)); }
+                try { r = deletion?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)):await stream.ReadAsync(bodyBytes.AsMemory(offset, remaining)); }
                 catch { break; }
                 if (r == 0) break;
                 offset += r;
@@ -523,7 +537,9 @@ public sealed class ApiServer
             }
         }
 
-        var body = StripBom(Encoding.UTF8.GetString(bodyBytes));
+        string body;
+        if(deletion){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw InvalidDeletion();}}
+        else body=StripBom(Encoding.UTF8.GetString(bodyBytes));
         return new HttpRequest(method, rawPath, headers, body, duplicateHeaders);
     }
 
@@ -562,6 +578,12 @@ public sealed class ApiServer
         if (!path.StartsWith(Prefix))
             throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint");
         var sub = path[Prefix.Length..];
+        if((method is "POST" or "PUT" or "PATCH") && !string.IsNullOrWhiteSpace(reqBody))
+        {
+            try { _ = ConfigParser.ValidateArtifactRequestJson(reqBody,method=="POST"&&(sub is "/recordings" or "/recordings/quick")); }
+            catch(JsonException) { } // Keep each route's original malformed-JSON error contract.
+        }
+        if(sub.StartsWith(DeletionPath,StringComparison.Ordinal))return RouteDeletion(method,sub,req,reqBody,reqId,cancellation,ref status);
 
         switch (method, sub)
         {
@@ -2680,6 +2702,9 @@ public sealed class ApiServer
     {
         var cfg = new JsonObject();
 
+        if(body is JsonObject obj && obj.ContainsKey("artifacts"))
+            cfg["artifacts"] = body["artifacts"]!.DeepClone();
+
         var videoNode = body["video"];
         if (videoNode != null)
             cfg["video"] = videoNode.DeepClone();
@@ -3609,6 +3634,21 @@ public sealed class ApiServer
                 ownership = "host_ordinary_directory_and_current_server_sid_session",
                 captures_media = false,
                 mutates_authorization = false
+            },
+            recording_artifacts = new
+            {
+                modes=new[]{"mp4_and_bundle","mp4_only"},default_bundle=true,
+                request_field="artifacts.bundle",endpoints=new[]{"/api/v1/recordings","/api/v1/recordings/quick"},
+                scope="ordinary_non_nested_video",requires_local_confirmation=true,
+                existing_bundle_protection_unchanged=true,media_only_digest="unknown_without_bundle_generation"
+            },
+            retention_deletion = new
+            {
+                supported=DeletionSupported,request_endpoint="/api/v1/retention/deletion-requests",query_endpoint="/api/v1/retention/deletion-requests/{id}",
+                scope="single_completed_ordinary_main_mp4_in_fixed_host_videos_with_original_anchor_and_not_applicable_bundle",
+                requires_local_confirmation=true,single_item=true,permanent=true,no_trash=true,unattended=false,
+                query_budget_seconds=3,idempotency="durable_same_key_same_request_no_reexecution",recovery="readonly_unknown_no_permit_or_ui_recovery",
+                result_semantics="accepted_is_os_disposition_request_not_physical_deletion_or_freed_space"
             },
             retention_preview = new
             {

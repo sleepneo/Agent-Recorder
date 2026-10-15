@@ -31,7 +31,7 @@ public sealed class RetentionSharedOutputPathTests(ITestOutputHelper output)
             Db=new(root??Path.Combine(TestHelper.ProjectRoot,".local-data/temp/task325r",Guid.NewGuid().ToString("N")));
             Query=headless?new(Db.Store,Db.Ordinary,true):Db.Query;
             Query.OrdinaryFileProbeForTests=_=>{OldProbes++;throw new IOException("SECRET_EARLY_PROBE");};
-            Service=new(Query.GetOrdinaryEvidencePage,Db.Root,Files,Files,()=>At.AddDays(5));
+            Service=new(Query.GetOrdinaryEvidencePage,Db.Root,Files,Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         }
         internal string PathFor(string name="Ä-Shared.mp4")=>Path.Combine(Db.Root,"Videos",name);
         internal OrdinaryRecordingHistorySnapshot Seed(string id="target",string? path=null,string status="completed",DateTimeOffset? at=null,string? role=null)
@@ -192,7 +192,7 @@ public sealed class RetentionSharedOutputPathTests(ITestOutputHelper output)
     {
         using var f=new Fixture();f.Seed();var page=f.Query.GetOrdinaryEvidencePage(Sid,Session,20,f.Before,null);var changed=page with{Items=page.Items.Select(e=>e with{SharedOutputReference=fault=="missing"?null:(SharedOutputPathReferenceState)999}).ToArray()};
         Func<string,string,int,DateTimeOffset,string?,OrdinaryRetentionEvidencePage> read=(_,_,_,_,_)=>fault=="throwing"?throw new IOException("SECRET_PROVIDER"):changed;
-        var service=new RetentionPreviewQueryService(fault=="null_provider"?null!:read,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5));Assert.Throws<RetentionPreviewUnavailableException>(()=>service.GetPage(Sid,Session,20,f.Before));f.NoProbes();
+        var service=new RetentionPreviewQueryService(fault=="null_provider"?null!:read,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);Assert.Throws<RetentionPreviewUnavailableException>(()=>service.GetPage(Sid,Session,20,f.Before));f.NoProbes();
     }
     [Theory]
     [InlineData("sql")][InlineData("collation_missing")][InlineData("comparison")]
@@ -256,13 +256,15 @@ public sealed class RetentionSharedOutputPathTests(ITestOutputHelper output)
             cmd.CommandText="ATTACH DATABASE $seed AS seed;";cmd.Parameters.AddWithValue("$seed",f.Db.Store.DatabasePath);cmd.ExecuteNonQuery();cmd.Parameters.Clear();cmd.CommandText="INSERT INTO ordinary_recording_history SELECT * FROM seed.ordinary_recording_history;";cmd.ExecuteNonQuery();
         }
         var before=OldSnapshot(path);var store=new SqliteOperationalStore(path);store.Initialize();Assert.Equal(before,OldSnapshot(path));var once=UnifiedHistoryProfileFilterTests.RawSnapshot(path);store.Initialize();Assert.Equal(once,UnifiedHistoryProfileFilterTests.RawSnapshot(path));
-        using var writer=new SqliteOrdinaryRecordingHistoryStore(store);var query=new UnifiedHistoryQueryService(store,writer);var service=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5));Assert.Equal("publication_identity_missing",Assert.Single(service.GetPage(Sid,Session,20,f.Before).Items).ReasonCode);f.NoProbes();
-        using var read=store.OpenReadOnlyConnection();using var cmd2=read.CreateCommand();cmd2.CommandText="PRAGMA integrity_check;";Assert.Equal("ok",cmd2.ExecuteScalar());Assert.Equal(41,SqliteOperationalStore.CurrentSchemaVersion);
+        using var writer=new SqliteOrdinaryRecordingHistoryStore(store);var query=new UnifiedHistoryQueryService(store,writer);var service=new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage,f.Db.Root,f.Files,f.Files,()=>At.AddDays(5), TestRuntimeOutputUse.None);Assert.Equal("publication_identity_missing",Assert.Single(service.GetPage(Sid,Session,20,f.Before).Items).ReasonCode);f.NoProbes();
+        using var read=store.OpenReadOnlyConnection();using var cmd2=read.CreateCommand();cmd2.CommandText="PRAGMA integrity_check;";Assert.Equal("ok",cmd2.ExecuteScalar());Assert.Equal(44,SqliteOperationalStore.CurrentSchemaVersion);
     }
     private static string OldSnapshot(string path)
     {
         var lines=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:27).Split('\n').Where(l=>!l.StartsWith("schema_migrations:28|")&&!l.StartsWith("schema_migrations:29|"));
         using var c=new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");c.Open();SqliteOutputPathCollation.Register(c);using var cmd=c.CreateCommand();cmd.CommandText="SELECT name,sql FROM sqlite_master WHERE type IN ('trigger','index') AND name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'idx_future_window_publication%' AND tbl_name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'plan_media_publication%' AND name NOT LIKE 'idx_plan_media_publication%' AND tbl_name NOT LIKE 'future_window_publication%' AND name NOT LIKE 'ordinary_bundle_attachment_hash%' AND name NOT LIKE 'idx_ordinary_bundle_attachment_hash%' AND name NOT LIKE 'ordinary_media_hash%' AND name NOT LIKE 'idx_ordinary_media_hash%' AND name NOT LIKE 'ordinary_bundle_identity%' AND name NOT LIKE 'idx_ordinary_bundle_identity%' AND name NOT LIKE 'ordinary_bundle_contents%' AND name NOT LIKE '%shared_output_path' AND name NOT LIKE '%planned_output_path' AND name NOT IN ('idx_setup_intents_pending_output_path','idx_setup_intents_pending_output_template','idx_recurring_profiles_pending_output_template','idx_required_once_setup_pending_output_path') AND tbl_name NOT IN ('ordinary_bundle_attachment_hash','ordinary_bundle_attachment_hash_boundary','ordinary_bundle_attachment_hash_items','ordinary_media_hash','ordinary_media_hash_boundary','ordinary_bundle_identity','ordinary_bundle_identity_boundary','ordinary_bundle_identity_items','ordinary_recording_window_targets','ordinary_window_target_boundary','ordinary_bundle_contents','ordinary_bundle_contents_boundary','ordinary_bundle_contents_items','ordinary_publication_anchors','ordinary_recording_bundles','ordinary_recording_targets','ordinary_recording_target_boundary') AND name NOT IN ('ordinary_recording_target_initial','ordinary_window_target_initial') ORDER BY name;";
+        cmd.CommandText=cmd.CommandText.Replace("WHERE type IN", "WHERE tbl_name<>'ordinary_deletion_operations' AND type IN",StringComparison.Ordinal);
+        cmd.CommandText=cmd.CommandText.Replace("WHERE ","WHERE tbl_name<>'ordinary_deletion_requests' AND ",StringComparison.Ordinal);
         var definitions=new List<string>();using var r=cmd.ExecuteReader();while(r.Read())definitions.Add(r.GetString(0)+":"+(r.IsDBNull(1)?"":r.GetString(1)));return string.Join("\n",lines.Concat(definitions));
     }
 }

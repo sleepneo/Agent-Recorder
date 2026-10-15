@@ -20,12 +20,12 @@ public sealed class RetentionSharedOutputPathApiTests : IDisposable
     {
         _f=new(headless);Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",_f.Db.Root);ApiKeyAuth.InitializeForTesting(_f.Db.Root);
         var audit=new RetentionSharedOutputPathTests.QuietAudit();var tray=new HeadlessTrayContext(audit);var engine=new RecordingEngine(audit);engine.SetTray(tray);engine.BackendFactory=_=>throw new IOException("SECRET_CAPTURE_FORBIDDEN");
-        var service=new RetentionPreviewQueryService(_f.Query,_f.Db.Root);
+        var service=new RetentionPreviewQueryService(_f.Query,_f.Db.Root, TestRuntimeOutputUse.None);
         if(fault is "missing_evidence" or "invalid_evidence")service=new((sid,session,limit,before,cursor)=>
         {
             var p=_f.Query.GetOrdinaryEvidencePage(sid,session,limit,before,cursor);
             return p with{Items=p.Items.Select(e=>e with{SharedOutputReference=fault=="missing_evidence"?null:(SharedOutputPathReferenceState)999}).ToArray()};
-        },_f.Db.Root,_f.Files,_f.Files,()=>At.AddDays(5));
+        },_f.Db.Root,_f.Files,_f.Files,()=>At.AddDays(5),TestRuntimeOutputUse.None);
         _server=new ApiServer(engine,audit,tray,null,null,null,null,null,null,null,null,null,0,retentionPreviewGateway:fault=="missing_provider"?null:new SqliteRetentionPreviewGateway(service,()=> (Sid,Session)));_server.Start();
         return new HttpClient(new HttpClientHandler{UseProxy=false}){BaseAddress=new Uri($"http://127.0.0.1:{_server.BoundPort}"),Timeout=TimeSpan.FromSeconds(10)};
     }

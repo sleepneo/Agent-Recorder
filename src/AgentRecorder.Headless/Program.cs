@@ -16,6 +16,10 @@ namespace AgentRecorder.Headless;
 
 internal static class Program
 {
+    internal static IRetentionPreviewGateway CreateRetentionPreviewGateway(UnifiedHistoryQueryService history,
+        string dataDir, RecordingEngine engine, Func<(string Sid, string Session)> identity)
+        => new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(history, dataDir, engine), identity);
+
     internal static IObservationHealthGateway CreateObservationHealthGateway(ApiServer server,RuntimeReadiness readiness,
         string dataDirectory,ObservationHealthProbes? probes=null)
     {
@@ -362,7 +366,7 @@ internal static class Program
             CaptureAuthorizationSessionBinding.Current);
         var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider,
             unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity),
-            retentionPreviewGateway: new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, _dataDir), historyIdentity),
+            retentionPreviewGateway: CreateRetentionPreviewGateway(unifiedHistoryQuery, _dataDir, engine, historyIdentity),
             artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
             mediaVerificationGateway: new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
             attachmentVerificationGateway: new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),

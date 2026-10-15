@@ -22,17 +22,25 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
   unattended plans each require a fresh local fixed-region selection and bounded
   lease approval before later runs.
 
-## Source And Release Status
+## Release And Scope
 
-The latest published package is v0.1.15. The current source also includes durable
+Version v0.1.16 includes durable
 ordinary recording history, unified indexed history, on-demand health and
 ordinary, plan and future-window artifact metadata checks, explicit ordinary
 main-video and five-attachment content verification, read-only retention
 previews, ordinary WGC Bundle generation, and durable plan and future-window
-publication identity. These source changes are not yet in that package.
-Retention is read-only; automatic deletion, disk quotas, signing and an
-installer remain unfinished. Inspect `/capabilities` for the running host's
+publication identity. Ordinary raw/quick video requests may select MP4-only
+output with `artifacts.bundle=false`; the default still includes a recording
+bundle. Eligible completed MP4-only recordings in the host's Videos directory
+can be submitted by ID for separate local deletion confirmation. Cancellation
+preserves the file; retries with the same key return the original result.
+Default Bundle outputs remain protected. Automatic cleanup, disk quotas,
+signing and an installer remain unfinished. Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
+
+When upgrading an existing installation, back up its data directory first.
+This version upgrades the history database to SQLite schema v44; keep upgraded
+data with the new binaries rather than reopening it with an older release.
 
 ## Recommended Agent Path
 

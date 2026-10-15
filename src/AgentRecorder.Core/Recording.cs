@@ -15,12 +15,18 @@ public sealed class Recording
     {
     }
 
-    internal Recording(string id)
+    internal Recording(bool generateBundle) : this("rec_" + Guid.NewGuid().ToString("N")[..12], generateBundle) { }
+
+    internal Recording(string id, bool generateBundle = true)
     {
         if (string.IsNullOrWhiteSpace(id))
             throw new ArgumentException("Recording identity is required.", nameof(id));
         Id = id;
+        GenerateBundle = generateBundle;
     }
+
+    // Frozen at creation, independent of mutable capture/output configuration.
+    public bool GenerateBundle { get; }
 
     public RecState State
     {
@@ -40,6 +46,9 @@ public sealed class Recording
     public string? SystemAudioEndpointName { get; set; }
     public bool? SystemAudioEndpointIsDefault { get; set; }
     public string OutputPath { get; set; } = "";
+    // Original built filename before the existing on-disk conflict policy.
+    // Internal only: runtime preparation must also arbitrate this requested path.
+    internal string? OrdinaryRequestedOutputPath { get; set; }
     internal ProfileRef? FixedRegionProfileReference { get; set; }
     internal Func<string?>? FixedRegionProfileEnvironmentValidator { get; set; }
     internal bool FixedRegionProfileStrictOutputConflict { get; set; }

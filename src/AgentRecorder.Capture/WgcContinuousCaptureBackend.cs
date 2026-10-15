@@ -27,6 +27,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     private readonly TaskCompletionSource<object?> _completionSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<object?> _terminalSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<object?> _stagingReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Completion-owner cleanup and staging retirement, not logical publication.
+    internal Task OutputRetirement => Task.WhenAll(_completionSignal.Task,_stagingReleased.Task);
     private readonly CancellationTokenSource _finalizationCts = new();
     private readonly IFileCommitGate _commitGate = new FileCommitGate();
 

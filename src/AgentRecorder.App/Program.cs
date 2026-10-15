@@ -205,7 +205,7 @@ internal static class Program
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
 
-        var bundleGenerator = new FfmpegRecordingBundleGenerator();
+        var bundleGenerator = CreateRecordingBundleGenerator();
         var standingStartSafetyInterlock = new StandingLeaseStartSafetyInterlock();
         var recurringCurrentSafetyValidator = new SqliteRecurringLeaseCurrentSafetyValidator(operationalStore);
         StandingLeaseSafetyControlService? unattendedSafetyService = null;
@@ -397,7 +397,9 @@ internal static class Program
         Func<(string Sid, string Session)> historyIdentity = () => (System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty,
             CaptureAuthorizationSessionBinding.Current);
         var unifiedHistoryGateway = new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity);
-        var retentionPreviewGateway = new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(unifiedHistoryQuery, dataDir), historyIdentity);
+        var retentionPreviewGateway = CreateRetentionPreviewGateway(unifiedHistoryQuery, dataDir, engine, historyIdentity);
+        using var deletionStopping=new CancellationTokenSource();
+        var retentionDeletionGateway=CreateRetentionDeletionGateway(engine,operationalStore,ordinaryRecordingHistory,dataDir,historyIdentity(),deletionStopping.Token);
         tray.SetUnifiedHistoryGateway(unifiedHistoryGateway);
         var server = new ApiServer(
             engine,
@@ -421,7 +423,8 @@ internal static class Program
             new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(ordinaryRecordingHistory)),
             new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
             new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),
-            new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity));
+            new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity),
+            retentionDeletionGateway);
 
         var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
         tray.SetObservationHealthGateway(observationHealth);
@@ -487,6 +490,7 @@ internal static class Program
             // First quiesce HTTP, then cancel setup flights while their store,
             // tray and shared UI gate are still alive.
             SafeShutdownStep("api_admission", server.StopAccepting);
+            SafeShutdownStep("retention_deletion", deletionStopping.Cancel);
             SafeShutdownStep("recording_admission", () => engine.BeginHostShutdown(reason));
             SafeShutdownStep("required_once_execution_runtime", () => requiredOncePlanExecutionCoordinator?.Dispose());
             SafeShutdownStep("recurring_setup", () => recurringPlanSetupCoordinator?.Dispose());
@@ -546,6 +550,20 @@ internal static class Program
             });
             throw;
         }
+    }
+
+    internal static IRetentionPreviewGateway CreateRetentionPreviewGateway(UnifiedHistoryQueryService history,
+        string dataDir, RecordingEngine engine, Func<(string Sid, string Session)> identity)
+        => new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(history, dataDir, engine), identity);
+
+    internal static FfmpegRecordingBundleGenerator CreateRecordingBundleGenerator() => new();
+
+    internal static IRetentionDeletionGateway CreateRetentionDeletionGateway(RecordingEngine engine,SqliteOperationalStore store,
+        SqliteOrdinaryRecordingHistoryStore writer,string dataDir,(string Sid,string Session) identity,CancellationToken stopping)
+    {
+        var root=Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(dataDir,"Videos")));
+        var authority=LocalRetentionApprovalUi.ForLocalHost(engine,store,writer,identity.Sid,identity.Session,root,stopping);
+        return new SqliteRetentionDeletionGateway(new RetentionDeletionCoordinator(store,identity.Sid,identity.Session,root,authority));
     }
 
     internal static IObservationHealthGateway CreateObservationHealthGateway(TrayContext tray, ApiServer server,

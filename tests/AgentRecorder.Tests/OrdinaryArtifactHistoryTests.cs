@@ -129,7 +129,7 @@ public sealed class OrdinaryArtifactHistoryTests(ITestOutputHelper output)
         using var f=new Fixture();var op=f.Seed(anchor:true,state:"generating");using var release=new ManualResetEventSlim();var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Writer.ArtifactSnapshotEstablishedForTests=()=>{entered.TrySetResult();Assert.True(release.Wait(TimeSpan.FromSeconds(5)));};
         var a=new Ancestors();var l=new Leaf();
-        l.Read=path=>Sample(path,12,new(0x123456789abcdef0,0xfedcba9876543210,0x876543210abcdef0));
+        l.Read=path=>Sample(path,12,PublicationAnchorTestFixture.SyntheticObject(path));
         var pending=f.Service(a,l).ReadAsync("r");await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         try{f.Complete(op);f.Db.RawExecute("PRAGMA ignore_check_constraints=ON;UPDATE ordinary_publication_anchors SET file_id=zeroblob(16);");}
         finally{release.Set();}

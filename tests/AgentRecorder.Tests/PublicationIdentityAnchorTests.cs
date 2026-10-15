@@ -66,7 +66,7 @@ public sealed class PublicationIdentityAnchorTests
     internal static OrdinaryRecordingHistorySnapshot Completed(UnifiedHistoryTestDatabase db,string path, PublicationReceipt? receipt) =>
         db.Recording("published",completed:true) with{OutputPath=path,PublicationReceipt=receipt,BundleRegistration=new(null)};
     internal static RetentionPreviewPage Preview(UnifiedHistoryTestDatabase db,bool headless=false) =>
-        new RetentionPreviewQueryService(new UnifiedHistoryQueryService(db.Store,db.Ordinary,headless),db.Root).GetPage(Sid,Session,20,At.AddHours(1));
+        new RetentionPreviewQueryService(new UnifiedHistoryQueryService(db.Store,db.Ordinary,headless),db.Root, TestRuntimeOutputUse.None).GetPage(Sid,Session,20,At.AddHours(1));
     [Fact]
     public async Task RealPublisherKeepsOriginalCopyHandleAcrossMoveAndSignsOnlyThatCopy()
     {
@@ -149,7 +149,7 @@ public sealed class PublicationIdentityAnchorTests
         using var f=new WindowsReadOnlyFileMetadataNativeTests.Files();var db=new UnifiedHistoryTestDatabase(f.Root);try
         {
             db.Ordinary.Register(Completed(db,Path.Combine(f.Videos,"absent.mp4"),null));var files=new RetentionPreviewQueryTests.MetadataFake{Attribute=_=>throw new Exception("probe must not run"),Observation=_=>throw new Exception("probe must not run")};
-            var service=new RetentionPreviewQueryService(db.Query.GetOrdinaryEvidencePage,db.Root,files,files,()=>At.AddDays(5));var page=service.GetPage(Sid,Session,20,At.AddHours(1));Assert.Equal("publication_identity_missing",Assert.Single(page.Items).ReasonCode);Assert.Empty(files.Attributes);Assert.Empty(files.Observations);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);
+            var service=new RetentionPreviewQueryService(db.Query.GetOrdinaryEvidencePage,db.Root,files,files,()=>At.AddDays(5), TestRuntimeOutputUse.None);var page=service.GetPage(Sid,Session,20,At.AddHours(1));Assert.Equal("publication_identity_missing",Assert.Single(page.Items).ReasonCode);Assert.Empty(files.Attributes);Assert.Empty(files.Observations);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);
             db.Ordinary.Register(db.Recording("child",At.AddDays(-1)) with{ParentRecordingId="published"});Assert.Equal("nested_parent_referenced",Assert.Single(service.GetPage(Sid,Session,1,At.AddHours(1)).Items).ReasonCode);Assert.Empty(files.Attributes);
         }finally{db.Ordinary.Dispose();SqliteConnection.ClearAllPools();}
     }

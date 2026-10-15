@@ -329,7 +329,7 @@ public sealed class AvSplitVideoOnlyPublicationTests(ITestOutputHelper output)
             if (failProbe) { Assert.Equal(RecState.failed, rec.State); Assert.Equal("failed", row.Status); Assert.Null(rec.LastMeta!.PublicationReceipt); Assert.False(rec.LastMeta.OutputFileExists); return; }
             Assert.Equal(RecState.completed, rec.State); Assert.Equal("completed", row.Status); var receipt = Assert.IsType<PublicationReceipt>(rec.LastMeta!.PublicationReceipt);
             Assert.Equal(Identity(row.OutputPath), receipt.Anchor.Identity); Assert.Equal(row.OutputSizeBytes, receipt.Anchor.Length); Assert.False(File.Exists(backend.TempVideoPath));
-            var service = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(store, writer), f.Root); var before = DateTimeOffset.UtcNow;
+            var service = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(store, writer), f.Root, TestRuntimeOutputUse.None); var before = DateTimeOffset.UtcNow;
             Assert.Equal("age_rule_match", Assert.Single(service.GetPage(UnifiedHistoryTestDatabase.Sid, UnifiedHistoryTestDatabase.Session, 20, before).Items).ReasonCode);
             var time = File.GetLastWriteTimeUtc(row.OutputPath); File.Move(row.OutputPath, Path.Combine(f.Videos, "held-original.mp4")); File.Copy(f.Fixture, row.OutputPath); File.SetLastWriteTimeUtc(row.OutputPath, time);
             Assert.Equal(receipt.Anchor.Length, new FileInfo(row.OutputPath).Length); Assert.Equal(time, File.GetLastWriteTimeUtc(row.OutputPath)); Assert.NotEqual(receipt.Anchor.Identity, Identity(row.OutputPath));

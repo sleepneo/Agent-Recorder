@@ -406,6 +406,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
         var stopping=Task.Run(()=>f.Engine.Stop(old.Id,"user_requested"));
         try {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));Assert.True(old.IsFinalized);Assert.False(p.Workers[0].Backend.IsOutputSettled);
+            Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
             using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer"));
             Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Contains("OUTPUT_PATH_IN_USE",await response.Content.ReadAsStringAsync());Assert.Equal(1,p.Starts);
         } finally { release.Set();await stopping.WaitAsync(TimeSpan.FromSeconds(10));p.BeforeAudioStop=null; }
@@ -431,6 +432,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
         var stopping=Task.Run(()=>f.Engine.Stop(old.Id,"user_requested"));
         try {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));Assert.True(old.IsFinalized);
+            Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
             using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer"));
             Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Contains("OUTPUT_PATH_IN_USE",await response.Content.ReadAsStringAsync());Assert.Equal(1,p.Starts);
         } finally { release.Set();await stopping.WaitAsync(TimeSpan.FromSeconds(10));p.BeforeVideoStop=null; }
@@ -444,6 +446,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
             Assert.Equal(HttpStatusCode.ServiceUnavailable,response.StatusCode);Assert.Contains("RECORDING_HISTORY_UNAVAILABLE",await response.Content.ReadAsStringAsync());
         }
         Assert.Empty(f.Engine._recs);Assert.Equal(0,p.Starts);history!.Fail=false;
+        Assert.False(RuntimeOutputTestEngine.Read(f.Engine,Path.Combine(f.Root,"same.mp4"))!.Paths.Single().InUse);
         var next=await p.Accept(p.Request(f.Root,"same.mp4","outer"));Assert.Equal(RecState.pending_confirmation,next.State);
     }
 
@@ -459,12 +462,18 @@ public sealed class OrdinaryAvOutputOwnershipTests
         try {
             await runner.Written.Task.WaitAsync(TimeSpan.FromSeconds(15));Assert.False(old.IsFinalized);Assert.False(p.Workers[0].Backend.IsOutputSettled);
             Assert.Contains(old.State,new[]{RecState.stopping,RecState.finalizing});
+            Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
             using var denied=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer"));Assert.Equal(HttpStatusCode.Conflict,denied.StatusCode);Assert.Equal(2,p.Starts);
         } finally { runner.Release.TrySetResult();await ending.WaitAsync(TimeSpan.FromSeconds(20)); }
         Assert.Equal(RecState.completed,old.State);Assert.True(p.Workers[0].Backend.IsOutputSettled);Assert.NotNull(old.LastMeta!.PublicationReceipt);
+        // Reading alone cannot perform the business-path retirement even after
+        // physical settling; the next admission still owns that responsibility.
+        Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
         await Until(()=>f.History.Read(old.Id)?.Bundle?.Status=="ready");Assert.Equal(1,f.AnchorCount(old.Id));await AvMuxOwnershipTests.VerifyBlue440(old.OutputPath);
         var nextRequest=p.Request(f.Root,"same.mp4","outer");nextRequest["output"]!["conflict_policy"]="rename";
         var next=await p.Accept(nextRequest);Assert.Equal(RecState.pending_confirmation,next.State);Assert.NotEqual(old.OutputPath,next.OutputPath);
+        var uses=RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath,next.OutputPath)!.Paths;
+        Assert.False(uses[0].InUse);Assert.True(uses[1].InUse);
         Assert.True(File.Exists(old.OutputPath));Assert.Equal("completed",f.History.Read(old.Id)!.Status);
     }
 }

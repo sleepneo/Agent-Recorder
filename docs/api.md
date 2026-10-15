@@ -1,10 +1,21 @@
 # Agent Recorder API
 
-This reference describes the current source contracts through SQLite v41:
-history, health, artifacts, generation digests and read-only retention preview.
-The published v0.1.15 package predates those increments; inspect `/capabilities`
-on the running host. Generation-time durable media hashes are described at the
-end of this reference. Explicit main-media and five-attachment verification have passed independent source acceptance. They share one host content-verification worker; retention deletion is not implemented.
+Ordinary non-nested video requests at raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` accept `"artifacts":{"bundle":false}` when the user wants only the MP4. Omitting artifacts or bundle defaults to true; explicit true keeps the full five-attachment Bundle. The policy freezes at creation and appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a local output-directory change. The bilingual local confirmation shows “MP4 only” or “MP4 and recording bundle”. Capture authorization, target and output proofs remain required.
+
+Artifacts must be an object containing only an optional JSON boolean bundle. Null, wrong types, unknown/duplicate fields and duplicate policies return `400 INVALID_ARGUMENT` before device/source/selection/confirmation or file work. Profile execution/configuration, Plan/Lease/future-window, screenshot-series and nested recording reject this field, even when true. `capabilities.recording_artifacts` publishes modes, default, routes and scope.
+
+False keeps the actual App generator installed but skips Bundle preparation/generation for this recording: no operation, `.bundle` or attachment extraction. Main MP4 validation, original-handle publication, terminal winner and durable history remain. Completed history atomically records `bundle.status="not_applicable"`; `media_hash` stays unknown/null because its existing generation stage did not run. Default Bundle generation and generating/ready/failed/interrupted protection remain. Schema stays V44; old media/facts are not backfilled or reinterpreted.
+
+A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. The policy is not deletion approval. Its main-output claim retires at a known production backend's actual settlement boundary; live or unknown work remains protected. Default Bundle outputs remain protected. Independent source/synthetic-input checks and one real 5-second silent FFmpeg selected-region run with local cancellation, approval and idempotent replay have passed. This does not establish all-backend or general retention acceptance.
+
+This reference describes v0.1.16 contracts through SQLite v44:
+history, health, artifacts, generation digests, read-only retention preview and
+locally confirmed single deletion request plumbing. The restricted implementation
+has passed source checks. App recordings default to Bundles and remain protected;
+explicit media-only recording has passed independent source/synthetic-input
+checks and the limited real desktop flow described above.
+Inspect `/capabilities` on the running host. Generation-time durable media hashes are described at the
+end of this reference. Explicit main-media and five-attachment verification have passed independent source acceptance. They share one host content-verification worker. Single deletion requests use the separate local-confirmation contract below.
 
 Base URL: `http://127.0.0.1:37891/api/v1`
 
@@ -1727,7 +1738,7 @@ on the recording's trusted first-frame monotonic timeline.
 
 ## Recording Bundle
 
-Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Source acceptance covers synthetic inputs with the production session/publication pipeline; dedicated native-capture acceptance remains pending. The public v0.1.15 package predates this increment.
+Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Source acceptance covers synthetic inputs with the production session/publication pipeline; dedicated native-capture acceptance remains pending.
 
 Successful supported FFmpeg and ordinary WGC MP4 recordings produce a structured bundle next
 to the video file. For `D:\Videos\demo.mp4` the bundle is:
@@ -1775,7 +1786,7 @@ Bundle status values:
 | `generating` | Main video passed validation; the five files are being produced. |
 | `ready` | All five files were generated and atomically published. `path` points to the bundle directory. |
 | `failed` | Bundle generation failed after the recording succeeded. `error_code` contains a stable code. |
-| `not_applicable` | Recording failed, used a WGC backend, or no bundle generator is enabled. |
+| `not_applicable` | Recording failed, media-only policy was selected, or no eligible Bundle generation applies. |
 
 Stable bundle error codes:
 
@@ -2547,7 +2558,7 @@ the file is missing, inaccessible, linked or changed. Reasons are a whitelist: `
 `resolved_path_mismatch`, `publication_identity_missing`,
 `publication_identity_mismatch`, `bundle_evidence_unknown`,
 `bundle_generation_in_progress`, `bundle_artifact_reference`,
-`bundle_artifact_state_unknown`, and `age_rule_match`. A missing sample never rewrites the
+`bundle_artifact_state_unknown`, `shared_publication_identity`, `runtime_output_in_use`, and `age_rule_match`. A missing sample never rewrites the
 persistent completed status. A reliable changed length is reported separately
 and included in the page's sampled-byte sum while the entry stays protected.
 
@@ -2635,7 +2646,7 @@ any ancestor attribute, leaf-handle or file-existence probe:
 | `generating` | `protected / bundle_generation_in_progress` |
 | `ready` | `protected / bundle_artifact_reference` |
 | `failed` or `interrupted_unknown` | `protected / bundle_artifact_state_unknown` |
-| `not_applicable` | Continue the existing ancestor, handle, identity and length rules |
+| `not_applicable` | Continue runtime-output protection, then the existing ancestor, handle, identity and length rules |
 
 These protected entries retain `age_candidate=true`, `recorded_path` and
 `recorded_bytes`; `observed_file_bytes=null`, and contribute to
@@ -2646,6 +2657,63 @@ media bindings, schema or migration receipts fail the entire page with the
 existing 503, even if an earlier item reason would protect it. Provider facts
 are validated too. No JSON, images, media contents or directories are read to
 infer or repair missing facts. Old rows remain null without backfill.
+
+After the existing missing-anchor and Bundle reasons, `shared_publication_identity`
+protects a candidate when another saved ordinary main-MP4 anchor, or a saved
+future-window or plan main-MP4 anchor, has the same original binary volume/file
+tuple, even at a different path or historical length. Only the candidate's own
+ordinary recording ID is excluded with exact BINARY semantics; equal strings in
+the other sources are still references. All three plan kinds are covered. Foreign
+SID/session, status, date, cutoff, page and cursor watermarks do not limit this
+existence check. No foreign paths, IDs, owners, counts or proof material are returned.
+
+At most 100 validated candidate anchors use one BLOB-parameterized indexed EXISTS
+batch in the original read-only transaction. SQLite V42 adds only three identity
+indexes and its migration receipt. Missing/invalid structures, indexes, receipts
+or incomplete/invalid private relation results fail the entire page with
+`503 RETENTION_PREVIEW_UNAVAILABLE` before any file probe, even if an earlier
+protection reason applies. GET does not migrate or repair; a V41 input requires
+normal host initialization. Missing candidate anchors remain unchecked and
+`publication_identity_missing`. A match retains the candidate's age/path/recorded
+bytes, with null observed bytes counted as unknown. No match continues the runtime
+and physical observations. Bad foreign business fields never filter a matching
+tuple into a negative answer; unknown/malformed keys that do not match are not
+claimed to have been comprehensively validated.
+
+This proves only a saved original identity reference, not that the paths currently
+refer to one object. ID reuse may overprotect. Bundle attachments, arbitrary workers,
+aliases, future references and deletion TOCTOU remain outside this relation check.
+DB, runtime and filesystem observations are separate time points; there is no pin,
+complete reference graph, `safe_to_delete` conclusion or deletion authority.
+The existing readiness/capability flags and endpoint arguments remain unchanged.
+
+App and Headless also query their actual RecordingEngine once per eligible page
+for an immutable process-local ordinary main-MP4 claim snapshot. At most 100
+distinct, lexically scoped candidate paths are requested. The existing output
+lock is acquired for at most 50 ms, and at most 500 registered owners are copied;
+501 owners, shutdown, a missing provider, lock timeout, exceptions or invalid
+answers cause the entire `503 RETENTION_PREVIEW_UNAVAILABLE` response before
+any ancestor or leaf probe. Missing, duplicate or foreign answer paths are
+invalid. Empty history or a page without age/lexical candidates needs no snapshot.
+Matching uses only registered canonical text and OrdinalIgnoreCase, without
+path completion, alias resolution, disk enumeration or a recording-history scan.
+
+After the existing DB reference, missing-anchor, Bundle and publication-identity reference reasons, a matching
+claim yields `protected / runtime_output_in_use`, retaining `age_candidate=true`
+and its own `recorded_path`/`recorded_bytes`. `observed_file_bytes=null` counts as
+unknown and adds no observed bytes. Claims still registered are included even
+after Stop returns, logical Completion or a completed/cancelled/failed status;
+reads never retire owners, inspect backends or wait for OutputSettled. No owner
+IDs, counts, origins or nonces are returned. The HTTP arguments remain only
+cutoff, limit and cursor; there is no arbitrary-path input or new endpoint.
+
+This covers this host's existing ordinary video claims, including silent,
+audio/AV-split and ordinary WGC paths already admitted by that registry. It does
+not cover Bundle, inputs, hash readers, temporary paths or other processes.
+DB facts and runtime claims are separate time points, and claims registered
+later are outside this observation. No match does not prove no references or
+permission to delete. There is no pin, future exclusivity or deletion gate;
+`read_only=true` and `deletion_supported=false` remain unchanged.
 
 `ready` records a historical association, not current attachment readiness;
 failure/unknown cannot rule out partial artifacts. `not_applicable` records that
@@ -2745,7 +2813,7 @@ Profile configuration references and Bundle/marks/thumbnails remain outside it.
 References inserted after the current snapshot are absent from that preview;
 a future cleanup must revalidate complete references and physical identity.
 An item with no detected reference is not proven free of every reference.
-This describes workspace code, not a released v0.1.15 capability.
+This capability is included in v0.1.16.
 
 ### Durable ordinary Bundle generation facts
 
@@ -2810,7 +2878,7 @@ Each ordinary history `bundle.contents` item additionally has nullable `content_
 
 V37 does not scan files or backfill old rows, including metadata containing a hash. Pre-migration facts, public `Ready(...)`/contents-only results, unbound publication or unavailable native identity remain `content_hash: null`; a missing required modern marker or corrupt/incomplete/cross-bound set fails closed. Ordinary list, detail and unified ordinary projections read one indexed batch in the same SQLite snapshot (at most 100 parents / 500 attachment items, with row 501 detecting overflow), without attachment reads. Other unified sources have no ordinary Bundle evidence.
 
-`bundle_publication` is a historical publication observation. It does not establish a shared video/frame timestamp, capture-original bytes, current attachment integrity, playability, future integrity or deletion authority. Explicit attachment comparisons are described below. `artifacts/check` remains metadata-only; `verify-media` still covers only the main MP4 with its existing 1 GiB / 30 second / one worker contract. Retention remains read-only and protects ready Bundles. This source increment is not included in the public v0.1.15 package.
+`bundle_publication` is a historical publication observation. It does not establish a shared video/frame timestamp, capture-original bytes, current attachment integrity, playability, future integrity or deletion authority. Explicit attachment comparisons are described below. `artifacts/check` remains metadata-only; `verify-media` still covers only the main MP4 with its existing 1 GiB / 30 second / one worker contract. Retention preview remains read-only and protects ready Bundles.
 
 ### On-demand ordinary artifact availability
 
@@ -2869,12 +2937,12 @@ Noncompleted/nonvideo media and insufficient usable output evidence incur zero f
 
 One process/host lease permits at most one worker, with no waiting queue; excess requests return `busy`. The **3-second total deadline starts before database dispatch**. Timeout or cancellation freezes an immutable partial response: finished samples remain, the active attempt is unavailable, remaining items are not checked, and no next item starts after cancellation. Native/SQLite synchronous work may outlive the response. The lease remains occupied until the worker actually exits, including after API stop and service/API recreation. No previous request's samples are reused. API shutdown explicitly cancels the request. Confirmed connection errors/RST trigger best-effort cancellation; a send-only FIN does not imply that the client abandoned receiving. Graceful Close and send half-close cannot reliably be distinguished from EOF alone, so ambiguous cases remain subject to the same total deadline, without an extra waiting period.
 
-`capabilities.ordinary_artifact_check` publishes `supported`, this `endpoint`, `scope="ordinary_video"`, `max_files=6`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `metadata_only=true`, `content_verification=false`, `deletion_supported=false`, `observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`, and `identity_scope="media_and_five_bundle_publication_anchors"`. This describes workspace code, not a released capability. SQLite facts and subsequent file observations are separate snapshots; ancestor chains are not atomically locked. Changes after sampling, in-place same-size writes, ID reuse, aliases and directory TOCTOU remain outside the result. Retention still protects ready Bundles, preserves unknown-byte accounting and all deletion/reference/physical-readiness flags; a check cannot authorize cleanup or bypass references.
+`capabilities.ordinary_artifact_check` publishes `supported`, this `endpoint`, `scope="ordinary_video"`, `max_files=6`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `metadata_only=true`, `content_verification=false`, `deletion_supported=false`, `observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`, and `identity_scope="media_and_five_bundle_publication_anchors"`. Inspect the running host capabilities before use. SQLite facts and subsequent file observations are separate snapshots; ancestor chains are not atomically locked. Changes after sampling, in-place same-size writes, ID reuse, aliases and directory TOCTOU remain outside the result. Retention still protects ready Bundles, preserves unknown-byte accounting and all deletion/reference/physical-readiness flags; a check cannot authorize cleanup or bypass references.
 
 Bundle identity matching does not change retention protection: registered Bundle protection is applied before physical sampling and never becomes delete permission. This API does not expose receipt or identity material and does not perform content hashing or playback checks.
 
 
-### Plan and future main-media check (workspace source, not released)
+### Plan and future main-media check (read-only)
 
 ```http
 GET /api/v1/history/{entry_id}/artifacts/check
@@ -2893,9 +2961,9 @@ New and ordinary metadata checks share **one actual host worker without a queue*
 
 `capabilities.history_artifact_check` reports gateway support, supported sources, endpoint, `scope="main_media"`, `max_files=1`, `max_distinct_ancestors=64`, `deadline_ms=3000`, `max_concurrent=1`, `concurrency_scope="host_metadata_check"`, the shared ordinary endpoint and fixed flags. A missing gateway advertises no supported sources. Headless can read historical Plan/future facts without gaining capture authorization; its ordinary-only unified page capability remains unchanged.
 
-`observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`: this is a current metadata observation after a database snapshot. It reads no media content, enumerates no directory and starts no process/capture. It does not prove audio completeness, playback, future stability, absence of references or safe deletion. This source increment has passed independent acceptance; it is not in the public v0.1.15 package.
+`observation_semantics="sequential_point_in_time_metadata_not_atomic_snapshot"`: this is a current metadata observation after a database snapshot. It reads no media content, enumerates no directory and starts no process/capture. It does not prove audio completeness, playback, future stability, absence of references or safe deletion. This feature has passed independent acceptance.
 
-### Durable ordinary media generation digest (workspace V36)
+### Durable ordinary media generation digest (SQLite V36)
 
 The ordinary entries returned by `GET /api/v1/recording-history`, its `/{recording_id}` detail (`data.recording`), and `GET /api/v1/history` include a top-level nullable `media_hash`:
 
@@ -2907,7 +2975,7 @@ The value records the main MP4 bytes observed during successful Bundle generatio
 
 Legacy history, absent or failed Bundles, public fake results and unavailable trusted native bindings return `null`; no media is scanned or backfilled during migration or history queries. A damaged stored marker or digest makes the history request unavailable rather than returning a trusted value. Queries use the same SQLite snapshot and an indexed batch of at most 100 entries. Other unified sources return `null`. No hash filter is provided. Content comparison requires the explicit POST described below.
 
-`capabilities.recording_history.media_hash_supported` and `capabilities.unified_history.media_hash_supported_sources` advertise ordinary support, with `media_hash_algorithm="sha256"` and `media_hash_basis="bundle_generation"`. This is a generation observation, not capture-original bytes or a current integrity/playability assertion. Changes after the hash pass, the three separate frame extractions and all attachments are outside this digest. Artifact checks retain `metadata_only=true`, `content_verification=false`; retention remains read-only and protects ready Bundles. The digest grants no deletion authority and is not in the public v0.1.15 package.
+`capabilities.recording_history.media_hash_supported` and `capabilities.unified_history.media_hash_supported_sources` advertise ordinary support, with `media_hash_algorithm="sha256"` and `media_hash_basis="bundle_generation"`. This is a generation observation, not capture-original bytes or a current integrity/playability assertion. Changes after the hash pass, the three separate frame extractions and all attachments are outside this digest. Artifact checks retain `metadata_only=true`, `content_verification=false`; retention preview remains read-only and protects ready Bundles. The digest grants no deletion authority and is not an authorization to delete.
 
 ### Explicit ordinary main-media verification
 
@@ -2944,7 +3012,7 @@ The response contains `recording_id`, UTC `check_started_at_utc`/`check_complete
 
 These are **sequential handle observations**, not a simultaneous or atomic five-file snapshot; earlier files may change before the response. They do not prove a shared frame timestamp, playability, future integrity or deletion authority, and combining them with the main endpoint does not create an atomic six-file snapshot. History GET, retention and `artifacts/check` do not invoke content verification; the latter remains metadata-only.
 
-`capabilities.ordinary_attachment_verification` separately publishes support, endpoint, scope, `algorithm="sha256"`, `reference_basis="bundle_publication"`, `max_files=5`, `max_distinct_ancestors=64`, `max_bytes=67108864`, `deadline_ms=30000`, `max_concurrent=1`, `concurrency_scope="host_content_verification"`, `shared_with` pointing to `verify-media`, read-only/deletion flags and sequential observation semantics. This describes workspace source, not the public v0.1.15 package.
+`capabilities.ordinary_attachment_verification` separately publishes support, endpoint, scope, `algorithm="sha256"`, `reference_basis="bundle_publication"`, `max_files=5`, `max_distinct_ancestors=64`, `max_bytes=67108864`, `deadline_ms=30000`, `max_concurrent=1`, `concurrency_scope="host_content_verification"`, `shared_with` pointing to `verify-media`, read-only/deletion flags and sequential observation semantics. This capability is included in v0.1.16.
 
 Example admission response (no snapshot acquired while the shared worker is busy):
 
@@ -2954,4 +3022,24 @@ Example admission response (no snapshot acquired while the shared worker is busy
 
 ### Plan Media Publication Identity
 
-Successful standing, recurring and required_once Plan MP4 executions preserve the original final publisher receipt inside the existing winner transaction. Native identity remains private; legacy or legitimately unavailable native identity stays unknown. Plan status, paged Plan history and unified source=plan history validate selected private facts in their existing read snapshot (512/100/100 bounds); modern missing or corrupt facts fail closed through the existing sanitized unavailable/503 contract. Public DTOs, cursors, endpoints and capabilities are unchanged. History GET does not read media bytes, hash or backfill identity. A recorded original identity is a publication-time fact; it does not prove current bytes, playback or deletion authority. This source increment has passed independent acceptance; the public v0.1.15 package is unchanged.
+Successful standing, recurring and required_once Plan MP4 executions preserve the original final publisher receipt inside the existing winner transaction. Native identity remains private; legacy or legitimately unavailable native identity stays unknown. Plan status, paged Plan history and unified source=plan history validate selected private facts in their existing read snapshot (512/100/100 bounds); modern missing or corrupt facts fail closed through the existing sanitized unavailable/503 contract. Public DTOs, cursors, endpoints and capabilities are unchanged. History GET does not read media bytes, hash or backfill identity. A recorded original identity is a publication-time fact; it does not prove current bytes, playback or deletion authority. This feature has passed independent acceptance and is included in v0.1.16.
+
+### Single deletion requests (SQLite V44, restricted scope)
+
+Default App recordings generate a Bundle, including a registered failed state when generation fails, and remain protected. New ordinary requests can explicitly select the media-only policy described at the start of this reference; the formal publisher then records not-applicable Bundle history without altering existing facts. Only a successful original MP4 satisfying the separate deletion scope can proceed to local confirmation. Workspace source and synthetic-input pipeline tests do not substitute for real desktop/human acceptance.
+
+The ready interactive App connects a host-owned local confirmation coordinator to these routes. Headless and hosts without this wiring advertise `capabilities.retention_deletion.supported=false` and return `503 RETENTION_DELETION_UNAVAILABLE`, without a confirmation window or native action. The configured API key is required even when optional authentication is disabled elsewhere. API authentication does not approve deletion.
+
+Send `POST /api/v1/retention/deletion-requests` with exactly `{"recording_id":"rec_example"}` and one `Idempotency-Key` header. The trimmed key must contain 1–128 printable ASCII characters, excluding whitespace, slash, backslash and comma. The UTF-8 body is bounded to 2048 bytes; unknown/duplicate fields, duplicate headers, invalid types, NUL, paths, query parameters and extra body arguments return `400 INVALID_ARGUMENT`. The recording ID is bounded to 200 characters. Neither owner/root nor approval/operation material can be supplied. The host freezes its SID/session, Videos root and actual engine/store/writer/UI.
+
+`202` means a durable request exists, not approval or a deletion result. The normal envelope's `data` includes `deletion_request_id`, `recording_id`, `request_state`, `local_confirmation_state`, `persisted_request_phase`, `query_url` and result fields below. Follow `query_url`, for example `GET /api/v1/retention/deletion-requests/{id}`, without a body or query parameters. IDs are exactly 32 lowercase hexadecimal characters; encoded separators and multiple segments are rejected. Missing and foreign requests share `404 DELETION_REQUEST_NOT_FOUND`. The query returns `200` for known requests, including requests with unknown outcomes. Invalid durable evidence, a busy worker or stopping/unready host returns a sanitized `503`; follow its `suggested_action` and query the same request.
+
+Before any window, an atomic durable CreateOrGet binds the current owner, hashed key, canonical request digest and random request ID. Same key/body returns the existing request; changed body returns `409 IDEMPOTENCY_KEY_CONFLICT`. Concurrent retries and a disconnected HTTP client do not create another window or cancel the host-owned flow. One pending/approved/executing flow is admitted without a queue. Unknown worker cleanup retains its slot. A genuine new attempt requires a new key and a new local confirmation; never change keys to automatically retry an unknown outcome.
+
+The independent local window identifies the filename, copyable full path, size and completion time and explains permanent deletion, no Recycle Bin, and preserved history. Default Enter/Esc/close/timeout cancels. Only actual local approval followed by actual UI retirement produces the existing short-lived permit. The API provides no approval or cancellation endpoint. After this retirement, a unique approval binding is durably reserved and all request database objects retire before the original V43 prepared ledger and original-handle disposition run. The two existing 60-second authorization lifetimes, common 3-second preparation/protection budget and separate 3-second settlement budget remain in force. Request writes and exact queries each have a 3-second total budget including cleanup; one host query worker retains its quota until actual retirement after timeout/cancellation.
+
+`request_state` is `awaiting_local_confirmation`, `execution_reserved`, `finished`, `confirmation_invalidated` or `unknown`. `local_confirmation_state` separately reports `pending`, `approved`, `rejected`, `expired`, `cancelled`, `unavailable`, `busy` or `invalidated`. `finished` describes the workflow, not physical removal. `operation_id` and `disposition_progress` are null before an actual linked V43 operation exists. Otherwise disposition is `not_attempted`, `accepted`, `rejected` or `unknown`; `reason_code` and nullable `win32_error` describe that attempt. `file_action_performed=true` means Windows accepted a disposition mark on the original handle; unknown is null. It proves neither physical deletion nor reclaimed bytes. There is no `deleted` or freed-space field.
+
+`original_resources_retired`, `ledger_resources_retired`, `our_resources_retired` and `request_resources_retired` distinguish actual ownership and may be null when unproven. `preparation_commit`, `ledger_settlement` and `request_write_commit` use `committed`, `not_committed` or `unknown` (operation fields can be null without a linked operation). `persisted_disposition_progress` separately reports the actual settled ledger fact. Accepted native facts survive a failed final request write. A fresh process reads persisted facts only: pending local confirmation becomes invalidated; an execution reservation without a settled result remains unknown. The same key returns the old request, with zero UI, recovered permits or resumed native calls. SQLite and Windows disposition are separate transactions; a missing ledger row never proves no action after an uncertain reservation.
+
+Scope is one completed ordinary main MP4 directly under the host's fixed Videos root, with its original trusted publication anchor, successful size, explicitly not-applicable Bundle and passing existing finite-use protections. Paths/directories, batches, quota cleanup, Plan/future entries, attachments and unknown legacy files are unsupported. No identity is recollected to grant authority. `capabilities.retention_deletion` publishes both endpoints, this scope, `requires_local_confirmation=true`, `single_item=true`, `permanent=true`, `no_trash=true`, `unattended=false` and the result/recovery semantics. `retention_preview` remains separately read-only with `deletion_supported=false`, `reference_protection_ready=false` and `physical_identity_protection_ready=false`; neither capability establishes a complete reference graph or namespace freeze. This implementation and private automated UI adapters do not constitute real desktop confirmation or release-package acceptance.

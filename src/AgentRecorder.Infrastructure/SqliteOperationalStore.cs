@@ -12,7 +12,7 @@ namespace AgentRecorder.Infrastructure;
 /// </summary>
 public sealed class SqliteOperationalStore
 {
-    public const int CurrentSchemaVersion = 41;
+    public const int CurrentSchemaVersion = 44;
     public const int BusyTimeoutMilliseconds = 5_000;
     public const string DatabaseFileName = "agent-recorder.db";
     public const string StateDirectoryName = "state";
@@ -30,6 +30,46 @@ public sealed class SqliteOperationalStore
     }
 
     public string DatabasePath { get; }
+
+    // Unopened: the guard owns cleanup even when Open fails. No creation,
+    // migration, recovery, global policy change or pooling on this connection.
+    internal SqliteConnection CreateRetentionGuardConnection()
+        => new(new SqliteConnectionStringBuilder
+        {
+            DataSource = DatabasePath, Mode = SqliteOpenMode.ReadWrite,
+            Cache = SqliteCacheMode.Private, Pooling = false, DefaultTimeout = 1
+        }.ToString()) { DefaultTimeout = 1 };
+
+    internal static void ConfigureRetentionGuardConnection(SqliteConnection connection)
+    {
+        SqliteOutputPathCollation.Register(connection);
+        ExecuteNonQuery(connection, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;");
+    }
+
+    internal static void ValidateRetentionGuardStore(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction;
+        command.CommandText = "SELECT version,CASE WHEN instr(name,char(0))=0 THEN name END,CASE WHEN instr(definition_checksum,char(0))=0 THEN definition_checksum END FROM schema_migrations ORDER BY version;";
+        using (var reader = command.ExecuteReader())
+        {
+            var index = 0;
+            while (reader.Read())
+            {
+                if (index == SqliteSchemaCatalog.Migrations.Count || reader.GetValue(0) is not long version ||
+                    reader.GetValue(1) is not string name || reader.GetValue(2) is not string checksum)
+                    throw new InvalidDataException("Guard migration receipt is invalid.");
+                var expected = SqliteSchemaCatalog.Migrations[index++];
+                if (version != expected.Version || name != expected.Name || checksum != expected.Checksum)
+                    throw new InvalidDataException("Guard migration receipt is invalid.");
+            }
+            if (index != SqliteSchemaCatalog.Migrations.Count) throw new InvalidDataException("Guard schema is unavailable.");
+        }
+        command.CommandText = "PRAGMA journal_mode;";
+        if (command.ExecuteScalar() as string != "wal") throw new InvalidDataException("Guard WAL is unavailable.");
+        ValidateUnifiedHistorySchema(connection, transaction);
+        SqliteSchemaV43.Validate(connection, transaction);
+        SqliteSchemaV44.Validate(connection, transaction);
+    }
 
     /// <summary>Read existing state only; a query cannot create a missing database or directory.</summary>
     public SqliteConnection OpenReadOnlyConnection()
@@ -147,6 +187,9 @@ public sealed class SqliteOperationalStore
         SqliteSchemaV37.Validate(connection, transaction);
         SqliteSchemaV40.Validate(connection, transaction);
         SqliteSchemaV41.Validate(connection, transaction);
+        SqliteSchemaV42.Validate(connection, transaction);
+        SqliteSchemaV43.Validate(connection, transaction);
+        SqliteSchemaV44.Validate(connection, transaction);
             using (var directoryCheck = connection.CreateCommand())
             {
                 directoryCheck.Transaction = transaction;
@@ -2722,8 +2765,10 @@ internal static class SqliteSchemaV10
 
 internal static class SqliteSchemaCatalog
 {
-    public static IReadOnlyList<SqliteMigrationDefinition> Migrations { get; } =
-        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).Concat(SqliteSchemaV19.Migrations).Concat(SqliteSchemaV20.Migrations).Concat(SqliteSchemaV21.Migrations).Concat(SqliteSchemaV22.Migrations).Concat(SqliteSchemaV23.Migrations).Concat(SqliteSchemaV24.Migrations).Concat(SqliteSchemaV25.Migrations).Concat(SqliteSchemaV26.Migrations).Concat(SqliteSchemaV27.Migrations).Concat(SqliteSchemaV28.Migrations).Concat(SqliteSchemaV29.Migrations).Concat(SqliteSchemaV30.Migrations).Concat(SqliteSchemaV31.Migrations).Concat(SqliteSchemaV32.Migrations).Concat(SqliteSchemaV33.Migrations).Concat(SqliteSchemaV34.Migrations).Concat(SqliteSchemaV35.Migrations).Concat(SqliteSchemaV36.Migrations).Concat(SqliteSchemaV37.Migrations).Concat(SqliteSchemaV38.Migrations).Concat(SqliteSchemaV39.Migrations).Concat(SqliteSchemaV40.Migrations).Concat(SqliteSchemaV41.Migrations).ToArray();
+    private static IReadOnlyList<SqliteMigrationDefinition> LegacyMigrations { get; } =
+        SqliteSchemaV1.Migrations.Concat(SqliteSchemaV2.Migrations).Concat(SqliteSchemaV3.Migrations).Concat(SqliteSchemaV4.Migrations).Concat(SqliteSchemaV5.Migrations).Concat(SqliteSchemaV6.Migrations).Concat(SqliteSchemaV7.Migrations).Concat(SqliteSchemaV8.Migrations).Concat(SqliteSchemaV9.Migrations).Concat(SqliteSchemaV10.Migrations).Concat(SqliteSchemaV11.Migrations).Concat(SqliteSchemaV12.Migrations).Concat(SqliteSchemaV13.Migrations).Concat(SqliteSchemaV14.Migrations).Concat(SqliteSchemaV15.Migrations).Concat(SqliteSchemaV16.Migrations).Concat(SqliteSchemaV17.Migrations).Concat(SqliteSchemaV18.Migrations).Concat(SqliteSchemaV19.Migrations).Concat(SqliteSchemaV20.Migrations).Concat(SqliteSchemaV21.Migrations).Concat(SqliteSchemaV22.Migrations).Concat(SqliteSchemaV23.Migrations).Concat(SqliteSchemaV24.Migrations).Concat(SqliteSchemaV25.Migrations).Concat(SqliteSchemaV26.Migrations).Concat(SqliteSchemaV27.Migrations).Concat(SqliteSchemaV28.Migrations).Concat(SqliteSchemaV29.Migrations).Concat(SqliteSchemaV30.Migrations).Concat(SqliteSchemaV31.Migrations).Concat(SqliteSchemaV32.Migrations).Concat(SqliteSchemaV33.Migrations).Concat(SqliteSchemaV34.Migrations).Concat(SqliteSchemaV35.Migrations).Concat(SqliteSchemaV36.Migrations).Concat(SqliteSchemaV37.Migrations).Concat(SqliteSchemaV38.Migrations).Concat(SqliteSchemaV39.Migrations).Concat(SqliteSchemaV40.Migrations).Concat(SqliteSchemaV41.Migrations).Concat(SqliteSchemaV42.Migrations).ToArray();
+
+    public static IReadOnlyList<SqliteMigrationDefinition> Migrations { get; } = LegacyMigrations.Concat(SqliteSchemaV43.Migrations).Concat(SqliteSchemaV44.Migrations).ToArray();
 
     public static IReadOnlyList<SqliteTableDefinition> Tables { get; } =
         SqliteSchemaV1.Tables.Concat(SqliteSchemaV2.Tables).Concat(SqliteSchemaV3.Tables.Where(table => table.Name != "setup_intents")).Concat(SqliteSchemaV5.Tables).Concat(SqliteSchemaV7.Tables).Concat(SqliteSchemaV8.Tables).Concat(SqliteSchemaV9.Tables).Concat(SqliteSchemaV10.Tables).Concat(SqliteSchemaV11.Tables).Concat(SqliteSchemaV12.Tables).Concat(SqliteSchemaV13.Tables).Concat(SqliteSchemaV14.Tables).Concat(SqliteSchemaV15.Tables).Concat(SqliteSchemaV16.Tables).Concat(SqliteSchemaV17.Tables).Concat(SqliteSchemaV18.Tables).Concat(SqliteSchemaV19.Tables).Concat(SqliteSchemaV21.Tables).Concat(SqliteSchemaV22.Tables).Concat(SqliteSchemaV23.Tables).ToArray();

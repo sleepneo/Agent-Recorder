@@ -1144,14 +1144,14 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 12,
+            RowCount = summary.Mode == "video" ? 13 : 12,
             AutoSize = false
         };
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _infoTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        for (int i = 0; i < 12; i++)
-            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 12f));
+        for (int i = 0; i < _infoTable.RowCount; i++)
+            _infoTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / _infoTable.RowCount));
 
         int row = 0;
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Source"), DisplayValue(summary.Source));
@@ -1161,6 +1161,9 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_SourceTitle"), DisplayValue(presentation.SourceTitle));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Duration"), DisplayValue(summary.Duration));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Countdown"), GetCountdownDisplay());
+        if(summary.Mode == "video")
+            AddInfoRow(_infoTable,row++,_text.Get("Confirmation_Info_Artifacts"),
+                _text.Get(summary.Artifacts?.Bundle == false ? "Confirmation_Value_MediaOnly" : "Confirmation_Value_MediaAndBundle"));
         var rawAudio = DisplayValue(summary.Audio);
         var audioSourceKind = DisplayValue(summary.AudioSourceKind);
         string audioLabel;

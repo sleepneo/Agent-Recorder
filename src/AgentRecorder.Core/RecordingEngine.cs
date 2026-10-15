@@ -16,7 +16,7 @@ using AgentRecorder.Windows;
 using ApiException = AgentRecorder.Infrastructure.ApiException;
 namespace AgentRecorder.Core;
 
-public sealed class RecordingEngine : IDisposable
+public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutputUseProvider
 {
     internal readonly ConcurrentDictionary<string, Recording> _recs = new();
     internal readonly ConcurrentDictionary<string, Confirmation> _confs = new();
@@ -112,14 +112,48 @@ public sealed class RecordingEngine : IDisposable
     private readonly Dictionary<string, OrdinaryOutputOwner> _ordinaryOutputs = new();
     private readonly ConcurrentDictionary<string, byte> _ordinaryOutputCleanup = new();
 
+    OrdinaryRuntimeOutputSnapshot? IOrdinaryRuntimeOutputUseProvider.ReadSnapshot(IReadOnlyList<string> candidatePaths)
+    {
+        if (Volatile.Read(ref _disposeStarted) != 0 || candidatePaths.Count > OrdinaryRuntimeOutputSnapshot.MaxCandidates)
+            return null;
+        var candidates = candidatePaths.ToArray();
+        if (candidates.Any(string.IsNullOrEmpty) ||
+            candidates.Distinct(StringComparer.OrdinalIgnoreCase).Count() != candidates.Length)
+            return null;
+        string[] claims;
+        if (!Monitor.TryEnter(_ordinaryOutputLock, OrdinaryRuntimeOutputSnapshot.LockTimeoutMilliseconds))
+            return null;
+        try
+        {
+            if (Volatile.Read(ref _disposeStarted) != 0 || _ordinaryOutputs.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims)
+                return null;
+            // Only immutable registration text. Do not inspect Recording, backend,
+            // Completion, cleanup, files or processes, and never retire an owner.
+            if (_ordinaryOutputs.Values.Any(owner => owner is null || string.IsNullOrEmpty(owner.Path))) return null;
+            claims = _ordinaryOutputs.Values.Select(owner => owner.Path).ToArray();
+            if (_ordinaryRetentionPreparation is { } preparation) claims = claims.Append(preparation.Path).ToArray();
+        }
+        finally { Monitor.Exit(_ordinaryOutputLock); }
+        if (claims.Any(string.IsNullOrEmpty) || Volatile.Read(ref _disposeStarted) != 0) return null;
+        var occupied = new HashSet<string>(claims, StringComparer.OrdinalIgnoreCase);
+        return new(candidates.Select(path => new OrdinaryRuntimeOutputUse(path, occupied.Contains(path))));
+    }
+
     private void ClaimOrdinaryOutput(Recording rec, string path, string? requestedPath = null)
     {
         if (!rec.IsOrdinaryLocalRequest || rec.Mode != "video") return;
         var normalized = Path.GetFullPath(path);
         var requested = requestedPath is null ? normalized : Path.GetFullPath(requestedPath);
+        var preparationRequested = requestedPath is null && rec.OrdinaryRequestedOutputPath is { } initialRequested
+            ? Path.GetFullPath(initialRequested) : requested;
         var av = RecordingStoragePolicy.IsOrdinaryAv(rec);
         lock (_ordinaryOutputLock)
         {
+            if (_ordinaryRetentionPreparation is { } preparation &&
+                (string.Equals(preparation.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(preparation.Path, preparationRequested, StringComparison.OrdinalIgnoreCase)))
+                throw new ApiException(409, "OUTPUT_PATH_IN_USE",
+                    "This ordinary output path is currently in use. Wait for its finalization or select a different path.");
             foreach (var owner in _ordinaryOutputs.Values.ToArray())
             {
                 var prior = owner.Recording;
@@ -857,6 +891,8 @@ public sealed class RecordingEngine : IDisposable
         traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
         endpoint ??= "recordings";
 
+        _ = ConfigParser.ValidateArtifactRequestJson(cfg.ToJsonString(),fixedRegionProfile is null);
+
         // =====================================================================
         // Phase 1: Extract nested metadata (outside lock, no expensive work)
         // =====================================================================
@@ -1319,7 +1355,7 @@ public sealed class RecordingEngine : IDisposable
                 profile_ref = ProfileRefObject(rec),
                 status = rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : "recording",
                 started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
-                config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
+                config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds, artifacts = new { bundle = rec.GenerateBundle } },
                 series = rec.IsScreenshotSeries ? ScreenshotSeriesStatus(rec) : null,
                 bundle = BundleObj(rec),
                 performance_trace_id = traceId
@@ -6287,6 +6323,8 @@ public sealed class RecordingEngine : IDisposable
 
         _tracer.FinalizationCompleted(GetTraceIdForRecording(rec.Id), rec.Id, finalizationSuccess);
 
+        RetireMediaOnlyOutputAfterFinalization(rec);
+
         if (bundleRequest != null)
         {
             _ = Task.Run(() => RunBundleGenerationAsync(rec, bundleRequest));
@@ -6439,7 +6477,7 @@ public sealed class RecordingEngine : IDisposable
             rec.BackendType is "wgc-continuous" or "wgc-window-av-split";
         bool isMp4 = string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
 
-        if (_bundleGenerator == null || !isEligibleBackend || !isMp4)
+        if (!rec.GenerateBundle || _bundleGenerator == null || !isEligibleBackend || !isMp4)
             return false;
 
         // Exactly-once guard: natural exit and Stop() may both reach here.
@@ -7111,7 +7149,7 @@ public sealed class RecordingEngine : IDisposable
             status = PublicRecordingStatus(rec),
             source = new { type = rec.SourceType, title = rec.SourceTitle },
             backend = rec.BackendType,
-            config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds },
+            config = new { countdown_seconds = rec.CountdownSeconds, duration_seconds = rec.DurationSeconds, artifacts = new { bundle = rec.GenerateBundle } },
             started_at = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             completed_at = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             elapsed_seconds = elapsed,
@@ -7504,7 +7542,7 @@ public sealed class RecordingEngine : IDisposable
             Status = rec.State.ToString(),
             Source = new { Type = rec.SourceType, Title = rec.SourceTitle },
             Backend = rec.BackendType,
-            Config = new { CountdownSeconds = rec.CountdownSeconds, DurationSeconds = rec.DurationSeconds },
+            Config = new { CountdownSeconds = rec.CountdownSeconds, DurationSeconds = rec.DurationSeconds, Artifacts = new { Bundle = rec.GenerateBundle } },
             StartedAt = rec.StartedAtUtc == default ? null : Iso(rec.StartedAtUtc),
             CompletedAt = rec.CompletedAtUtc.HasValue ? Iso(rec.CompletedAtUtc.Value) : null,
             ElapsedSeconds = elapsed,
@@ -7596,6 +7634,7 @@ public sealed class RecordingEngine : IDisposable
 
     public void StopAllSync(string reason)
     {
+        RequestOrdinaryRetentionExit();
         Recording[] activeRecordings;
         lock (_lock)
         {
@@ -7646,6 +7685,7 @@ public sealed class RecordingEngine : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
         lock (_lock) Interlocked.Exchange(ref _disposeStarted, 1);
+        RequestOrdinaryRetentionExit();
         Recording[] awaitingConfirmation;
         lock (_lock)
         {

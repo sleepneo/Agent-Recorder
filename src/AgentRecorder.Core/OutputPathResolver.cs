@@ -71,6 +71,7 @@ internal static class OutputPathResolver
         string name = BuildFileName(output, rec);
         var policy = Str(output?["conflict_policy"]) ?? "rename";
         var full = Path.Combine(dir, name);
+        rec.OrdinaryRequestedOutputPath = full;
         return ResolveConflict(full, policy);
     }
 

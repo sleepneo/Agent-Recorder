@@ -17,6 +17,7 @@ public enum OrdinaryNestedReferenceState { None, Relationship, ParentReferenced,
 public enum SharedOutputPathReferenceState { None, Referenced }
 public enum PlannedOutputPathReferenceState { None, Referenced, Indeterminate }
 internal enum PendingOutputUseState { None, SetupExact, Template, Unknown }
+internal enum PublicationIdentityReferenceState { None, Referenced }
 public sealed record OrdinaryRetentionEvidence(UnifiedHistoryEntry Entry, OrdinaryNestedReferenceState? NestedReference,
     SharedOutputPathReferenceState? SharedOutputReference, PlannedOutputPathReferenceState? PlannedOutputReference)
 {
@@ -24,6 +25,8 @@ public sealed record OrdinaryRetentionEvidence(UnifiedHistoryEntry Entry, Ordina
     internal PendingOutputUseState PendingOutputUse { get; init; }
     [System.Text.Json.Serialization.JsonIgnore]
     internal AgentRecorder.Infrastructure.PublicationIdentityAnchor? PublicationAnchor { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal PublicationIdentityReferenceState? PublicationIdentityReference { get; init; }
 }
 public sealed record OrdinaryRetentionEvidencePage(IReadOnlyList<OrdinaryRetentionEvidence> Items,
     string? NextCursor, int PageSize, UnifiedHistoryFilters Filters);

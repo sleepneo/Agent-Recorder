@@ -84,7 +84,7 @@ public sealed class OrdinaryArtifactApiTests(ITestOutputHelper output)
         using var f=new Fixture(videos:true);await f.RealBundle();var before=f.Db.Snapshot();var row=f.Writer.Read("r")!;
         var paths=new[]{row.OutputPath}.Concat(row.Bundle!.ContentsEvidence!.Contents.Select(i=>Path.Combine(row.Bundle.Path!,i.Name))).ToArray();
         string FileState()=>string.Join("|",paths.Select(p=>new FileInfo(p).Length+":"+File.GetLastWriteTimeUtc(p).Ticks));var files=FileState();
-        var fake=new RetentionPreviewQueryTests.MetadataFake();var retention=new RetentionPreviewQueryService(f.Db.Query.GetOrdinaryEvidencePage,f.Root,fake,fake,()=>At.AddDays(5));
+        var fake=new RetentionPreviewQueryTests.MetadataFake();var retention=new RetentionPreviewQueryService(f.Db.Query.GetOrdinaryEvidencePage,f.Root,fake,fake,()=>At.AddDays(5), TestRuntimeOutputUse.None);
         var retentionBefore=JsonSerializer.Serialize(retention.GetPage(Sid,Session,20,At.AddHours(1)));
         var trace=new WindowsReadOnlyFileMetadataNativeTests.Trace();var a=new Ancestors{Read=File.GetAttributes};var s=new OrdinaryArtifactCheckService(f.Writer.ReadArtifactFacts,a,new WindowsReadOnlyFileMetadataProbe(trace));
         using var host=new Host(f,headless,new SqliteOrdinaryArtifactCheckGateway(s));using var client=host.Client();

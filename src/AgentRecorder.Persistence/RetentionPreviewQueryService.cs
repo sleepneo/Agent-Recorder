@@ -15,16 +15,19 @@ public sealed class RetentionPreviewQueryService
     private readonly IReadOnlyFileMetadataProbe? _probe;
     private readonly Func<DateTimeOffset> _now;
     private readonly string _videosRoot;
+    private readonly IOrdinaryRuntimeOutputUseProvider? _runtimeOutputs;
     internal string VideosRootForTests => _videosRoot;
 
-    public RetentionPreviewQueryService(UnifiedHistoryQueryService history, string hostDataDirectory)
+    public RetentionPreviewQueryService(UnifiedHistoryQueryService history, string hostDataDirectory,
+        IOrdinaryRuntimeOutputUseProvider? runtimeOutputs)
         : this(history.GetOrdinaryEvidencePage, hostDataDirectory, ReadOnlyPathMetadata.Instance,
-            WindowsReadOnlyFileMetadataProbe.Instance, () => DateTimeOffset.UtcNow) { }
+            WindowsReadOnlyFileMetadataProbe.Instance, () => DateTimeOffset.UtcNow, runtimeOutputs) { }
 
     internal RetentionPreviewQueryService(Func<string, string, int, DateTimeOffset, string?, OrdinaryRetentionEvidencePage> read,
-        string hostDataDirectory, IReadOnlyPathMetadata files, IReadOnlyFileMetadataProbe? probe, Func<DateTimeOffset> now)
+        string hostDataDirectory, IReadOnlyPathMetadata files, IReadOnlyFileMetadataProbe? probe, Func<DateTimeOffset> now,
+        IOrdinaryRuntimeOutputUseProvider? runtimeOutputs)
     {
-        _read = read; _files = files; _probe = probe; _now = now;
+        _read = read; _files = files; _probe = probe; _now = now; _runtimeOutputs = runtimeOutputs;
         // Fixed once by host composition; never consult output-settings or HTTP.
         _videosRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(hostDataDirectory, "Videos")));
     }
@@ -44,6 +47,8 @@ public sealed class RetentionPreviewQueryService
                     e.SharedOutputReference is null || !Enum.IsDefined(e.SharedOutputReference.Value) ||
                     e.PlannedOutputReference is null || !Enum.IsDefined(e.PlannedOutputReference.Value) ||
                     !Enum.IsDefined(e.PendingOutputUse) ||
+                    (e.PublicationAnchor is null ? e.PublicationIdentityReference is not null :
+                        e.PublicationIdentityReference is null || !Enum.IsDefined(e.PublicationIdentityReference.Value)) ||
                     e.PublicationAnchor is { } anchor && (!anchor.Valid || e.Entry.Status != "completed" ||
                         e.Entry.CompletedAtUtc is null || anchor.Length != e.Entry.OutputSizeBytes ||
                         !string.Equals(anchor.Path, e.Entry.OutputPath, StringComparison.OrdinalIgnoreCase))) ||
@@ -57,7 +62,14 @@ public sealed class RetentionPreviewQueryService
                 e.Entry.OutputPathRecorded && e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null))
                 throw new InvalidDataException("Retention planned path matching is unavailable.");
             if (_probe is null) throw new InvalidDataException("Retention file observation provider is unavailable.");
-            var items = page.Items.Select(e => Evaluate(e, completedBefore)).ToArray();
+            // Validate the complete DB page first, then one complete runtime
+            // answer, before sampling any item. These are separate time points.
+            var paths = page.Items.Where(e => e.Entry.Status == "completed" &&
+                e.Entry.CompletedAtUtc is { } at && at < completedBefore && e.Entry.OutputPathRecorded &&
+                e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null)
+                .Select(e => e.Entry.OutputPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var occupied = ReadRuntimeSnapshot(paths);
+            var items = page.Items.Select(e => Evaluate(e, completedBefore, occupied)).ToArray();
             var candidates = items.Where(e => e.AgeCandidate).ToArray();
             long bytes = 0; var samples = 0;
             foreach (var item in candidates)
@@ -69,7 +81,32 @@ public sealed class RetentionPreviewQueryService
         catch (Exception e) { throw new RetentionPreviewUnavailableException(e); }
     }
 
-    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before)
+    private HashSet<string> ReadRuntimeSnapshot(string[] paths)
+    {
+        var occupied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (paths.Length == 0) return occupied;
+        OrdinaryRuntimeOutputSnapshot? snapshot;
+        try { snapshot = _runtimeOutputs?.ReadSnapshot(Array.AsReadOnly(paths)); }
+        catch (Exception error)
+        {
+            // Provider faults are service unavailability even if their exception
+            // type is also used by the user argument/cursor validation path.
+            throw new InvalidDataException("Retention runtime output snapshot failed.", error);
+        }
+        if (snapshot is null || snapshot.Paths.Count != paths.Length || paths.Length > OrdinaryRuntimeOutputSnapshot.MaxCandidates)
+            throw new InvalidDataException("Retention runtime output snapshot is unavailable.");
+        var requested = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var use in snapshot.Paths)
+        {
+            if (use is null || use.Path is null || !requested.Contains(use.Path) || !seen.Add(use.Path))
+                throw new InvalidDataException("Invalid retention runtime output snapshot.");
+            if (use.InUse) occupied.Add(use.Path);
+        }
+        return occupied;
+    }
+
+    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before, HashSet<string> occupied)
     {
         var item=evidence.Entry;
         RetentionPreviewEntry Result(string evaluation, string reason, bool age = false, string? path = null, long? observed = null)
@@ -122,6 +159,11 @@ public sealed class RetentionPreviewQueryService
             _ => throw new InvalidDataException("Invalid bundle evidence.")
         };
         if (bundleReason is not null) return Result("protected", bundleReason, true, path);
+
+        if (evidence.PublicationIdentityReference == PublicationIdentityReferenceState.Referenced)
+            return Result("protected", "shared_publication_identity", true, path);
+
+        if (occupied.Contains(path)) return Result("protected", "runtime_output_in_use", true, path);
 
         // A time-rule candidate may still be protected or have unknown bytes.
         // Never call it safe-to-delete, including when every check succeeds.

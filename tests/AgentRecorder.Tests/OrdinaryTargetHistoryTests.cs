@@ -115,7 +115,7 @@ public sealed class OrdinaryTargetHistoryTests(ITestOutputHelper output)
     {
         using var d=Database();d.Ordinary.Register(Row(d,"r",true));d.RawExecute(sql.Replace("definition_checksum='bad'", "definition_checksum='"+new string('f',64)+"'",StringComparison.Ordinal));
         var probes=0;d.Query.OrdinaryFileProbeForTests=_=>{probes++;return true;};var files=new RetentionPreviewQueryTests.MetadataFake();
-        var retention=new RetentionPreviewQueryService(d.Query.GetOrdinaryEvidencePage,d.Root,files,files,()=>At.AddDays(2));
+        var retention=new RetentionPreviewQueryService(d.Query.GetOrdinaryEvidencePage,d.Root,files,files,()=>At.AddDays(2), TestRuntimeOutputUse.None);
         Assert.Throws<UnifiedHistoryUnavailableException>(()=>d.Page());Assert.Throws<RetentionPreviewUnavailableException>(()=>retention.GetPage(Sid,Session,1,At.AddHours(1)));
         if(sql.Contains("schema_migrations",StringComparison.Ordinal)) Assert.Throws<SqliteOperationalStoreException>(()=>d.Ordinary.Read("r"));
         else Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>d.Ordinary.Read("r"));

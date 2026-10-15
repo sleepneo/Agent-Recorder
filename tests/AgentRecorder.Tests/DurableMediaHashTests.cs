@@ -290,7 +290,7 @@ public sealed class DurableMediaHashTests(ITestOutputHelper output)
     private static async Task AssertApis(RecordingEngine engine,SqliteOperationalStore store,SqliteOrdinaryRecordingHistoryStore writer,OrdinaryRecordingHistorySnapshot row,bool headless)
     {
         var audit=new RetentionSharedOutputPathTests.QuietAudit();var q=new UnifiedHistoryQueryService(store,writer,headless);var files=new RetentionPreviewQueryTests.MetadataFake();
-        var preview=new RetentionPreviewQueryService(q.GetOrdinaryEvidencePage,Path.GetDirectoryName(Path.GetDirectoryName(row.OutputPath))!,files,files,()=>DateTimeOffset.UtcNow.AddDays(1));
+        var preview=new RetentionPreviewQueryService(q.GetOrdinaryEvidencePage,Path.GetDirectoryName(Path.GetDirectoryName(row.OutputPath))!,files,files,()=>DateTimeOffset.UtcNow.AddDays(1), TestRuntimeOutputUse.None);
         var api=new ApiServer(engine,audit,new Tray(headless),null,null,null,null,null,null,null,null,null,0,
             unifiedHistoryGateway:new SqliteUnifiedHistoryGateway(q,()=>(Sid,Session)),artifactCheckGateway:new SqliteOrdinaryArtifactCheckGateway(new(writer)),retentionPreviewGateway:new SqliteRetentionPreviewGateway(preview,()=>(Sid,Session)));
         try

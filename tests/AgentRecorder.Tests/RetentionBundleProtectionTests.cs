@@ -38,7 +38,7 @@ public sealed class RetentionBundleProtectionTests(ITestOutputHelper output)
             Query = new(Db.Store, Writer, _headless);
             Query.OrdinaryFileProbeForTests = _ => { OldProbes++; throw new InvalidOperationException("SECRET_EARLY_PROBE"); };
             Query.CandidatesSelectedForTests = (_, n) => Selected += n;
-            Preview = new(Query.GetOrdinaryEvidencePage, Db.Root, Files, Files, () => At.AddDays(5));
+            Preview = new(Query.GetOrdinaryEvidencePage, Db.Root, Files, Files, () => At.AddDays(5), TestRuntimeOutputUse.None);
         }
         internal OrdinaryRecordingBundleOperation? Seed(string id, string? state, bool anchor = true)
         {
@@ -240,7 +240,7 @@ public sealed class RetentionBundleProtectionTests(ITestOutputHelper output)
             "na_error" => new("not_applicable", null, "SECRET"), "generating_error" => b with { ErrorCode = "SECRET" }, _ => b
         };
         var entry = evidence.Entry with { Bundle = b, CompletedAtUtc = f.Before, Status = fault == "media_status" ? "failed" : "completed" };
-        var service = new RetentionPreviewQueryService((_,_,_,_,_) => page with { Items = new[] { evidence with { Entry = entry, PublicationAnchor = null } } }, f.Db.Root, f.Files, f.Files, () => At.AddDays(5));
+        var service = new RetentionPreviewQueryService((_,_,_,_,_) => page with { Items = new[] { evidence with { Entry = entry, PublicationAnchor = null } } }, f.Db.Root, f.Files, f.Files, () => At.AddDays(5), TestRuntimeOutputUse.None);
         Assert.Throws<RetentionPreviewUnavailableException>(() => service.GetPage(Sid, Session, 20, f.Before)); f.NoProbes();
     }
 
@@ -248,6 +248,7 @@ public sealed class RetentionBundleProtectionTests(ITestOutputHelper output)
     public async Task V30LegacyUpgradeKeepsNullAndMissingAnchorPriorityWithoutBackfill(bool anchored)
     {
         using var f = new Fixture(); f.Seed("legacy", null, anchored);
+        f.Db.DropPublicationReferenceMigration();
         f.Db.RawExecute("DROP TRIGGER plan_media_publication_initial; DROP TABLE plan_media_publication_anchors; DROP TABLE plan_media_publication_boundary; DELETE FROM schema_migrations WHERE version=41; DROP TRIGGER future_window_publication_initial; DROP TABLE future_window_publication_anchors; DROP TABLE future_window_publication_boundary; DELETE FROM schema_migrations WHERE version=40;");
         foreach(var index in SqliteSchemaV39.Indexes)f.Db.RawExecute("DROP INDEX "+index.Name+";" );
         foreach(var index in SqliteSchemaV38.Indexes)f.Db.RawExecute("DROP INDEX "+index.Name+";");

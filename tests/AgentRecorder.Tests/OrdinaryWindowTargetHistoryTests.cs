@@ -111,7 +111,7 @@ public sealed class OrdinaryWindowTargetHistoryTests
     public void DamagedWindowFactsFailHistoryAndRetentionBeforeFileProbe(string sql)
     {
         using var d=Database();d.Ordinary.Register(Row(d,"r",true));d.RawExecute("PRAGMA ignore_check_constraints=ON;"+sql);
-        var files=new RetentionPreviewQueryTests.MetadataFake();var retention=new RetentionPreviewQueryService(d.Query.GetOrdinaryEvidencePage,d.Root,files,files,()=>At.AddDays(2));
+        var files=new RetentionPreviewQueryTests.MetadataFake();var retention=new RetentionPreviewQueryService(d.Query.GetOrdinaryEvidencePage,d.Root,files,files,()=>At.AddDays(2), TestRuntimeOutputUse.None);
         var probes=0;d.Query.OrdinaryFileProbeForTests=_=>{probes++;return true;};
         Assert.Throws<UnifiedHistoryUnavailableException>(()=>d.Page());Assert.Throws<RetentionPreviewUnavailableException>(()=>retention.GetPage(Sid,Session,1,At.AddHours(1)));
         Assert.ThrowsAny<Exception>(()=>d.Ordinary.Read("r"));Assert.Equal(0,probes);Assert.Empty(files.Observations);

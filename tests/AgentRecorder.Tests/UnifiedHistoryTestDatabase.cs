@@ -88,7 +88,14 @@ internal sealed class UnifiedHistoryTestDatabase : IDisposable
     }
     internal void DowngradeToV22()
     {
-        using var c = Store.OpenConnection(); using var cmd = c.CreateCommand();
+        DropPublicationReferenceMigration();
+        // This owned migration fixture has deliberately removed v42 already.
+        // A current-schema business connection must continue to reject it.
+        using var c = new SqliteConnection(new SqliteConnectionStringBuilder
+        { DataSource = Store.DatabasePath, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+        c.Open(); SqliteOutputPathCollation.Register(c);
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;"; cmd.ExecuteNonQuery();
         cmd.CommandText="DROP TRIGGER plan_media_publication_initial; DROP TABLE plan_media_publication_anchors; DROP TABLE plan_media_publication_boundary; DELETE FROM schema_migrations WHERE version=41; DROP TRIGGER future_window_publication_initial; DROP TABLE future_window_publication_anchors; DROP TABLE future_window_publication_boundary; DELETE FROM schema_migrations WHERE version=40;";cmd.ExecuteNonQuery();
         foreach(var index in SqliteSchemaV39.Indexes) {cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}
         cmd.CommandText="DELETE FROM schema_migrations WHERE version=39;";cmd.ExecuteNonQuery();
@@ -105,6 +112,15 @@ internal sealed class UnifiedHistoryTestDatabase : IDisposable
     }
     internal void RawExecute(string sql)
     { using var c = new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Store.DatabasePath,Pooling=false}.ToString()); c.Open(); using var cmd=c.CreateCommand(); cmd.CommandText=sql; cmd.ExecuteNonQuery(); }
+    internal void DropPublicationReferenceMigration()
+    {
+        // This fixture explicitly creates v41, so first remove v44/v43 too. Use one
+        // existing-only connection; current business policy must reject the downgrade.
+        using var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=Store.DatabasePath,Mode=SqliteOpenMode.ReadWrite,Pooling=false}.ToString());c.Open();
+        using var cmd=c.CreateCommand();cmd.CommandText="DROP TABLE ordinary_deletion_requests; DELETE FROM schema_migrations WHERE version=44; DROP TABLE ordinary_deletion_operations; DELETE FROM schema_migrations WHERE version=43;";cmd.ExecuteNonQuery();
+        foreach(var index in SqliteSchemaV42.Indexes){cmd.CommandText="DROP INDEX "+index.Name+";";cmd.ExecuteNonQuery();}
+        cmd.CommandText="DELETE FROM schema_migrations WHERE version=42;";cmd.ExecuteNonQuery();
+    }
     internal long Scalar(string sql)
     { using var c = Store.OpenConnection(); using var cmd = c.CreateCommand(); cmd.CommandText = sql; return (long)cmd.ExecuteScalar()!; }
     internal string Snapshot()

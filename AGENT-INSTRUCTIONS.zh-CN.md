@@ -1,5 +1,9 @@
 # Agent Recorder：AI Agent 操作指令
 
+用户明确说“只要视频，不需要说明包”时，在普通非nested视频raw/quick请求中传 `"artifacts":{"bundle":false}`；省略或true仍交付默认完整Bundle。先读取当前 `/capabilities.recording_artifacts`，不得把该字段用于Profile、Plan/Lease/未来窗口、截图序列或nested。确认摘要会显示实际冻结政策，本地改目录不改变它。
+
+仅MP4仍须原本机录制确认和正式发布，历史的media_hash可为null。符合原锚点/成功大小、固定Videos范围及现有限定用途保护时才可按recording_id申请独立删除；false不是批准、路径绕过或忽略已有Bundle。默认Bundle录制及已有Bundle继续保护。删除202后查询原请求，等待真正本机确认，不以聊天“同意”代替，不自动换key重试unknown。本工作区产物政策源码/合成输入正式链及一次5秒无声FFmpeg选区的本地取消/批准删除与重放已独立验收，不代表全部后端或完整保留执行。
+
 本文档面向本地 AI agent。AI agent 应启动或复用 Agent Recorder，并优先调用 quick API 完成常见录屏流程。
 
 ## 产品定位

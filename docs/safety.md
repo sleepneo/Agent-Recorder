@@ -1,5 +1,11 @@
 # Agent Recorder Safety Model
 
+New ordinary non-nested video requests can explicitly choose `artifacts.bundle=false` (raw and quick only); the default is true. The immutable creation policy is shown by the local confirmation and API configuration. Unsupported entry points and malformed policy fields reject before provider/UI/file work. Policy selection neither authorizes capture nor grants deletion.
+
+Media-only recordings retain formal main-MP4 validation, original publication identity, winner and durable not-applicable Bundle registration. They skip preparation/generation rather than deleting a newly generated Bundle, and do not manufacture a generation hash. The actual App generator and default five-file Bundle path stay installed. Existing Bundle protection and V1–44 schema definitions remain unchanged.
+
+Only a known production backend's actual output-settlement boundary can retire a completed media-only main-output claim. Read-only snapshots and deletion preparation never prune claims; unknown backends, active cleanup and unproven settlement stay protected. This closes the new path without treating completion as resource retirement. Existing default Bundle recordings remain protected. Synthetic-input formal publishing/native tests do not establish real desktop capture or human approval acceptance.
+
 Agent Recorder is designed for local AI-agent use. The agent may request a
 recording, but the local user remains in control of what is selected and which
 bounded authorization permits recording to start.
@@ -361,7 +367,83 @@ Retention remains a read-only preview under the trusted host Videos root.
 Nested references, cross-source shared paths, frozen plan uses, Bundle states
 and unknown/replaced/reparse/hard-linked objects conservatively protect items.
 Reference checks precede physical probes and are not restricted to the current
-page. No API deletes media, enforces a full retention quota, or establishes a
+page. The preview API neither deletes media, enforces a full retention quota, nor establishes a
 complete reference graph. A completed recording, ready Bundle or hash never
 grants deletion authority. Real full-disk/removable-volume fault acceptance and
 broader parallel/platform compatibility remain separate work.
+
+## Ordinary runtime-output observation
+
+Retention preview also checks saved original main-MP4 volume/file tuples in the
+ordinary, future-window and plan publication-anchor tables. One bounded indexed
+BLOB batch in the original SQLite snapshot protects other saved references even
+at different paths/lengths. Only the candidate's own ordinary BINARY ID is excluded.
+V42 adds three indexes and a receipt; missing/invalid schema or relation facts
+fail the entire page before filesystem probes, without GET migration/repair.
+The `shared_publication_identity` reason follows Bundle and precedes runtime/FS;
+missing candidate anchors remain unchecked. No foreign identity material is exposed.
+Matching malformed business evidence is conservative protection, not a trusted
+receipt; unmatched malformed/unknown keys are not comprehensively validated.
+This relation does not prove current aliases, cover all artifacts/workers or freeze
+future references. ID reuse may overprotect. Readiness stays incomplete and no
+pin, deletion authority or complete absence-of-reference conclusion is introduced.
+
+Retention preview observes this host's existing ordinary main-MP4 claims once
+per eligible page, separately from its validated SQLite facts. The read provider
+copies only immutable registered paths under the original output lock (50 ms
+acquisition budget, at most 500 owners, at most 100 candidate paths). It performs
+no file/process/backend I/O, takes no recording/backend locks and cannot retire
+claims. Shutdown, overflow or an unavailable/damaged snapshot fails the whole
+page before file probes. Logical terminal status and Stop/Completion do not
+exclude a claim that is still registered. Matching adds conservative protection;
+an unmatched path grants no absence-of-reference or deletion authority. Other
+artifacts, hash readers, temporary paths and other processes remain outside this
+runtime observation. No pin, future exclusion or deletion gate is introduced.
+
+## Locally confirmed single deletion requests (SQLite V44)
+
+The restricted implementation has passed independent checks and one real
+5-second silent FFmpeg selected-region flow with local cancellation, approval
+and idempotent replay. This does not establish every backend or general retention
+execution. Default App outputs have a Bundle and remain protected. New ordinary
+video requests may explicitly select the MP4-only policy. Never rewrite
+old Bundle facts or bypass reference guards to make a file eligible.
+
+The interactive App now owns a separate deletion-request coordinator and the
+original local approval UI. The configured API key and ready host are required
+before persistent facts or UI are accessed. Headless has no local deletion
+gateway. POST accepts only a single recording ID and a durable idempotency key;
+GET reads one exact request. There is no remote approval, batch, path-input,
+automatic quota or cleanup endpoint. A 202 response means an application was
+persisted, not approved or deleted.
+
+CreateOrGet commits before any window and retires its SQLite objects before
+waiting for local approval. Actual UI approval and retirement precede a unique
+durable execution reservation; its successful commit and cleanup precede the
+original V43 prepared ledger and protected original-handle disposition. No
+executable permit is persisted. The original two 60-second approval lifetimes,
+common 3-second prepare/protection budget and separate 3-second settlement
+remain. HTTP timeouts/disconnects never reclaim the host-owned flow. Host stop
+cancels it and waits for actual retirement before closing the shared writer;
+unknown cleanup retains ownership and busy status. Exact read workers have a
+total 3-second budget and retain their separate single query quota until actual
+exit. SQLite identity BLOBs are filtered by exact type and length before managed
+materialization; this does not truncate or reconstruct trusted identity.
+
+Only a completed ordinary main MP4 directly under the frozen host Videos root,
+with the original trusted identity/size, explicit not-applicable Bundle and
+existing finite-use protections, can reach the original disposition. Unknown
+or unsupported facts reject the action. No namespace-wide freeze, full reference
+graph, future non-use or physical-deletion guarantee is claimed. History and
+publication anchors are preserved. Preview remains read-only with deletion and
+complete-reference/physical readiness flags false.
+
+Request and ledger commits are separate from Windows disposition. A restart
+invalidates old local confirmation and reads facts without opening another UI,
+recovering a permit or resuming execution. A reservation without a settled
+ledger remains unknown; accepted native facts survive failed request writes.
+`file_action_performed=true` means OS acceptance of an original-handle mark,
+not physical removal or freed bytes. No automatic retry is safe for an unknown
+result; query the same request. New execution requires a new local approval.
+Private test UI adapters and disposable native files do not substitute for real
+human desktop approval or release-package acceptance.

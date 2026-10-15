@@ -1,6 +1,14 @@
 # Agent Recorder API 手册
 
-本文描述当前源码合同（SQLite v41，公开包仍 v0.1.15），包含尚未进入该发布包的历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、计划和未来窗口成片原始身份与只读保留预览。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，保留删除尚未实现。
+普通、非nested视频的原始 `POST /api/v1/recordings` 和quick `POST /api/v1/recordings/quick` 支持 `"artifacts":{"bundle":false}`，用于用户只要视频、不需要说明包的请求。省略artifacts或bundle默认true，显式true继续完整五附件Bundle。政策在创建时冻结，`summary.artifacts.bundle`、视频 `config.artifacts.bundle` 与实际一致，本地改保存目录也不重置。中英确认窗显示“仅MP4”或“MP4与录制说明包”，不改变捕获范围、输出或本地授权Proof。
+
+artifacts必须object，内部仅可选JSON boolean bundle；null、错误类型、未知/重复内部字段及重复artifacts，在设备/来源探测、选区/确认和文件操作之前400 INVALID_ARGUMENT。Profile执行/持久配置、Plan/Lease/未来窗口、截图序列、nested不支持本字段，即使true也拒绝。`capabilities.recording_artifacts` 公布模式、default_bundle=true、两个入口和ordinary_non_nested_video范围。
+
+false不卸载App生产generator，只为当前ordinary视频跳过Bundle准备/生成，不创建operation、.bundle或截图附件。主MP4仍正式校验、原句柄发布、结算赢家并持久登记，completed事务明确保存bundle.status=not_applicable。主媒体摘要依赖原Bundle生成阶段，此时media_hash为未知/null，不补造。默认完整Bundle及generating/ready/failed/interrupted保护保持；schema仍V44，不改旧媒体、不回填历史。
+
+成功仅MP4成片只有原锚点/大小、固定Videos范围与现有限定用途保护都通过时，才可用录制ID申请独立删除；政策本身不是删除授权。运行期主输出登记只在已知生产后端实际收尾后退休，活资源/未知继续保护。默认Bundle录制仍受保护。本源码/合成输入正式链及一次5秒无声FFmpeg选区的本地取消/批准删除与同键重放已独立验收，不代表全部后端或完整保留执行。
+
+本文描述v0.1.16 合同（SQLite v44），包含历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、计划和未来窗口成片原始身份、只读保留预览，以及本机确认的单项删除申请。后者及显式仅MP4正式发布路径已通过独立源码/自动化与上述限定桌面验收，默认App录制仍生成受保护Bundle。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用文末独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
@@ -1741,7 +1749,7 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 10. 结构化录制产物（Recording Bundle）
 
-普通本地逐次确认 video 的成功 MP4，明确后端 `wgc-continuous`（无声显示器、选区或严格窗口）及 `wgc-window-av-split`（严格窗口固定系统 loopback）也复用下述五附件 Bundle 和持久生成摘要链。既有 raw/quick/Profile/nested 请求规则、后端资格、实验开关和音频矩阵继续有效；不扩大 standing/recurring/required/future 独立执行。Bundle 异步生成，失败保留已完成 MP4。历史 GET 不哈希或补填内容，显式核验复用既有端点和预算；native 证据不可用时保持原兼容未知合同。源码验收使用合成输入与正式会话/发布链；native helper真实采集下的专项交付验收尚待进行。公开v0.1.15包不包含本增量。
+普通本地逐次确认 video 的成功 MP4，明确后端 `wgc-continuous`（无声显示器、选区或严格窗口）及 `wgc-window-av-split`（严格窗口固定系统 loopback）也复用下述五附件 Bundle 和持久生成摘要链。既有 raw/quick/Profile/nested 请求规则、后端资格、实验开关和音频矩阵继续有效；不扩大 standing/recurring/required/future 独立执行。Bundle 异步生成，失败保留已完成 MP4。历史 GET 不哈希或补填内容，显式核验复用既有端点和预算；native 证据不可用时保持原兼容未知合同。源码验收使用合成输入与正式会话/发布链；native helper真实采集下的专项交付验收尚待进行。v0.1.16包含本能力。
 
 上述支持范围内的FFmpeg及普通WGC MP4录制成功后，会在视频文件旁自动生成结构化产物包。例如 `D:\Videos\demo.mp4` 对应：
 
@@ -2542,9 +2550,21 @@ capabilities.retention_preview 以及每页均明确 read_only=true、deletion_s
 
 上述四类保护仍保留 age_candidate=true、recorded_path/recorded_bytes；observed_file_bytes=null，计入 unknown_candidate_file_count，不加入 observed_candidate_bytes。复用同一只读 SQLite 快照中已批量读取、最多100项的 Bundle 事实，不另开逐项连接、不读 JSON/图片/MP4 内容、不遍历或按目录补证据。状态/路径/错误组合、媒体绑定、schema/收据或 provider 契约损坏仍整页503，不能被前置保护原因掩盖；旧历史不回填，仍为 null。
 
+Bundle 理由之后、runtime 和任何文件探针之前，另一 ordinary 主 MP4 锚点或 future-window/plan 主 MP4 锚点保存相同原始二进制 volume/file 身份时，返回 protected / shared_publication_identity。不同路径、历史大小、SID/session、状态、日期、cutoff、页或 cursor 水位均不限制引用；只以精确 BINARY 语义排除 ordinary 候选自身 recording_id，其他来源同字符串 ID 仍匹配，覆盖 standing/recurring/required_once 三种计划。不返回外来路径、ID、owner、来源、数量或证明材料。
+
+最多100项已验证候选锚点，在原只读事务内用一个 BLOB 参数化批次及三个身份索引 EXISTS 的 OR 读取私有关系事实；SQLite V42 仅新增三个索引及迁移收据。缺失/错误表结构、索引、collation、收据或不完整/错误关系结果均在完整页任何文件探针之前整页503 RETENTION_PREVIEW_UNAVAILABLE，不能被旧保护理由或 runtime 阳性掩盖。GET 不迁移/修复，V41 输入须经正常宿主初始化。候选缺原锚点保持未检查及 publication_identity_missing，不补身份。
+
+命中保留本条 age_candidate/path/recorded_bytes，observed_file_bytes=null 计入未知、不增加实测字节；无匹配继续原 runtime/物理观察。外来坏业务字段不会将匹配 tuple 过滤成无引用；未命中的坏/未知键不宣称已全面验证。命中只证明保存的原始身份引用，不证明两个路径当前指向同一对象，ID复用可能保守过度保护。五附件、任意 worker、磁盘别名、未来引用及删除 TOCTOU 未覆盖；DB/runtime/FS 是不同时间点，不新增 pin、完整无引用、安全删除结论或删除授权。endpoint、分页、read_only/deletion_supported 和不完整引用 readiness 保持原语义。
+
+App 与 Headless 每页还从该宿主实际 RecordingEngine 获取一次不可变 ordinary 主 MP4 claim 时间点快照。最多请求100个通过年龄/词法范围校验的不同路径；原输出锁最多等待50ms，已有登记最多检查500个 owner。第501条、关停、缺provider、锁超时、异常或坏返回均整页503 RETENTION_PREVIEW_UNAVAILABLE，且在任何祖先/属性/叶探针之前失败；重复、缺失或外来返回路径也是契约损坏。空历史或无年龄/范围候选可不查询。仅按已登记 canonical 文本和 OrdinalIgnoreCase 精确匹配，不补目录、解析别名、枚举磁盘或扫描全部录制。
+
+原 nested/shared/planned/pending、缺发布锚点及 Bundle 原因保持优先；剩余匹配路径返回 protected / runtime_output_in_use，保留 age_candidate=true 及自身 recorded_path/recorded_bytes，observed_file_bytes=null，计入未知而不增加实测字节。登记仍存在时，无论 Stop 已返回、逻辑 Completion 或 completed/cancelled/failed 状态都包含；读请求不退休 owner，不访问后端或等待 OutputSettled。不公开 owner ID、数量、来源或 nonce。HTTP 仍只接受原 cutoff/limit/cursor，不新增任意路径输入或端点。
+
+覆盖仅限本宿主已有 ordinary video 主输出登记，包括无声、有声/AV split 及原登记已覆盖的 ordinary WGC；不宣称覆盖 Bundle/input/hash-reader/temp 或跨进程占用。DB 和运行期是两个时间点，之后新 claim 不在本次观察内。无匹配不等于无引用或可删；没有 pin、未来排他或删除闸门，read_only=true/deletion_supported=false 保持。
+
 ready 只证明历史关联，不能担保当前附件物理完整；failed/unknown 不能证明没有部分产物。not_applicable 只表示记录了本次不生成 Bundle，不证明不存在其他引用或可删除。事实在事务后或下一 cursor 页可变化，不能冻结未来删除决策。五项附件名称、类型和生成字节可作为持久历史清单读取，但尚无逐附件物理身份或完整跨产物引用图。bundle_included 继续 false：附件实体和体积未纳入预览，完整附件引用/身份/删除保护尚未完成；read_only=true，删除/reference/physical readiness 继续 false。
 
-age_rule_match 仅增加有限的发布副本身份比较，不证明上游内容/视频真实性或排除全部同账户进程。原子祖先链、采样之后的变化、ID复用、原位同大小改写、内存映射写入、全部别名和删除TOCTOU仍未解决；完整引用、权限和明确本地删除授权仍需另行设计。本轮未交付完整保留策略，也不代表 v0.1.15 已发布能力。
+age_rule_match 仅增加有限的发布副本身份比较，不证明上游内容/视频真实性或排除全部同账户进程。原子祖先链、采样之后的变化、ID复用、原位同大小改写、内存映射写入、全部别名和删除TOCTOU仍未解决；完整引用、权限和明确本地删除授权仍需另行设计。本能力不等于完整保留策略；受限单项删除另见相应章节。
 
 ### 普通视频 Bundle 的持久历史事实
 
@@ -2609,7 +2629,7 @@ age_rule_match 仅增加有限的发布副本身份比较，不证明上游内�
 
 V37 不扫描文件、不回填旧行，metadata 内已有 hash 也不能补齐可信摘要。迁移前事实、公共 `Ready(...)`/仅清单结果、未绑定操作或缺原生身份保持 `content_hash: null`；新行缺必需标记、损坏/缺项/跨绑定集合 fail closed。普通列表、详情和 unified ordinary 从同一 SQLite 快照 indexed batch 读取，最多100个父项/500项附件，以第501行检测越界，不读取附件内容；其他 unified 来源没有此普通 Bundle 证据。
 
-`bundle_publication` 是生成发布时历史观察，不代表截图与视频共享时刻、捕获原始字节、附件当前完整性、可播放、未来完整性保证或删除授权。附件按需内容比较见下文；`artifacts/check` 仍仅元数据，`verify-media` 仍仅主 MP4，1 GiB/30秒/单 worker 合同不变。保留预览仍只读并保护 ready Bundle。本源码增量不在公开 v0.1.15 包中。
+`bundle_publication` 是生成发布时历史观察，不代表截图与视频共享时刻、捕获原始字节、附件当前完整性、可播放、未来完整性保证或删除授权。附件按需内容比较见下文；`artifacts/check` 仍仅元数据，`verify-media` 仍仅主 MP4，1 GiB/30秒/单 worker 合同不变。保留预览仍只读并保护 ready Bundle。
 
 
 ### 普通产物按需可用性检查
@@ -2686,7 +2706,7 @@ capabilities.ordinary_artifact_check公布 supported、endpoint、scope=ordinary
 
 旧历史、没有或失败的 Bundle、公共假 Ready 结果、无法取得可信原生绑定均返回 null。V36 不回填、不扫描媒体；历史查询沿现有一致 SQLite 快照按索引批量读取，最多 100 项，不读取媒体或附件内容。新登记缺标记、摘要类型/算法/hex/长度损坏及媒体/操作绑定错误使查询不可用，不降级为可信值；其他统一来源为 null，不增加 hash 筛选。当前内容比较必须显式调用下述 POST 核验端点。
 
-capabilities.recording_history.media_hash_supported 与 capabilities.unified_history.media_hash_supported_sources 声明 ordinary 支持，media_hash_algorithm=sha256、media_hash_basis=bundle_generation。摘要不代表捕获原始字节、当前完整性或可播放；哈希之后的变化、三次独立抽帧及附件内容不在此证据内。artifact-check 继续 metadata_only=true、content_verification=false；retention 仍只读并保护 ready Bundle，摘要不是删除授权。本功能未进入公开 v0.1.15 包。
+capabilities.recording_history.media_hash_supported 与 capabilities.unified_history.media_hash_supported_sources 声明 ordinary 支持，media_hash_algorithm=sha256、media_hash_basis=bundle_generation。摘要不代表捕获原始字节、当前完整性或可播放；哈希之后的变化、三次独立抽帧及附件内容不在此证据内。artifact-check 继续 metadata_only=true、content_verification=false；retention_preview 仍只读并保护 ready Bundle，摘要不是删除授权。本功能包含在 v0.1.16 中。
 
 ### 普通主视频显式内容核验
 
@@ -2721,7 +2741,7 @@ digest_match表示该项完整稳定读取匹配；digest_mismatch区分身份�
 
 这些是**顺序读句柄各自时间点观察，不是同时/原子五文件快照**，前项在响应时可能已变化；不代表共享截图时刻、可播放、未来完整性或删除授权。与主MP4端点组合也不是原子六文件快照。history GET、retention和旧artifacts/check不触发内容核验，旧check继续metadata-only。
 
-capabilities.ordinary_attachment_verification单独声明 supported/endpoint/scope=bundle_attachments、algorithm=sha256、reference_basis=bundle_publication、max_files=5、max_distinct_ancestors=64、max_bytes=67108864、deadline_ms=30000、max_concurrent=1、concurrency_scope=host_content_verification、shared_with指向verify-media、read_only/deletion_supported及顺序观察语义。本节是工作区源码能力，未进入公开v0.1.15发布包。
+capabilities.ordinary_attachment_verification单独声明 supported/endpoint/scope=bundle_attachments、algorithm=sha256、reference_basis=bundle_publication、max_files=5、max_distinct_ancestors=64、max_bytes=67108864、deadline_ms=30000、max_concurrent=1、concurrency_scope=host_content_verification、shared_with指向verify-media、read_only/deletion_supported及顺序观察语义。本节能力包含在 v0.1.16 中。
 
 示例：共享名额占用、尚未读取事实时返回：
 
@@ -2731,7 +2751,7 @@ capabilities.ordinary_attachment_verification单独声明 supported/endpoint/sco
 
 ### 计划成片的原始发布身份
 
-standing、recurring 和 required_once 成功 MP4 在原赢家事务内保存正式最终 publisher 的原始 receipt；native 身份仅内部保存，旧记录或合法无法取得 native 身份的成功仍为未知。计划详情、分页历史和统一 source=plan 历史在原只读快照内批量验证选中事实，保留 512/100/100 上限。现代缺失或损坏沿既有 unavailable/503 合同返回经过清理的错误。公开 DTO、cursor、端点和 capability 不变；历史 GET 不读取媒体字节、不计算摘要、不回填身份。原始身份只表示发布时事实，不能证明当前字节、可播放性或删除权限。此源码增量已通过独立验收，公开包仍为 v0.1.15。
+standing、recurring 和 required_once 成功 MP4 在原赢家事务内保存正式最终 publisher 的原始 receipt；native 身份仅内部保存，旧记录或合法无法取得 native 身份的成功仍为未知。计划详情、分页历史和统一 source=plan 历史在原只读快照内批量验证选中事实，保留 512/100/100 上限。现代缺失或损坏沿既有 unavailable/503 合同返回经过清理的错误。公开 DTO、cursor、端点和 capability 不变；历史 GET 不读取媒体字节、不计算摘要、不回填身份。原始身份只表示发布时事实，不能证明当前字节、可播放性或删除权限。本能力已通过独立验收，包含在 v0.1.16 中。
 
 
 ### 计划与未来窗口主视频检查（工作区源码，未发布）
@@ -2748,4 +2768,24 @@ standing、recurring 和 required_once 成功 MP4 在原赢家事务内保存正
 
 capabilities.history_artifact_check 给出 gateway supported、supported_sources 两种来源、endpoint、main_media、max_files=1、max_distinct_ancestors=64、deadline_ms=3000、max_concurrent=1、host_metadata_check 和共享 ordinary 入口及固定 flags。缺 gateway 时 sources 为空。Headless 可只读历史 Plan/future，不扩展捕获授权，其统一分页 ordinary-only 仍保持。
 
-observation_semantics=sequential_point_in_time_metadata_not_atomic_snapshot：数据库事实与后续文件采样是两个时间点边界，不读内容、不列目录、不启动进程/捕获，不证明声音完整、可播放、未来不变、无引用或可安全删除。本源码增量已通过独立验收，尚未包含在公开 v0.1.15 包中。
+observation_semantics=sequential_point_in_time_metadata_not_atomic_snapshot：数据库事实与后续文件采样是两个时间点边界，不读内容、不列目录、不启动进程/捕获，不证明声音完整、可播放、未来不变、无引用或可安全删除。本能力已通过独立验收，包含在 v0.1.16 中。
+
+### 单项删除申请（SQLite V44，受限范围）
+
+默认App录制仍登记Bundle，生成失败也不是not_applicable，继续受保护。新ordinary请求可显式选择本文开头的仅MP4政策，正式publisher保存主媒体原锚点及not_applicable历史，再按原删除范围和独立本机批准处理。已有历史不重解释；合成输入的正式发布/原生处置独立检查不等于真实桌面或人类批准验收。
+
+ready 的交互 App 已接实际本机确认协调器；Headless、未接线或未 ready 时 `capabilities.retention_deletion.supported=false`，申请/查询返回稳定 `503 RETENTION_DELETION_UNAVAILABLE`，0 UI、0 native。两个入口均要求已配置的 API key，不能利用其他路由的可选鉴权设置绕过。API key 不能批准删除。
+
+`POST /api/v1/retention/deletion-requests` 的 UTF-8 body 仅允许 `{"recording_id":"rec_example"}`，并要求单个 `Idempotency-Key` header。键去除首尾空白后为1–128个可打印 ASCII 字符，不含空白、斜杠、反斜杠、逗号。body 上限2048字节、recording ID上限200字符；未知/重复字段、重复header、错误类型、NUL、路径、query和多余参数返回 `400 INVALID_ARGUMENT`。owner、固定 Videos 根、engine/store/writer和真实UI由host冻结，不能通过请求提供许可、批准或外部operation。
+
+`202` 表示持久申请已建立，不表示已批准或删除。标准envelope的data含 `deletion_request_id`、`recording_id`、`request_state`、`local_confirmation_state`、`persisted_request_phase`、`query_url` 及下述结果。直接跟随 `query_url`：`GET /api/v1/retention/deletion-requests/{id}`，不带body/query。请求ID必须是32位小写hex，编码分隔符、多段ID被拒绝；不存在/外来请求统一 `404 DELETION_REQUEST_NOT_FOUND`。已知请求即使结果未知也返回200；持久事实损坏、busy、host停止/未ready为503，按 `suggested_action` 查询原申请，无需让人类转述诊断。
+
+任何弹窗之前，原子CreateOrGet持久绑定可信owner、键摘要、规范请求摘要与随机请求ID，数据库对象实际退出后才等待人类。同键同body返回原申请，同键异body为 `409 IDEMPOTENCY_KEY_CONFLICT`。并发/HTTP断线重试不能产生第二个窗或动作，HTTP断线不拥有也不回收协调器。宿主总额度为一个pending/approved/executing流程、无队列；worker/Close未知继续busy。确需新尝试时必须新key和新本机批准；不能通过自动换key重试未知结果。
+
+本机独立确认窗说明文件名、完整可复制路径、大小、完成时间、永久删除、不进回收站和保留历史；默认Enter/Esc/关闭/超时取消。真实本机批准且UI实际退休后，原短期Permit才能使用。API没有批准/取消入口，对话中的“确认”也不能代替本机批准。执行前先持久提交唯一approval关联并退出请求DB对象，再进入原V43 prepared账本及原句柄处置，保留两段60秒、准备/保护共同3秒和退休后独立结算3秒。请求DB操作及精确查询各有包含清理的总3秒预算；查询只有一个实际worker，超时/取消后继续占额度直到实际退休。
+
+`request_state` 为 `awaiting_local_confirmation`、`execution_reserved`、`finished`、`confirmation_invalidated` 或 `unknown`，finished仅指流程结束。`local_confirmation_state` 独立为 pending/approved/rejected/expired/cancelled/unavailable/busy/invalidated。无实际关联V43操作时 `operation_id`、`disposition_progress` 为null，不能编造未执行结果。有操作时处置为 not_attempted/accepted/rejected/unknown，并提供有限 `reason_code`、可空 `win32_error`。`file_action_performed=true` 只代表OS接受原句柄删除标记，unknown为null，不代表物理删除完成或空间回收，不返回deleted或回收字节。
+
+`original_resources_retired`、`ledger_resources_retired`、`our_resources_retired`、`request_resources_retired` 分开描述实际退休，无法证明时可为null。`preparation_commit`、`ledger_settlement`、`request_write_commit` 为 committed/not_committed/unknown，无操作时前两项可为null；`persisted_disposition_progress` 单独保留实际settled账本事实。请求最终写入失败不能抹去accepted。新进程只读旧申请：未批准的本地确认失效，已执行预约但无结算事实仍未知；同key只返回旧申请，0 UI/0 native，不恢复Permit、不继续删除。请求SQLite事务与Windows处置不是跨系统原子事务，预约后账本missing不能推断未动作。
+
+范围仅当前固定Videos直接子级的单个ordinary completed主MP4、原可信发布锚点/成功大小、明确not_applicable Bundle、现有限定用途保护通过。不支持目录/路径、批量、自动清理/配额、Plan/未来窗口/附件、未知旧文件，不重新采集身份来授予权限。独立 `retention_deletion` capability公布两路由和scope、requires_local_confirmation/single_item/permanent/no_trash=true、unattended=false及恢复/结果语义。原 `retention_preview` 继续read_only、deletion_supported=false、reference_protection_ready=false、physical_identity_protection_ready=false；不表示完整引用图、全命名空间冻结或safe_to_delete。私有UI自动化自测不等于真实桌面确认窗或发布包验收。

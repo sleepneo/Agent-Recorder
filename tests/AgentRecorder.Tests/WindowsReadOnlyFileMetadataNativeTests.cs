@@ -51,7 +51,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
     internal static void HardLink(string link,string target)
     {Assert.True(CreateHardLinkW(link,target,IntPtr.Zero),"Synthetic hard-link preparation failed: "+Marshal.GetLastWin32Error());}
     internal static RetentionPreviewQueryService Service(UnifiedHistoryTestDatabase db,IReadOnlyFileMetadataProbe probe) =>
-        new(db.Query.GetOrdinaryEvidencePage,db.Root,ReadOnlyPathMetadata.Instance,probe,()=>At.AddDays(5));
+        new(db.Query.GetOrdinaryEvidencePage,db.Root,ReadOnlyPathMetadata.Instance,probe,()=>At.AddDays(5), TestRuntimeOutputUse.None);
     [Fact]
     public void RealSingleFileHasStable128BitIdentityOneHandleAndNoContentRead()
     {
@@ -139,7 +139,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
             db.Ordinary.Register(db.Recording("replaced",completed:true) with{OutputPath=path});var snapshot=db.Snapshot();
             File.Move(path,Path.Combine(f.Videos,"held-original.mp4"));f.Create();var current=WindowsReadOnlyFileMetadataProbe.Instance.Observe(path);
             Assert.NotEqual(original.Before!.Identity,current.Before!.Identity);Assert.Equal(original.Before.Length,current.Before.Length);
-            var page=new RetentionPreviewQueryService(db.Query,db.Root).GetPage(Sid,Session,20,At.AddHours(1));Assert.Equal("publication_identity_missing",Assert.Single(page.Items).ReasonCode);Assert.Equal(0,page.ObservedCandidateBytes);Assert.Equal(snapshot,db.Snapshot());
+            var page=new RetentionPreviewQueryService(db.Query,db.Root, TestRuntimeOutputUse.None).GetPage(Sid,Session,20,At.AddHours(1));Assert.Equal("publication_identity_missing",Assert.Single(page.Items).ReasonCode);Assert.Equal(0,page.ObservedCandidateBytes);Assert.Equal(snapshot,db.Snapshot());
             output.WriteLine("Same-size prior replacement has a different observed current identity but no trusted publication anchor; Task325 now protects this unanchored old record as publication_identity_missing.");
         }finally{db.Ordinary.Dispose();SqliteConnection.ClearAllPools();}
     }

@@ -318,7 +318,7 @@ public sealed class NoAudioFinalizerPublicationTests(ITestOutputHelper output)
             Assert.Equal(Identity(row.OutputPath), receipt.Anchor.Identity); Assert.Equal(row.OutputSizeBytes, receipt.Anchor.Length);
             using (var c = store.OpenReadOnlyConnection()) using (var command = c.CreateCommand())
             { command.CommandText = "SELECT COUNT(*) FROM ordinary_publication_anchors;"; Assert.Equal(1L, command.ExecuteScalar()); }
-            var service = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(store, writer), f.Root);
+            var service = new RetentionPreviewQueryService(new UnifiedHistoryQueryService(store, writer), f.Root, TestRuntimeOutputUse.None);
             var before = DateTimeOffset.UtcNow;
             Assert.Equal("age_rule_match", Assert.Single(service.GetPage(UnifiedHistoryTestDatabase.Sid, UnifiedHistoryTestDatabase.Session, 20, before).Items).ReasonCode);
             var time = File.GetLastWriteTimeUtc(row.OutputPath); File.Move(row.OutputPath, Path.Combine(f.Videos, "held-original.mp4"));
