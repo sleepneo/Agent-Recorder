@@ -42,9 +42,15 @@ Record the current conversation window for 5 minutes.
 | --- | --- |
 | `primary_display` | Record the primary display |
 | `windows_display` | Record the positive display number shown by Windows “Identify” |
-| `active_window` | Record the current active window using its visible bounds |
+| `active_window` | Fix the active window identity and record its own content, excluding obscuring windows |
 | `selected_region` | Ask the user to draw a region, then record it |
 | `last_region` | Reuse the most recent successful region selection |
+
+Window video captures the window's own content, including its controls, even
+when another application covers it. Use 1–1800 whole seconds with no audio or
+system audio; microphone and nested window recording are not supported.
+Unavailable window capture fails explicitly instead of recording the desktop.
+For detailed limits, see [the API reference](docs/api.md#strict-wgc-window-surface-recording).
 
 Example request:
 

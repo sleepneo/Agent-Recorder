@@ -16,7 +16,16 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-SystemQueryProviders")]
 public class ConfigParserWindowTests : IDisposable
 {
-    private static JsonNode ParseJson(string json) => JsonNode.Parse(json)!;
+    private static JsonNode ParseJson(string json)
+    {
+        var request = JsonNode.Parse(json)!;
+        // Geometry tests use bounded video. Missing/manual duration rejection
+        // is exercised separately by WindowContentDefaultTests.
+        if (request["source"] is JsonObject source && source["type"]?.ToString() == "window" &&
+            request is JsonObject obj && !obj.ContainsKey("stop_condition"))
+            obj["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 10 };
+        return request;
+    }
 
     public ConfigParserWindowTests()
     {

@@ -35,7 +35,8 @@ public static partial class ConfigParser
         IMicrophoneDeviceProvider? microphoneProvider = null,
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
-        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
+        SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null,
+        SystemQuery.WindowInfo? preResolvedWindow = null)
     {
         bool generateBundle = NormalizeArtifactBundle(cfg);
         // Normalize this before audio/device/source resolution so malformed
@@ -43,53 +44,10 @@ public static partial class ConfigParser
         // creation, or any other request side effect.
         int countdownSeconds = NormalizeCountdownSeconds(cfg);
         var seriesConfig = NormalizeModeAndSeries(cfg);
-        bool requireWindowSurface = ParseRequiredCaptureSemantics(cfg);
-        if (requireWindowSurface)
-        {
-            if (seriesConfig != null)
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    "required_capture_semantics is supported only for ordinary video recordings.",
-                    new { field = "required_capture_semantics", mode = ScreenshotSeriesConfig.ModeName });
-            if (cfg["nested"] != null)
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    "required_capture_semantics cannot be combined with nested recording.",
-                    new { field = "required_capture_semantics", unsupported = "nested" });
-            foreach (var unsupportedField in new[] { "target", "schedule", "plan", "lease", "authorization_mode" })
-            {
-                if (cfg[unsupportedField] != null)
-                    throw new ApiException(400, "INVALID_ARGUMENT",
-                        $"required_capture_semantics cannot be combined with '{unsupportedField}'.",
-                        new { field = unsupportedField, required_capture_semantics = "window_surface" });
-            }
-            if (cfg["source"] is not JsonObject source)
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    "window_surface requires source to be an object with a fixed window target.",
-                    new { field = "source", required_type = "object" });
-
-            var requestedSourceType = StrictString(source["type"], "source.type");
-            if (requestedSourceType != "window")
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    "required_capture_semantics='window_surface' requires source.type='window'.",
-                    new { field = "required_capture_semantics", required_source_type = "window" });
-            _ = StrictString(source["window_id"], "source.window_id");
-            ValidateRequiredWindowSurfaceSourceAndAudio(cfg, source);
-
-            if (cfg["stop_condition"] is not JsonObject stopCondition)
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    "window_surface requires stop_condition to be an object with a bounded duration.",
-                    new { field = "stop_condition", required_type = "object" });
-
-            var stopType = StrictString(stopCondition["type"], "stop_condition.type");
-            if (stopType != "duration")
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    $"window_surface requires stop_condition.type='duration' with a duration from {WindowSurfaceDurationPolicy.MinSeconds} to {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
-                    new { field = "stop_condition.type", required = "duration" });
-            var seconds = StrictInt(stopCondition, "seconds");
-            if (!WindowSurfaceDurationPolicy.IsEligibleSeconds(seconds))
-                throw new ApiException(400, "INVALID_ARGUMENT",
-                    $"window_surface duration must be between {WindowSurfaceDurationPolicy.MinSeconds} and {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
-                    new { field = "stop_condition.seconds", minimum = WindowSurfaceDurationPolicy.MinSeconds, maximum = WindowSurfaceDurationPolicy.MaxSeconds });
-        }
+        bool requireWindowSurface = ValidateWindowSurfaceRequest(cfg, seriesConfig);
+        if (preResolvedWindow is not null &&
+            cfg["source"]?["window_id"]?.GetValue<string>() != preResolvedWindow.id)
+            throw Inv("The resolved window must match source.window_id.");
         RejectUnsupportedContinuousFeatures(cfg);
 
         // =====================================================================
@@ -185,7 +143,7 @@ public static partial class ConfigParser
                     cap.WindowHandle = hwnd;
                 if (requireWindowSurface)
                 {
-                    var strictWindow = ResolveRequiredWindowSurfaceWindow(wid);
+                    var strictWindow = preResolvedWindow ?? ResolveRequiredWindowSurfaceWindow(wid);
                     PolicyEngine.CheckDenylist(strictWindow.title);
                     PolicyEngine.CheckDenylistByProcessName(strictWindow.app_name);
                     WindowIdParser.RejectMinimized(strictWindow.is_minimized, strictWindow.title);
@@ -207,12 +165,12 @@ public static partial class ConfigParser
             }
             else
             {
-                var w = requireWindowSurface
+                var w = preResolvedWindow ?? (requireWindowSurface
                     ? ResolveRequiredWindowSurfaceWindow(wid)
                     : SystemQuery.EnumWindows(true, false).FirstOrDefault(x => x.id == wid)
                         ?? throw new ApiException(404, "SOURCE_NOT_FOUND",
                             "The selected window no longer exists. Call GET /api/v1/windows to choose another.",
-                            new { suggested_action = "list_windows" });
+                            new { suggested_action = "list_windows" }));
                 PolicyEngine.CheckDenylist(w.title);
                 PolicyEngine.CheckDenylistByProcessName(w.app_name);
                 WindowIdParser.RejectMinimized(w.is_minimized, w.title);
@@ -532,6 +490,41 @@ public static partial class ConfigParser
             MaxDurationSeconds = maxDuration,
             PlannedFrameCount = planned
         };
+    }
+
+    // This applies only at the ordinary request boundary. Internal CaptureConfig,
+    // frozen history, future-window plans and screenshot-series keep their contracts.
+    internal static bool ValidateWindowSurfaceRequest(JsonNode cfg) =>
+        ValidateWindowSurfaceRequest(cfg, NormalizeModeAndSeries(cfg));
+
+    private static bool ValidateWindowSurfaceRequest(JsonNode cfg, ScreenshotSeriesConfig? seriesConfig)
+    {
+        bool required = ParseRequiredCaptureSemantics(cfg);
+        required |= seriesConfig is null && cfg["source"] is JsonObject sourceObject &&
+            sourceObject["type"] is JsonValue type && type.TryGetValue<string>(out var name) && name == "window";
+        if (!required) return false;
+        if (seriesConfig is not null)
+            throw Inv("required_capture_semantics is supported only for ordinary video recordings.");
+        if (cfg["nested"] is not null)
+            throw Inv("Window-surface video cannot be combined with nested recording.");
+        foreach (var field in new[] { "target", "schedule", "plan", "lease", "authorization_mode" })
+            if (cfg[field] is not null)
+                throw Inv($"Window-surface video cannot be combined with '{field}'.");
+        if (cfg["source"] is not JsonObject source)
+            throw Inv("window_surface requires source to be an object with a fixed window target.");
+        if (StrictString(source["type"], "source.type") != "window")
+            throw Inv("required_capture_semantics='window_surface' requires source.type='window'.");
+        _ = StrictString(source["window_id"], "source.window_id");
+        ValidateRequiredWindowSurfaceSourceAndAudio(cfg, source);
+        if (cfg["stop_condition"] is not JsonObject stop ||
+            StrictString(stop["type"], "stop_condition.type") != "duration")
+            throw Inv("window_surface requires stop_condition.type='duration' with a bounded duration.");
+        int seconds = StrictInt(stop, "seconds");
+        if (!WindowSurfaceDurationPolicy.IsEligibleSeconds(seconds))
+            throw new ApiException(400, "INVALID_ARGUMENT",
+                $"window_surface duration must be between {WindowSurfaceDurationPolicy.MinSeconds} and {WindowSurfaceDurationPolicy.MaxSeconds} seconds.",
+                new { field = "stop_condition.seconds", minimum = WindowSurfaceDurationPolicy.MinSeconds, maximum = WindowSurfaceDurationPolicy.MaxSeconds });
+        return true;
     }
 
     private static bool ParseRequiredCaptureSemantics(JsonNode cfg)

@@ -115,9 +115,16 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
         Assert.Equal(0, probe.CallCount);
 
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
+        SystemQuery.SetWindowProvider((_, _) => new()
+        {
+            new("window_4660", "Private window", "private.exe", 42, true, false, new(0, 0, 1280, 720))
+        });
         var tray = new TestTray { DeferConfirmation = true };
         var audit = new CapturingAudit();
         var engine = new RecordingEngine(audit);
+        // Direct legacy configs retain the decision above. Newly parsed
+        // ordinary requests now require window content, including at 61s.
+        engine.CapturePlanFactoryForTests = cfg => CaptureBackendSelector.BuildPlan(cfg, probe);
         int backendFactoryCalls = 0;
         engine.BackendFactory = _ =>
         {
@@ -137,22 +144,22 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
         }));
         var root = summary.RootElement;
-        Assert.Equal("screen_rectangle", root.GetProperty("capture_semantics").GetString());
-        Assert.Equal("ffmpeg-window-region", root.GetProperty("planned_backend").GetString());
+        Assert.Equal("window_surface", root.GetProperty("capture_semantics").GetString());
+        Assert.Equal("wgc-continuous", root.GetProperty("planned_backend").GetString());
         Assert.Equal("window_4660", root.GetProperty("window_id").GetString());
-        Assert.Equal("duration_not_eligible", root.GetProperty("selection_reason_code").GetString());
-        Assert.Equal("not_run", root.GetProperty("selection_availability_source").GetString());
-        Assert.True(root.GetProperty("selection_fallback").GetBoolean());
-        Assert.Equal("screen_rectangle", root.GetProperty("preview_semantics").GetString());
+        Assert.Equal("wgc_probe_success", root.GetProperty("selection_reason_code").GetString());
+        Assert.Equal("fresh_probe", root.GetProperty("selection_availability_source").GetString());
+        Assert.False(root.GetProperty("selection_fallback").GetBoolean());
+        Assert.Equal("window_surface", root.GetProperty("preview_semantics").GetString());
         Assert.Equal(0, backendFactoryCalls);
         Assert.Null(engine._recs.Values.Single().Backend);
         Assert.Contains(audit.Events, e => e == "recording.capture_plan_created");
         var planAudit = audit.Payloads.Single(x => x.Event == "recording.capture_plan_created").Payload;
         Assert.Equal("window_4660", planAudit.GetProperty("target_identity").GetString());
-        Assert.Equal("ffmpeg-window-region", planAudit.GetProperty("planned_backend").GetString());
-        Assert.Equal("screen_rectangle", planAudit.GetProperty("capture_semantics").GetString());
-        Assert.Equal("duration_not_eligible", planAudit.GetProperty("selection_reason_code").GetString());
-        Assert.True(planAudit.GetProperty("fallback").GetBoolean());
+        Assert.Equal("wgc-continuous", planAudit.GetProperty("planned_backend").GetString());
+        Assert.Equal("window_surface", planAudit.GetProperty("capture_semantics").GetString());
+        Assert.Equal("wgc_probe_success", planAudit.GetProperty("selection_reason_code").GetString());
+        Assert.False(planAudit.GetProperty("fallback").GetBoolean());
     }
 
     [Fact]
@@ -406,6 +413,35 @@ public sealed class CapturePlanSemanticLockTests : IDisposable
             CaptureBackendSelector.DetermineSemanticsForTests("window", "future-window-backend"));
 
         Assert.Equal("CAPTURE_SEMANTICS_UNKNOWN", ex.Code);
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void HiddenWindowContentPreviewNeverReadsDesktopEvenWhenDwmUnavailable(bool available)
+    {
+        RunSta(() =>
+        {
+            var screen = new CountingScreenPreviewProvider();
+            var dwm = new FakeDwmThumbnailProvider { RegisterResult = available };
+            using var form = NewForm(WindowSurfaceSummary(), screen, dwm);
+            _ = form.Handle; // Create a hidden top-level handle; never Show/Activate.
+            form.PerformLayout();
+            form.EnsureDwmThumbnailForTests();
+            Assert.False(form.Visible);
+            Assert.True(form.WindowSurfacePreviewForTests);
+            Assert.Equal(0, screen.Calls);
+            // Hidden ancestors have no visible compositor destination. A
+            // registered fake thumbnail is released; desktop pixels stay unused.
+            Assert.False(form.DwmThumbnailActiveForTests);
+            if (available)
+            {
+                Assert.Equal((nint)12345, dwm.SourceWindow);
+                Assert.Equal(1, dwm.Thumbnail!.DisposeCalls);
+            }
+            Assert.Same(form.CancelActionForTests, form.DefaultActionForTests);
+            form.Dispose();
+            if (available) Assert.Equal(1, dwm.Thumbnail!.DisposeCalls);
+        });
     }
 
     [Fact]

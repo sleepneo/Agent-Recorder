@@ -109,14 +109,16 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   approval, preparation, countdown, and the trusted first frame without
   weakening local confirmation.
 - Lower-level display, window, and region recording APIs.
-- Active-window recording defaults to visible window bounds clipped to the
-  virtual desktop and the FFmpeg `ffmpeg-window-region` backend. A guarded
-  local experiment can instead use native WGC continuous window capture for
-  eligible short, silent recordings. Confirmation distinguishes the selected
-  window surface from a composed screen rectangle and revalidates that meaning
-  after approval before any capture starts.
-- Ordinary raw recording requests can require a fixed `window_id` with
-  `required_capture_semantics: "window_surface"`. This public strict path uses
+- New ordinary raw window video and quick `active_window` default to the
+  selected window's own content, excluding obscuring windows. The raw field
+  `required_capture_semantics: "window_surface"` remains optional and explicit;
+  omitting it uses the same strict contract. WGC unavailable or unsupported
+  combinations fail explicitly, without a desktop fallback or experiment flag.
+  Confirmation/preview and the approved backend share this meaning. The raw
+  default passed a 15-second occlusion test; quick has automated coverage but
+  still awaits its dedicated desktop test. This source change is not yet in
+  the v0.1.16 release package.
+- Ordinary window video fixes a `window_id`. This public strict path uses
   WGC to capture the selected window even while another window obscures it,
   supports no audio or an explicitly approved system-loopback endpoint, and
   accepts a bounded 1-1800 second duration. It never falls back to a desktop
@@ -124,6 +126,11 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   desktop acceptance. The separately authorized future-window flow also passed
   a supervised 30-minute run on the current hardware; this is not a guarantee
   for every device or a full livestream.
+  Microphone, nested and manual/unbounded window video are rejected. Window
+  title bars/controls are included; the player area is not cropped automatically.
+  System sound covers the approved output endpoint, not only that window.
+  Desktop rectangles use region/selected_region/last_region. Window screenshot
+  series remains a composed screen rectangle; frozen legacy history is unchanged.
 - One-shot future-window authorization binds an exact local executable, a new
   post-approval process and its unique eligible window, a frozen output target,
   and either no audio or a fixed system-loopback endpoint. A locally approved,

@@ -111,6 +111,48 @@ public sealed class OrdinaryWindowTargetApiTests
     }
 
     [Theory]
+    [InlineData(false, false)] [InlineData(false, true)]
+    [InlineData(true, false)] [InlineData(true, true)]
+    public async Task DefaultWindowMatchesExplicitAuthorizationAndTerminalHistory(bool audio, bool reject)
+    {
+        using var f = new Fixture();
+        var request = f.Request(audio);
+        var explicitConfig = ConfigParser.Build(request, "owned", out _, systemAudioEndpointProvider: new Devices()).Config;
+        var explicitPlan = CaptureBackendSelector.BuildPlan(explicitConfig, new Probe());
+        request.Remove("required_capture_semantics");
+        await f.Accepted(request);
+        var rec = Assert.Single(f.Engine._recs.Values);
+        var plan = rec.ApprovedCapturePlan!;
+        Assert.Equal(CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(explicitPlan),
+            CaptureAuthorizationProofIssuer.ComputeCapturePlanDigest(plan));
+        Assert.Equal("window_surface", plan.CaptureSemantics);
+        var key = f.Db.Ordinary.Read(rec.Id)!.TargetKey;
+        Assert.NotNull(key);
+        // Mutating the original JSON cannot flip the frozen plan or policy.
+        request["required_capture_semantics"] = "screen_rectangle";
+        f.Tray.Confirm!(reject ? ConfirmationDecision.Reject() : ConfirmationDecision.Approve());
+        if (reject) Assert.Equal(0, f.Backend.Starts);
+        else
+        {
+            await Until(() => rec.State == RecState.recording);
+            Assert.NotNull(f.Backend.Proof);
+            Assert.True(f.Backend.Config!.RequireWindowSurface);
+            Assert.Equal(audio ? "wgc-window-av-split" : "wgc-continuous", rec.BackendType);
+            f.Engine.Stop(rec.Id, "user_requested");
+            await Until(() => rec.IsFinalized);
+            Assert.Equal(RecState.completed, rec.State);
+        }
+        using var response = await f.Client.GetAsync("/api/v1/recording-history/" + rec.Id);
+        var item = (await Data(response)).GetProperty("recording");
+        Assert.Equal("window_surface", item.GetProperty("capture_semantics").GetString());
+        Assert.Equal(reject ? "rejected" : "completed", item.GetProperty("status").GetString());
+        Assert.Equal(key, item.GetProperty("target_key").GetString());
+        using var restarted = new SqliteOrdinaryRecordingHistoryStore(f.Db.Store);
+        Assert.Equal("window_surface", restarted.Read(rec.Id)!.CaptureSemantics);
+        Assert.Equal(key, restarted.Read(rec.Id)!.TargetKey);
+    }
+
+    [Theory]
     [InlineData("unknown")] [InlineData("exception")] [InlineData("changed")] [InlineData("request_injection")]
     public async Task MissingOrChangedMetadataDoesNotDisableLegalRecordingAndBodyCannotSetHistoryKey(string outcome)
     {

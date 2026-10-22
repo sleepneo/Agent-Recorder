@@ -32,6 +32,11 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1");
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _dataDir);
         Directory.CreateDirectory(_dataDir);
+        // These product-flow tests use fake audio/video workers. Keep their
+        // capability preflight private too, including isolated build layouts.
+        RecordingPreflightChecker.AudioHelperPathResolver = () => "private-system-audio-helper";
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new()
+        { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = System.Diagnostics.Stopwatch.Frequency };
     }
 
     public void Dispose()

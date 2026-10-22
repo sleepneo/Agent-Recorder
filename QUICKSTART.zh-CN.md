@@ -41,9 +41,13 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 | --- | --- |
 | `primary_display` | 录制主显示器 |
 | `windows_display` | 按 Windows“标识”显示的正整数录制指定显示器 |
-| `active_window` | 按当前活动窗口的可见边界录制 |
+| `active_window` | 固定活动窗口身份并捕获窗口自身内容，排除遮挡窗口 |
 | `selected_region` | 弹出选区 UI，让用户框选区域后录制 |
 | `last_region` | 复用最近一次成功选区 |
+
+窗口视频录制窗口自身内容（含标题栏和控制栏），其他应用遮挡它时不会进入成片。
+支持 1–1800 整秒、无音频或系统声音，不支持窗口麦克风和窗口嵌套；窗口捕获
+不可用时明确失败，不改录桌面。完整限制见[API参考](AGENT-API-REFERENCE.zh-CN.md#15-窗口捕获语义字段)。
 
 请求示例：
 

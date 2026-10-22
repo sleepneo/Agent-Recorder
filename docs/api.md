@@ -256,7 +256,7 @@ fact that the history can be read after process restart. It does not claim
 coverage of automatic/lease executions or screenshot-series output.
 
 A native `wgc-native-helper.exe`, managed continuous session, and
-capture-backend adapter are present in the repository. Guarded selectors can
+capture-backend adapter are present in the repository. Existing internal legacy selectors can
 use this pipeline for eligible 1–60 second, silent display, window, or region
 requests only when the corresponding local experiment is explicitly enabled. Availability
 is checked without capture, successful evidence is cached briefly, and an
@@ -267,15 +267,16 @@ revalidates current topology after approval, and crops the display texture on
 the GPU before encoding. The self-contained portable package contains one
 production helper. The display/region WGC experiment remains internal,
 default-off, and cannot be selected through public request fields. The public
-API has a separate, explicit fixed-window contract (`required_capture_semantics`
-below): it is available only when the non-capturing WGC capability probe passes.
+API defaults new ordinary window video requests to the strict fixed-window
+contract below, including quick `active_window`. It is available only when the
+non-capturing WGC capability probe passes; no experiment flag is required.
 
 The 1–60 second range is the current controlled acceptance boundary, not a claim
 that every GPU, driver, Windows version, or application is compatible. The
 explicit window-surface contract is never silently downgraded. For that request,
 WGC supplies video and the existing WASAPI/AvSplit path may add system loopback;
-the ordinary experimental WGC display/region path remains audio-free. Legacy
-window requests without the strict field retain their current FFmpeg behavior.
+the ordinary experimental WGC display/region path remains audio-free. Frozen
+legacy requests and historical screen-rectangle records retain their facts.
 
 Microphone recording uses an isolated Windows WASAPI helper process (`AgentRecorder.AudioHelper.exe`) that captures via CoreAudio and writes a temporary WAV. The final MP4 mux step encodes the audio as AAC. For Bluetooth Hands-Free capture endpoints, the helper classifies the transport, discovers the render endpoint belonging to the same device container, starts a silent render stream, and keeps that endpoint alive while capture runs. This establishes the duplex HFP link required by devices such as AirPods Pro and Focal Bathys. The helper reports the selected capture strategy, pairing evidence, render-prime latency, current/max gap, recovery, gap-fill, and discontinuity metrics. Compatibility still depends on the Windows Bluetooth stack, device firmware, and driver. The legacy FFmpeg dshow backend remains available as an explicit diagnostic fallback via `AGENT_RECORDER_AUDIO_BACKEND=dshow`; without this variable the default is `wasapi-helper`.
 
@@ -287,6 +288,15 @@ The `recording.audio` array is preserved for backward compatibility and now repo
 currently ready, its reason code when unavailable, the strict-path 1800-second
 maximum, and whether system loopback is currently usable. It also reports the
 1-second minimum and that each run requires local confirmation.
+`contract_supported` describes the static contract;
+`default_for_ordinary_window_video=true` identifies the new raw/quick default.
+`supported/status/reason_code` describe current WGC availability, and the
+active-window recipe requires both a target and this same single non-capturing
+probe result. `automatic_fallback=false`, `nested_supported=false` and
+`duration_required=true` describe the strict scope. A recipe template is an
+example, not proof that its target is currently capturable. Screenshot-series
+separately reports `window_capture_semantics="screen_rectangle"` and
+`window_surface_supported=false`.
 `long_run_readiness="bounded_duration_only"` and
 `long_run_stress_tested=false` make clear that the capability probe does not
 certify 30-minute A/V continuity for a particular window, endpoint, GPU,
@@ -364,7 +374,10 @@ Quick recipe fields:
         "target_type": "active_window",
         "endpoint": "/api/v1/recordings/quick",
         "method": "POST",
-        "request_template": { "target": { "type": "active_window" } },
+        "request_template": { "target": { "type": "active_window" }, "duration_seconds": 60, "countdown_seconds": 3 },
+        "capture_semantics": "window_surface",
+        "preview_semantics": "window_surface",
+        "automatic_fallback": false,
         "available": true,
         "unavailable_reason": null
       },
@@ -716,14 +729,30 @@ The default audio capture backend is the isolated WASAPI helper. Set the environ
 
 ### Strict WGC window-surface recording
 
-Ordinary `POST /api/v1/recordings` accepts the optional top-level
-`required_capture_semantics: "window_surface"`. When present it is a hard
-requirement: only a fixed `source.type="window"`/`window_id`, normal local
+New ordinary video `POST /api/v1/recordings` requests with
+`source.type="window"` require `window_surface` by default, including when
+`required_capture_semantics` is omitted. The optional explicit value is still
+`"window_surface"`; null, booleans, and `"screen_rectangle"` are rejected.
+Only a fixed `source.type="window"`/`window_id`, normal local
 per-run approval, video mode, and a duration stop from 1 to 1800 seconds are
 accepted. Audio may be omitted or use `audio.system_audio.enabled=true`; a
 microphone is not supported. The capability must be shown as ready by
 `GET /api/v1/capabilities` (`recording.window_surface.supported=true`), and a
 usable render endpoint is also required for the system-audio variant.
+
+Quick video `target.type="active_window"` fixes the resolved window identity and
+uses the same contract; send `duration_seconds` (1–1800 whole seconds) or the
+equivalent duration stop condition. Manual/missing/unbounded duration, microphone
+and nested window video fail before confirmation or workers. The quick request
+shape does not accept the raw-only `required_capture_semantics` field. The recipe's
+60-second example and the shared countdown/wait/auth rules are unchanged.
+
+This changes the old ordinary-window default. Window content includes that
+window's title bar and controls; it does not automatically crop a video player.
+System audio remains all loopback sound on the approved output endpoint. Use
+region/selected_region/last_region when the intent is a desktop rectangle;
+they are not an equivalent fallback for unavailable window content. Window
+screenshot series still uses `screen_rectangle`, not a WGC window surface.
 
 ```json
 {
@@ -810,8 +839,10 @@ directory reparse aliases.
 An invalid field, ineligible request, unavailable helper/endpoint, changed HWND
 identity/size, or minimized/closed target fails explicitly. In particular,
 `WINDOW_SURFACE_UNAVAILABLE` does not fall back to `screen_rectangle`.
-`required_capture_semantics` is rejected by quick, screenshot-series, nested,
-and plan requests; omitting it preserves all legacy window behavior. See
+The explicit field is rejected by quick, screenshot-series, nested,
+and plan requests. New ordinary window video without it uses the same strict
+contract. Display/region, plans, future-window authorization and frozen history
+are not reinterpreted. See
 [Window capture semantics](#window-capture-semantics) for the distinction from
 the legacy screen rectangle.
 
@@ -823,7 +854,7 @@ Supported `target.type` values:
 | --- | --- |
 | `primary_display` | Resolve the primary display, then create a recording |
 | `windows_display` | Resolve one exact Windows display number from the current display snapshot, then create a recording |
-| `active_window` | Resolve the active window, clamp its visible bounds to the virtual desktop, then create a recording |
+| `active_window` | Fix the active window identity, then require its own window content for ordinary video; WGC unavailable fails explicitly |
 | `selected_region` | Show local region-selection UI, then create a recording |
 | `last_region` | Reuse the last successful region selection, then create a recording without showing the UI |
 
@@ -878,7 +909,8 @@ Successful creation returns `requires_user_confirmation`:
 
 For `active_window`, `resolved_source.bounds` is the visible window bounds
 reported by Windows, while `resolved_source.capture_bounds` is the clamped and
-normalized region actually passed to the capture backend:
+normalized capture geometry. These coordinates do not select desktop capture:
+ordinary video still captures the fixed HWND surface with `window_surface`:
 
 ```json
 {
@@ -1920,7 +1952,8 @@ handles beyond the existing `window_id` contract.
 covering it. The strict request above uses this class. `screen_rectangle` means
 the composed desktop rectangle used by legacy `ffmpeg-window-region` or its A/V
 split variant; a covering window may therefore appear. Omitting
-`required_capture_semantics` preserves that legacy choice. Display and region
+`required_capture_semantics` now also requires window content for new ordinary
+video. Existing screen-rectangle history is unchanged. Display and region
 requests use the explicit `display_surface` and `region_rectangle` classes.
 
 The plan is built before confirmation without constructing or starting a backend.

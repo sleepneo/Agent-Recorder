@@ -524,8 +524,8 @@ Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 
 
 | 用户请求 | 条件 | 推荐 action |
 |----------|------|-------------|
-| "录当前窗口" | `context.windows.active != null` | 使用 `quick_recipes.record_active_window` |
-| "录当前窗口" | `context.windows.active == null` | 提示用户聚焦窗口或改用 `selected_region` |
+| "录当前窗口" | active-window recipe 的 `available=true` 且窗口内容能力可用 | 使用 recipe，给出有界时长并核对返回 capture/preview semantics |
+| "录当前窗口" | 无活动窗口或 WGC unavailable | 说明 recipe/能力返回原因；无目标时请用户聚焦，不将 selected_region 当等价替代 |
 | "录主屏幕" | `context.displays.primary_display_id != null` | 使用 `quick_recipes.record_primary_display` |
 | "录上次选区" | `context.last_selected_region != null` | 使用 `quick_recipes.record_last_region` |
 | "录上次选区" | `context.last_selected_region == null` | 提示用户先进行选区或改用 `selected_region` |
@@ -690,10 +690,24 @@ AGENT-API-REFERENCE.zh-CN.md
 
 ## 窗口目标的确认说明
 
+自然语言“录某窗口”应使用窗口自身内容合同。新普通 video 的 raw `source.type=window`
+和 quick `target.type=active_window` 默认要求 `window_surface`，不需要补救字段；
+raw 可显式传同名严格要求，quick 不传该 raw 字段。固定窗口身份、1–1800 整秒、
+无音频或系统声音，窗口麦克风、nested、manual/缺少必要时长明确失败，不降级。
+先核对 capabilities 的 `recording.window_surface.default_for_ordinary_window_video`、
+当前 `supported/status/reason_code` 和 active-window recipe 的可用性；静态支持不等于
+当前目标一定可录。旧版服务缺少此默认能力时，应结合能力/版本明确说明其默认不满足
+窗口内容要求；若提供已公开的 raw 严格合同，可显式使用并核对响应，否则停止，不能
+盲重试或偷偷换 region。不要再推荐旧默认区域路径。
+
 向用户描述窗口录制时，必须使用确认摘要中的 `capture_semantics` 和
 `preview_semantics`：`window_surface` 是所选窗口内容且排除遮挡窗口；
 `screen_rectangle` 是窗口当前屏幕区域，遮挡窗口可能被录入。不要把通用的
 `source_type=window` 当成窗口表面承诺，也不要把屏幕截图称为窗口内容预览。
+返回的 capture/preview semantics 不是 `window_surface` 时，不得宣称完成了窗口内容
+录制。窗口自身标题栏/控制栏会包含在内，不保证自动裁出视频区；系统声音覆盖批准
+输出端点的全部声音，不是窗口独占音轨。桌面矩形使用 region/选区意图，不能当作
+窗口内容不可用时的等价替代。截图序列窗口模式仍是屏幕矩形，不承诺排除遮挡。
 
 如果批准后的计划校验返回 `capture_semantics_changed`，应报告“捕获方式在确认后
 发生变化，录制未开始”，然后重新创建请求。不得通过 HTTP 自批准，也不得把该失败

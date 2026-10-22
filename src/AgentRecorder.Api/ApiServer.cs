@@ -2400,6 +2400,13 @@ public sealed partial class ApiServer
 
         JsonObject cfg = BuildQuickRecordingConfig(body);
         cfg["countdown_seconds"] = countdownSeconds;
+        if (targetType == "active_window")
+        {
+            // Validate the ordinary window contract before audio/target providers.
+            // The placeholder is replaced once by the fixed active-window snapshot.
+            cfg["source"] = new JsonObject { ["type"] = "window", ["window_id"] = "active_window" };
+            ConfigParser.ValidateWindowSurfaceRequest(cfg);
+        }
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null;
 
         // Resolve audio intent before any target resolution so microphone failures
@@ -2492,10 +2499,11 @@ public sealed partial class ApiServer
                             EffectiveMicrophoneProvider,
                             EffectiveMicrophoneStatusProvider,
                             EffectiveSystemAudioEndpointProvider,
-                            preResolvedSystemAudioEndpoint);
+                            preResolvedSystemAudioEndpoint,
+                            window);
                         var capBounds = preBuilt.Config.Bounds;
-                        var result = _engine.CreateRecording(
-                            cfg, agent, _tray, traceId, endpoint, preResolvedSystemAudioEndpoint);
+                        var result = _engine.CreateQuickWindowRecording(
+                            cfg, agent, _tray, window, traceId, endpoint, preResolvedSystemAudioEndpoint);
                         var resolved = new JsonObject
                         {
                             ["type"] = "window",
@@ -2740,13 +2748,15 @@ public sealed partial class ApiServer
         }
         else
         {
-            var durationSec = body["duration_seconds"]?.GetValue<int?>();
-            if (durationSec.HasValue)
+            var durationSec = body["duration_seconds"];
+            if (durationSec is not null)
             {
                 cfg["stop_condition"] = new JsonObject
                 {
                     ["type"] = "duration",
-                    ["seconds"] = durationSec.Value
+                    // Keep the JSON type so the shared window validator can
+                    // reject malformed durations before providers or workers.
+                    ["seconds"] = durationSec.DeepClone()
                 };
             }
         }
@@ -3474,7 +3484,7 @@ public sealed partial class ApiServer
         SelectedRegionState? lastRegion;
         lock (_regionLock) { lastRegion = _lastSelectedRegion; }
         bool hasLastRegion = lastRegion != null;
-        var windowSurfaceProbe = CaptureBackendSelector.ProbeWindowSurfaceAvailability();
+        var windowSurfaceProbe = (WindowSurfaceAvailabilityForTests ?? CaptureBackendSelector.ProbeWindowSurfaceAvailability)();
         var systemAudioAvailability = GetFreshSystemAudioAvailability();
         bool systemAudioHelperChecked = systemAudioAvailability == "ready";
         var systemAudioHelperAvailability = systemAudioHelperChecked
@@ -3489,6 +3499,7 @@ public sealed partial class ApiServer
         var quickRecipes = BuildQuickRecipes(
             hasPrimaryDisplay,
             hasActiveWindow,
+            windowSurfaceProbe,
             supportsRegionSelection,
             hasLastRegion,
             displaysContext.DisplaySnapshot);
@@ -3541,6 +3552,11 @@ public sealed partial class ApiServer
                 },
                 window_surface = new
                 {
+                    contract_supported = true,
+                    default_for_ordinary_window_video = true,
+                    automatic_fallback = false,
+                    nested_supported = false,
+                    duration_required = true,
                     supported = windowSurfaceProbe.Available,
                     status = windowSurfaceProbe.Available ? "ready" : "unavailable",
                     reason_code = windowSurfaceProbe.Available ? null : windowSurfaceProbe.ReasonCode,
@@ -3578,6 +3594,8 @@ public sealed partial class ApiServer
                     min_duration_seconds = ScreenshotSeriesConfig.MinDurationSeconds,
                     max_planned_frames = ScreenshotSeriesConfig.MaxFrameCount,
                     targets = new[] { "primary_display", "windows_display", "active_window", "selected_region", "last_region" },
+                    window_capture_semantics = "screen_rectangle",
+                    window_surface_supported = false,
                     capture_semantics = "one single-frame capture per anchored schedule point; no continuous video extraction"
                 },
                 codecs = new[] { "h264" },
@@ -3954,9 +3972,12 @@ public sealed partial class ApiServer
         source = state.Source
     };
 
+    internal Func<WgcContinuousAvailabilityResult>? WindowSurfaceAvailabilityForTests { get; set; }
+
     private static object[] BuildQuickRecipes(
         bool hasPrimaryDisplay,
         bool hasActiveWindow,
+        WgcContinuousAvailabilityResult windowSurfaceProbe,
         bool supportsRegionSelection,
         bool hasLastRegion,
         IReadOnlyList<SystemQuery.DisplayInfo> displaySnapshot)
@@ -3978,12 +3999,20 @@ public sealed partial class ApiServer
             {
                 name = "record_active_window",
                 target_type = "active_window",
-                description = "Record the current active window with local confirmation.",
+                description = "Record the fixed active window's own content, including its controls and excluding obscuring windows; local confirmation and WGC required, no desktop fallback.",
+                capture_semantics = "window_surface",
+                preview_semantics = "window_surface",
+                obscuring_windows_excluded = true,
+                automatic_fallback = false,
+                min_duration_seconds = WindowSurfaceDurationPolicy.MinSeconds,
+                max_duration_seconds = WindowSurfaceDurationPolicy.MaxSeconds,
+                audio = new[] { "none", "system_audio" },
+                nested_supported = false,
                 endpoint = "/api/v1/recordings/quick",
                 method = "POST",
                 request_template = new { target = new { type = "active_window" }, duration_seconds = 60, countdown_seconds = ConfigParser.DefaultCountdownSeconds },
-                available = hasActiveWindow,
-                unavailable_reason = hasActiveWindow ? null : "no_active_window"
+                available = hasActiveWindow && windowSurfaceProbe.Available,
+                unavailable_reason = !hasActiveWindow ? "no_active_window" : windowSurfaceProbe.Available ? null : windowSurfaceProbe.ReasonCode
             },
             new
             {

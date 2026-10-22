@@ -865,6 +865,11 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null)
         => CreateRecordingCore(cfg, agent, tray, traceId, endpoint, preResolvedSystemAudioEndpoint, null);
 
+    internal object CreateQuickWindowRecording(
+        JsonNode cfg, string agent, ITrayContext tray, SystemQuery.WindowInfo window,
+        string? traceId, string? endpoint, SystemAudioEndpointInfo? audioEndpoint)
+        => CreateRecordingCore(cfg, agent, tray, traceId, endpoint, audioEndpoint, null, window);
+
     internal object CreateRecordingFromFixedRegionProfile(
         JsonNode cfg,
         string agent,
@@ -886,7 +891,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         string? traceId,
         string? endpoint,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint,
-        FixedRegionProfileExecution? fixedRegionProfile)
+        FixedRegionProfileExecution? fixedRegionProfile,
+        SystemQuery.WindowInfo? preResolvedWindow = null)
     {
         traceId ??= "trace_" + Guid.NewGuid().ToString("N")[..16];
         endpoint ??= "recordings";
@@ -983,7 +989,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 _microphoneProvider,
                 _microphoneStatusProvider,
                 _systemAudioEndpointProvider,
-                preResolvedSystemAudioEndpoint);
+                preResolvedSystemAudioEndpoint,
+                preResolvedWindow);
             if (fixedRegionProfile is not null)
             {
                 rec.FixedRegionProfileReference = fixedRegionProfile.ProfileRef;

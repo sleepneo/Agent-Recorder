@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AgentRecorder.Api;
+using AgentRecorder.Capture;
 using AgentRecorder.Core;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Logging;
@@ -72,8 +73,17 @@ public class QuickRecordingApiTests
 
         var audit = new AuditLogger();
         var engine = new RecordingEngine(audit);
+        engine.CapturePlanFactoryForTests = cfg => cfg.IsScreenshotSeries
+            ? CaptureBackendSelector.BuildScreenshotSeriesPlan(cfg)
+            : CaptureBackendSelector.BuildPlan(cfg, new WindowProbe());
         engine.SetTray(tray);
-        return new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0, futureWindowOneShotGateway: futureWindowGateway);
+        return new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0, futureWindowOneShotGateway: futureWindowGateway)
+        { WindowSurfaceAvailabilityForTests = () => new(true, "ready", "fresh_probe", 0) };
+    }
+
+    private sealed class WindowProbe : IWgcContinuousAvailabilityProbe
+    {
+        public WgcContinuousAvailabilityResult Check(CaptureConfig config) => new(true, "ready", "fresh_probe", 0);
     }
 
     private static void Cleanup(string dataDir)
@@ -549,7 +559,7 @@ public class QuickRecordingApiTests
                 Assert.Equal(200, (int)seed.StatusCode);
             }
 
-            string body = $"{{\"target\":{{\"type\":\"{targetType}\"}},\"countdown_seconds\":10}}";
+            string body = $"{{\"target\":{{\"type\":\"{targetType}\"}},\"duration_seconds\":10,\"countdown_seconds\":10}}";
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
                 JsonContent(body));
@@ -782,7 +792,7 @@ public class QuickRecordingApiTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/quick",
-                JsonContent("{\"target\":{\"type\":\"active_window\"}}"));
+                JsonContent("{\"target\":{\"type\":\"active_window\"},\"duration_seconds\":10}"));
             Assert.Equal(400, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -1004,7 +1014,7 @@ public class QuickRecordingApiTests
             var data = doc.RootElement.GetProperty("data");
             var interaction = data.GetProperty("interaction");
 
-            Assert.Equal("0.1.15", data.GetProperty("app").GetProperty("version").GetString());
+            Assert.Equal(typeof(ApiServer).Assembly.GetName().Version!.ToString(3), data.GetProperty("app").GetProperty("version").GetString());
 
             Assert.Equal("/api/v1/recordings/quick", interaction.GetProperty("quick_recording_endpoint").GetString());
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
