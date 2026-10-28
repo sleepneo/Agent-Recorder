@@ -24,7 +24,15 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
 
 ## Release And Scope
 
-Version v0.1.16 includes durable
+Version v0.1.17 is a prerelease for validation. It adds default isolated
+window-content recording, authenticated idle-only agent shutdown, bounded
+loopback clock diagnostics and runtime observation, and earlier native audio
+buffer release. Intermittent system-audio failures remain an open stability
+issue: the new candidate has completed one 200-second QB run, not the planned
+repeatability acceptance. Do not rely on this prerelease for unattended critical
+recordings. See [QUICKSTART](QUICKSTART.md) for current test procedures.
+
+Existing capabilities include durable
 ordinary recording history, unified indexed history, on-demand health and
 ordinary, plan and future-window artifact metadata checks, explicit ordinary
 main-video and five-attachment content verification, read-only retention
@@ -41,6 +49,40 @@ actual scope and use [the API reference](docs/api.md) for contracts.
 When upgrading an existing installation, back up its data directory first.
 This version upgrades the history database to SQLite schema v44; keep upgraded
 data with the new binaries rather than reopening it with an older release.
+
+## Recording Audio
+
+**Recordings are silent by default.** Asking to record an entire PotPlayer
+window does not enable audio: "entire window" describes the picture area.
+Request audio explicitly in natural language.
+
+| Mode | What is captured | Current scope |
+| --- | --- | --- |
+| No audio (default) | Video without an audio track | Ordinary window, region and display video |
+| System audio | All sound on the selected speaker/headphone output | Ordinary window, region and display video |
+| Microphone | The selected microphone input | Ordinary region and display video; not window-content recording |
+| System audio + microphone | A mixture of both | Simultaneous capture is not supported |
+
+Example requests:
+
+```text
+Record the entire PotPlayer window for 20 seconds with system audio, without the microphone.
+Record a selected region for 15 seconds using the AirPods microphone, without system audio.
+Record the primary display for 15 seconds without any audio.
+```
+
+System audio is not isolated to the recorded window: other applications using
+the same output device may be heard. Without a device selection, system audio
+uses the current Windows multimedia default output. Microphone selection uses
+a uniquely determined default or single active input; the agent must resolve
+ambiguous choices. The device approved locally stays fixed for that recording;
+changing the Windows default does not switch capture to another device.
+
+Check the audio mode and device in the local confirmation dialog. If requested
+audio is unavailable, the agent must explain the failure rather than substitute
+a silent recording or enable a microphone without permission. Fixed-region
+profiles, fixed-region unattended plans and screenshot sequences retain their
+separate audio-free scope. Inspect live capabilities before recording.
 
 ## Recommended Agent Path
 
@@ -116,8 +158,7 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   combinations fail explicitly, without a desktop fallback or experiment flag.
   Confirmation/preview and the approved backend share this meaning. The raw
   default passed a 15-second occlusion test; quick has automated coverage but
-  still awaits its dedicated desktop test. This source change is not yet in
-  the v0.1.16 release package.
+  still awaits its dedicated desktop test. The default is included in v0.1.17.
 - Ordinary window video fixes a `window_id`. This public strict path uses
   WGC to capture the selected window even while another window obscures it,
   supports no audio or an explicitly approved system-loopback endpoint, and
@@ -306,3 +347,18 @@ dotnet test tests\AgentRecorder.Tests\AgentRecorder.Tests.csproj --configuration
 Agent Recorder is licensed under the MIT License. The portable package also
 includes FFmpeg binaries, which remain subject to FFmpeg's own license terms;
 see `LICENSE-NOTICE.md`.
+
+
+## Agent-requested idle shutdown
+
+When the user asks to exit Recorder, the agent runs:
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<data_dir returned by ensure-running>"
+```
+
+Check `capabilities.host_shutdown.supported` first. This build supports authenticated idle-only `POST /api/v1/host/shutdown`, with no force option. The CLI never starts an app or accepts a PID; it verifies ready/capabilities, user, executable, process start identity and instance nonce, sends the existing key, and waits up to 15000 ms (`--timeout-ms`, 100–120000) for that original process to exit. `exited` is confirmed process termination; `not_running` means no ready file and no held host instance. `busy`, `unsupported`, `timeout` and `unknown` are not successful exits. A 202 API `accepted` response alone does not mean exited.
+
+Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
+
+The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.

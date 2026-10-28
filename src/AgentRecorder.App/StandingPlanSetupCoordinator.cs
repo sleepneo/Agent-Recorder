@@ -212,6 +212,8 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
         return ToState(record, _query.GetExecution(setupIntentId, currentUserSid, sessionBinding));
     }
 
+    internal bool HostShutdownBusy => _flights.Values.Any(flight => !flight.IsValueCreated || !flight.Value.IsCompleted);
+
     internal Task WaitForIdleAsync()
     {
         var flights = _flights.Values

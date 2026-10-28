@@ -23,6 +23,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 - 复杂或精确控制场景使用 Agent Recorder 原始 HTTP API 编排录制流程。
 - 不要在用户确认前声称录制已经开始。
 - 不要尝试调用 HTTP 自批准接口；`POST /confirmations/{id}/approve` 被禁止。
+- 每条新录制指令独立解析；上一条的显式参数不自动成为后续默认设置。用户未要求声音时默认关闭麦克风和系统声音，未指定倒计时时使用服务默认值（当前3秒）。不得因上次开启系统声音或设置5秒倒计时就在本次请求中继续显式传入这些值。“更改保存目录”只改变本次输出选择，不表示沿用音频或倒计时。只有用户明确要求沿用、保存配置或建立持续偏好时才按其准确范围复用；“上一次选区”也只复用选区，不隐含复用其他参数。
 - 不要静默录制敏感或隐私区域。
 - 普通录制前要说明即将录制的对象和时长，并等待本地用户逐次确认；一次性无人值守计划必须说明目标、时间、时长和输出，并等待本地用户完成固定区域选择与有界 Lease 批准。
 
@@ -481,7 +482,7 @@ X-Agent-Recorder-Key: <api-key>
 - 不要设置 `source: "hotkey"`；远程调用省略 `source` 即可，服务端会记为 `agent`。
 - 用户也可以按 `Ctrl+Shift+F11` 本地标记当前所有活动录制。嵌套录制时，该热键会分别标记 outer 和 inner；API 调用则只标记路径中的指定 `recording_id`。
 - API 返回成功后再告知用户标记已添加；`409 RECORDING_NOT_ACTIVE` 表示录制尚未开始或已经进入停止/保存阶段，不应把它误报为成功。
-- 成功 FFmpeg MP4 录制的标记会写入对应 bundle 的 `marks.json`。
+- 启用 Bundle 时，成功录制的标记写入对应 `marks.json`，不写入 MP4 章节或画面。`artifacts.bundle=false` 时当前没有标记产物交付，不得声称 MP4 已带章节。返回时间是服务接收调用时的位置，不是人类发出自然语言时的位置；不推荐将实时“标记这里”作为公开体验用例。
 
 ### 上下文快照（减少往返）
 
@@ -533,6 +534,8 @@ Windows“设置 > 系统 > 显示 > 标识”的序号，也不要自行拼接 
 ## 有限无人值守计划
 
 仅当用户明确要求稍后自动录制时使用。先读取 `/capabilities.unattended_lease`；只有 `supported`、`current_enabled` 和 `execution_supported` 都为 `true` 才提交 `POST /plans`。一次性计划限制为固定区域、无音频、自然唤醒和交互桌面，单次最长 10 分钟、Lease 最长 1 小时。每日/每周周期计划还需检查 `unattended_lease.recurring` 的支持状态和有界配额。
+
+若 `current_enabled=false`，先指导用户在托盘的无人值守安全控制中本地启用，不替用户操作安全开关、不提交计划，也不报告已排期。用户启用后重新读取当前实例状态。公开“两分钟后”测试应先完成此准备，再由用户发送新的录制指令并计算具体开始时间，明确告知用户；不得沿用启用前已过期的时间。全局开关和本次Lease批准是两项独立授权，开关已启用也不能省略本地选区及授权。计划一旦批准，不得因交互过慢而擅自推迟或重复执行。
 
 提交时必须使用稳定 `Idempotency-Key`，并明确给出 UTC 的 `start_at`、`latest_start_at`、`planned_end_at`、Lease `expires_at`、绝对输出目录和冻结文件名。随后提示用户在本地完成重新选区与 Lease 批准，并通过 `/plan-setups/{id}` 的 `status_version_cursor` 做有界长轮询。
 
@@ -799,3 +802,18 @@ FFmpeg 单帧进程；不要把截图序列理解成连续 worker，也不要并
 首次创建而尚无 Profile 时，若 `/capabilities.profile_management.creation_modes` 包含 `create_from_local_selection`，先调用 `POST /api/v1/regions/select` 并明确传 `{"purpose":"profile"}`，等待用户在本地选择器中确认；随后把响应中的 `selection_ref` 原样用于唯一 `POST /api/v1/profiles` 请求，提交命名和 `changes.duration_seconds`（1–600），并可选择 countdown（0–10，默认 3）、filename_prefix（默认 `recording`）及 output_directory（省略则冻结当前默认目录）。使用新的 `Idempotency-Key`。选区引用是短期配置输入，不是授权或录制凭证；取消/超时须重新选择。不可用过期引用、last-region、普通录制选择或自行构造的几何替代真实本地交互。创建之后仍须按精确 Profile ref 发起普通录制并由本地用户逐次确认；不得把配置保存当作批准或启动。
 
 这组接口只管理固定区域、无音频的配置，不是录制授权或执行入口。不得提交选择几何、proof、批准、音频/窗口目标，也不得声称保存/复制/修改成功就代表显示器当前可用、计划已绑定或录制已批准。历史版本通过 exact version 路由读取；墓碑配置默认不在列表中，可显式请求 `include_deleted=true` 查看。
+
+
+## Agent 调用空闲退出
+
+用户说“退出 Recorder”时，agent 自行执行：
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-running 返回的 data_dir>"
+```
+
+先检查 `capabilities.host_shutdown.supported`。本构建提供鉴权的 `POST /api/v1/host/shutdown`，只允许空闲退出，无 force 参数。CLI 不启动应用、不接受 PID；按 ready/capabilities、当前用户、应用路径、进程启动身份及实例 nonce 绑定原宿主，携带原 key，默认最多等待 15000ms（`--timeout-ms` 范围100–120000）确认原进程结束。只有 `exited` 表示已证实退出；`not_running` 表示没有 ready 且无宿主实例持有。`busy/unsupported/timeout/unknown` 均不表示成功退出；HTTP 202 的 `accepted` 也不代表进程已结束。
+
+确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
+
+本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。

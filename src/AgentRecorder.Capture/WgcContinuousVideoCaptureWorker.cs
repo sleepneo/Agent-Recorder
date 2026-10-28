@@ -17,6 +17,10 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
     private readonly Func<long> _timestampProvider;
     private readonly TaskCompletionSource<object?> _exitSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly WorkerStartBoundary _hostStart = new();
+    private WgcContinuousCaptureBackend? _hostRetirementBackend;
+    internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    private bool ReadStartedHostRetirement() => (_backend ?? _hostRetirementBackend)?.OutputRetirement.IsCompletedSuccessfully == true;
     private WgcContinuousCaptureBackend? _backend;
     private OutputMeta? _terminalMeta;
     private int _exitCode = -1;
@@ -63,7 +67,10 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
     public long? FirstProgressOutTimeUs => Interlocked.Read(ref _firstProgressOutTimeUs) is var time && time >= 0 ? time : null;
     public double? ProgressAnchorDeltaMs => null;
 
-    public void Start(CaptureConfig cfg, string outputPath)
+    public void Start(CaptureConfig cfg, string outputPath) =>
+        _hostStart.Start(attempt => StartCore(cfg, outputPath, attempt), ReadStartedHostRetirement);
+
+    private void StartCore(CaptureConfig cfg, string outputPath, WorkerStartBoundary.Attempt attempt)
     {
         ArgumentNullException.ThrowIfNull(cfg);
         if (!cfg.RequireWindowSurface || !string.Equals(cfg.SourceKind, "window", StringComparison.Ordinal))
@@ -75,7 +82,9 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
         if (targetFailure != null)
             throw new InvalidOperationException("window_surface target revalidation failed: " + targetFailure);
 
-        var backend = _backendFactory();
+        WgcContinuousCaptureBackend? created = null;
+        attempt.Launch(() => { created = _backendFactory(); return true; }, nativeProcessContract: false);
+        var backend = created!;
         _backend = backend;
         OutputPath = outputPath;
         backend.OnNaturalExit(OnBackendNaturalExit);
@@ -93,6 +102,7 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
             // Dispose is an idempotent final safety net for its session seam.
             try { backend.FirstFrameObserved -= OnBackendFirstFrame; } catch { }
             try { backend.Dispose(); } catch { }
+            _hostRetirementBackend = backend;
             if (ReferenceEquals(_backend, backend))
                 _backend = null;
             OutputPath = null;
@@ -140,17 +150,25 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
         catch { return false; }
     }
 
-    public void Dispose()
+    internal bool HasNoStartedHostResources => _hostStart.KnownNoResources;
+    internal void RetireUnstartedHostResources() => _hostStart.CloseIfNoResources(CleanupForDispose);
+
+    public void Dispose() => _hostStart.Close(CleanupForDispose);
+
+    private bool CleanupForDispose()
     {
         var backend = Interlocked.Exchange(ref _backend, null);
-        if (backend == null) return;
+        if (backend == null) return true;
+        _hostRetirementBackend = backend;
         try { backend.FirstFrameObserved -= OnBackendFirstFrame; } catch { }
-        try { backend.Dispose(); } catch { }
+        bool cleaned = true;
+        try { backend.Dispose(); } catch { cleaned = false; }
         if (!HasExited)
         {
             Interlocked.Exchange(ref _hasExited, 1);
             _exitSignal.TrySetResult(null);
         }
+        return cleaned;
     }
 
     private void OnBackendFirstFrame(FirstFrameObservation observation)

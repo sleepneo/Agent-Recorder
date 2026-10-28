@@ -1668,6 +1668,8 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 8.1 Chapter Marks（录制标记）
 
+当前为录制时间注释，不是 MP4 内嵌章节或画面字幕。启用 Bundle 才将标记交付到 `marks.json`；仅 MP4 模式仍可接受添加请求，但没有最终标记产物。这是已知组合限制，不能将 API 接收成功报告为视频已带章节。调用时间不等于用户发送自然语言的时间。
+
 ### 添加标记
 
 ```http
@@ -2104,6 +2106,8 @@ region/selected_region/last_region；窗口不可用时不得将它们当等价�
 ```json
 { "target": { "type": "primary_display" }, "countdown_seconds": 10 }
 ```
+
+该字段只影响本次录制，不修改后续请求的默认值，也不自动继承上次录制的值。agent只有在用户明确要求复用时才沿用；否则省略或使用当前服务默认值。
 
 省略时为 `3`；只接受 `0..10` 的整数。非法类型或越界值统一返回
 `400 INVALID_ARGUMENT`，quick API 会在主屏、活动窗口、选区和上次选区解析之前完成
@@ -2797,3 +2801,18 @@ ready 的交互 App 已接实际本机确认协调器；Headless、未接线或�
 `original_resources_retired`、`ledger_resources_retired`、`our_resources_retired`、`request_resources_retired` 分开描述实际退休，无法证明时可为null。`preparation_commit`、`ledger_settlement`、`request_write_commit` 为 committed/not_committed/unknown，无操作时前两项可为null；`persisted_disposition_progress` 单独保留实际settled账本事实。请求最终写入失败不能抹去accepted。新进程只读旧申请：未批准的本地确认失效，已执行预约但无结算事实仍未知；同key只返回旧申请，0 UI/0 native，不恢复Permit、不继续删除。请求SQLite事务与Windows处置不是跨系统原子事务，预约后账本missing不能推断未动作。
 
 范围仅当前固定Videos直接子级的单个ordinary completed主MP4、原可信发布锚点/成功大小、明确not_applicable Bundle、现有限定用途保护通过。不支持目录/路径、批量、自动清理/配额、Plan/未来窗口/附件、未知旧文件，不重新采集身份来授予权限。独立 `retention_deletion` capability公布两路由和scope、requires_local_confirmation/single_item/permanent/no_trash=true、unattended=false及恢复/结果语义。原 `retention_preview` 继续read_only、deletion_supported=false、reference_protection_ready=false、physical_identity_protection_ready=false；不表示完整引用图、全命名空间冻结或safe_to_delete。私有UI自动化自测不等于真实桌面确认窗或发布包验收。
+
+
+## Agent 调用空闲退出
+
+用户说“退出 Recorder”时，agent 自行执行：
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-running 返回的 data_dir>"
+```
+
+先检查 `capabilities.host_shutdown.supported`。本构建提供鉴权的 `POST /api/v1/host/shutdown`，只允许空闲退出，无 force 参数。CLI 不启动应用、不接受 PID；按 ready/capabilities、当前用户、应用路径、进程启动身份及实例 nonce 绑定原宿主，携带原 key，默认最多等待 15000ms（`--timeout-ms` 范围100–120000）确认原进程结束。只有 `exited` 表示已证实退出；`not_running` 表示没有 ready 且无宿主实例持有。`busy/unsupported/timeout/unknown` 均不表示成功退出；HTTP 202 的 `accepted` 也不代表进程已结束。
+
+确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
+
+本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Text.Json;
 using System.Runtime.InteropServices;
 using AgentRecorder.Capture;
 using NAudio.CoreAudioApi;
@@ -403,6 +404,89 @@ public class AudioHelperCaptureSessionTests
         }
     }
 
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task LoopbackObservedConflictEmitsOneBoundedMetadataExportAndKeepsFailure(bool qb)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "task364-session-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "audio.wav");
+        var partial = Path.Combine(dir, "audio.partial.wav");
+        var signal = Path.Combine(dir, "stop.signal");
+        var format = qb ? new WaveFormat(48000, 32, 2) : new WaveFormat(44100, 16, 2);
+        int frames = qb ? 480 : 441;
+        var input = new FakeAudioInput { SourceKind = AudioSourceKind.SystemLoopback, Format = format };
+        var options = Options("task364-private", output, signal); options.SourceKind = AudioSourceKind.SystemLoopback;
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(signal, cts);
+        var stdout = new StringWriter(); var stderr = new StringWriter(); int opens = 0;
+        using var session = new CaptureSession(options, PathResult(output, partial), new(stdout, stderr), watcher, cts,
+            _ => { opens++; return (input, null, null); });
+        var run = Task.Run(() => session.Run());
+        Assert.True(SpinWait.SpinUntil(() => (int)typeof(CaptureSession).GetField("_loopbackStartConfirmed", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)! == 1, TimeSpan.FromSeconds(3)));
+        var anchor = (long)typeof(CaptureSession).GetField("_firstSampleAnchorTicks", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(session)!;
+        long Scale(long ticks) => (long)Math.Round(ticks * (double)Stopwatch.Frequency / 10_000_000);
+        input.InjectPositionedPacket(new byte[frames * format.BlockAlign], frames, anchor);
+        if (qb) input.InjectPositionedPacket(new byte[frames * format.BlockAlign], frames * 2, anchor + Scale(3_364_077), dataDiscontinuity: true);
+        else
+        {
+            input.InjectPositionedPacket(new byte[frames * format.BlockAlign], frames * 2, anchor + Scale(201_132));
+            input.InjectPositionedPacket(new byte[frames * format.BlockAlign], frames * 3, anchor + Scale(402_357));
+        }
+        Assert.NotEqual(0, await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(input.Stopped && input.Disposed);
+        Assert.Equal(1, opens);
+        Assert.False(File.Exists(output));
+        var terminal = AudioHelperEventStreamParser.ParseEvents(stdout.ToString()).Last();
+        Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
+        Assert.Equal("audio_capture_discontinuous", terminal.ErrorCode);
+        Assert.Single(stderr.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        Assert.True(LoopbackClockDiagnosticReader.TryRead(stderr.ToString(), out var diagnostic));
+        var packets = diagnostic.GetProperty("packets");
+        Assert.Equal(qb ? 2 : 3, packets.GetArrayLength());
+        var rejected = packets[packets.GetArrayLength() - 1];
+        Assert.Equal(4, rejected[21].GetInt32()); Assert.Equal(1, rejected[25].GetInt32());
+        Assert.Equal(0, rejected[22].GetInt64()); Assert.Equal(qb, rejected[20].GetBoolean());
+        Assert.Equal(JsonValueKind.Null, rejected[8].ValueKind); // Fake input did not observe native flags.
+        Assert.Equal(qb ? 0 : 1, rejected[26][10].GetInt64());
+        Assert.DoesNotContain("EndpointId", stderr.ToString());
+        var evidence = Path.Combine(TestRoot(), ".local-data", "task364", qb ? "qb-constructed-diagnostics.json" : "airpods-constructed-diagnostics.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(evidence)!);
+        await File.WriteAllTextAsync(evidence, diagnostic.GetRawText(), new System.Text.UTF8Encoding(false));
+    }
+
+    private static string TestRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "AgentRecorder.sln"))) directory = directory.Parent;
+        return directory?.FullName ?? throw new InvalidOperationException("Workspace not found");
+    }
+
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task TerminalDiagnosticIsOnceForLoopbackAndAbsentForMicrophone(bool loopback)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "task364-terminal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "audio.wav"); var signal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput { SourceKind = loopback ? AudioSourceKind.SystemLoopback : AudioSourceKind.Microphone };
+        var options = Options("task364-terminal", output, signal); options.SourceKind = input.SourceKind;
+        using var cts = new CancellationTokenSource(); using var watcher = Watcher(signal, cts);
+        var stdout = new StringWriter(); var stderr = new StringWriter();
+        using var session = new CaptureSession(options, PathResult(output, output + ".partial"), new(stdout, stderr), watcher, cts, _ => (input, null, null));
+        var run = Task.Run(() => session.Run());
+        Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(3)));
+        if (!loopback) input.InjectData(new byte[3200], 3200);
+        session.RequestStop();
+        Assert.Equal(0, await run.WaitAsync(TimeSpan.FromSeconds(5)));
+        if (loopback)
+        {
+            Assert.Single(stderr.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            Assert.True(LoopbackClockDiagnosticReader.TryRead(stderr.ToString(), out _));
+        }
+        else Assert.Equal("", stderr.ToString());
+    }
+
     [Fact]
     public async Task Run_SystemLoopback_ContinuousQpcConflictFailsClosedWithoutFinalWav()
     {
@@ -445,7 +529,65 @@ public class AudioHelperCaptureSessionTests
             Assert.NotEqual(0, exitCode);
             Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
             Assert.Equal("audio_capture_discontinuous", terminal.ErrorCode);
-            Assert.Contains("qpc_outlier_count=1", terminal.Reason);
+            Assert.Contains("Unresolved runtime clock observation", terminal.Reason);
+            Assert.Contains("last_trusted_qpc_ticks=", terminal.Reason);
+            Assert.Contains("last_trusted_device_start=0", terminal.Reason);
+            Assert.False(File.Exists(output));
+            Assert.False(File.Exists(partial));
+        }
+        finally
+        {
+            session.Dispose();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task Run_SystemLoopback_UnresolvedObservationFailsOnStopOrCancellation(bool cancel)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"ah_loopback_qpc_conflict_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var output = Path.Combine(dir, "loopback.wav");
+        var partial = Path.Combine(dir, "loopback.partial.wav");
+        var stopSignal = Path.Combine(dir, "stop.signal");
+        var input = new FakeAudioInput
+        {
+            SourceKind = AudioSourceKind.SystemLoopback,
+            Format = new WaveFormat(48_000, 16, 1)
+        };
+        var opts = Options("rec_loopback_qpc_conflict", output, stopSignal);
+        opts.SourceKind = AudioSourceKind.SystemLoopback;
+        var paths = PathResult(output, partial);
+        using var cts = new CancellationTokenSource();
+        using var watcher = Watcher(stopSignal, cts);
+        var stdout = new StringWriter();
+        var session = new CaptureSession(opts, paths, new EventWriter(stdout, null), watcher, cts, _ => (input, null, null));
+
+        try
+        {
+            var runTask = Task.Run(() => session.Run());
+            Assert.True(SpinWait.SpinUntil(() => input.Started, TimeSpan.FromSeconds(2)));
+            var anchor = (long)(typeof(CaptureSession)
+                .GetField("_firstSampleAnchorTicks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session) ?? 0L);
+            var expectedTwoPackets = AudioPacketPositionMath.FramesToTimestampTicks(960, 48_000, Stopwatch.Frequency);
+            var expectedThreePackets = AudioPacketPositionMath.FramesToTimestampTicks(1_440, 48_000, Stopwatch.Frequency);
+
+            input.InjectPositionedPacket(new byte[960], 0, anchor);
+            input.InjectPositionedPacket(new byte[960], 960, anchor + expectedTwoPackets + 1_164_385);
+            input.InjectPositionedPacket(new byte[960], 1_440, anchor + expectedThreePackets + 1_164_385);
+
+            if (cancel) cts.Cancel(); else session.RequestStop();
+            var exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+            var events = AudioHelperEventStreamParser.ParseEvents(stdout.ToString());
+            var terminal = events.Last(evt => evt.Result is AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped or AudioHelperEventResult.Fail);
+
+            Assert.NotEqual(0, exitCode);
+            Assert.Equal(AudioHelperEventResult.Fail, terminal.Result);
+            Assert.Equal("audio_capture_discontinuous", terminal.ErrorCode);
+            Assert.Contains("Unresolved runtime clock observation", terminal.Reason);
             Assert.Contains("last_trusted_qpc_ticks=", terminal.Reason);
             Assert.Contains("last_trusted_device_start=0", terminal.Reason);
             Assert.False(File.Exists(output));

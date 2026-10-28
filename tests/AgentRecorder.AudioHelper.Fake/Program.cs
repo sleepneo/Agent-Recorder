@@ -148,6 +148,10 @@ internal static class Program
         outputPath ??= Path.Combine(Path.GetTempPath(), $"{recordingId}_audio.wav");
 
         Console.Error.WriteLine($"FAKE stopSignalPath={stopSignalPath} outputPath={outputPath}");
+        // Private transport test hook; the production helper has no such knob.
+        var clockDiagnostic = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_CLOCK_DIAGNOSTIC");
+        if (clockDiagnostic is { Length: > 0 and <= 24000 })
+            Console.Error.WriteLine("LoopbackClockDiagnosticsV1: " + clockDiagnostic);
 
         if (hang)
         {

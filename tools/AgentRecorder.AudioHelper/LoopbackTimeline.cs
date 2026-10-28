@@ -66,6 +66,91 @@ internal sealed class LoopbackTimelineException : InvalidOperationException
 /// </summary>
 internal sealed class LoopbackTimeline
 {
+    // Production runtime observation. Legacy epoch/phase guards below remain unchanged.
+    internal bool ObserveRuntimeClock { get; set; }
+    internal Func<long> ObservationMilliseconds { get; set; } = () => Environment.TickCount64;
+    private readonly List<(byte[] Data, int Frames, long Device, long Qpc)> _observed = new();
+    private long _observationStarted, _observationFrames, _observationGapFrames;
+    private int _observationCount;
+    private bool _replayingObserved;
+    internal int PendingObservationPackets => _observed.Count;
+    internal void CheckObservationDeadline()
+    {
+        if (_observed.Count != 0 && ObservationMilliseconds() - _observationStarted > 150)
+            RequireObservationSettled();
+    }
+    internal void RequireObservationSettled()
+    {
+        if (_observed.Count != 0)
+            throw new LoopbackTimelineException($"Unresolved runtime clock observation; pending PCM is not publishable; last_trusted_qpc_ticks={_lastTrustedQpcTimestamp}; last_trusted_device_start={_lastTrustedDeviceStart}; pending_packets={_observed.Count}; pending_frames={_observationFrames}; observation_count={_observationCount}; observation_gap_frames={_observationGapFrames}; max_pending_packets=8; max_pending_ms=150; max_pending_frames={_format.SampleRate / 10}");
+    }
+
+    private LoopbackPacketAppendResult? ObservePacket(byte[] buffer, int bytes, int frames,
+        long device, long qpc, bool valid, bool discontinuity,
+        Action<byte[], int, int> writePacket, Action<byte[], int> writeZeros)
+    {
+        if (!ObserveRuntimeClock || _replayingObserved || _lastTrustedQpcTimestamp < 0) return null;
+        long priorEnd = _observed.Count == 0 ? _lastDeviceEnd : _observed[^1].Device + _observed[^1].Frames;
+        long priorQpc = _observed.Count == 0 ? _lastPacketStartTimestamp : _observed[^1].Qpc;
+        long gap = Math.Max(0, device - priorEnd);
+        if (device < _lastTrustedDeviceStart)
+            throw new LoopbackTimelineException("WASAPI loopback device position regressed below trusted evidence");
+        var drift = GetQpcDrift(qpc, device, _lastTrustedQpcTimestamp, _lastTrustedDeviceStart);
+        bool original = IsWithinQpcJitter(drift.DriftTicks);
+        if (_observed.Count == 0 && gap == 0) return null; // Preserve exact-continuity phase/epoch policy.
+        if (_observed.Count == 0 && (original || AbsoluteValue(drift.DriftTicks) >= _epochResetQpcDriftThresholdTicks)) return null;
+        if (!valid || discontinuity || frames <= 0 || bytes != (long)frames * _format.BlockAlign || bytes > buffer.Length ||
+            device < priorEnd || qpc <= _lastTrustedQpcTimestamp || (!original && qpc <= priorQpc) || gap > _maxDeviceGapFrames)
+            throw new LoopbackTimelineException("Invalid evidence during runtime clock observation");
+        if (_observed.Count == 0)
+        {
+            if (++_observationCount > 8) throw new LoopbackTimelineException("Runtime clock observation count budget exhausted");
+            _observationStarted = ObservationMilliseconds();
+            _observationFrames = 0;
+        }
+        if (_observed.Count >= 8 || _observationFrames + frames > _format.SampleRate / 10 ||
+            ObservationMilliseconds() - _observationStarted > 150 ||
+            AbsoluteValue(drift.DriftTicks) > _timestampFrequency / 4 ||
+            _observationGapFrames + gap > _maxDeviceGapFrames)
+            throw new LoopbackTimelineException("Runtime clock observation duration/frame/gap budget exhausted");
+        _observationFrames += frames;
+        _observationGapFrames += gap; // Session-lifetime missing-sample budget, independent of QPC phase.
+        _observed.Add((buffer.AsSpan(0, bytes).ToArray(), frames, device, qpc));
+        Volatile.Write(ref _continuityDegraded, 1);
+        if (!original) Interlocked.Increment(ref _qpcOutlierCount);
+        bool stable = _observed.Count >= 3 &&
+            IsWithinQpcJitter(GetQpcDrift(qpc, device, _observed[^2].Qpc, _observed[^2].Device).DriftTicks) &&
+            IsWithinQpcJitter(GetQpcDrift(_observed[^2].Qpc, _observed[^2].Device, _observed[^3].Qpc, _observed[^3].Device).DriftTicks);
+        if (!original && !stable) return new(0, 0, 0, true);
+        if (!original)
+        {
+            long step = AbsoluteValue(drift.DriftTicks);
+            long offset = AbsoluteValue(GetQpcDrift(qpc, device, _phaseBudgetReferenceQpcTimestamp, _phaseBudgetReferenceDeviceStart).DriftTicks);
+            if (_confirmedQpcPhaseRebaseCount >= MaxConfirmedQpcPhaseRebasesPerSession ||
+                offset > _maxQpcPhaseShiftTicks || step > _maxQpcPhaseShiftTicks - _cumulativeAbsoluteQpcPhaseAdjustmentTicks)
+                throw new LoopbackTimelineException("Runtime clock phase budget exceeded");
+            _confirmedQpcPhaseRebaseCount++;
+            _cumulativeAbsoluteQpcPhaseAdjustmentTicks += step;
+        }
+        long zeros = 0, written = 0, skipped = 0;
+        _replayingObserved = true;
+        try
+        {
+            foreach (var p in _observed)
+            {
+                // Original raw evidence remains in diagnostics. Device frames alone map retained PCM;
+                // the confirmed QPC track is a cross-check, never callback-arrival time.
+                var result = AppendPacket(p.Data, p.Data.Length, p.Frames, p.Device, p.Qpc, true, writePacket, writeZeros);
+                zeros += result.ZeroBytesWritten; written += result.PacketBytesWritten; skipped += result.PacketBytesSkipped;
+            }
+            _lastTrustedQpcTimestamp = qpc; _lastTrustedDeviceStart = device;
+            _pendingQpcPhaseTimestamp = _pendingQpcPhaseDeviceStart = -1;
+            _consecutiveQpcOutliers = 0;
+            _observed.Clear();
+        }
+        finally { _replayingObserved = false; }
+        return new(zeros, written, skipped, true);
+    }
     private const int MaxZeroChunkBytes = 65536;
     // A single startup phase correction is expected; a few more tolerate
     // transient clock settling, while repeated rebases indicate an unstable
@@ -141,6 +226,17 @@ internal sealed class LoopbackTimeline
     public bool ContinuityDegraded => Volatile.Read(ref _continuityDegraded) != 0;
     internal long QpcJitterToleranceTicks => _qpcJitterToleranceTicks;
     internal long MaxDeviceGapFrames => _maxDeviceGapFrames;
+    // Called by the existing serialized timeline owner. Diagnostic reads do
+    // not advance/rebase either clock or alter any continuity budget.
+    internal long[] SnapshotForDiagnostics() => new[]
+    {
+        AnchorTimestamp, _anchorDevicePosition, _anchorDeviceMediaBytes, MediaBytes,
+        _lastDeviceStart, _lastDeviceEnd, _lastTrustedQpcTimestamp, _lastTrustedDeviceStart,
+        _pendingQpcPhaseTimestamp, _pendingQpcPhaseDeviceStart, QpcOutlierCount,
+        _consecutiveQpcOutliers, _confirmedQpcPhaseRebaseCount,
+        _cumulativeAbsoluteQpcPhaseAdjustmentTicks, _maxQpcPhaseShiftTicks,
+        _qpcJitterToleranceTicks, _maxDeviceGapFrames
+    };
     internal int ConfirmedQpcPhaseRebaseCount
         => checked((int)Interlocked.Read(ref _confirmedQpcPhaseRebaseCount));
     internal long CumulativeAbsoluteQpcPhaseAdjustmentTicks
@@ -249,6 +345,10 @@ internal sealed class LoopbackTimeline
         if (writeZeros == null)
             throw new ArgumentNullException(nameof(writeZeros));
 
+        var observation = ObservePacket(buffer, bytesRecorded, framesRecorded, devicePosition,
+            packetStartTimestampTicks, positionValid, dataDiscontinuity, writePacket, writeZeros);
+        if (observation.HasValue) return observation.Value;
+
         long packetDurationTicks = AudioPacketPositionMath.FramesToTimestampTicks(
             framesRecorded, _format.SampleRate, _timestampFrequency);
         long packetEndTimestamp;
@@ -280,7 +380,7 @@ internal sealed class LoopbackTimeline
         }
 
         bool qpcOutlierAccepted = false;
-        if (trustedQpc >= 0)
+        if (trustedQpc >= 0 && !_replayingObserved)
         {
             var trustedDrift = GetQpcDrift(packetStartTimestampTicks, devicePosition,
                 trustedQpc, trustedDeviceStart);
@@ -588,6 +688,11 @@ internal sealed class LoopbackTimeline
     /// </summary>
     public long PadToTimestamp(long timestamp, Action<byte[], int> writeZeros, bool finalize = false)
     {
+        if (ObserveRuntimeClock && _observed.Count != 0)
+        {
+            if (finalize || ObservationMilliseconds() - _observationStarted > 150) RequireObservationSettled();
+            return 0;
+        }
         if (writeZeros == null)
             throw new ArgumentNullException(nameof(writeZeros));
 

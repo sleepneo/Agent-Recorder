@@ -17,6 +17,21 @@ namespace AgentRecorder.Capture;
 
 public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IMicrophoneStatusConsumer
 {
+    private readonly WorkerStartBoundary _hostStart = new();
+    internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    private void ObserveHostProcessExit()
+    { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
+
+    private bool ReadStartedHostRetirement()
+    {
+        ObserveHostProcessExit();
+        return Volatile.Read(ref _hostProcessExited) != 0 && _hasExited && IsVideoOnlyOutputSettled &&
+        _videoOnlyRun is { } run && run.StderrDrained.Task.IsCompletedSuccessfully &&
+        (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+        (_microphoneMonitorTask?.IsCompleted ?? true);
+    }
+
+    private int _hostProcessExited;
     private Process? _proc;
     private string _output = "";
     private CaptureConfig? _cfg;
@@ -55,6 +70,17 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
             throw new ArgumentNullException(nameof(authorizationProof));
         authorizationProof.RequireConsumed();
         DisplayScaleGeometry.ThrowIfInvalidCaptureBounds(cfg);
+        // Keep the original in-flight output-owner rejection, including its exception contract.
+        // This read-only check must not reset that owner's state or reopen closed admission.
+        lock (_lock)
+            if (_videoOnlyRun is { } previous &&
+                (!previous.Completion.Task.IsCompleted || Volatile.Read(ref previous.OutputSettled) == 0))
+                throw new InvalidOperationException("The video run is still active.");
+        _hostStart.Start(attempt => StartCore(cfg, attempt), ReadStartedHostRetirement);
+    }
+
+    private void StartCore(CaptureConfig cfg, WorkerStartBoundary.Attempt attempt)
+    {
         lock (_lock)
         {
             if (_videoOnlyRun is { } previous)
@@ -66,6 +92,7 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
             }
             _completionMeta = null;
             _hasExited = false;
+            Volatile.Write(ref _hostProcessExited, 0);
             _manualStopped = false;
             _abortReason = null;
             _firstFrameObserved = 0;
@@ -142,7 +169,7 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
                     if (stderrRun is null || ReferenceEquals(_videoOnlyRun, stderrRun)) _stderrLog.AppendLine(e.Data);
         };
 
-        try { ConfigureProcessForTests?.Invoke(_proc.StartInfo); _proc.Start(); }
+        try { ConfigureProcessForTests?.Invoke(_proc.StartInfo); attempt.Launch(_proc.Start, nativeProcessContract: true, () => WorkerStartBoundary.NoAssociatedProcess(_proc)); }
         catch (Exception ex)
         {
             if (_videoOnlyRun is { } failedRun)
@@ -169,7 +196,11 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
         {
             bool exited = watchedProcess.WaitForExit(timeoutMs);
             lock (_lock)
-                if (videoOnlyRun is null || ReferenceEquals(_videoOnlyRun, videoOnlyRun)) _hasExited = true;
+                if (videoOnlyRun is null || ReferenceEquals(_videoOnlyRun, videoOnlyRun))
+                {
+                    _hasExited = true;
+                    if (exited) Volatile.Write(ref _hostProcessExited, 1);
+                }
             int exitCode = -1;
             try { if (exited) exitCode = watchedProcess.ExitCode; } catch { }
 
@@ -1195,17 +1226,28 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
             ? parsed
             : null;
 
-    public void Dispose()
+    internal void RetireUnstartedHostResources()
     {
+        if (_videoOnlyRun is not null && !IsVideoOnlyOutputSettled) return;
+        _hostStart.CloseIfNoResources(CleanupForDispose);
+    }
+
+    public void Dispose() => _hostStart.Close(CleanupForDispose);
+
+    private bool CleanupForDispose()
+    {
+        bool cleaned = true;
         if (_videoOnlyRun is { } run)
         {
             lock (_lock) run.DisposeRequested = true;
             CloseVideoOnlyAdmission(run);
             ConvergeVideoOnly(run, natural: false, naturalExitCode: null);
-            if (Volatile.Read(ref run.OutputSettled) == 0) return; // The actual owner disposes after I/O ends.
+            if (Volatile.Read(ref run.OutputSettled) == 0) return false; // The actual owner disposes after I/O ends.
             run.Cancellation.Dispose();
         }
-        try { _proc?.Dispose(); } catch { }
+        ObserveHostProcessExit();
+        try { _proc?.Dispose(); } catch { cleaned = false; }
         StopMicrophoneMonitor();
+        return cleaned;
     }
 }

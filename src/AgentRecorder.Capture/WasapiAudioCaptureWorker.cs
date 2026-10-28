@@ -36,11 +36,28 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private static readonly TimeSpan MicrophoneMonitorInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
 
+    internal Func<Process, bool>? StartProcessForTests { get; set; }
+    internal Action<ProcessStartInfo>? ConfigureProcessForTests { get; set; }
     private Process? _proc;
     private readonly BoundedStringBuilder _stderrLog = new(StderrMaxChars);
     private readonly BoundedStringBuilder _stdoutLog = new(StdoutMaxChars);
     private readonly object _lock = new();
 
+    private int _hostStderrRetired;
+    private int _hostProcessExited;
+    private readonly WorkerStartBoundary _hostStart = new();
+    internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    private void ObserveHostProcessExit()
+    { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
+
+    private bool ReadStartedHostRetirement()
+    {
+        ObserveHostProcessExit();
+        try { return Volatile.Read(ref _hostProcessExited) != 0 && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+                    Volatile.Read(ref _hostStderrRetired) != 0 &&
+                    (_microphoneMonitorTask?.IsCompleted ?? true); }
+        catch { return false; }
+    }
     private Task? _stdoutReader;
     private Task? _watcher;
     private TaskCompletionSource<bool>? _exitTcs;
@@ -146,7 +163,10 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         _microphoneStatusProvider = provider;
     }
 
-    public void Start(CaptureConfig cfg, string outputPath)
+    public void Start(CaptureConfig cfg, string outputPath) =>
+        _hostStart.Start(attempt => StartCore(cfg, outputPath, attempt), ReadStartedHostRetirement);
+
+    private void StartCore(CaptureConfig cfg, string outputPath, WorkerStartBoundary.Attempt attempt)
     {
         if (Interlocked.Exchange(ref _startCalled, 1) != 0)
             throw new InvalidOperationException("WasapiAudioCaptureWorker.Start can only be called once.");
@@ -226,6 +246,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         foreach (var a in args)
             _proc.StartInfo.ArgumentList.Add(a);
 
+        Volatile.Write(ref _hostProcessExited, 0);
+        Volatile.Write(ref _hostStderrRetired, 0);
         _stderrClosed = new ManualResetEventSlim();
         _exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -233,6 +255,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         {
             if (e.Data == null)
             {
+                Volatile.Write(ref _hostStderrRetired, 1);
                 try { _stderrClosed?.Set(); } catch { }
                 return;
             }
@@ -251,7 +274,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
 
         try
         {
-            _proc.Start();
+            ConfigureProcessForTests?.Invoke(_proc.StartInfo);
+            attempt.Launch(() => StartProcessForTests is null ? _proc.Start() : StartProcessForTests(_proc), StartProcessForTests is null, () => WorkerStartBoundary.NoAssociatedProcess(_proc));
         }
         catch (Exception ex)
         {
@@ -283,6 +307,7 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
                 try { if (exited) exitCode = _proc.ExitCode; } catch { }
             }
 
+            if (exited) Volatile.Write(ref _hostProcessExited, 1);
             DrainTask(_stdoutReader, StdoutDrainTimeout);
             WaitStderrClosed(StderrDrainTimeout);
             FinalValidateStream();
@@ -334,19 +359,27 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         return _stderrLog.ToString();
     }
 
-    public void Dispose()
+    internal bool HasNoStartedHostResources => _hostStart.KnownNoResources;
+    internal void RetireUnstartedHostResources() => _hostStart.CloseIfNoResources(CleanupForDispose);
+
+    public void Dispose() => _hostStart.Close(CleanupForDispose);
+
+    private bool CleanupForDispose()
     {
+        bool cleaned = true;
         try
         {
             // Ensure a clean shutdown even if the caller never called Stop().
             Stop();
         }
-        catch { }
+        catch { cleaned = false; }
 
-        try { _proc?.Dispose(); } catch { }
-        try { _stderrClosed?.Dispose(); } catch { }
+        ObserveHostProcessExit();
+        try { _proc?.Dispose(); } catch { cleaned = false; }
+        try { _stderrClosed?.Dispose(); } catch { cleaned = false; }
         StopMicrophoneMonitor();
         CleanupStopSignal();
+        return cleaned;
     }
 
     private void RequestHelperStopGraceful()

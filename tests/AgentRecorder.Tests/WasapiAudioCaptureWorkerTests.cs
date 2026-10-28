@@ -666,6 +666,31 @@ public class WasapiAudioCaptureWorkerTests : IDisposable
         return result! with { StopSignalExistsAfterDispose = stopSignalExistsAfterDispose };
     }
 
+    [Fact]
+    public void RealWorkerPreservesBoundedClockMetadataFromPrivateFakeStderr()
+    {
+        const string key = "AGENT_RECORDER_FAKE_CLOCK_DIAGNOSTIC";
+        var previous = Environment.GetEnvironmentVariable(key);
+        var source = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND");
+        try
+        {
+            string line = LoopbackClockDiagnosticHostTests.DiagnosticLine();
+            Environment.SetEnvironmentVariable(key, line["LoopbackClockDiagnosticsV1: ".Length..]);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", "system-loopback");
+            using var worker = new WasapiAudioCaptureWorker
+            { HelperExePathOverride = FakeHelperExePath(), SkipMicrophoneStatusMonitor = true };
+            worker.Start(CaptureConfigWithLoopback(), Path.Combine(_tmpDir, "clock-metadata.wav"));
+            Assert.True(SpinWait.SpinUntil(() => worker.HasExited, TimeSpan.FromSeconds(10)));
+            Assert.True(LoopbackClockDiagnosticReader.TryRead(worker.GetStderrLog(), out var diagnostic));
+            Assert.Equal(1, diagnostic.GetProperty("fault_sequence").GetInt64());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(key, previous);
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_SOURCE_KIND", source);
+        }
+    }
+
     private static CaptureConfig CaptureConfigWithLoopback()
     {
         return new CaptureConfig

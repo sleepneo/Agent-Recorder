@@ -9,6 +9,32 @@ namespace AgentRecorder.AudioHelper.Tests;
 
 public class WasapiAudioInputTests
 {
+    [Fact]
+    public async Task LoopbackSlowConsumerRunsAfterExactlyOneNativeReleaseAndUsesOwnedCopy()
+    {
+        var capture = new FakeAudioCaptureClient { DevicePosition = 480, QpcPosition = 100_000_000 };
+        using var input = new AudioClientAudioInput(new FakeDevice(), new FakeAudioClient { BufferSize = 480 },
+            capture, new WaveFormat(48000,32,2),100, sourceKind: AudioSourceKind.SystemLoopback);
+        using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+        var stopped = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bytes = Enumerable.Repeat((byte)42,3840).ToArray(); var pin = GCHandle.Alloc(bytes,GCHandleType.Pinned);
+        AudioPacketEventArgs? packet = null;
+        input.RecordingStopped += (_,_) => stopped.TrySetResult(true);
+        input.PacketPositionAvailable += (_,p) => { packet=p.Clone(); entered.Set(); release.Wait(); input.StopRecording(); };
+        try
+        {
+            capture.Packets.Enqueue((pin.AddrOfPinnedObject(),480,AudioClientBufferFlags.None));
+            input.StartRecording();
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(3)));
+            Assert.Equal(1,capture.ReleaseBufferCallCount);
+            Assert.True(packet!.Observation!.Release!.Success);
+            Array.Fill(bytes,(byte)0); // Native storage can be reused while consumer is blocked.
+            Assert.All(packet.Buffer.Take(packet.BytesRecorded),b=>Assert.Equal(42,b));
+            release.Set(); await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(1,capture.ReleaseBufferCallCount);
+        }
+        finally { release.Set(); input.Dispose(); pin.Free(); }
+    }
     private static int GetRecordBufferLength(AudioClientAudioInput input)
     {
         var field = typeof(AudioClientAudioInput).GetField("_recordBuffer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -129,6 +155,8 @@ public class WasapiAudioInputTests
         public Exception? GetBufferException { get; set; }
         public Exception? ReleaseBufferException { get; set; }
         public int ReleaseBufferCallCount { get; protected set; }
+        public long DevicePosition { get; set; }
+        public long QpcPosition { get; set; }
 
         public virtual int GetNextPacketSize()
         {
@@ -159,7 +187,61 @@ public class WasapiAudioInputTests
                 throw ReleaseBufferException;
         }
 
+        public virtual IntPtr GetBuffer(out int frames, out AudioClientBufferFlags flags, out long devicePosition, out long qpcPosition)
+        {
+            devicePosition = DevicePosition; qpcPosition = QpcPosition;
+            return GetBuffer(out frames, out flags);
+        }
+
         public virtual void Dispose() => Interlocked.Increment(ref _disposeCount);
+    }
+
+    [Theory]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(4)] [InlineData(5)]
+    public async Task LoopbackMetadataPreservesRawFlagsQpcAndExactReleaseWithoutRealDevice(int rawFlags)
+    {
+        var capture = new FakeAudioCaptureClient { DevicePosition = 480, QpcPosition = 100_000_000 };
+        var client = new FakeAudioClient { BufferSize = 480 };
+        var format = new WaveFormat(48000, 32, 2);
+        using var input = new AudioClientAudioInput(new FakeDevice(), client, capture, format, 100,
+            sourceKind: AudioSourceKind.SystemLoopback);
+        var bytes = new byte[480 * 8];
+        var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        var stopped = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        AudioPacketEventArgs? observed = null;
+        input.RecordingStopped += (_, _) => stopped.TrySetResult(true);
+        input.PacketPositionAvailable += (_, packet) => { observed = packet.Clone(); input.StopRecording(); };
+        try
+        {
+            capture.Packets.Enqueue((pin.AddrOfPinnedObject(), 480, (AudioClientBufferFlags)rawFlags));
+            Assert.Equal(StartRecordingResult.Started, input.StartRecording());
+            await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            input.Dispose();
+            var observation = Assert.IsType<AudioPacketObservation>(observed!.Observation);
+            Assert.Equal(rawFlags, observation.Flags);
+            Assert.Equal(480, observation.BufferCapacityFrames);
+            Assert.Equal(5, observation.PollSleepMilliseconds);
+            Assert.Equal(480, observation.RawDevicePosition);
+            Assert.Equal(100_000_000, observation.RawQpcPosition);
+            Assert.Equal((rawFlags & 4) == 0, observed.PositionValid);
+            Assert.Equal((rawFlags & 1) != 0, observed.DataDiscontinuity);
+            if ((rawFlags & 4) != 0) Assert.Equal(0, observed.PacketStartTimestampTicks);
+            else
+            {
+                // The existing double-to-long conversion can round down at
+                // large callback timestamps. Require one WASAPI QPC quantum,
+                // not a relaxed media continuity/phase budget.
+                long quantum = Math.Max(1L, (long)Math.Ceiling(Stopwatch.Frequency / 10_000_000d));
+                Assert.InRange(observed.PacketStartTimestampTicks, 10 * Stopwatch.Frequency - quantum, 10 * Stopwatch.Frequency + quantum);
+            }
+            Assert.NotNull(observation.Release);
+            Assert.True(observation.Release!.Success);
+            Assert.True(observation.GetBufferStartTicks <= observation.GetBufferEndTicks);
+            Assert.True(observation.GetBufferEndTicks <= observation.Release.StartTicks);
+            Assert.True(observation.Release.StartTicks <= observation.Release.EndTicks);
+            Assert.Equal(1, capture.ReleaseBufferCallCount);
+        }
+        finally { input.Dispose(); pin.Free(); }
     }
 
     [Fact]
@@ -676,8 +758,8 @@ public class WasapiAudioInputTests
         var capture = new FakeAudioCaptureClient();
         var input = new AudioClientAudioInput(new FakeDevice(), client, capture, format, 100);
 
-        var events = new List<WaveInEventArgs>();
-        input.DataAvailable += (_, e) => events.Add(e);
+        var events = new System.Collections.Concurrent.ConcurrentQueue<WaveInEventArgs>();
+        input.DataAvailable += (_, e) => events.Enqueue(e);
 
         // Silent packet with IntPtr.Zero and 160 frames = 320 bytes.
         capture.Packets.Enqueue((IntPtr.Zero, 160, AudioClientBufferFlags.Silent));

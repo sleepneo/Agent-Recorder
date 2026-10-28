@@ -36,6 +36,82 @@ Record the current conversation window for 5 minutes.
    highlighted window; edges snap automatically, and holding `Alt` temporarily
    disables snapping for precise adjustment.
 
+## Recording Audio
+
+**Audio is off unless requested.** "Record the entire window" does not
+automatically include the sound it plays. Tell your AI agent explicitly:
+
+```text
+Find PotPlayer and record its entire window for 20 seconds with system audio, without the microphone.
+Record a selected region for 15 seconds using the AirPods microphone, without system audio.
+Record the primary display for 15 seconds without any audio.
+```
+
+- **System audio** includes all sound on the selected output device, potentially
+  including other applications; it is not a window-exclusive audio track.
+- **Microphone** capture is supported for ordinary region and display video,
+  not window-content recording.
+- **System audio and microphone cannot be enabled together.** Fixed-region
+  profiles, fixed-region unattended plans and screenshot sequences remain silent.
+- With no device specified, use the current Windows multimedia default output
+  or a uniquely determined microphone input. The locally approved device stays
+  fixed; changing the default does not switch capture to another device.
+- Check the audio mode and device before approving. If requested audio is
+  unavailable, the agent must explain it rather than silently record without it.
+
+See [Recording Audio in the README](README.md#recording-audio) for the full rules.
+
+## Nested Recording Test
+
+Tell your AI agent:
+
+```text
+Start an outer selected-region recording for 120 seconds.
+```
+
+Select the outer region, approve locally, and wait for REC. Then immediately say:
+
+```text
+While outer continues recording, start an inner selected-region recording for 20 seconds.
+```
+
+Select the inner region and approve locally. The 120-second outer duration
+leaves room for agent responses and both interactions; it does not guarantee
+a fixed response time. To see the inner recording controls in the outer video,
+select regions on the same display with the inner region and controls inside
+the outer region.
+
+Check that outer continues after inner finishes and that both videos are valid.
+If outer has ended before inner is created, the agent must explain that no
+nested recording was established rather than report a successful nested test.
+
+## One-Shot Unattended Test
+
+Complete setup before starting the countdown. First tell your AI agent:
+
+```text
+Check whether limited unattended recording is enabled. If it is disabled, tell me where to enable it, but do not create a plan yet.
+```
+
+If disabled, open the unattended safety controls from the Recorder tray menu
+and enable the feature locally. Ask the agent to check the current instance
+again. Once it is enabled, send a new instruction:
+
+```text
+In two minutes, automatically record a fixed region for 10 seconds without audio. Let me select the region and approve a one-shot authorization now; do not ask again at execution time.
+```
+
+The two-minute delay belongs to this new instruction after setup, not the time
+spent enabling the switch. Select the region and approve its authorization
+locally. The agent should report the specific scheduled start time and whether
+scheduling succeeded. Enabling the global switch does not authorize a specific
+recording; waiting for the switch or approval is not a scheduled plan.
+
+Keep Recorder running and the computer awake with the desktop unlocked.
+Check that recording starts without a second confirmation and ends after about
+10 seconds. An expired approval or missed execution window must be reported,
+not silently postponed or retried.
+
 ## Quick API Targets
 
 | target.type | Use case |
@@ -166,29 +242,6 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
-## Adding Chapter Marks
-
-While recording, press `Ctrl+Shift+F11` to add a chapter mark. Agent Recorder
-shows brief green in-app feedback; it does not use a tray balloon. If outer and
-inner recordings are active, one key press adds a mark to each recording on its
-own first-frame timeline.
-
-An agent can add a labeled mark to one active recording through the
-authenticated API:
-
-```http
-POST /api/v1/recordings/{recording_id}/marks
-Content-Type: application/json
-X-Agent-Recorder-Key: <api-key>
-
-{
-  "label": "Important decision"
-}
-```
-
-Accepted marks are written to `<video-stem>.bundle/marks.json` after a
-successful FFmpeg MP4 recording.
-
 The tray menu provides a Chinese/English language selector. The choice is
 persisted locally and applies to newly opened selection, confirmation, and
 recording-control windows.
@@ -264,3 +317,18 @@ AGENT-API-REFERENCE.zh-CN.md       agent API reference
 LICENSE                            Agent Recorder MIT license
 LICENSE-NOTICE.md                  third-party license notices
 ```
+
+
+## Agent-requested idle shutdown
+
+When the user asks to exit Recorder, the agent runs:
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<data_dir returned by ensure-running>"
+```
+
+Check `capabilities.host_shutdown.supported` first. This build supports authenticated idle-only `POST /api/v1/host/shutdown`, with no force option. The CLI never starts an app or accepts a PID; it verifies ready/capabilities, user, executable, process start identity and instance nonce, sends the existing key, and waits up to 15000 ms (`--timeout-ms`, 100–120000) for that original process to exit. `exited` is confirmed process termination; `not_running` means no ready file and no held host instance. `busy`, `unsupported`, `timeout` and `unknown` are not successful exits. A 202 API `accepted` response alone does not mean exited.
+
+Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
+
+The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.

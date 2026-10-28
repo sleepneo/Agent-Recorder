@@ -112,6 +112,9 @@ internal sealed class CaptureSession : IDisposable
     private Timer? _firstPacketTimer;
     private Timer? _loopbackTimer;
     private LoopbackTimeline? _loopbackTimeline;
+    private readonly LoopbackPacketDiagnostics? _loopbackDiagnostics;
+    private long _loopbackInputGeneration;
+    private int _loopbackDiagnosticEmitted;
     private readonly object _loopbackCallbackGate = new();
     private readonly object _loopbackPreStartLock = new();
     private List<AudioPacketEventArgs> _loopbackPreStartPackets = new();
@@ -201,6 +204,7 @@ internal sealed class CaptureSession : IDisposable
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _events = events ?? throw new ArgumentNullException(nameof(events));
+        _loopbackDiagnostics = options.SourceKind == AudioSourceKind.SystemLoopback ? new() : null;
         _watcher = watcher ?? throw new ArgumentNullException(nameof(watcher));
         _cts = cts ?? throw new ArgumentNullException(nameof(cts));
         _inputFactory = inputFactory;
@@ -586,6 +590,7 @@ internal sealed class CaptureSession : IDisposable
 
     private void OnLoopbackPacketAvailable(object? sender, AudioPacketEventArgs packet)
     {
+        long receivedTicks = Stopwatch.GetTimestamp();
         if (packet.BytesRecorded <= 0 || !ReferenceEquals(sender, Volatile.Read(ref _input)))
             return;
 
@@ -613,12 +618,19 @@ internal sealed class CaptureSession : IDisposable
                     (_runtimeRecoveryInProgress != 0 && Volatile.Read(ref _recoveryCandidatePublished) == 0))
                     return;
 
+                packet.DiagnosticGeneration = Interlocked.Read(ref _loopbackInputGeneration);
+                packet.DiagnosticReceivedTicks = receivedTicks;
                 if (Volatile.Read(ref _loopbackStartConfirmed) == 0)
                 {
+                    packet.DiagnosticSequence = _loopbackDiagnostics?.Observe(packet,
+                        Interlocked.Read(ref _loopbackInputGeneration), _waveFormat, receivedTicks,
+                        _loopbackTimeline?.SnapshotForDiagnostics()) ?? 0;
                     lock (_loopbackPreStartLock)
                     {
                         if (_loopbackPreStartPackets.Count >= MaxLoopbackPreStartPackets)
                         {
+                            _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 4, 0, packet.BytesRecorded, 0,
+                                _loopbackTimeline?.SnapshotForDiagnostics(), 3);
                             SetPendingErrorLocked(
                                 "audio_loopback_start_packet_overflow",
                                 "Loopback packets arrived before the successful Start boundary faster than they could be drained",
@@ -627,15 +639,22 @@ internal sealed class CaptureSession : IDisposable
                         }
 
                         _loopbackPreStartPackets.Add(packet.Clone());
+                        _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 1, 0, 0, 0, null);
                     }
                     return;
                 }
+
+                packet.DiagnosticSequence = _loopbackDiagnostics?.Observe(packet,
+                    Interlocked.Read(ref _loopbackInputGeneration), _waveFormat, receivedTicks,
+                    _loopbackTimeline?.SnapshotForDiagnostics()) ?? 0;
 
                 if (Volatile.Read(ref _recoveryCandidatePublished) != 0 &&
                     _loopbackRecoveryGeneration is { Buffering: true } recoveryGeneration)
                 {
                     if (recoveryGeneration.BufferedPackets.Count >= MaxLoopbackRecoveryCandidatePackets)
                     {
+                        _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 4, 0, packet.BytesRecorded, 0,
+                            _loopbackTimeline?.SnapshotForDiagnostics(), 3);
                         throw new LoopbackTimelineException(
                             $"Loopback recovery generation {recoveryGeneration.GenerationId} received too many packets before StartRecording completed");
                     }
@@ -645,6 +664,7 @@ internal sealed class CaptureSession : IDisposable
                     // candidate; it is not committed media until this exact
                     // generation passes its start boundary and is rebased.
                     recoveryGeneration.BufferedPackets.Add(packet.Clone());
+                    _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 2, 0, 0, 0, null);
                     return;
                 }
 
@@ -674,6 +694,7 @@ internal sealed class CaptureSession : IDisposable
                         Volatile.Write(ref _continuityDegraded, 1);
                         recoveryTrigger = "loopback_epoch_reset";
                         recoveryMetrics = FormatLoopbackEpochResetMetrics(timelineEx);
+                        _loopbackDiagnostics?.State(2, Interlocked.Read(ref _loopbackInputGeneration));
                     }
                 }
             }
@@ -825,6 +846,7 @@ internal sealed class CaptureSession : IDisposable
                     // Progress is observational only. Packet position is the
                     // sole capture-time source allowed to advance media;
                     // terminal finalization owns wall-clock silence padding.
+                    _loopbackTimeline?.CheckObservationDeadline();
                     TryEmitProgress(
                         Interlocked.Read(ref _bytesWritten),
                         Interlocked.Read(ref _firstSampleAnchorTicks),
@@ -1328,6 +1350,7 @@ internal sealed class CaptureSession : IDisposable
             _loopbackRecoveryGeneration?.BufferedPackets.Clear();
             _loopbackRecoveryGeneration = new LoopbackRecoveryGeneration(
                 ++_nextLoopbackRecoveryGeneration);
+            _loopbackDiagnostics?.State(3, Interlocked.Read(ref _loopbackInputGeneration));
         }
     }
 
@@ -1355,6 +1378,7 @@ internal sealed class CaptureSession : IDisposable
 
                 generation.BufferedPackets.Clear();
                 generation.Buffering = false;
+                _loopbackDiagnostics?.State(4, Interlocked.Read(ref _loopbackInputGeneration));
                 Interlocked.Exchange(ref _lastCallbackTimestamp, Stopwatch.GetTimestamp());
                 return true;
             }
@@ -1372,8 +1396,12 @@ internal sealed class CaptureSession : IDisposable
             {
                 if (ReferenceEquals(_input, candidate) || _loopbackRecoveryGeneration != null)
                 {
+                    if (_loopbackRecoveryGeneration is { } generation)
+                        foreach (var packet in generation.BufferedPackets)
+                            _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 5, 0, packet.BytesRecorded, 0, null);
                     _loopbackRecoveryGeneration?.BufferedPackets.Clear();
                     _loopbackRecoveryGeneration = null;
+                    _loopbackDiagnostics?.State(5, Interlocked.Read(ref _loopbackInputGeneration));
                 }
             }
         }
@@ -1423,6 +1451,7 @@ internal sealed class CaptureSession : IDisposable
         try { input.RecordingStopped -= OnRecordingStopped; } catch { }
         try { input.StopRecording(); } catch { }
         try { input.Dispose(); } catch { }
+        _loopbackDiagnostics?.State(6, Interlocked.Read(ref _loopbackInputGeneration));
 
         // AudioClientAudioInput joins its capture thread during Dispose, and the
         // fake inputs model the same lifecycle. Read only after both operations
@@ -1556,13 +1585,16 @@ internal sealed class CaptureSession : IDisposable
             // writer. Keep that media cursor in lockstep with recovery silence
             // before the next endpoint epoch is rebased.
             if (IsSystemLoopback)
+            {
                 _loopbackTimeline?.AdvanceMediaCursor(padBytes);
+                _loopbackDiagnostics?.State(9, Interlocked.Read(ref _loopbackInputGeneration), padBytes);
+            }
         }
     }
 
     private void ResetLoopbackAttempt(WaveFormat format)
     {
-        _loopbackTimeline = new LoopbackTimeline(format, Stopwatch.Frequency, LoopbackPaddingTolerance);
+        _loopbackTimeline = new LoopbackTimeline(format, Stopwatch.Frequency, LoopbackPaddingTolerance) { ObserveRuntimeClock = true };
         Volatile.Write(ref _loopbackStartConfirmed, 0);
         _loopbackRecoveryGeneration = null;
         _nextLoopbackRecoveryGeneration = 0;
@@ -1627,6 +1659,7 @@ internal sealed class CaptureSession : IDisposable
         {
             if (input is not IAudioPacketPositionSource positionSource)
                 throw new InvalidOperationException("Loopback input does not expose WASAPI packet positions");
+            _loopbackDiagnostics?.State(1, Interlocked.Increment(ref _loopbackInputGeneration));
             positionSource.PacketPositionAvailable += OnLoopbackPacketAvailable;
         }
         else
@@ -1647,6 +1680,7 @@ internal sealed class CaptureSession : IDisposable
         var timeline = _loopbackTimeline ?? throw new InvalidOperationException("Loopback timeline is not initialized");
         lock (_writerLock)
         {
+            _loopbackDiagnostics?.BeforeAppend(packet, _waveFormat, timeline.SnapshotForDiagnostics());
             var writer = _writer ?? throw new InvalidOperationException("Loopback writer is not initialized");
             if (_loopbackRecoveryGeneration is { RebasePending: true } recoveryGeneration)
             {
@@ -1654,16 +1688,39 @@ internal sealed class CaptureSession : IDisposable
                 recoveryGeneration.RebasePending = false;
             }
 
-            var result = timeline.AppendPacket(
+            bool writeAttempted = false;
+            LoopbackPacketAppendResult result;
+            try
+            {
+            result = timeline.AppendPacket(
                 packet.Buffer,
                 packet.BytesRecorded,
                 packet.FramesRecorded,
                 packet.DevicePosition,
                 packet.PacketStartTimestampTicks,
                 packet.PositionValid,
-                (buffer, offset, count) => writer.Write(buffer, offset, count),
-                (buffer, count) => writer.Write(buffer, 0, count),
+                (buffer, offset, count) => { writeAttempted = true; writer.Write(buffer, offset, count); },
+                (buffer, count) => { writeAttempted = true; writer.Write(buffer, 0, count); },
                 packet.DataDiscontinuity);
+            }
+            catch (Exception error)
+            {
+                int faultKind = error is LoopbackTimelineException conflict && conflict.IsQpcDevicePositionConflict
+                    ? 1 : !packet.PositionValid ? 2 : 3;
+                // If an I/O call threw after a partial write, the exact byte
+                // counts are unknown. A rejected clock packet has no writes.
+                long? bytes = writeAttempted ? null : 0;
+                _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, 4, bytes, bytes, bytes,
+                    timeline.SnapshotForDiagnostics(), faultKind);
+                throw;
+            }
+            _loopbackDiagnostics?.Finish(packet.DiagnosticSequence, timeline.PendingObservationPackets != 0 ? 2 : result.QpcOutlierAccepted ? 6 : 3,
+                result.PacketBytesWritten, result.PacketBytesSkipped, result.ZeroBytesWritten,
+                timeline.SnapshotForDiagnostics());
+            if (timeline.PendingObservationPackets != 0)
+                _loopbackDiagnostics?.State(10, Interlocked.Read(ref _loopbackInputGeneration), timeline.PendingObservationPackets);
+            else if (result.QpcOutlierAccepted)
+                _loopbackDiagnostics?.State(11, Interlocked.Read(ref _loopbackInputGeneration), result.TotalBytesWritten);
             Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
             Interlocked.Exchange(ref _qpcOutlierCount, timeline.QpcOutlierCount);
             if (result.QpcOutlierAccepted)
@@ -1696,6 +1753,7 @@ internal sealed class CaptureSession : IDisposable
             Interlocked.Exchange(ref _bytesWritten, timeline.MediaBytes);
             if (paddedBytes > 0)
             {
+                _loopbackDiagnostics?.State(9, Interlocked.Read(ref _loopbackInputGeneration), paddedBytes);
                 Interlocked.Add(ref _gapFilledBytesTotal, paddedBytes);
                 Interlocked.Add(ref _gapFilledMsTotal,
                     (long)(paddedBytes / (double)writer.WaveFormat.AverageBytesPerSecond * 1000.0));
@@ -1966,6 +2024,7 @@ internal sealed class CaptureSession : IDisposable
             Interlocked.Exchange(ref _exitCode, 0);
 
             var info = BuildTerminalEventInfo(bytesWritten, stopTimestamp);
+            EmitLoopbackDiagnostics(failed: false);
             if (userRequested)
                 _events.Stopped(info);
             else
@@ -2159,7 +2218,20 @@ internal sealed class CaptureSession : IDisposable
             info.EndpointId = _options.EndpointId;
             info.FailureStage = failureStage ?? "HfpUnknown";
         }
+        EmitLoopbackDiagnostics(failed: true);
         _events.Fail(info);
+    }
+
+    private void EmitLoopbackDiagnostics(bool failed)
+    {
+        if (_loopbackDiagnostics is null || Interlocked.Exchange(ref _loopbackDiagnosticEmitted, 1) != 0)
+            return;
+        try
+        {
+            _loopbackDiagnostics.State(failed ? 7 : 8, Interlocked.Read(ref _loopbackInputGeneration), Interlocked.Read(ref _bytesWritten));
+            _events.LoopbackDiagnostics(_loopbackDiagnostics.Export(Stopwatch.Frequency));
+        }
+        catch { /* Best-effort metadata must never alter media outcome/retirement. */ }
     }
 
     private string? EffectiveHfpRenderEndpointId

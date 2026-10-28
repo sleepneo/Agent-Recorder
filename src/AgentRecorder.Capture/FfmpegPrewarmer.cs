@@ -56,6 +56,8 @@ public sealed class FfmpegPrewarmer
         get { lock (_lock) return _startCount; }
     }
 
+    public bool HasActiveWork { get { lock (_lock) return _task is not null && !_task.IsCompleted; } }
+
     public PrewarmStatus Status
     {
         get { lock (_lock) return _status; }

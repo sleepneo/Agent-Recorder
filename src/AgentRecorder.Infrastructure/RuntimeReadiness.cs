@@ -14,11 +14,16 @@ namespace AgentRecorder.Infrastructure;
 public sealed class RuntimeReadiness : IDisposable
 {
     public const string NamedEventName = @"Local\AgentRecorderReady";
+    private readonly string _namedEventName;
 
     private readonly DateTimeOffset _desktopEvidenceReceivedAt = DateTimeOffset.UtcNow;
     private readonly Stopwatch _stopwatch;
     private readonly string _mode;
     private readonly int _pid;
+    private readonly string _instanceId = Guid.NewGuid().ToString("D");
+    private readonly long _processStartedAtUtcTicks = Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks;
+    private readonly string _executablePath = Environment.ProcessPath ?? "";
+    private readonly string _processUserSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? "";
     private readonly int _port;
     private EventWaitHandle? _namedEvent;
     private string? _readyFileWritten;
@@ -33,7 +38,11 @@ public sealed class RuntimeReadiness : IDisposable
     private readonly InteractiveDesktopObservation? _desktopObservation;
 
     public RuntimeReadiness(string mode, int port, InteractiveDesktopObservation? desktopObservation = null)
+        : this(mode, port, desktopObservation, NamedEventName) { }
+
+    internal RuntimeReadiness(string mode, int port, InteractiveDesktopObservation? desktopObservation, string namedEventName)
     {
+        _namedEventName = namedEventName;
         _mode = mode;
         _pid = Environment.ProcessId;
         _port = port;
@@ -54,6 +63,7 @@ public sealed class RuntimeReadiness : IDisposable
         return DataDirResolver.Resolve();
     }
 
+    public string InstanceId => _instanceId;
     public string DataDir => ResolveDataDir();
     public string ReadyFilePath => Path.Combine(DataDir, "runtime", "ready.json");
     public string ApiKeyFilePath => ApiKeyAuth.GetTokenFilePath();
@@ -91,6 +101,8 @@ public sealed class RuntimeReadiness : IDisposable
 
         var snapshot = new ReadySnapshot
         {
+            InstanceId = _instanceId, ProcessStartedAtUtcTicks = _processStartedAtUtcTicks,
+            ExecutablePath = _executablePath, ProcessUserSid = _processUserSid,
             Ready = true,
             Pid = _pid,
             Port = _port,
@@ -103,7 +115,7 @@ public sealed class RuntimeReadiness : IDisposable
             ApiKeyFile = ApiKeyFilePath,
             AuditLogPath = AuditLogPathResolved,
             ReadyFile = ReadyFilePath,
-            NamedEvent = NamedEventName,
+            NamedEvent = _namedEventName,
             InteractiveDesktopReady = _mode != "tray" || _desktopObservation?.IsOnInteractiveDesktop == true,
             SessionId = _desktopObservation?.ProcessSessionId ?? -1,
             WindowStation = _desktopObservation?.WindowStation ?? "",
@@ -136,7 +148,7 @@ public sealed class RuntimeReadiness : IDisposable
     {
         try
         {
-            _namedEvent = new EventWaitHandle(false, EventResetMode.ManualReset, NamedEventName);
+            _namedEvent = new EventWaitHandle(false, EventResetMode.ManualReset, _namedEventName);
             _namedEvent.Set();
         }
         catch
@@ -153,6 +165,8 @@ public sealed class RuntimeReadiness : IDisposable
     {
         return new
         {
+            instance_id = _instanceId, process_started_at_utc_ticks = _processStartedAtUtcTicks,
+            executable_path = _executablePath, process_user_sid = _processUserSid,
             ready = _readyFileWritten != null,
             pid = _pid,
             port = _port,
@@ -163,7 +177,7 @@ public sealed class RuntimeReadiness : IDisposable
             ready_file = ReadyFilePath,
             api_key_file = ApiKeyFilePath,
             audit_log_path = AuditLogPathResolved,
-            named_event = NamedEventName,
+            named_event = _namedEventName,
             interactive_desktop = new
             {
                 ready = _mode != "tray" || _desktopObservation?.IsOnInteractiveDesktop == true,
@@ -231,6 +245,10 @@ public sealed class RuntimeReadiness : IDisposable
 /// </summary>
 public sealed class ReadySnapshot
 {
+    public string InstanceId { get; set; } = "";
+    public long ProcessStartedAtUtcTicks { get; set; }
+    public string ExecutablePath { get; set; } = "";
+    public string ProcessUserSid { get; set; } = "";
     public bool Ready { get; set; }
     public int Pid { get; set; }
     public int Port { get; set; }

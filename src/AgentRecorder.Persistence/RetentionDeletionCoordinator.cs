@@ -37,6 +37,9 @@ public sealed class RetentionDeletionCoordinator:IDisposable
     internal RetentionDeletionCoordinator(SqliteOperationalStore store,string sid,string session,string root,LocalRetentionApproval authority,
         TimeProvider? clock=null,DeletionLedgerDatabase? database=null,DeletionRequestAdmission? admission=null,DeletionQueryAdmission? queryAdmission=null)
     { _authority=authority;_clock=clock??TimeProvider.System;_store=new(store,sid,session,root,_clock,database);_admission=admission??DeletionRequestAdmission.Host;_queryAdmission=queryAdmission??DeletionQueryAdmission.Host; }
+    public string? HostShutdownBusyReason
+    { get { lock (_gate) return _active is not null || _query is not null ? "deletion_in_flight" :
+        _last is { Retired: false } || _last is not null && _last.RequestRetired != true ? "deletion_retirement_unknown" : null; } }
     public bool Supported=>!_stop.IsCancellationRequested;
     public static bool ValidRecordingId(string? id)=>id is {Length:>0 and <=200}&&!id.Any(char.IsControl)&&id.IndexOfAny(new[]{'/','\\','%',':','?','#'})<0&&UnifiedHistoryQueryService.ValidId(id);
     public static string NormalizeKey(string? key)

@@ -13,7 +13,7 @@ namespace AgentRecorder.Cli;
 /// CLI tool for AI agents to reliably start/reuse Agent Recorder
 /// and obtain machine-readable readiness information.
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private const int DefaultTimeoutSeconds = 30;
     private const int ApiPort = 37891;
@@ -32,6 +32,7 @@ internal static class Program
             var opts = ParseOpts(args, 1);
             return RunEnsureRunning(opts);
         }
+        if (command == "shutdown") return RunShutdown(args);
         if (command == "interactive-launch")
             return RunInteractiveLaunchCommand(args);
         if (command == "autostart")
@@ -655,6 +656,9 @@ internal static class Program
         => EnsureRunningCore(opts, InteractiveDesktopRuntime.ObserveCurrent());
 
     internal static EnsureRunningResult EnsureRunningCore(CliOptions opts, InteractiveDesktopObservation desktop)
+        => EnsureRunningCore(opts, desktop, null);
+
+    internal static EnsureRunningResult EnsureRunningCore(CliOptions opts, InteractiveDesktopObservation desktop, StaleReadyDecisionContext? context)
     {
         var ensureStopwatch = Stopwatch.StartNew();
         var packageRoot = ResolvePackageRoot(opts);
@@ -676,7 +680,7 @@ internal static class Program
                 desktop, opts, "none");
         }
 
-        var decision = EvaluateStaleReadyDecision(readyPath);
+        var decision = EvaluateStaleReadyDecision(readyPath, context ?? new StaleReadyDecisionContext());
 
         switch (decision.Action)
         {
@@ -1531,6 +1535,7 @@ internal static class Program
         Console.WriteLine("Usage: AgentRecorder.Cli <command> [options]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
+        Console.WriteLine("  shutdown         Gracefully exit the exact idle host; never force or launch");
         Console.WriteLine("  ensure-running   Ensure Agent Recorder is running and return readiness info");
         Console.WriteLine("  autostart        Manage per-user autostart (login startup) setting");
         Console.WriteLine("  help             Show this help");

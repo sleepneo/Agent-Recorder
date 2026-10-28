@@ -58,6 +58,8 @@ internal sealed class StandingLeaseNaturalWakeScheduler : IDisposable
 
     internal bool IsStarted => Volatile.Read(ref _started) != 0 && Volatile.Read(ref _disposed) == 0;
 
+    internal HostWorkAdmission? HostAdmission { get; set; }
+
     internal Task? LoopTaskForTests => _loop;
 
     internal bool Start()
@@ -143,6 +145,8 @@ internal sealed class StandingLeaseNaturalWakeScheduler : IDisposable
         if (Volatile.Read(ref _disposed) != 0)
             return;
 
+        using var hostWork = HostAdmission?.TryEnter("plan_execution_in_flight");
+        if (HostAdmission is not null && hostWork is null) return;
         await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {

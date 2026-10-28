@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using AgentRecorder.Capture;
@@ -384,6 +385,60 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void ClockFailureBeforeVideoPreserves200SecondsMp4OnlyDefaultCountdownAndFullAudit(bool audioReady)
+    {
+        RecordingPreflightChecker.FreeSpaceProvider = (string _, out long free) => { free = 100L << 30; return true; };
+        RecordingPreflightChecker.EncoderProvider = (out string? ffmpeg, out string? ffprobe) =>
+        { ffmpeg = ffprobe = typeof(SystemAudioProductFlowTests).Assembly.Location; return true; };
+        var audit = new ClockAudit(); var tray = new PendingTray(); var backend = new OrderedAudioReadyBackend();
+        using var engine = new RecordingEngine(audit,
+            displayTopologyProvider: new FixedDisplayTopologyProvider(new DisplayTopologySnapshot(
+                "display_1", "synthetic-test-display:display_1", DisplayIdentityResolutionStatus.Resolved,
+                new CapturePlanBounds(0, 0, 1920, 1080))),
+            systemAudioEndpointProvider: new CountingEndpointProvider(DefaultEndpoint))
+        { CountdownInterval = TimeSpan.FromMilliseconds(250), CountdownSteps = 3 };
+        engine.BackendFactory = _ => (backend, "ffmpeg-region-av-split");
+        var request = Request(sourceType: "region", outputDirectory: _dataDir);
+        request["stop_condition"]!["seconds"] = 200;
+        request["artifacts"] = new JsonObject { ["bundle"] = false };
+        engine.CreateRecording(request, "private", tray);
+        var rec = Assert.Single(engine._recs.Values);
+        Assert.Equal(200, rec.Config.DurationSeconds); Assert.False(rec.GenerateBundle);
+        Assert.Equal(3, rec.CountdownSeconds); Assert.Equal(3, tray.Presentation!.Summary.CountdownSeconds);
+        Assert.Equal(DefaultEndpoint.Id, rec.Config.SystemLoopbackEndpoint);
+        tray.PendingCallback!(ConfirmationDecision.Approve());
+        Assert.True(SpinWait.SpinUntil(() => backend.StartCalls == 1, TimeSpan.FromSeconds(3)));
+        if (audioReady)
+        {
+            backend.SignalAudioReady();
+            Assert.True(SpinWait.SpinUntil(() => rec.State == RecState.countdown, TimeSpan.FromSeconds(3)));
+        }
+        backend.SignalFailureBeforeVideo(LoopbackClockDiagnosticHostTests.DiagnosticLine() + "\n" + new string('v', 5000));
+        Assert.True(SpinWait.SpinUntil(() => rec.IsFinalized, TimeSpan.FromSeconds(3)));
+        Assert.Equal(RecState.failed, rec.State); Assert.Equal("audio_capture_discontinuous", rec.Error);
+        Assert.Equal(default, rec.StartedAtUtc); Assert.Equal(0, backend.StartVideoCalls);
+        Assert.False(File.Exists(rec.OutputPath)); Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
+        Assert.DoesNotContain("LoopbackClockDiagnosticsV1", rec.StderrExcerpt ?? "");
+        var entry = Assert.Single(audit.ClockEntries);
+        Assert.Equal(rec.Id, entry.GetProperty("recording_id").GetString());
+        Assert.Equal(1, entry.GetProperty("packet_diagnostics").GetProperty("packets").GetArrayLength());
+        backend.SignalFailureBeforeVideo(LoopbackClockDiagnosticHostTests.DiagnosticLine());
+        Assert.Single(audit.ClockEntries);
+        var config = JsonSerializer.SerializeToNode(engine.GetStatus(rec.Id))!["config"]!;
+        Assert.Equal(200, config["duration_seconds"]!.GetValue<int>());
+        Assert.Equal(3, config["countdown_seconds"]!.GetValue<int>());
+        Assert.False(config["artifacts"]!["bundle"]!.GetValue<bool>());
+    }
+
+    private sealed class ClockAudit : AuditLogger
+    {
+        internal System.Collections.Concurrent.ConcurrentQueue<JsonElement> ClockEntries = new();
+        public override void Log(string evt, object payload)
+        { if (evt == "recording.loopback_clock_diagnostics") ClockEntries.Enqueue(JsonSerializer.SerializeToElement(payload)); }
+    }
+
     private static readonly SystemAudioEndpointInfo DefaultEndpoint =
         new("{0.0.0.00000000}.{SYSTEM}", "Speakers Long Name", "render", "active", true);
 
@@ -468,7 +523,9 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public string HostMode => "headless";
         public bool SupportsRegionSelectionUi => true;
         public Action<ConfirmationDecision>? PendingCallback { get; private set; }
-        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => PendingCallback = callback;
+        public RecordingConfirmationPresentation? Presentation { get; private set; }
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback)
+        { Presentation = presentation; PendingCallback = callback; }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
         public void SetRecording(RecordingUiPresentation rec) { }
         public void SetIdle(RecordingUiPresentation rec) { }
@@ -489,7 +546,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         public int ExitCode => 0;
         public void Start(CaptureConfig cfg, CaptureAuthorizationProof authorizationProof) { StartCalls++; Events.Add("start"); cfg.CommandArgs = "controlled-test"; }
         public void SignalAudioReady() { _audioReady = true; Events.Add("audio-ready"); AudioReady?.Invoke(); }
-        public void SignalFailureBeforeVideo()
+        public void SignalFailureBeforeVideo(string diagnosticStderr = "")
         {
             Events.Add("audio-failed-before-video");
             _naturalExit?.Invoke(1, new OutputMeta
@@ -500,6 +557,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
                 AudioContinuityStatus = "degraded",
                 AudioHelperErrorCode = "audio_capture_discontinuous",
                 AudioHelperFailureReason = "Failed to append loopback packet: synthetic QPC/device conflict",
+                StderrLog = diagnosticStderr,
                 Warnings = new[] { "audio_worker_exited_before_video_started" }
             });
         }

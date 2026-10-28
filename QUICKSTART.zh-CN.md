@@ -35,6 +35,68 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
    - 在本地确认窗口中检查录制信息，可按需更改保存目录，然后明确点击「确认」批准录制
    - 播放 AI agent 返回的视频文件
 
+## 如何录制声音
+
+**不指定声音时，默认只录画面，不录声音。** “录制整个窗口”不表示自动录下该窗口播放的声音。需要音频时，直接告诉 AI agent：
+
+```text
+找到 PotPlayer 窗口，录制整个窗口 20 秒，开启系统声音，不录麦克风。
+选区录屏 15 秒，开启 AirPods 麦克风，不录系统声音。
+录制主屏 15 秒，不录任何声音。
+```
+
+- **系统声音**：录制所选输出设备上的全部声音，其他应用也可能录入，不是窗口独占音轨。
+- **麦克风**：普通选区和显示器视频支持；窗口内容录制不支持。
+- **不能同时开启系统声音和麦克风。** 固定区域配置/无人值守及截图序列仍不录声音。
+- 未指定设备时，使用当前 Windows 多媒体默认输出或可唯一确定的麦克风输入；本地确认后设备固定，切换默认设备不会自动改录另一设备。
+- 批准前核对确认窗中的声音模式及设备；请求的音频不可用时，应由 agent 明确告知，不能悄悄改录静音视频。
+
+完整规则见 [README 的声音录制说明](README.zh-CN.md#声音录制规则)。
+
+## 嵌套录制测试
+
+先对 AI agent 说：
+
+```text
+开始 outer 选区录制 120 秒。
+```
+
+完成外层选区和本地确认，看到 REC 后，立即发送：
+
+```text
+在 outer 继续录制期间，开始 inner 选区录制 20 秒。
+```
+
+再完成内层选区和本地确认。120 秒外层时长为 agent 响应及两次交互留出余量，
+不是固定的响应时间保证。若要在 outer 视频里看到 inner 的录制控件，请在同一
+显示器内选择范围，使 inner 区域及控件位于 outer 范围中。
+
+检查 inner 结束后 outer 是否仍在录制，以及是否分别得到两段正常视频。
+若创建 inner 前 outer 已结束，agent 应明确告知本次未形成嵌套，不能按嵌套成功报告。
+
+## 一次性无人值守测试
+
+先完成准备，再开始计时。可以先对 AI agent 说：
+
+```text
+检查有限无人值守是否已开启；若未开启，告诉我在哪里启用，先不要创建计划。
+```
+
+若尚未开启，在 Recorder 托盘菜单打开无人值守安全控制，由你在本地启用。
+请让 agent 再次检查当前实例的开关状态；确认已开启后，再发送：
+
+```text
+两分钟后自动录制一个固定区域 10 秒，无音频；现在让我选区并批准一次性授权，到点不要再次询问。
+```
+
+“两分钟后”以准备完成后这次新指令为准，不包含等待启用开关的时间。
+完成选区并在本地批准这一次授权，agent 应报告具体的计划开始时间及排期结果。
+启用全局开关不等于已批准具体录制；等待开关或批准时，也不能报告已排期。
+
+测试期间保持 Recorder 运行、电脑唤醒且桌面未锁定。检查到点是否无需第二次确认
+就开始录制，并在约 10 秒后结束。若批准超时或错过执行窗口，应明确报告未执行，
+不能自行延后或重复录制。
+
 ## quick API 目标类型
 
 | target.type | 说明 |
@@ -131,24 +193,6 @@ X-Agent-Recorder-Key: <api-key>
 }
 ```
 
-## 添加章节标记
-
-录制中按 `Ctrl+Shift+F11` 可添加章节标记。Agent Recorder 会短暂显示绿色应用内提示，不使用托盘气泡；如果 outer 和 inner 同时录制，一次按键会按各自的首帧时间轴分别添加标记。
-
-AI agent 也可以通过鉴权 API 为一条活动录制添加带名称的标记：
-
-```http
-POST /api/v1/recordings/{recording_id}/marks
-Content-Type: application/json
-X-Agent-Recorder-Key: <api-key>
-
-{
-  "label": "重要决定"
-}
-```
-
-成功完成 FFmpeg MP4 录制后，已接受的标记会写入 `<视频文件名>.bundle/marks.json`。
-
 托盘菜单提供中文/English 语言选择，设置保存在本机，并应用于后续打开的选区、确认和录制控制窗口。
 
 ## 公开系统声音
@@ -220,3 +264,18 @@ AGENT-API-REFERENCE.zh-CN.md       API 快速手册
 LICENSE                            Agent Recorder MIT 许可证
 LICENSE-NOTICE.md                  第三方许可说明
 ```
+
+
+## Agent 调用空闲退出
+
+用户说“退出 Recorder”时，agent 自行执行：
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-running 返回的 data_dir>"
+```
+
+先检查 `capabilities.host_shutdown.supported`。本构建提供鉴权的 `POST /api/v1/host/shutdown`，只允许空闲退出，无 force 参数。CLI 不启动应用、不接受 PID；按 ready/capabilities、当前用户、应用路径、进程启动身份及实例 nonce 绑定原宿主，携带原 key，默认最多等待 15000ms（`--timeout-ms` 范围100–120000）确认原进程结束。只有 `exited` 表示已证实退出；`not_running` 表示没有 ready 且无宿主实例持有。`busy/unsupported/timeout/unknown` 均不表示成功退出；HTTP 202 的 `accepted` 也不代表进程已结束。
+
+确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
+
+本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。

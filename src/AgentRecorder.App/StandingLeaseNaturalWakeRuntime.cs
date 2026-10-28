@@ -76,6 +76,7 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
             () => CaptureAuthorizationSessionBinding.Current,
             utcNow: () => DateTimeOffset.UtcNow,
             audit: _audit.Log);
+        _scheduler.HostAdmission = _engine.HostAdmission;
     }
 
     internal bool ExecutionSupported =>

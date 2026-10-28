@@ -426,7 +426,17 @@ internal static class Program
             new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity),
             retentionDeletionGateway);
 
+        Task? hostWarmup = null;
+        int hostStartupComplete = 0;
+        server.ConfigureHostShutdown(() =>
+            Volatile.Read(ref hostStartupComplete) == 0 ? "host_startup_pending" :
+            ffmpegPrewarmer.HasActiveWork || hostWarmup is null || !hostWarmup.IsCompleted ? "host_warmup_pending" :
+            tray.HostShutdownInteractionBusy || standingPlanSetupCoordinator?.HostShutdownBusy == true || recurringPlanSetupCoordinator?.HostShutdownBusy == true ||
+            requiredOncePlanSetupCoordinator?.HostShutdownBusy == true || futureWindowCoordinator?.HostShutdownBusy == true
+                ? "interaction_in_flight" : retentionDeletionGateway.HostShutdownBusyReason ?? HostReadOnlyWorkerState.BusyReason, tray.PostAgentExit);
+
         var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
+        if (observationHealth is ObservationHealthGateway ownedHealth) ownedHealth.HostAdmission = engine.HostAdmission;
         tray.SetObservationHealthGateway(observationHealth);
         server.SetObservationHealthGateway(observationHealth);
 
@@ -459,7 +469,7 @@ internal static class Program
         ffmpegPrewarmer.Start(audit);
 
         var wgcWarmupCts = new CancellationTokenSource();
-        _ = WgcContinuousWarmup.StartIfEnabled(
+        hostWarmup = WgcContinuousWarmup.StartIfEnabled(
             CaptureBackendSelector.ProductionDisplayProbe,
             message => Debug.WriteLine(message),
             wgcWarmupCts.Token);
@@ -517,6 +527,7 @@ internal static class Program
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Shutdown("process_exit");
         Application.ApplicationExit += (_, _) => Shutdown("application_exit");
+        Volatile.Write(ref hostStartupComplete, 1);
         Application.Run(tray);
     }
 

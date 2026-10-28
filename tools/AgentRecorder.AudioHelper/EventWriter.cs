@@ -185,6 +185,19 @@ internal sealed class EventWriter
         }
     }
 
+    internal void LoopbackDiagnostics(string json)
+    {
+        // Stderr avoids changing audio-helper-v1 stdout events or their limits.
+        // Exactly one bounded export per loopback terminal, never per packet.
+        if (json.Length > LoopbackPacketDiagnostics.MaxJsonChars) return;
+        lock (_lock)
+        {
+            var error = _error ?? Console.Error;
+            error.WriteLine(LoopbackPacketDiagnostics.Prefix + json);
+            error.Flush();
+        }
+    }
+
     private void WriteLine(string key, string value)
     {
         OutWriter.WriteLine($"{key}: {value}");

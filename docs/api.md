@@ -1724,6 +1724,12 @@ returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
 
 ## Chapter Marks
 
+Marks are timeline annotations, not embedded MP4 chapters or burned-in text.
+They are delivered in `marks.json` only when a recording bundle is enabled.
+MP4-only requests can currently accept marks without producing a durable mark
+artifact; this is a known combination limitation, not embedded-chapter support.
+The mark refers to server call time, not the time a human sent natural language.
+
 Add a labeled mark to one active recording:
 
 ```http
@@ -3076,3 +3082,18 @@ The independent local window identifies the filename, copyable full path, size a
 `original_resources_retired`, `ledger_resources_retired`, `our_resources_retired` and `request_resources_retired` distinguish actual ownership and may be null when unproven. `preparation_commit`, `ledger_settlement` and `request_write_commit` use `committed`, `not_committed` or `unknown` (operation fields can be null without a linked operation). `persisted_disposition_progress` separately reports the actual settled ledger fact. Accepted native facts survive a failed final request write. A fresh process reads persisted facts only: pending local confirmation becomes invalidated; an execution reservation without a settled result remains unknown. The same key returns the old request, with zero UI, recovered permits or resumed native calls. SQLite and Windows disposition are separate transactions; a missing ledger row never proves no action after an uncertain reservation.
 
 Scope is one completed ordinary main MP4 directly under the host's fixed Videos root, with its original trusted publication anchor, successful size, explicitly not-applicable Bundle and passing existing finite-use protections. Paths/directories, batches, quota cleanup, Plan/future entries, attachments and unknown legacy files are unsupported. No identity is recollected to grant authority. `capabilities.retention_deletion` publishes both endpoints, this scope, `requires_local_confirmation=true`, `single_item=true`, `permanent=true`, `no_trash=true`, `unattended=false` and the result/recovery semantics. `retention_preview` remains separately read-only with `deletion_supported=false`, `reference_protection_ready=false` and `physical_identity_protection_ready=false`; neither capability establishes a complete reference graph or namespace freeze. This implementation and private automated UI adapters do not constitute real desktop confirmation or release-package acceptance.
+
+
+## Agent-requested idle shutdown
+
+When the user asks to exit Recorder, the agent runs:
+
+```powershell
+AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<data_dir returned by ensure-running>"
+```
+
+Check `capabilities.host_shutdown.supported` first. This build supports authenticated idle-only `POST /api/v1/host/shutdown`, with no force option. The CLI never starts an app or accepts a PID; it verifies ready/capabilities, user, executable, process start identity and instance nonce, sends the existing key, and waits up to 15000 ms (`--timeout-ms`, 100–120000) for that original process to exit. `exited` is confirmed process termination; `not_running` means no ready file and no held host instance. `busy`, `unsupported`, `timeout` and `unknown` are not successful exits. A 202 API `accepted` response alone does not mean exited.
+
+Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
+
+The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.

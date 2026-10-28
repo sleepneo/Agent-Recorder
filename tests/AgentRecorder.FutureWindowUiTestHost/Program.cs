@@ -9,6 +9,9 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 0 && Path.GetFileName(Environment.ProcessPath) == "AgentRecorder.Headless.exe")
+            return PrivateShutdownHost.Run(Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR")!);
+        if (args.Length == 2 && args[1] == "shutdown-host") return PrivateShutdownHost.Run(args[0]);
         if (args.Length != 2 || args[1] is not ("parent-close" or "cancel-after-visible"))
             return 2;
 

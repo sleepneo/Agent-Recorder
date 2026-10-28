@@ -4,6 +4,7 @@ namespace AgentRecorder.Persistence;
 internal static class ArtifactMetadataWorker
 {
     private static int _busy;
+    internal static bool HostBusy => Volatile.Read(ref _busy) != 0;
     internal static async Task<T?> ReadAsync<T>(Func<CancellationToken,T?> run, Func<string,T> snapshot,
         Func<CancellationToken,Task> deadlineFactory, Action? retired, CancellationToken cancellation) where T : class
     {

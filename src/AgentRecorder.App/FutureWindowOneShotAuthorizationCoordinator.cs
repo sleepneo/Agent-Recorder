@@ -69,6 +69,9 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
             Recover();
     }
 
+    private int _shutdownUiUnknown;
+    internal bool HostShutdownBusy { get { lock (_approvalFlightSync) return Volatile.Read(ref _shutdownUiUnknown) != 0 || _approvalFlights.Values.Any(f => !f.Task.IsCompleted); } }
+
     public bool IsInteractiveDesktopAvailable =>
         Volatile.Read(ref _disposed) == 0 && _tray.SupportsRegionSelectionUi &&
         FutureWindowProcessIdentity.IsInteractiveDesktopAvailable() &&
@@ -671,6 +674,7 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
         }
         catch (TimeoutException)
         {
+            Volatile.Write(ref _shutdownUiUnknown, 1);
             AuditApprovalUi(authorizationId, "close_unconfirmed", new
             { reason_code = "approval_ui_close_timeout" });
         }
@@ -775,12 +779,14 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
         {
             if (!Task.WhenAll(flights.Select(item => item.Flight.Task)).Wait(ApprovalUiCloseGrace))
             {
+                Volatile.Write(ref _shutdownUiUnknown, 1);
                 foreach (var (authorizationId, flight) in flights.Where(item => !item.Flight.Task.IsCompleted))
                     AuditApprovalUi(authorizationId, "close_unconfirmed", new { reason_code = "approval_ui_close_timeout" });
             }
         }
         catch
         {
+            Volatile.Write(ref _shutdownUiUnknown, 1);
             foreach (var (authorizationId, flight) in flights.Where(item => !item.Flight.Task.IsCompleted))
                 AuditApprovalUi(authorizationId, "close_unconfirmed", new { reason_code = "approval_ui_task_failed" });
         }

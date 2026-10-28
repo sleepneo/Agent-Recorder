@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -31,6 +31,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
     private byte[] _recordBuffer;
     private readonly int _bytesPerFrame;
     private readonly int _sleepMilliseconds;
+    private readonly int _bufferCapacityFrames;
 
     private Thread? _captureThread;
     private readonly ManualResetEventSlim _threadExited = new(false);
@@ -43,6 +44,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
     private int _captureThreadStarted;
     private int _resourcesReleased;
     private long _discontinuityCount;
+    private long _packetSequence;
 
     // Test-only gates. They are null in the production helper and exist solely
     // to make the thread-publication/start publication ownership windows
@@ -112,6 +114,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         }
 
         int bufferFrameCount = audioClient.BufferSize;
+        _bufferCapacityFrames = bufferFrameCount;
         _bytesPerFrame = waveFormat.Channels * waveFormat.BitsPerSample / 8;
         if (_bytesPerFrame <= 0)
             throw new ArgumentException("Wave format yields zero bytes per frame", nameof(waveFormat));
@@ -455,6 +458,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 AudioClientBufferFlags flags;
                 long devicePosition;
                 long qpcPosition;
+                long getBufferStartTicks = Stopwatch.GetTimestamp();
                 try
                 {
                     buffer = _captureClient.GetBuffer(out frames, out flags, out devicePosition, out qpcPosition);
@@ -465,14 +469,33 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                     break;
                 }
 
+                AudioPacketObservation? observation = null;
+                byte[]? detached = null;
+
                 if ((flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity)
                     Interlocked.Increment(ref _discontinuityCount);
 
                 try
                 {
+                    if (_sourceKind == AudioSourceKind.SystemLoopback)
+                        observation = new AudioPacketObservation(++_packetSequence, _waveFormat.SampleRate,
+                            _waveFormat.BlockAlign, frames, devicePosition, qpcPosition, (int)flags,
+                            getBufferStartTicks, Stopwatch.GetTimestamp(), _bufferCapacityFrames, _sleepMilliseconds);
                     int bytesAvailable = checked(frames * _bytesPerFrame);
                     if (bytesAvailable > 0)
-                        ReadPacket(buffer, bytesAvailable, frames, flags, devicePosition, qpcPosition);
+                    {
+                        if (_sourceKind == AudioSourceKind.SystemLoopback)
+                        {
+                            if (bytesAvailable > 16 * 1024 * 1024) throw new InvalidOperationException("Native packet exceeds bounded copy budget");
+                            detached = new byte[bytesAvailable];
+                            if ((flags & AudioClientBufferFlags.Silent) == 0)
+                            {
+                                if (buffer == IntPtr.Zero) throw new InvalidOperationException("Non-silent packet has a null buffer pointer");
+                                Marshal.Copy(buffer, detached, 0, bytesAvailable);
+                            }
+                        }
+                        else ReadPacket(buffer, bytesAvailable, frames, flags, devicePosition, qpcPosition, observation);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -480,9 +503,12 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 }
                 finally
                 {
+                    long releaseStartTicks = Stopwatch.GetTimestamp();
+                    bool releaseSucceeded = false;
                     try
                     {
                         _captureClient.ReleaseBuffer(frames);
+                        releaseSucceeded = true;
                     }
                     catch (Exception ex)
                     {
@@ -499,8 +525,20 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                             runtimeException.TryAttachSecondaryFailure("ReleaseBuffer", ex);
                         }
                     }
+                    finally
+                    {
+                        observation?.CompleteRelease(releaseStartTicks, Stopwatch.GetTimestamp(), releaseSucceeded);
+                    }
                 }
 
+                if (runtimeException == null && detached != null)
+                {
+                    // One owned packet only: synchronous consumers run after native ReleaseBuffer.
+                    var pin = GCHandle.Alloc(detached, GCHandleType.Pinned);
+                    try { ReadPacket(pin.AddrOfPinnedObject(), detached.Length, frames, flags, devicePosition, qpcPosition, observation); }
+                    catch (Exception ex) { runtimeException = AudioCaptureRuntimeException.FromException("ReadPacket", ex); }
+                    finally { pin.Free(); }
+                }
                 if (runtimeException != null)
                     break;
             }
@@ -542,7 +580,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         int framesAvailable,
         AudioClientBufferFlags flags,
         long devicePosition,
-        long qpcPosition)
+        long qpcPosition,
+        AudioPacketObservation? observation)
     {
         bool silent = (flags & AudioClientBufferFlags.Silent) == AudioClientBufferFlags.Silent;
         bool positionValid = devicePosition >= 0 && qpcPosition > 0 &&
@@ -572,7 +611,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                     qpcPosition,
                     packetStartTimestamp,
                     positionValid,
-                    (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity);
+                    (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity,
+                    observation);
                 silentOffset += chunkSize;
             }
             return;
@@ -601,7 +641,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
                 qpcPosition,
                 packetStartTimestamp,
                 positionValid,
-                (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity);
+                (flags & AudioClientBufferFlags.DataDiscontinuity) == AudioClientBufferFlags.DataDiscontinuity,
+                observation);
             readOffset += chunkBytes;
         }
     }
@@ -615,7 +656,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         long qpcPosition,
         long packetStartTimestamp,
         bool positionValid,
-        bool dataDiscontinuity)
+        bool dataDiscontinuity,
+        AudioPacketObservation? observation)
     {
         int framesOffset = byteOffset / _bytesPerFrame;
         int framesRecorded = bytesRecorded / _bytesPerFrame;
@@ -639,7 +681,9 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
             chunkQpcPosition,
             chunkTimestamp,
             positionValid,
-            dataDiscontinuity));
+            dataDiscontinuity,
+            observation,
+            framesOffset));
         DataAvailable?.Invoke(this, new WaveInEventArgs(buffer, bytesRecorded));
     }
 

@@ -102,6 +102,13 @@ public sealed partial class ApiServer
     private int _stopped;
     internal Action? BeforeStopClientDrainWaitForTests { get; set; }
 
+    private Func<string?>? _hostShutdownBusy;
+    private Action? _postHostShutdown;
+    private int _hostExitPosted;
+    internal Action? BeforeHostShutdownResponseWriteForTests { get; set; }
+    public void ConfigureHostShutdown(Func<string?> busy, Action postExit)
+    { _hostShutdownBusy = busy; _postHostShutdown = postExit; }
+
     private SelectedRegionState? _lastSelectedRegion;
     private readonly object _regionLock = new();
 
@@ -362,7 +369,7 @@ public sealed partial class ApiServer
                 if (RequiresAuth(method, path))
                 {
                     var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
-                    if(IsDeletionPath(path)||method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
+                    if(path==Prefix+"/host/shutdown"||IsDeletionPath(path)||method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
                     {
                         // The new diagnostic endpoint requires authentication even in an
                         // unconfigured host. Preserve the shared validator and existing codes.
@@ -374,12 +381,23 @@ public sealed partial class ApiServer
                     else ApiKeyAuth.ValidateHeader(key);
                 }
 
+                bool shutdown = path == Prefix + "/host/shutdown";
+                using var admission = shutdown ? null :
+                    _engine.HostAdmission.TryEnter("request_in_flight");
+                if (!shutdown && admission is null)
+                    throw new ApiException(503, "HOST_SHUTTING_DOWN", "Host work admission is closed.");
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
                 var disconnect=(IsDeletionPath(path)||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
                 try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
                 finally { requestCancellation.Cancel(); await disconnect; }
-                await WriteJson(stream, status, responseBody, responseHeaders);
+                if (shutdown && status == 202) BeforeHostShutdownResponseWriteForTests?.Invoke();
+                await WriteJson(stream, status, responseBody, responseHeaders, strictFlush: shutdown);
+                if (shutdown && status == 202 && Interlocked.Exchange(ref _hostExitPosted, 1) == 0)
+                {
+                    // The transport has finished writing. Never run/drain the host on this client task.
+                    _ = Task.Run(() => _postHostShutdown!());
+                }
             }
             catch (ApiException ex)
             {
@@ -427,7 +445,7 @@ public sealed partial class ApiServer
         catch { } // An observation failure alone does not prove the peer cannot receive.
     }
 
-    private static async Task WriteJson(Stream stream, int status, string body, IReadOnlyDictionary<string, string>? responseHeaders = null)
+    private static async Task WriteJson(Stream stream, int status, string body, IReadOnlyDictionary<string, string>? responseHeaders = null, bool strictFlush = false)
     {
         var buf = Encoding.UTF8.GetBytes(body);
         var extraHeaders = responseHeaders is null
@@ -437,7 +455,8 @@ public sealed partial class ApiServer
         var responseBytes = Encoding.UTF8.GetBytes(headers);
         await stream.WriteAsync(responseBytes);
         await stream.WriteAsync(buf);
-        try { stream.Flush(); } catch { }
+        if (strictFlush) await stream.FlushAsync();
+        else { try { stream.Flush(); } catch { } }
     }
 
     private static string StatusText(int status) => status switch
@@ -562,6 +581,7 @@ public sealed partial class ApiServer
 
     private static bool RequiresAuth(string method, string path)
     {
+        if (path == Prefix + "/host/shutdown") return true;
         if (method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE")
             return true;
 
@@ -578,6 +598,23 @@ public sealed partial class ApiServer
         if (!path.StartsWith(Prefix))
             throw new ApiException(404, "RECORDING_NOT_FOUND", "Unknown endpoint");
         var sub = path[Prefix.Length..];
+        if (sub == "/host/shutdown")
+        {
+            if (method != "POST") throw new ApiException(405, "METHOD_NOT_ALLOWED", "Use POST.");
+            if (req.Headers.TryGetValue("X-Agent-Recorder-Instance", out var expectedInstance) &&
+                (_readiness is null || expectedInstance != _readiness.InstanceId))
+                throw new ApiException(409, "HOST_IDENTITY_MISMATCH", "The bound host instance changed.", new { reason_code = "host_identity_mismatch" });
+            if (_postHostShutdown is null || _hostShutdownBusy is null)
+                throw new ApiException(501, "HOST_SHUTDOWN_UNSUPPORTED", "This host has no idle shutdown dispatcher.");
+            if (!string.IsNullOrWhiteSpace(reqBody) && reqBody.Trim() != "{}")
+                throw new ApiException(400, "INVALID_SHUTDOWN_REQUEST", "Idle shutdown accepts no options or force flag.");
+            string? busy;
+            try { busy = _engine.HostAdmission.TryClose(() => _engine.TryReserveIdleHostShutdown(_hostShutdownBusy)); }
+            catch { busy = "owner_state_unknown"; }
+            if (busy is not null) throw new ApiException(409, "HOST_BUSY", "Host remains available; no work was cancelled.", new { reason_code = busy });
+            status = 202;
+            return ApiResponse.Ok(new { status = "accepted", exited = false, idle_only = true }, reqId);
+        }
         if((method is "POST" or "PUT" or "PATCH") && !string.IsNullOrWhiteSpace(reqBody))
         {
             try { _ = ConfigParser.ValidateArtifactRequestJson(reqBody,method=="POST"&&(sub is "/recordings" or "/recordings/quick")); }
@@ -3897,6 +3934,8 @@ public sealed partial class ApiServer
                     !_futureWindowOneShotGateway.IsExecutionSupported ? "future_window_execution_unavailable" : null,
             },
             auth = new { required = true, header = "X-Agent-Recorder-Key" },
+            host_shutdown = new { supported = _postHostShutdown is not null, idle_only = true,
+                endpoint = "/api/v1/host/shutdown", method = "POST", force = false },
             readiness = _readiness?.ToCapabilitiesObject(),
             context = new
             {

@@ -18,9 +18,26 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class AudioCaptureWorker : IAudioCaptureWorker
 {
+    internal Func<Process, bool>? StartProcessForTests { get; set; }
+    internal Action<ProcessStartInfo>? ConfigureProcessForTests { get; set; }
     private Process? _proc;
     private readonly StringBuilder _stderrLog = new();
     private readonly object _lock = new();
+    private int _hostStderrRetired;
+    private int _hostProcessExited;
+    private readonly WorkerStartBoundary _hostStart = new();
+    internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    private void ObserveHostProcessExit()
+    { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
+
+    private bool ReadStartedHostRetirement()
+    {
+        ObserveHostProcessExit();
+        try { return Volatile.Read(ref _hostProcessExited) != 0 && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+                    Volatile.Read(ref _hostStderrRetired) != 0 &&
+                    (_microphoneMonitorTask?.IsCompleted ?? true); }
+        catch { return false; }
+    }
     private Task? _stdoutReader;
     private Task? _watcher;
     private TaskCompletionSource<bool>? _exitTcs;
@@ -92,7 +109,10 @@ public sealed class AudioCaptureWorker : IAudioCaptureWorker
         _microphoneStatusProvider = provider;
     }
 
-    public void Start(CaptureConfig cfg, string outputPath)
+    public void Start(CaptureConfig cfg, string outputPath) =>
+        _hostStart.Start(attempt => StartCore(cfg, outputPath, attempt), ReadStartedHostRetirement);
+
+    private void StartCore(CaptureConfig cfg, string outputPath, WorkerStartBoundary.Attempt attempt)
     {
         if (TestArgumentsOverride == null && string.IsNullOrEmpty(cfg.MicDevice))
             throw new ArgumentException("Microphone device is required for audio worker", nameof(cfg));
@@ -141,12 +161,15 @@ public sealed class AudioCaptureWorker : IAudioCaptureWorker
         foreach (var a in args)
             _proc.StartInfo.ArgumentList.Add(a);
 
+        Volatile.Write(ref _hostProcessExited, 0);
+        Volatile.Write(ref _hostStderrRetired, 0);
         _stderrClosed = new ManualResetEventSlim();
         _exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _proc.ErrorDataReceived += (_, e) =>
         {
             if (e.Data == null)
             {
+                Volatile.Write(ref _hostStderrRetired, 1);
                 _stderrClosed?.Set();
                 return;
             }
@@ -154,7 +177,11 @@ public sealed class AudioCaptureWorker : IAudioCaptureWorker
                 lock (_lock) _stderrLog.AppendLine(e.Data);
         };
 
-        try { _proc.Start(); }
+        try
+        {
+            ConfigureProcessForTests?.Invoke(_proc.StartInfo);
+            attempt.Launch(() => StartProcessForTests is null ? _proc.Start() : StartProcessForTests(_proc), StartProcessForTests is null, () => WorkerStartBoundary.NoAssociatedProcess(_proc));
+        }
         catch (Exception ex)
         {
             _stderrClosed?.Set();
@@ -185,6 +212,7 @@ public sealed class AudioCaptureWorker : IAudioCaptureWorker
                 try { if (exited) exitCode = _proc.ExitCode; } catch { }
             }
 
+            if (exited) Volatile.Write(ref _hostProcessExited, 1);
             DrainTask(_stdoutReader, StdoutDrainTimeout);
             WaitStderrClosed(StderrDrainTimeout);
             StopMicrophoneMonitor();
@@ -391,10 +419,18 @@ public sealed class AudioCaptureWorker : IAudioCaptureWorker
         catch { }
     }
 
-    public void Dispose()
+    internal bool HasNoStartedHostResources => _hostStart.KnownNoResources;
+    internal void RetireUnstartedHostResources() => _hostStart.CloseIfNoResources(CleanupForDispose);
+
+    public void Dispose() => _hostStart.Close(CleanupForDispose);
+
+    private bool CleanupForDispose()
     {
-        try { _proc?.Dispose(); } catch { }
-        try { _stderrClosed?.Dispose(); } catch { }
+        bool cleaned = true;
+        ObserveHostProcessExit();
+        try { _proc?.Dispose(); } catch { cleaned = false; }
+        try { _stderrClosed?.Dispose(); } catch { cleaned = false; }
         StopMicrophoneMonitor();
+        return cleaned;
     }
 }

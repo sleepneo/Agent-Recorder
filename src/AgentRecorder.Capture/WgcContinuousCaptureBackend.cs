@@ -480,10 +480,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
                     if (Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Disposed, (int)LifecycleState.Created) == (int)LifecycleState.Created)
                     {
-                        _finalMeta = new OutputMeta();
-                        SignalPublish();
-                        _terminalSignal.TrySetResult(null);
-                        _completionSignal.TrySetResult(null);
+                        CompleteUnstartedDisposal();
                         return;
                     }
                     current = _lifecycleState;
@@ -640,6 +637,22 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         {
             // Already canceled or disposed; ignore.
         }
+    }
+
+    internal void RetireUnstartedHostResources()
+    {
+        if (Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Disposed, (int)LifecycleState.Created) != (int)LifecycleState.Created) return;
+        ClaimDisposeNotification();
+        CompleteUnstartedDisposal();
+    }
+
+    private void CompleteUnstartedDisposal()
+    {
+        _finalMeta = new OutputMeta();
+        SignalPublish();
+        ReleaseStagingIfCleaned();
+        _terminalSignal.TrySetResult(null);
+        _completionSignal.TrySetResult(null);
     }
 
     private void ReleaseStagingIfCleaned()

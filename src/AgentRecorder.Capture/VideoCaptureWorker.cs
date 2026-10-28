@@ -21,6 +21,20 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
     private readonly StringBuilder _stderrLog = new();
     private readonly object _lock = new();
     private readonly object _anchorLock = new();
+    private int _hostStderrRetired;
+    private int _hostProcessExited;
+    private readonly WorkerStartBoundary _hostStart = new();
+    internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    private void ObserveHostProcessExit()
+    { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
+
+    private bool ReadStartedHostRetirement()
+    {
+        ObserveHostProcessExit();
+        try { return Volatile.Read(ref _hostProcessExited) != 0 && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+                    (Volatile.Read(ref _hostStderrRetired) != 0 || _proc?.ErrorStreamClosed == true); }
+        catch { return false; }
+    }
     private Task? _stdoutReader;
     private Task? _watcher;
     private TaskCompletionSource<bool>? _exitTcs;
@@ -99,7 +113,10 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
         }
     }
 
-    public void Start(CaptureConfig cfg, string outputPath)
+    public void Start(CaptureConfig cfg, string outputPath) =>
+        _hostStart.Start(attempt => StartCore(cfg, outputPath, attempt), ReadStartedHostRetirement);
+
+    private void StartCore(CaptureConfig cfg, string outputPath, WorkerStartBoundary.Attempt attempt)
     {
         // Lifecycle tests may inject a non-capture command such as -version;
         // that seam deliberately has no physical desktop bounds. Real gdigrab
@@ -134,6 +151,8 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
         foreach (var a in args)
             proc.StartInfo.ArgumentList.Add(a);
 
+        Volatile.Write(ref _hostProcessExited, 0);
+        Volatile.Write(ref _hostStderrRetired, 0);
         var stderrClosed = new ManualResetEventSlim();
         _stderrClosed = stderrClosed;
         var exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -142,6 +161,7 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
         {
             if (e.Data == null)
             {
+                if (lifecycleGeneration == Volatile.Read(ref _lifecycleGeneration)) Volatile.Write(ref _hostStderrRetired, 1);
                 stderrClosed.Set();
                 return;
             }
@@ -151,7 +171,7 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
 
         try
         {
-            if (!proc.Start())
+            if (!attempt.Launch(proc.Start, proc is SystemVideoCaptureProcess, () => proc is SystemVideoCaptureProcess native && native.NoAssociatedProcess))
                 throw new InvalidOperationException("The video process reported an unsuccessful start.");
 
             // This is deliberately taken after the successful Start() boundary,
@@ -187,6 +207,7 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
                 try { if (exited) exitCode = proc.ExitCode; } catch { }
             }
 
+            if (exited && lifecycleGeneration == Volatile.Read(ref _lifecycleGeneration)) Volatile.Write(ref _hostProcessExited, 1);
             DrainTask(stdoutReader, StdoutDrainTimeout);
             if (!proc.ErrorStreamClosed)
                 WaitStderrClosed(stderrClosed, StderrDrainTimeout);
@@ -467,9 +488,17 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
         return m;
     }
 
-    public void Dispose()
+    internal bool HasNoStartedHostResources => _hostStart.KnownNoResources;
+    internal void RetireUnstartedHostResources() => _hostStart.CloseIfNoResources(CleanupForDispose);
+
+    public void Dispose() => _hostStart.Close(CleanupForDispose);
+
+    private bool CleanupForDispose()
     {
-        try { _proc?.Dispose(); } catch { }
-        try { _stderrClosed?.Dispose(); } catch { }
+        bool cleaned = true;
+        ObserveHostProcessExit();
+        try { _proc?.Dispose(); } catch { cleaned = false; }
+        try { _stderrClosed?.Dispose(); } catch { cleaned = false; }
+        return cleaned;
     }
 }

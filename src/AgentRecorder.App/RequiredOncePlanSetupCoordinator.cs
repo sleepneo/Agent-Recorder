@@ -152,6 +152,8 @@ internal sealed class RequiredOncePlanSetupCoordinator : IRequiredOncePlanSetupG
         return ToApiState(state);
     }
 
+    internal bool HostShutdownBusy => _flights.Values.Any(flight => !flight.IsValueCreated || !flight.Value.IsCompleted);
+
     internal async Task WaitForIdleAsync() => await Task.WhenAll(_flights.Values.Select(flight => flight.Value)).ConfigureAwait(false);
 
     internal int FlightCountForTests => _flights.Count;

@@ -116,6 +116,8 @@ internal sealed class RequiredOncePlanExecutionCoordinator : IDisposable
     internal async Task<int> ProcessDueOnceAsync(CancellationToken cancellationToken = default)
     {
         if (Volatile.Read(ref _disposed) != 0) return 0;
+        using var hostWork = _engine.HostAdmission.TryEnter("plan_execution_in_flight");
+        if (hostWork is null) return 0;
         await _pollGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {

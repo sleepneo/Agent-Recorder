@@ -1291,6 +1291,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         }
 
         // Start UI thread
+        var selectionWork = _engine.HostAdmission.TryEnter("selection_ui_in_flight");
+        if (selectionWork is null) { guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen"); return; }
         uiThread = new Thread(() =>
         {
             try
@@ -1373,12 +1375,13 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             }
             finally
             {
+                selectionWork.Dispose();
                 uiThreadCompleted.Set();
             }
         });
         uiThread.SetApartmentState(ApartmentState.STA);
         uiThread.IsBackground = true;
-        uiThread.Start();
+        try { uiThread.Start(); } catch { selectionWork.Dispose(); throw; }
 
         // Timeout thread
         var timeoutThread = new Thread(() =>
@@ -1483,6 +1486,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             }
         });
 
+        var selectionWork = _engine.HostAdmission.TryEnter("selection_ui_in_flight");
+        if (selectionWork is null) { guardedCallback("host_shutdown", 0, 0, 0, 0, "", "virtual_screen"); return; }
         uiThread = new Thread(() =>
         {
             try
@@ -1534,12 +1539,13 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             }
             finally
             {
+                selectionWork.Dispose();
                 uiThreadCompleted.Set();
             }
         });
         uiThread.SetApartmentState(ApartmentState.STA);
         uiThread.IsBackground = true;
-        uiThread.Start();
+        try { uiThread.Start(); } catch { selectionWork.Dispose(); throw; }
 
         var timeoutThread = new Thread(() =>
         {
@@ -1590,6 +1596,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
         Directory.CreateDirectory(Paths.DefaultOutputDir);
         Process.Start(new ProcessStartInfo { FileName = Paths.DefaultOutputDir, UseShellExecute = true });
     }
+
+    internal bool HostShutdownInteractionBusy => Volatile.Read(ref _currentForm) is not null;
+
+    internal void PostAgentExit() => _uiInvoker.BeginInvoke(new Action(ExitApp));
 
     private void ExitApp()
     {

@@ -37,6 +37,7 @@ internal sealed class ObservationHealthGateway : IObservationHealthGateway
     private readonly Func<ObservationHealthOwner> _owner;
     private readonly ObservationHealthProbes _probes;
     private int _busy;
+    internal HostWorkAdmission? HostAdmission { get; set; }
     private readonly Func<CancellationToken,Task<ObservationHealthOwner>>? _postOwner;
     private readonly Func<ObservationHealthOwner> _partialOwner;
     internal Func<CancellationToken,Task> DeadlineForTests { get; set; } = token => Task.Delay(TimeSpan.FromSeconds(3),token);
@@ -50,12 +51,14 @@ internal sealed class ObservationHealthGateway : IObservationHealthGateway
         var progress=new OwnerProgress(PartialOwner());
         if(cancellation.IsCancellationRequested) return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.Failed);
         if(_postOwner is null) return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.NotChecked);
-        if(Interlocked.CompareExchange(ref _busy,1,0)!=0) return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.Busy);
+        var hostWork = HostAdmission?.TryEnter("health_worker_in_flight");
+        if (HostAdmission is not null && hostWork is null) return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.Busy);
+        if(Interlocked.CompareExchange(ref _busy,1,0)!=0) { hostWork?.Dispose(); return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.Busy); }
         var workCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         using var deadlineCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         // The stopwatch starts before owner dispatch; there is one deadline for the whole operation.
         var deadline=DeadlineForTests(deadlineCancellation.Token);
-        var work=ReadCoreAsync(progress,workCancellation);
+        var work=ReadCoreAsync(progress,workCancellation,hostWork);
         try
         {
             var winner=await Task.WhenAny(work,deadline).ConfigureAwait(false);
@@ -70,7 +73,7 @@ internal sealed class ObservationHealthGateway : IObservationHealthGateway
         private ObservationHealthOwner _owner=owner;
         internal ObservationHealthOwner Owner { get=>Volatile.Read(ref _owner); set=>Volatile.Write(ref _owner,value); }
     }
-    private async Task<ObservationHealthSnapshot> ReadCoreAsync(OwnerProgress progress,CancellationTokenSource cancellation)
+    private async Task<ObservationHealthSnapshot> ReadCoreAsync(OwnerProgress progress,CancellationTokenSource cancellation, IDisposable? hostWork)
     {
         try
         {
@@ -81,18 +84,20 @@ internal sealed class ObservationHealthGateway : IObservationHealthGateway
             return await Task.Run(()=>SampleCore(progress.Owner,cancellation.Token)).ConfigureAwait(false);
         }
         catch { return ObservationHealthSnapshot.Partial(progress.Owner,HealthProbeState.Failed); }
-        finally { cancellation.Dispose(); Volatile.Write(ref _busy,0); }
+        finally { cancellation.Dispose(); Volatile.Write(ref _busy,0); hostWork?.Dispose(); }
     }
     public ObservationHealthSnapshot PartialSnapshot(HealthProbeState state)=>ObservationHealthSnapshot.Partial(PartialOwner(),state);
     public ObservationHealthOwner CaptureOwner() => _owner();
     public Task<ObservationHealthSnapshot> SampleAsync(ObservationHealthOwner owner, CancellationToken cancellation)
     {
+        var hostWork = HostAdmission?.TryEnter("health_worker_in_flight");
+        if (HostAdmission is not null && hostWork is null) return Task.FromResult(ObservationHealthSnapshot.Partial(owner,HealthProbeState.Busy));
         if(Interlocked.CompareExchange(ref _busy,1,0)!=0)
-            return Task.FromResult(ObservationHealthSnapshot.Partial(owner,HealthProbeState.Busy));
+        { hostWork?.Dispose(); return Task.FromResult(ObservationHealthSnapshot.Partial(owner,HealthProbeState.Busy)); }
         return Task.Run(() =>
         {
             try { return SampleCore(owner,cancellation); }
-            finally { Volatile.Write(ref _busy,0); }
+            finally { Volatile.Write(ref _busy,0); hostWork?.Dispose(); }
         });
     }
     private ObservationHealthSnapshot SampleCore(ObservationHealthOwner owner,CancellationToken cancellation)

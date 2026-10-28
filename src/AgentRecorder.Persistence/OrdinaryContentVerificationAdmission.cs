@@ -5,6 +5,7 @@ namespace AgentRecorder.Persistence;
 internal static class OrdinaryContentVerificationAdmission
 {
     private static int _busy;
+    internal static bool HostBusy => Volatile.Read(ref _busy) != 0;
     internal static bool TryAcquire() => Interlocked.CompareExchange(ref _busy, 1, 0) == 0;
     internal static void Release() => Volatile.Write(ref _busy, 0);
 }

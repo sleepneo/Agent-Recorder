@@ -16,6 +16,12 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservableCaptureBackend, IAudioReadyBackend, ICaptureEndedObservableBackend, IMicrophoneStatusConsumer
 {
+    internal bool HostResourcesRetired => IsOutputSettled &&
+        (_audioWorker is null || _audioWorker is WasapiAudioCaptureWorker wasapi && wasapi.HostResourcesRetired ||
+            _audioWorker is AudioCaptureWorker audio && audio.HostResourcesRetired) &&
+        (_videoWorker is null || _videoWorker is VideoCaptureWorker video && video.HostResourcesRetired ||
+            _videoWorker is WgcContinuousVideoCaptureWorker wgc && wgc.HostResourcesRetired);
+
     private CaptureConfig? _cfg;
     private string _finalOutputPath = "";
     private IAudioCaptureWorker? _audioWorker;
@@ -516,6 +522,10 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
             TryDeleteTempFile(_tempAudioPath);
         }
         if (cancelMeta is not null) Volatile.Write(ref _outputSettled, 1);
+        if (_audioWorker is WasapiAudioCaptureWorker wasapi) wasapi.RetireUnstartedHostResources();
+        if (_audioWorker is AudioCaptureWorker audio) audio.RetireUnstartedHostResources();
+        if (_videoWorker is VideoCaptureWorker video) video.RetireUnstartedHostResources();
+        if (_videoWorker is WgcContinuousVideoCaptureWorker wgc) wgc.RetireUnstartedHostResources();
     }
 
     public void OnNaturalExit(Action<int, OutputMeta> callback)
@@ -1373,6 +1383,20 @@ public sealed class AvSplitCaptureBackend : ICaptureBackend, IFirstFrameObservab
         if (_cfg?.AudioRequested != false) return;
         try { _videoOnlyPublicationCancellation.Cancel(); }
         catch (ObjectDisposedException) { }
+    }
+
+    internal void RetireUnstartedHostResources()
+    {
+        lock (_lock)
+        {
+            bool audioEmpty = _audioWorker is null ||
+                _audioWorker is WasapiAudioCaptureWorker wasapi && wasapi.HasNoStartedHostResources ||
+                _audioWorker is AudioCaptureWorker audio && audio.HasNoStartedHostResources;
+            bool videoEmpty = _videoWorker is null ||
+                _videoWorker is VideoCaptureWorker video && video.HasNoStartedHostResources ||
+                _videoWorker is WgcContinuousVideoCaptureWorker wgc && wgc.HasNoStartedHostResources;
+            if (audioEmpty && videoEmpty) Cancel();
+        }
     }
 
     public void Dispose()

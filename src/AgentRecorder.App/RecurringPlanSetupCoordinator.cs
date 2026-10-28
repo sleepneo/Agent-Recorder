@@ -187,6 +187,8 @@ internal sealed class RecurringPlanSetupCoordinator : IRecurringPlanSetupGateway
         }
     }
 
+    internal bool HostShutdownBusy => _flights.Values.Any(flight => !flight.IsValueCreated || !flight.Value.IsCompleted);
+
     internal Task WaitForIdleAsync() => Task.WhenAll(_flights.Values.Select(value => value.Value));
     internal int FlightCountForTests => _flights.Count;
 

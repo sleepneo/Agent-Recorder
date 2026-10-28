@@ -134,6 +134,7 @@ internal sealed class RecurringLeaseNaturalWakeRuntime : IDisposable
             pollInterval: pollIntervalForTest,
             audit: _audit.Log,
             advanceBeforeQuery: RunAdvancementLoopPassAsync);
+        _scheduler.HostAdmission = _engine.HostAdmission;
     }
 
     internal bool ExecutionSupported =>
@@ -253,6 +254,8 @@ internal sealed class RecurringLeaseNaturalWakeRuntime : IDisposable
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        using var hostWork = _engine.HostAdmission.TryEnter("plan_advancement_in_flight");
+        if (hostWork is null) return Task.FromResult(false);
         var succeeded = _advancement.RunLoopPass(
             nowUtc, currentUserSid, sessionBinding, cancellationToken);
         Volatile.Write(ref _advancementHealthy, succeeded ? 1 : 0);

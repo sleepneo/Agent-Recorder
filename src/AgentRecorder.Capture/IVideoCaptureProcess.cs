@@ -28,6 +28,7 @@ internal interface IVideoCaptureProcess : IDisposable
 
 internal sealed class SystemVideoCaptureProcess : IVideoCaptureProcess
 {
+    internal bool NoAssociatedProcess => WorkerStartBoundary.NoAssociatedProcess(_process);
     private readonly Process _process;
     private volatile bool _errorStreamClosed;
 

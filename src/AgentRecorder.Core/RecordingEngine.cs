@@ -2485,7 +2485,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         lock (_lock)
         {
-            if (_recs.Values.Any(IsActiveRecordingState))
+            if (Volatile.Read(ref _disposeStarted) != 0 || _recs.Values.Any(IsActiveRecordingState))
             {
                 return StandingLeaseCaptureExecutionResult.Rejected("recording_conflict");
             }
@@ -2609,7 +2609,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         lock (_lock)
         {
-            if (_recs.Values.Any(IsActiveRecordingState))
+            if (Volatile.Read(ref _disposeStarted) != 0 || _recs.Values.Any(IsActiveRecordingState))
             {
                 return RecurringLeaseCaptureExecutionResult.Rejected("recording_conflict");
             }
@@ -2741,7 +2741,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         lock (_lock)
         {
-            if (_recs.Values.Any(IsActiveRecordingState))
+            if (Volatile.Read(ref _disposeStarted) != 0 || _recs.Values.Any(IsActiveRecordingState))
             {
                 identityHold.Dispose();
                 return new FutureWindowCaptureStartResult(false, receipt.RunId, "recording_conflict");
@@ -2832,7 +2832,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         }
         lock (_lock)
         {
-            if (_recs.Values.Any(IsActiveRecordingState))
+            if (Volatile.Read(ref _disposeStarted) != 0 || _recs.Values.Any(IsActiveRecordingState))
                 return RequiredOnceCaptureExecutionResult.Rejected("recording_conflict");
             if (!_recs.TryAdd(rec.Id, rec))
                 return RequiredOnceCaptureExecutionResult.Rejected("required_once_recording_identity_conflict");
@@ -5598,6 +5598,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         string error,
         string? stage)
     {
+        RetireNeverStartedBackend(rec.Backend);
         _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
             rec.BackendType ?? "unknown", errorCode, errorType);
         _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
@@ -6078,6 +6079,17 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             rec.CompletedAtUtc = DateTime.UtcNow;
             rec.ExitCode = exitCode;
             rec.LastMeta = meta;
+
+            // Preserve the helper's closed, numeric-only metadata schema before
+            // the existing public stderr excerpt is shortened. Diagnostics are
+            // observational and cannot change terminal arbitration or success.
+            try
+            {
+                if (rec.Config.IsSystemLoopback && LoopbackClockDiagnosticReader.TryRead(meta.StderrLog, out var clockDiagnostic))
+                    _audit.Log("recording.loopback_clock_diagnostics", new
+                    { recording_id = rec.Id, backend = rec.BackendType, packet_diagnostics = clockDiagnostic });
+            }
+            catch { }
 
             if (!natural)
             {
