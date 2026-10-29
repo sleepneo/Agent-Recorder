@@ -6,7 +6,8 @@ internal readonly record struct LoopbackPacketAppendResult(
     long ZeroBytesWritten,
     long PacketBytesWritten,
     long PacketBytesSkipped,
-    bool QpcOutlierAccepted = false)
+    bool QpcOutlierAccepted = false,
+    long NormalIdleZeroBytes = 0)
 {
     public long TotalBytesWritten => ZeroBytesWritten + PacketBytesWritten;
 }
@@ -74,6 +75,55 @@ internal sealed class LoopbackTimeline
     private int _observationCount;
     private bool _replayingObserved;
     internal int PendingObservationPackets => _observed.Count;
+    internal bool CanMapIdle(long previousDevice,long previousQpc) => _observed.Count==0 &&
+        _lastTrustedDeviceStart==previousDevice && AbsoluteValue(_lastTrustedQpcTimestamp-previousQpc)<=_qpcJitterToleranceTicks;
+    internal long IdleShift(long device,long qpc) => GetQpcDrift(qpc,device,_lastTrustedQpcTimestamp,_lastTrustedDeviceStart).DriftTicks;
+    internal bool StableObservationTrajectory(long firstDevice,long firstQpc,long middleDevice,long middleQpc,long lastDevice,long lastQpc) =>
+        IsWithinQpcJitter(GetQpcDrift(middleQpc,middleDevice,firstQpc,firstDevice).DriftTicks) &&
+        IsWithinQpcJitter(GetQpcDrift(lastQpc,lastDevice,middleQpc,middleDevice).DriftTicks);
+
+    private void SpendObservationPhase(long step,long offset)
+    {
+        step=AbsoluteValue(step);
+        if (_confirmedQpcPhaseRebaseCount>=MaxConfirmedQpcPhaseRebasesPerSession ||
+            AbsoluteValue(offset)>_maxQpcPhaseShiftTicks || step>_maxQpcPhaseShiftTicks-_cumulativeAbsoluteQpcPhaseAdjustmentTicks)
+            throw new LoopbackTimelineException("Runtime clock phase budget exceeded");
+        _confirmedQpcPhaseRebaseCount++;
+        _cumulativeAbsoluteQpcPhaseAdjustmentTicks+=step;
+    }
+
+    // Validate/spend the existing phase budget before committing any held idle PCM.
+    // Only the semantic idle shift changes the media map; a settling QPC offset adds no silence.
+    internal void ConfirmIdleTrajectory(AudioPacketEventArgs first,AudioPacketEventArgs last,long shift,bool observed,long outliers)
+    {
+        if(observed)
+        {
+            long step=GetQpcDrift(last.PacketStartTimestampTicks,last.DevicePosition,first.PacketStartTimestampTicks,first.DevicePosition).DriftTicks;
+            if(!IsWithinQpcJitter(step))
+                SpendObservationPhase(step,GetQpcDrift(last.PacketStartTimestampTicks,last.DevicePosition,
+                    checked(_phaseBudgetReferenceQpcTimestamp+shift),_phaseBudgetReferenceDeviceStart).DriftTicks);
+            Volatile.Write(ref _continuityDegraded,1);
+            Interlocked.Add(ref _qpcOutlierCount,outliers);
+        }
+        MapConfirmedIdle(first.DevicePosition,first.PacketStartTimestampTicks,shift);
+    }
+    internal void MapConfirmedIdle(long device,long qpc,long shift)
+    {
+        if (_observed.Count!=0 || shift<=0) throw new LoopbackTimelineException("Idle overlaps unresolved clock observation");
+        long start=checked(_anchorDeviceMediaBytes+(device-_anchorDevicePosition)*_format.BlockAlign+TimestampToBytes(shift));
+        if(start<MediaBytes)throw new LoopbackTimelineException("Idle would overwrite committed media");
+        _anchorDevicePosition=device;_anchorDeviceMediaBytes=start;
+        _lastTrustedDeviceStart=device;_lastTrustedQpcTimestamp=qpc;
+        // Move only the semantic idle offset; preserve old phase counts/absolute adjustment budgets.
+        _phaseBudgetReferenceQpcTimestamp=checked(_phaseBudgetReferenceQpcTimestamp+shift);
+    }
+    internal LoopbackPacketAppendResult AppendConfirmedIdlePacket(AudioPacketEventArgs p,Action<byte[],int,int> write,Action<byte[],int> zeros)
+    {
+        _replayingObserved=true;
+        try { return AppendPacket(p.Buffer,p.BytesRecorded,p.FramesRecorded,p.DevicePosition,p.PacketStartTimestampTicks,p.PositionValid,write,zeros,p.DataDiscontinuity); }
+        finally { _replayingObserved=false; }
+    }
+    internal void TrustIdlePacket(long device,long qpc) { _lastTrustedDeviceStart=device;_lastTrustedQpcTimestamp=qpc; }
     internal void CheckObservationDeadline()
     {
         if (_observed.Count != 0 && ObservationMilliseconds() - _observationStarted > 150)
@@ -118,19 +168,13 @@ internal sealed class LoopbackTimeline
         _observed.Add((buffer.AsSpan(0, bytes).ToArray(), frames, device, qpc));
         Volatile.Write(ref _continuityDegraded, 1);
         if (!original) Interlocked.Increment(ref _qpcOutlierCount);
-        bool stable = _observed.Count >= 3 &&
-            IsWithinQpcJitter(GetQpcDrift(qpc, device, _observed[^2].Qpc, _observed[^2].Device).DriftTicks) &&
-            IsWithinQpcJitter(GetQpcDrift(_observed[^2].Qpc, _observed[^2].Device, _observed[^3].Qpc, _observed[^3].Device).DriftTicks);
+        bool stable = _observed.Count >= 3 && StableObservationTrajectory(
+            _observed[^3].Device,_observed[^3].Qpc,_observed[^2].Device,_observed[^2].Qpc,device,qpc);
         if (!original && !stable) return new(0, 0, 0, true);
         if (!original)
         {
-            long step = AbsoluteValue(drift.DriftTicks);
             long offset = AbsoluteValue(GetQpcDrift(qpc, device, _phaseBudgetReferenceQpcTimestamp, _phaseBudgetReferenceDeviceStart).DriftTicks);
-            if (_confirmedQpcPhaseRebaseCount >= MaxConfirmedQpcPhaseRebasesPerSession ||
-                offset > _maxQpcPhaseShiftTicks || step > _maxQpcPhaseShiftTicks - _cumulativeAbsoluteQpcPhaseAdjustmentTicks)
-                throw new LoopbackTimelineException("Runtime clock phase budget exceeded");
-            _confirmedQpcPhaseRebaseCount++;
-            _cumulativeAbsoluteQpcPhaseAdjustmentTicks += step;
+            SpendObservationPhase(drift.DriftTicks,offset);
         }
         long zeros = 0, written = 0, skipped = 0;
         _replayingObserved = true;

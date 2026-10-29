@@ -35,13 +35,36 @@ internal sealed class LoopbackPacketDiagnostics
     private long? _faultSequence;
     private Entry? _faultEntry;
     private long _statesOmitted;
+    private long[] _idlePolicy=new long[13];
+    internal void SetIdlePolicy(long[] summary)
+    { lock(_gate) { if(summary.Length!=13)throw new ArgumentException("Invalid idle summary");_idlePolicy=(long[])summary.Clone(); } }
+    private readonly List<(long Generation, LoopbackIdleEvidence Evidence)> _idleSources = new(4);
+    private long _idleSourcesOmitted;
+    private long _faultIdleGeneration = -1;
+    private long[]? _faultIdleBinding;
+    private void TrimIdleSources()
+    {
+        while (_idleSources.Count > 4)
+        {
+            int remove = _idleSources.FindIndex(1,s => s.Generation != _faultIdleGeneration);
+            _idleSources.RemoveAt(remove); _idleSourcesOmitted++;
+        }
+    }
+    internal void RegisterIdleEvidence(long generation, LoopbackIdleEvidence evidence)
+    {
+        lock (_gate)
+        {
+            _idleSources.Add((generation, evidence));
+            TrimIdleSources();
+        }
+    }
 
     internal long Observe(AudioPacketEventArgs packet, long generation, WaveFormat? format, long receivedTicks, long[]? before)
     {
         lock (_gate)
         {
             long sequence = ++_sequence;
-            _entries[(sequence - 1) % Capacity] = new Entry(sequence, generation, packet, format, receivedTicks, before);
+            _entries[(sequence - 1) % Capacity] = MakeEntry(sequence, generation, packet, format, receivedTicks, before);
             return sequence;
         }
     }
@@ -54,9 +77,9 @@ internal sealed class LoopbackPacketDiagnostics
             long sequence = packet.DiagnosticSequence;
             var entry = _entries[(sequence - 1) % Capacity];
             if (entry?.Sequence != sequence)
-                _entries[(sequence - 1) % Capacity] = entry = new Entry(sequence,
+                _entries[(sequence - 1) % Capacity] = entry = MakeEntry(sequence,
                     packet.DiagnosticGeneration, packet, format, packet.DiagnosticReceivedTicks, before);
-            entry.Before = before;
+            if (!ReferenceEquals(entry, _faultEntry)) entry.Before = before;
         }
     }
 
@@ -69,9 +92,25 @@ internal sealed class LoopbackPacketDiagnostics
         {
             var entry = _entries[(sequence - 1) % Capacity];
             if (entry?.Sequence != sequence) return;
+            if (ReferenceEquals(entry, _faultEntry)) return; // A revisit cannot rewrite the first rejection.
             entry.Outcome = outcome; entry.Written = written; entry.Skipped = skipped;
             entry.Zeros = zeros; entry.After = after; entry.FaultKind = faultKind;
-            if (outcome == 4 && _faultEntry is null) { _faultSequence = sequence; _faultEntry = entry; }
+            if (outcome == 4 && _faultEntry is null)
+            {
+                _faultSequence = sequence; _faultEntry = entry;
+                _faultIdleGeneration = entry.Generation;
+                if (entry.IdleSource is not null)
+                {
+                    if (entry.IdleContext is not null) entry.IdleSource.Pin(entry.IdleContext);
+                    if (!_idleSources.Any(s => s.Generation == entry.Generation))
+                    { _idleSources.Add((entry.Generation,entry.IdleSource)); _idleSourcesOmitted--; }
+                    _idleSources.Sort((a,b) => a.Generation.CompareTo(b.Generation));
+                    TrimIdleSources();
+                }
+                // status: 1 exact membership, 0 source present/no match, 2 source absent, 3 native sequence absent.
+                _faultIdleBinding = new[] { entry.Generation, entry.NativeSequence, entry.IdleContext?.Start ?? -1,
+                    entry.NativeSequence <= 0 ? 3L : entry.IdleSource is null ? 2L : entry.IdleContext is null ? 0L : 1L };
+            }
         }
     }
 
@@ -106,7 +145,12 @@ internal sealed class LoopbackPacketDiagnostics
                     capacity = Capacity, total_observed = _sequence, omitted_packets = _sequence - rows.Count,
                     fault_sequence = _faultSequence, fault_record_pinned = _faultEntry is not null,
                     columns = Columns, timeline_columns = TimelineColumns, packets = rows,
-                    states = _states, states_omitted = _statesOmitted
+                    states = _states, states_omitted = _statesOmitted,
+                    idle_evidence_version = 3,
+                    idle_policy = _idlePolicy,
+                    idle_fault_binding = _faultIdleBinding,
+                    idle_sources_omitted = _idleSourcesOmitted,
+                    idle_sources = _idleSources.Select(s => new { generation = s.Generation, evidence = s.Evidence.Snapshot() }).ToArray()
                 });
                 if (result.Length <= MaxJsonChars) return result;
                 // Preserve the pinned fault and newest evidence under the byte budget.
@@ -120,6 +164,9 @@ internal sealed class LoopbackPacketDiagnostics
     private sealed class Entry
     {
         internal readonly long Sequence, Generation;
+        internal long NativeSequence => _native?.InputSequence ?? -1;
+        internal LoopbackIdleEvidence? IdleSource;
+        internal LoopbackIdleEvidence.Context? IdleContext;
         private readonly AudioPacketObservation? _native;
         private readonly int? _sampleRate, _blockAlign;
         private readonly int _offset, _frames;
@@ -149,5 +196,12 @@ internal sealed class LoopbackPacketDiagnostics
                 Written, Skipped, Zeros, FaultKind, Before, After, _native?.BufferCapacityFrames, _native?.PollSleepMilliseconds
             };
         }
+    }
+    private Entry MakeEntry(long sequence, long generation, AudioPacketEventArgs packet, WaveFormat? format, long receivedTicks, long[]? before)
+    {
+        var e = new Entry(sequence,generation,packet,format,receivedTicks,before);
+        e.IdleSource = _idleSources.FirstOrDefault(s => s.Generation == generation).Evidence;
+        if (e.NativeSequence > 0) e.IdleContext = e.IdleSource?.Capture(e.NativeSequence);
+        return e;
     }
 }

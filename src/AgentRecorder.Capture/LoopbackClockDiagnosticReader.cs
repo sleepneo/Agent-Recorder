@@ -42,11 +42,15 @@ public static class LoopbackClockDiagnosticReader
         if (end - start > MaxJsonChars) return false;
         try
         {
-            using var document = JsonDocument.Parse(stderr.Substring(start, end - start), new() { MaxDepth = 6 });
+            using var document = JsonDocument.Parse(stderr.Substring(start, end - start), new() { MaxDepth = 10 });
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return false;
             var keys = root.EnumerateObject().Select(x => x.Name).ToArray();
-            if (keys.Length != Fields.Count || !Fields.SetEquals(keys)) return false;
+            bool idle = root.TryGetProperty("idle_evidence_version", out _);
+            var expected = idle ? Fields.Concat(new[] { "idle_evidence_version", "idle_sources_omitted", "idle_sources" }).ToHashSet(StringComparer.Ordinal) : Fields;
+            if (idle && root.GetProperty("idle_evidence_version").GetInt32() >= 2) expected.Add("idle_fault_binding");
+            if (idle && root.GetProperty("idle_evidence_version").GetInt32() == 3) expected.Add("idle_policy");
+            if (keys.Length != expected.Count || !expected.SetEquals(keys) || (idle && !ValidIdle(root))) return false;
             if (root.GetProperty("version").GetInt32() != 1 || root.GetProperty("capacity").GetInt32() != 64 ||
                 root.GetProperty("timestamp_frequency").GetInt64() <= 0 || root.GetProperty("qpc_units_per_second").GetInt64() != 10_000_000)
                 return false;
@@ -90,4 +94,51 @@ public static class LoopbackClockDiagnosticReader
         value.GetArrayLength() == names.Length && value.EnumerateArray().Select(x => x.GetString()).SequenceEqual(names);
     private static bool NumericArray(JsonElement value, int length) => value.ValueKind == JsonValueKind.Array &&
         value.GetArrayLength() == length && value.EnumerateArray().All(x => x.TryGetInt64(out _));
+
+    private static bool Keys(JsonElement e, params string[] keys) => e.ValueKind == JsonValueKind.Object &&
+        e.EnumerateObject().Count() == keys.Length && e.EnumerateObject().All(p => keys.Contains(p.Name, StringComparer.Ordinal));
+    private static bool ValidIdle(JsonElement root)
+    {
+        int version = root.GetProperty("idle_evidence_version").GetInt32();
+        if (version is not (1 or 2 or 3) || root.GetProperty("idle_sources_omitted").GetInt64() < 0) return false;
+        if(version==3 && !NumericArray(root.GetProperty("idle_policy"),13))return false;
+        var sources = root.GetProperty("idle_sources");
+        if (sources.ValueKind != JsonValueKind.Array || sources.GetArrayLength() > 4) return false;
+        long generation = 0;
+        foreach (var source in sources.EnumerateArray())
+        {
+            if (!Keys(source,"generation","evidence") || source.GetProperty("generation").GetInt64() <= generation) return false;
+            generation = source.GetProperty("generation").GetInt64();
+            var e = source.GetProperty("evidence");
+            if (!Keys(e,"total_windows","omitted_windows","windows")) return false;
+            var windows = e.GetProperty("windows");
+            if (windows.ValueKind != JsonValueKind.Array || windows.GetArrayLength() > 4 ||
+                e.GetProperty("total_windows").GetInt64() != e.GetProperty("omitted_windows").GetInt64() + windows.GetArrayLength() || e.GetProperty("omitted_windows").GetInt64() < 0) return false;
+            foreach (var w in windows.EnumerateArray())
+            {
+                if (!Keys(w,"start_ticks","last_empty_ticks","end_ticks","empty_polls","end_reason","previous","following") ||
+                    w.GetProperty("start_ticks").GetInt64() > w.GetProperty("last_empty_ticks").GetInt64() ||
+                    w.GetProperty("empty_polls").GetInt64() <= 0 || w.GetProperty("end_reason").GetInt32() is < 0 or > 2 ||
+                    !NumericArray(w.GetProperty("previous"),5)) return false;
+                var packets = w.GetProperty("following");
+                if (packets.ValueKind != JsonValueKind.Array || packets.GetArrayLength() > 4 || packets.EnumerateArray().Any(p => !NumericArray(p,6))) return false;
+                _ = w.GetProperty("end_ticks").GetInt64();
+            }
+        }
+        if (version >= 2)
+        {
+            var binding = root.GetProperty("idle_fault_binding");
+            var fault = root.GetProperty("fault_sequence");
+            if (fault.ValueKind == JsonValueKind.Null) return binding.ValueKind == JsonValueKind.Null;
+            if (!NumericArray(binding,4) || binding[0].GetInt64() < 1 || binding[3].GetInt32() is < 0 or > 3) return false;
+            var packet = root.GetProperty("packets").EnumerateArray().First(p => p[0].GetInt64() == fault.GetInt64());
+            if (packet[1].GetInt64() != binding[0].GetInt64() || (packet[2].ValueKind == JsonValueKind.Null ? -1 : packet[2].GetInt64()) != binding[1].GetInt64()) return false;
+            if (binding[3].GetInt32() == 1)
+                return binding[1].GetInt64() > 0 && sources.EnumerateArray().Any(s => s.GetProperty("generation").GetInt64() == binding[0].GetInt64() &&
+                    s.GetProperty("evidence").GetProperty("windows").EnumerateArray().Any(w => w.GetProperty("start_ticks").GetInt64() == binding[2].GetInt64() &&
+                        w.GetProperty("following").EnumerateArray().Any(p => p[0].GetInt64() == binding[1].GetInt64())));
+            return binding[2].GetInt64() == -1 && (binding[3].GetInt32() == 3 ? binding[1].GetInt64() <= 0 : binding[1].GetInt64() > 0);
+        }
+        return true;
+    }
 }

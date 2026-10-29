@@ -9,8 +9,174 @@ using Xunit;
 
 namespace AgentRecorder.AudioHelper.Tests;
 
-public class AudioHelperCaptureSessionTests
+public partial class AudioHelperCaptureSessionTests
 {
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public Task SameInputIdleSessionPreservesPcmAndNeverReopens(bool stopWhilePending) => RunSameInputIdleSession(stopWhilePending,0);
+    [Theory]
+    [InlineData(1)] [InlineData(2)]
+    public Task SameInputIdlePendingCancelOrDispose(int mode) => RunSameInputIdleSession(true,mode);
+    [Theory]
+    [InlineData("complete")] [InlineData("stop")] [InlineData("cancel")] [InlineData("dispose")] [InlineData("timeout")]
+    public Task SlowIdleTrajectorySessionRetainsOnsetOrFailsWithoutPublication(string mode) =>
+        RunSameInputIdleSession(mode!="complete",mode=="cancel"?1:mode=="dispose"?2:mode=="timeout"?3:0,true);
+    private async Task RunSameInputIdleSession(bool stopWhilePending,int mode,bool slow=false)
+    {
+        var dir=Path.Combine(Path.GetTempPath(),"idle-session-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(dir);
+        var output=Path.Combine(dir,"audio.wav");var partial=Path.Combine(dir,"audio.partial.wav");var signal=Path.Combine(dir,"stop");
+        var input=new FakeAudioInput{SourceKind=AudioSourceKind.SystemLoopback,Format=new WaveFormat(48000,32,2)};
+        var opts=Options("idle-session",output,signal);opts.SourceKind=AudioSourceKind.SystemLoopback;
+        using var cts=new CancellationTokenSource();using var watcher=Watcher(signal,cts);int opens=0;
+        var stdout=new StringWriter();using var session=new CaptureSession(opts,PathResult(output,partial),new EventWriter(stdout,null),watcher,cts,_=>{opens++;return(input,null,null);});
+        var run=Task.Run(()=>session.Run());
+        Assert.True(SpinWait.SpinUntil(()=> (int)(typeof(CaptureSession).GetField("_loopbackStartConfirmed",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(session)??0)!=0,TimeSpan.FromSeconds(3)));
+        long frequency=Stopwatch.Frequency;long anchor=(long)typeof(CaptureSession).GetField("_firstSampleAnchorTicks",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(session)!;
+        var policy=(LoopbackIdleResumePolicy)typeof(CaptureSession).GetField("_idleResumePolicy",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(session)!;
+        if(slow)policy.Milliseconds=()=>0;
+        var source=new LoopbackIdleEvidence();
+        AudioPacketEventArgs Packet(long seq,long device,long qpc,int flags,byte value,LoopbackIdleTicket? ticket=null)
+        {
+            long raw=(long)(qpc*10000000d/frequency);
+            var o=new AudioPacketObservation(seq,48000,8,480,device,raw,flags,qpc+frequency/200,qpc+frequency/200+1){InputIdentity=source,IdleBefore=ticket};o.CompleteRelease(qpc+frequency/200+2,qpc+frequency/200+3,true);
+            return new(Enumerable.Repeat(value,3840).ToArray(),3840,480,device,raw,qpc,true,false,o);
+        }
+        input.InjectObserved(Packet(1,0,anchor,0,0x11));long previous=anchor+frequency/100;
+        var silent=Packet(2,480,previous,2,0);input.InjectObserved(silent);
+        long current=previous+frequency/2+frequency/100;
+        var ticket=new LoopbackIdleTicket(source,previous+frequency/200+4,current-frequency/20,current+frequency/200,8,frequency/15,2,silent.Observation!.Release!.EndTicks,480,480,silent.QpcPosition,2);
+        input.InjectObserved(Packet(3,960,current,0,0x22,ticket));
+        long offset=slow?frequency*92883/10000000:0;
+        if(slow) {input.InjectObserved(Packet(4,1440,current+frequency/100+offset,0,0x33));Assert.Equal(2,policy.Pending);Assert.Equal(7680,GetPrivateLong(session,"_bytesWritten"));}
+        if(!stopWhilePending) {if(!slow)input.InjectObserved(Packet(4,1440,current+frequency/100,0,0x33));input.InjectObserved(Packet(5,1920,current+frequency/50+offset,2,0));input.InjectObserved(Packet(6,2400,current+3*frequency/100+offset,2,0));}
+        if(mode==1)cts.Cancel();else if(mode==2)session.Dispose();else if(mode==3)policy.Milliseconds=()=>301;else session.RequestStop();int exit=await run.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1,opens);
+        if(stopWhilePending){Assert.NotEqual(0,exit);Assert.False(File.Exists(output));}
+        else
+        {
+            Assert.Equal(0,exit);using var wav=new WaveFileReader(output);var pcm=new byte[(int)wav.Length];Assert.Equal(pcm.Length,wav.Read(pcm,0,pcm.Length));
+            Assert.All(pcm.Take(3840),b=>Assert.Equal(0x11,b));Assert.All(pcm.Skip(7680).Take(192000),b=>Assert.Equal(0,b));
+            Assert.All(pcm.Skip(199680).Take(3840),b=>Assert.Equal(0x22,b));Assert.All(pcm.Skip(203520).Take(3840),b=>Assert.Equal(0x33,b));
+            Assert.Equal(215040,pcm.Length);
+            Assert.Equal(0,(long)typeof(CaptureSession).GetField("_recoveryAttemptCount",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(session)!);
+            if(slow){Assert.Equal(1,policy.Snapshot()[0]);Assert.Equal(0,policy.Pending);Assert.Equal(1,GetPrivateLong(session,"_loopbackInputGeneration"));}
+        }
+    }
+
+    [Theory]
+    [InlineData(0)] [InlineData(1)] [InlineData(2)]
+    public Task ConfirmedIdleWarmupHandsOffThroughOfficialSessionRecovery(int warmupPackets) => RunIdleEpochHandoff(warmupPackets,"normal");
+    [Theory]
+    [InlineData("pending")] [InlineData("stop")] [InlineData("cancel")] [InlineData("dispose")]
+    [InlineData("failed_candidate")] [InlineData("buffered")]
+    public Task IdleEpochHandoffKeepsWinnerAndPendingContracts(string scenario) => RunIdleEpochHandoff(0,scenario);
+    [Theory]
+    [InlineData("normal")] [InlineData("pending")] [InlineData("stop")] [InlineData("cancel")] [InlineData("dispose")]
+    [InlineData("failed_candidate")] [InlineData("buffered")]
+    public Task SlowIdleTrajectoryRespectsOfficialEpochWinnersAndLateSenders(string scenario) => RunIdleEpochHandoff(0,scenario,true);
+    [Theory]
+    [InlineData("cancel")] [InlineData("dispose")]
+    public async Task IdleEpochTerminalCompetitionRepeatedlyConverges(string scenario)
+    {
+        for(int i=0;i<100;i++)await RunIdleEpochHandoff(0,scenario,i%2!=0);
+    }
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public Task RetiringRecoveryOwnerCanDisposeWithoutWaitingForItself(bool slow)=>RunIdleEpochHandoff(0,"retiring_dispose",slow);
+    private async Task RunIdleEpochHandoff(int warmupPackets,string scenario,bool slow=false)
+    {
+        var dir=Path.Combine(Path.GetTempPath(),$"idle-epoch-{scenario}-{slow}-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(dir);
+        var output=Path.Combine(dir,"audio.wav");var signal=Path.Combine(dir,"stop");
+        var old=new FakeAudioInput{SourceKind=AudioSourceKind.SystemLoopback,Format=new WaveFormat(48000,32,2)};
+        var next=new FakeAudioInput{SourceKind=AudioSourceKind.SystemLoopback,Format=old.Format};
+        var failed=new FakeAudioInput{SourceKind=AudioSourceKind.SystemLoopback,Format=old.Format};
+        var opts=Options("idle-epoch",output,signal);opts.SourceKind=AudioSourceKind.SystemLoopback;
+        using var cts=new CancellationTokenSource();using var watcher=Watcher(signal,cts);int opens=0;
+        var stdout=new StringWriter();using var session=new CaptureSession(opts,PathResult(output,output+".partial"),new EventWriter(stdout,null),watcher,cts,o=>
+        {Assert.Equal("{0.0.1.00000000}.{guid}",opts.EndpointId);return(++opens==1?old:scenario is "failed_candidate" or "retiring_dispose" && opens==2?failed:next,null,null);},stallDetectionThreshold:TimeSpan.FromSeconds(30));
+        var run=Task.Run(()=>session.Run());
+        Assert.True(SpinWait.SpinUntil(()=>GetPrivateLong(session,"_firstSampleAnchorTicks")>0,TimeSpan.FromSeconds(3)));
+        long f=Stopwatch.Frequency,anchor=GetPrivateLong(session,"_firstSampleAnchorTicks");var identity=new LoopbackIdleEvidence();
+        AudioPacketEventArgs Packet(long seq,long dev,long q,int flags,byte value,LoopbackIdleTicket? idle=null)
+        {
+            long raw=(long)(q*10000000d/f);var native=new AudioPacketObservation(seq,48000,8,480,dev,raw,flags,q+f/200,q+f/200+1){InputIdentity=identity,IdleBefore=idle};native.CompleteRelease(q+f/200+2,q+f/200+3,true);
+            return new(Enumerable.Repeat(value,3840).ToArray(),3840,480,dev,raw,q,true,false,native);
+        }
+        old.InjectObserved(Packet(1,0,anchor,0,0x11));long prior=anchor+f/100;
+        var silent=Packet(2,480,prior,2,0);old.InjectObserved(silent);long q=prior+f/2+f/100;
+        var idle=new LoopbackIdleTicket(identity,prior+f/200+4,q-f/20,q+f/200,8,f/15,2,silent.Observation!.Release!.EndTicks,480,480,silent.QpcPosition,2);
+        old.InjectObserved(Packet(3,960,q,0,0x22,idle));
+        if(slow)
+        {
+            long shift=f*92883/10000000;
+            old.InjectObserved(Packet(4,1440,q+f/100+shift,0,0x33));
+            if(scenario!="pending"){old.InjectObserved(Packet(5,1920,q+2*f/100+shift,0,0x55));old.InjectObserved(Packet(6,2400,q+3*f/100+shift,0,0x66));}
+        }
+        else if(scenario!="pending")old.InjectObserved(Packet(4,1440,q+f/100,0,0x33));
+        for(int n=0;n<warmupPackets;n++)old.InjectObserved(Packet(5+n,1920+n*480,q+(2+n)*f/100,2,0));
+        var policy=(LoopbackIdleResumePolicy)typeof(CaptureSession).GetField("_idleResumePolicy",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(session)!;
+        var before=policy.Snapshot();Assert.Equal(scenario=="pending"?0:1,before[0]);Assert.Equal(scenario=="pending"?(slow?2:1):0,before[4]);
+        long[]? failedSnapshot=null;int failedWarmup=-1;long failedExpected=-1;
+        using var entered=new ManualResetEventSlim();using var release=new ManualResetEventSlim();
+        if(scenario is "failed_candidate" or "retiring_dispose")
+        {
+            failed.OnStartRecording=i=>{i.InjectPositionedPacket(Enumerable.Repeat((byte)0x99,3840).ToArray(),0,100000000);throw new IOException("Candidate did not start");};
+            failed.OnDispose=_=>{failedSnapshot=policy.Snapshot();failedWarmup=(int)typeof(LoopbackIdleResumePolicy).GetField("_warmup",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(policy)!;failedExpected=GetPolicyLong(policy,"_expectedEpochGeneration");if(scenario=="retiring_dispose")session.Dispose();};
+        }
+        if(scenario=="buffered")next.OnStartRecording=i=>i.InjectPositionedPacket(Enumerable.Repeat((byte)0x44,3840).ToArray(),0,100000000);
+        if(scenario is "stop" or "cancel" or "dispose")next.OnStartRecording=i=>
+        {i.InjectPositionedPacket(Enumerable.Repeat((byte)0x99,3840).ToArray(),0,100000000);entered.Set();release.Wait(TimeSpan.FromSeconds(5));};
+        var late=old.CaptureLatePacketCallback();
+        ForceCallbackStarvation(session,GetPrivateLong(session,"_bytesWritten"));
+        if(scenario=="retiring_dispose")
+        {
+            Assert.Equal(0,await run.WaitAsync(TimeSpan.FromSeconds(3)));Assert.Equal(2,opens);
+            Assert.Equal(0,GetPrivateLong(session,"_runtimeRecoveryInProgress"));Assert.Equal(0,GetPrivateLong(session,"_inputFinalizationInProgress"));
+            Assert.NotNull(failedSnapshot);Assert.Equal(before.Take(3),failedSnapshot!.Take(3));Assert.Equal(0,failedExpected);
+            Assert.DoesNotContain((byte)0x99,ReadPcm(output));Assert.Contains("RESULT: STOPPED",stdout.ToString());return;
+        }
+        if(scenario=="pending")
+        {
+            Assert.NotEqual(0,await run.WaitAsync(TimeSpan.FromSeconds(8)));Assert.False(File.Exists(output));
+            Assert.Equal(2,opens);Assert.Equal(2,GetPrivateLong(session,"_loopbackInputGeneration"));Assert.Equal(0,GetPolicyLong(policy,"_expectedEpochGeneration"));
+            Assert.Equal(slow?2:1,policy.Pending);Assert.Equal(before.Take(3),policy.Snapshot().Take(3));return;
+        }
+        if(scenario is "stop" or "cancel" or "dispose")
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            var stop=Task.Run(()=>{if(scenario=="cancel")cts.Cancel();else if(scenario=="dispose")session.Dispose();else session.RequestStop();});
+            try{Assert.True(SpinWait.SpinUntil(()=>GetPrivateLong(session,"_userStopRequested")!=0,TimeSpan.FromSeconds(3)));}finally{release.Set();}
+            try
+            {
+                await stop.WaitAsync(TimeSpan.FromSeconds(8));Assert.Equal(0,await run.WaitAsync(TimeSpan.FromSeconds(8)));
+            }
+            catch(Exception ex)
+            {
+                File.WriteAllText(Path.Combine(dir,"failure-events.txt"),stdout.ToString());
+                File.WriteAllText(Path.Combine(dir,"failure-state.txt"),ex+"\n"+string.Join("\n",new[]{"_terminalEventRaised","_runtimeRecoveryInProgress","_inputFinalizationInProgress","_runtimeRecoveryThreadId","_userStopRequested"}.Select(n=>n+"="+GetPrivateLong(session,n))));
+                throw;
+            }
+            Assert.Equal(before.Take(3),policy.Snapshot().Take(3));Assert.Equal(0,GetPolicyLong(policy,"_expectedEpochGeneration"));Assert.Equal(slow?0:2,GetPolicyLong(policy,"_warmup"));
+            Assert.DoesNotContain((byte)0x99,ReadPcm(output));return;
+        }
+        WaitForCommittedRecovery(session,next,1,"idle official recovery");
+        long bytesBefore=GetPrivateLong(session,"_bytesWritten");late(Packet(99,99999,anchor,0,0x99));Assert.Equal(bytesBefore,GetPrivateLong(session,"_bytesWritten"));
+        if(scenario!="buffered")next.InjectPositionedPacket(Enumerable.Repeat((byte)0x44,3840).ToArray(),0,100000000);
+        Assert.Equal(before.Take(4),policy.Snapshot().Take(4));
+        Assert.Equal(scenario=="failed_candidate"?3:2,GetPrivateLong(session,"_loopbackInputGeneration"));
+        session.RequestStop();int exit=await run.WaitAsync(TimeSpan.FromSeconds(8));
+        Assert.Equal(0,exit);Assert.Equal(scenario=="failed_candidate"?3:2,opens);
+        if(scenario=="failed_candidate"){Assert.NotNull(failedSnapshot);Assert.Equal(before.Take(3),failedSnapshot!.Take(3));Assert.Equal(slow?0:2,failedWarmup);Assert.Equal(0,failedExpected);}
+        var summary=AudioHelperEventStreamParser.ParseAndValidate(stdout.ToString());Assert.Equal(1,summary.RecoveryCount);Assert.Equal("degraded",summary.ContinuityStatus);
+        var pcm=ReadPcm(output);Assert.DoesNotContain((byte)0x99,pcm);Assert.Equal(Enumerable.Repeat((byte)0x11,3840),pcm.Take(3840));
+        Assert.Equal(Enumerable.Repeat((byte)0x22,3840),pcm.Skip(199680).Take(3840));Assert.Equal(Enumerable.Repeat((byte)0x33,3840),pcm.Skip(203520).Take(3840));
+        if(slow){Assert.All(pcm.Skip(207360).Take(3840),b=>Assert.Equal(0x55,b));Assert.All(pcm.Skip(211200).Take(3840),b=>Assert.Equal(0x66,b));}
+        Assert.Equal(1,Enumerable.Range(0,pcm.Length-3839).Count(i=>pcm[i]==0x44 && (i==0 || pcm[i-1]!=0x44)));
+        int at=FindRun(pcm,0x44,3840,207360);Assert.True(at>=207360);Assert.All(pcm.Skip(at).Take(3840),b=>Assert.Equal(0x44,b));
+    }
+
+    private static long GetPolicyLong(LoopbackIdleResumePolicy p,string name)=>Convert.ToInt64(typeof(LoopbackIdleResumePolicy).GetField(name,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(p));
+
     private class FakeAudioInput : IAudioInput, IAudioPacketPositionSource
     {
         public WaveFormat? Format { get; set; } = new WaveFormat(16000, 16, 1);
@@ -26,6 +192,7 @@ public class AudioHelperCaptureSessionTests
         public int DisposeThreadId { get; private set; }
         public Exception? StartRecordingException { get; set; }
         public bool RaiseStartExceptionAfterCallback { get; set; }
+        public StartRecordingResult StartResult { get; set; }=StartRecordingResult.Started;
         public Action<FakeAudioInput>? OnStartRecording { get; set; }
         public long DiscontinuityCount { get; set; }
         public Action<FakeAudioInput>? OnStopRecording { get; set; }
@@ -48,7 +215,7 @@ public class AudioHelperCaptureSessionTests
                 throw StartRecordingException;
             if (ErrorToRaiseInsideStartRecording != null)
                 RecordingStopped?.Invoke(this, new StoppedEventArgs(ErrorToRaiseInsideStartRecording));
-            return StartRecordingResult.Started;
+            return StartResult;
         }
 
         public void StopRecording()
@@ -88,6 +255,8 @@ public class AudioHelperCaptureSessionTests
         {
             RecordingStopped?.Invoke(this, new StoppedEventArgs(ex));
         }
+        public void InjectObserved(AudioPacketEventArgs packet) => PacketPositionAvailable?.Invoke(this,packet);
+        public Action<AudioPacketEventArgs> CaptureLatePacketCallback() {var handler=PacketPositionAvailable;return p=>handler?.Invoke(this,p);}
 
         public void Dispose()
         {

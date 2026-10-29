@@ -83,6 +83,8 @@ internal sealed class AudioPacketObservation(
     internal long GetBufferEndTicks { get; } = getBufferEndTicks;
     internal int? BufferCapacityFrames { get; } = bufferCapacityFrames;
     internal int? PollSleepMilliseconds { get; } = pollSleepMilliseconds;
+    internal LoopbackIdleEvidence? InputIdentity { get; set; }
+    internal LoopbackIdleTicket? IdleBefore { get; set; }
     private PacketReleaseObservation? _release;
     internal PacketReleaseObservation? Release => Volatile.Read(ref _release);
     internal void CompleteRelease(long start, long end, bool success) =>
@@ -90,6 +92,9 @@ internal sealed class AudioPacketObservation(
 }
 
 internal sealed record PacketReleaseObservation(long StartTicks, long EndTicks, bool Success);
+internal sealed record LoopbackIdleTicket(LoopbackIdleEvidence Source, long Start, long LastEmpty,
+    long ResumeGet, long Polls, long MaxPollGap, long PreviousSequence, long PreviousRelease,
+    long PreviousDevice, int PreviousFrames, long PreviousQpc, int PreviousFlags);
 
 internal static class AudioPacketPositionMath
 {

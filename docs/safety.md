@@ -183,6 +183,14 @@ Context files are written using a random temp file in the same directory and ato
   normal local confirmation, countdown, preflight, recording, continuity,
   bounded same-endpoint recovery, finalization, and atomic publication
   boundaries apply; measured recovery gaps are reported as silence/metadata.
+  Native empty polls alone do not prove silence or audio loss. Same-input idle
+  recovery requires bounded timing and packet-continuity evidence; resumed PCM
+  remains unpublished until confirmation. Normal idle silence and actual gap
+  compensation are accounted separately. Unresolved or over-budget timing
+  conflicts still fail explicitly, and `continuous` does not promise zero
+  compensated samples. A helper's terminal result is published only after its
+  media and terminal-event work finishes; a disposal timeout is not proof that
+  resources have retired.
 - Microphone discovery supports both the bundled FFmpeg classic dshow listing and the FFmpeg 8.x tagged format. The parser accepts only trusted logger prefixes and complete records; malformed, incomplete, or conflicting listings fail closed as `unavailable`, and partial device lists are never returned. See [API reference](api.md#get-audiodevices) for the exact grammar and response contract.
 
 ## Truthful window confirmation

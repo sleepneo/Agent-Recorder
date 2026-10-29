@@ -9,6 +9,46 @@ namespace AgentRecorder.AudioHelper.Tests;
 
 public class WasapiAudioInputTests
 {
+    private sealed class PausedLoopbackCapture : FakeAudioCaptureClient
+    {
+        internal readonly ManualResetEventSlim EmptySeen = new(), Resume = new();
+        public override int GetNextPacketSize()
+        {
+            if (ReleaseBufferCallCount == 1 && !Resume.IsSet) { EmptySeen.Set(); return 0; }
+            return base.GetNextPacketSize();
+        }
+    }
+    [Fact]
+    public async Task NativeEmptyPollResumeRecordsEvidenceWithoutPretendingLostTimeIsSilence()
+    {
+        var c=new PausedLoopbackCapture { DevicePosition=0,QpcPosition=100_000_000 };
+        using var input=new AudioClientAudioInput(new FakeDevice(),new FakeAudioClient {BufferSize=480},c,new WaveFormat(48000,16,1),100,sourceKind:AudioSourceKind.SystemLoopback);
+        var one=Enumerable.Repeat((byte)0x11,960).ToArray();var two=Enumerable.Repeat((byte)0x22,960).ToArray();
+        var p1=GCHandle.Alloc(one,GCHandleType.Pinned);var p2=GCHandle.Alloc(two,GCHandleType.Pinned);
+        var stopped=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeline=new LoopbackTimeline(new WaveFormat(48000,16,1),Stopwatch.Frequency,TimeSpan.FromMilliseconds(100)){ObserveRuntimeClock=true};timeline.Start(10*Stopwatch.Frequency);
+        var output=new List<byte>();LoopbackTimelineException? conflict=null;LoopbackIdleTicket? measured=null;
+        input.RecordingStopped+=(_,_)=>stopped.TrySetResult(true);
+        input.PacketPositionAvailable+=(_,p)=>
+        {
+            try {timeline.AppendPacket(p.Buffer,p.BytesRecorded,p.FramesRecorded,p.DevicePosition,p.PacketStartTimestampTicks,p.PositionValid,(b,o,n)=>output.AddRange(b.AsSpan(o,n).ToArray()),(_,_)=>throw new Exception("No speculative padding"));}
+            catch(LoopbackTimelineException ex){conflict=ex;}
+            if(c.ReleaseBufferCallCount==1){c.DevicePosition=480;c.QpcPosition=150_000_000;}else {measured=p.Observation!.IdleBefore;input.StopRecording();}
+        };
+        try
+        {
+            c.Packets.Enqueue((p1.AddrOfPinnedObject(),480,AudioClientBufferFlags.None));c.Packets.Enqueue((p2.AddrOfPinnedObject(),480,AudioClientBufferFlags.None));
+            input.StartRecording();Assert.True(c.EmptySeen.Wait(TimeSpan.FromSeconds(3)));c.Resume.Set();
+            await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));input.Dispose();
+            Assert.NotNull(measured);Assert.Same(input.IdleEvidence,measured!.Source);Assert.Equal(480,measured.PreviousFrames);Assert.Equal(1,measured.PreviousSequence);Assert.True(measured.MaxPollGap>0);
+            Assert.True(conflict!.IsEpochResetCandidate);Assert.Equal(960,output.Count);Assert.All(output,b=>Assert.Equal(0x11,b));
+            var evidence=System.Text.Json.JsonSerializer.SerializeToElement(input.IdleEvidence.Snapshot());
+            var w=evidence.GetProperty("windows")[0];Assert.Equal(1,w.GetProperty("end_reason").GetInt32());
+            Assert.Equal(1,w.GetProperty("previous")[0].GetInt64());Assert.Equal(2,w.GetProperty("following")[0][0].GetInt64());
+            Assert.Equal(150_000_000,w.GetProperty("following")[0][4].GetInt64());Assert.Equal(2,c.ReleaseBufferCallCount);
+        }
+        finally {c.Resume.Set();input.Dispose();p1.Free();p2.Free();c.EmptySeen.Dispose();c.Resume.Dispose();}
+    }
     [Fact]
     public async Task LoopbackSlowConsumerRunsAfterExactlyOneNativeReleaseAndUsesOwnedCopy()
     {

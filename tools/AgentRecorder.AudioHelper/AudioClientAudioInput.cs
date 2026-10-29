@@ -426,6 +426,8 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         }
     }
 
+    internal LoopbackIdleEvidence IdleEvidence { get; } = new();
+
     private void CaptureThread()
     {
         AudioCaptureRuntimeException? runtimeException = null;
@@ -446,6 +448,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
 
                 if (packetSize == 0)
                 {
+                    if (_sourceKind == AudioSourceKind.SystemLoopback) IdleEvidence.Empty(Stopwatch.GetTimestamp());
                     if (_captureEvent != null)
                         _captureEvent.WaitOne(_sleepMilliseconds);
                     else
@@ -533,6 +536,9 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
 
                 if (runtimeException == null && detached != null)
                 {
+                    observation!.InputIdentity=IdleEvidence;
+                    observation.IdleBefore=IdleEvidence.RecordPacket(observation.InputSequence, getBufferStartTicks,
+                        observation.Release!.EndTicks, devicePosition, qpcPosition, (int)flags, Stopwatch.Frequency,frames);
                     // One owned packet only: synchronous consumers run after native ReleaseBuffer.
                     var pin = GCHandle.Alloc(detached, GCHandleType.Pinned);
                     try { ReadPacket(pin.AddrOfPinnedObject(), detached.Length, frames, flags, devicePosition, qpcPosition, observation); }
@@ -549,6 +555,7 @@ internal sealed class AudioClientAudioInput : IAudioInput, IAudioPacketPositionS
         }
         finally
         {
+            if (_sourceKind == AudioSourceKind.SystemLoopback) IdleEvidence.End(Stopwatch.GetTimestamp());
             var stopFailure = StopAudioClient();
             if (stopFailure != null)
             {
