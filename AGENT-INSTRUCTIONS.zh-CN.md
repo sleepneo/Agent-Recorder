@@ -466,7 +466,7 @@ X-Agent-Recorder-Key: <api-key>
 
 ### 添加章节标记
 
-当用户说“做个标记”“标记这里”或给出具体标记名称时，AI agent 应对目标录制调用：
+当用户明确要求给一条具备Bundle交付资格的活动录制添加具名时间注释时，AI agent 可对精确目标录制调用：
 
 ```http
 POST /api/v1/recordings/{recording_id}/marks
@@ -480,9 +480,9 @@ X-Agent-Recorder-Key: <api-key>
 
 - 只在目标状态为 `recording` 时调用；成功响应已经包含服务端接受的 `t_ms`，无需额外查询。
 - 不要设置 `source: "hotkey"`；远程调用省略 `source` 即可，服务端会记为 `agent`。
-- 用户也可以按 `Ctrl+Shift+F11` 本地标记当前所有活动录制。嵌套录制时，该热键会分别标记 outer 和 inner；API 调用则只标记路径中的指定 `recording_id`。
-- API 返回成功后再告知用户标记已添加；`409 RECORDING_NOT_ACTIVE` 表示录制尚未开始或已经进入停止/保存阶段，不应把它误报为成功。
-- 启用 Bundle 时，成功录制的标记写入对应 `marks.json`，不写入 MP4 章节或画面。`artifacts.bundle=false` 时当前没有标记产物交付，不得声称 MP4 已带章节。返回时间是服务接收调用时的位置，不是人类发出自然语言时的位置；不推荐将实时“标记这里”作为公开体验用例。
+- 用户也可以按 `Ctrl+Shift+F11` 本地标记当前所有具备Bundle交付资格的活动录制。嵌套录制时，该热键只标记具备资格的 outer 和 inner；API 调用则只标记路径中的指定 `recording_id`。
+- API 返回 `delivery={artifact:"bundle/marks.json",status:"pending"}` 后，只能告知已接受、等待Bundle交付，不得说已持久交付或写入MP4；`409 RECORDING_NOT_ACTIVE` 表示录制尚未开始或已经进入停止/保存阶段，不应把它误报为成功。
+- 启用 Bundle 时，成功录制的标记写入对应 `marks.json`，不写入 MP4 章节或画面。`artifacts.bundle=false`、缺生成器或不支持的后端返回409 `MARK_DELIVERY_UNAVAILABLE`，reason分别为bundle_disabled、bundle_generator_unavailable、backend_not_supported；不会自动开启Bundle或创建侧车。最终Bundle可能失败，按既有状态报告，MP4保留。返回时间是服务接收调用时的位置，不是人类发出自然语言时的位置；不推荐将实时“标记这里”作为公开体验用例。
 
 ### 上下文快照（减少往返）
 
@@ -817,3 +817,19 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
 
 本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+
+
+### 仅复用保存区域（普通 quick）
+
+读取 profiles 精确 id/version/digest，并检查 `interaction.profile_region.supported`。
+调用 `POST /api/v1/recordings/quick`，target 为
+`{"type":"profile_region","profile_ref":{"id":"<id>","version":1,"digest":"<digest>"}}`，
+本次必须传 `duration_seconds`（1–600整秒）。例如“测试区域10秒无声”省略audio；
+“20秒系统声音”传20及 `audio.system_audio={"enabled":true,"device_id":"<真实输出设备ID>"}`；
+“20秒麦克风”改用 `audio.microphone` 和真实麦克风ID。声音种类不明先询问，不猜测。
+省略倒计时固定为本次普通默认3秒；不沿用旧配置的时长、声音、倒计时或目录。
+仍须本地逐次预览批准，可在确认窗改目录；不能自动重选、换屏或批准。
+只支持普通video、非nested和默认Bundle，拒绝artifacts、series、raw source/profile_ref/stop_condition混入。
+来源以原ref及 `profile_reuse_mode:region_only` 返回，Profile本身不会被修改。
+旧raw单独profile_ref仍为完整无声配置执行，计划/Lease不支持本目标。
+完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。

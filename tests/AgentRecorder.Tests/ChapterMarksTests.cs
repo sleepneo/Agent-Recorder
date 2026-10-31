@@ -18,7 +18,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("HeadlessHostIntegration")]
-public sealed class ChapterMarksTests : IDisposable
+public sealed partial class ChapterMarksTests : IDisposable
 {
     private sealed class NoOpTray : ITrayContext
     {
@@ -71,10 +71,10 @@ public sealed class ChapterMarksTests : IDisposable
         ApiKeyAuth.InitializeForTesting(_dataDir);
 
         _audit = new CaptureAuditLogger();
-        _engine = new RecordingEngine(_audit);
+        _engine = new RecordingEngine(_audit, bundleGenerator: new UnusedMarkBundleGenerator());
         _engine.MonotonicFrequencyForTests = 1000;
         _engine.MonotonicTimestampProviderForTests = () => 0;
-        _server = new ApiServer(_engine, _audit, new NoOpTray());
+        _server = new ApiServer(_engine, _audit, new NoOpTray(), null, null, null, null, null, null, null, null, null, 0);
         _server.Start();
     }
 
@@ -85,10 +85,12 @@ public sealed class ChapterMarksTests : IDisposable
         ApiKeyAuth.ResetForTesting(null);
     }
 
-    private Recording Register(RecState state = RecState.recording, DateTime? startedAtUtc = null)
+    private Recording Register(RecState state = RecState.recording, DateTime? startedAtUtc = null, bool bundle = true, string backend = "ffmpeg", bool ordinary = false)
     {
-        var rec = new Recording
+        var rec = new Recording(bundle)
         {
+            BackendType = backend,
+            IsOrdinaryLocalRequest = ordinary,
             State = state,
             StartedAtUtc = startedAtUtc ?? DateTime.UtcNow.AddSeconds(-1),
             BackendStartAtUtc = DateTime.UtcNow.AddMinutes(-1),
@@ -113,7 +115,7 @@ public sealed class ChapterMarksTests : IDisposable
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         using var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/{recordingId}/marks",
+            $"http://127.0.0.1:{_server.BoundPort}/api/v1/recordings/{recordingId}/marks",
             JsonContent(body));
         return (response.StatusCode, await response.Content.ReadAsStringAsync());
     }
@@ -131,6 +133,8 @@ public sealed class ChapterMarksTests : IDisposable
         using var doc = JsonDocument.Parse(result.Body);
         var data = doc.RootElement.GetProperty("data");
         Assert.Equal(rec.Id, data.GetProperty("recording_id").GetString());
+        Assert.Equal("bundle/marks.json", data.GetProperty("delivery").GetProperty("artifact").GetString());
+        Assert.Equal("pending", data.GetProperty("delivery").GetProperty("status").GetString());
         var mark = data.GetProperty("mark");
         Assert.Equal(1234, mark.GetProperty("t_ms").GetInt64());
         Assert.Equal("重要决定 😀", mark.GetProperty("label").GetString());

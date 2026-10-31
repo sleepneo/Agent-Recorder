@@ -16,7 +16,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class CodexProfileRecordingRegressionTests : IDisposable
+public sealed partial class CodexProfileRecordingRegressionTests : IDisposable
 {
     private readonly TempDirectory _temp = new();
     private readonly string? _oldOverride;
@@ -26,6 +26,7 @@ public sealed class CodexProfileRecordingRegressionTests : IDisposable
     private readonly SqliteRecurringFixedRegionProfileRepository _versions;
     private readonly SqliteFixedRegionProfileManagementGateway _gateway;
     private readonly DisplayProvider _display;
+    private int _systemDisplayCalls;
     private readonly Tray _tray = new();
     private readonly Backend _backend = new();
     private readonly RecordingEngine _engine;
@@ -50,14 +51,18 @@ public sealed class CodexProfileRecordingRegressionTests : IDisposable
         _display = new DisplayProvider(new StandingLeaseDisplayMetadata("display_1", fingerprint,
             DisplayIdentityResolutionStatus.Resolved, new(-100, 50, 1920, 1080),
             96, 96, 1920, 1080, AuthorizedDisplayOrientation.Landscape));
-        SystemQuery.SetDisplayTopologyProvider(() => new List<SystemQuery.DisplayTopologyInfo>
+        SystemQuery.SetDisplayTopologyProvider(() =>
         {
-            new("display_1", "Display 1", true, new(-100, 50, 1920, 1080), 1.0,
-                fingerprint, DisplayIdentityResolutionStatus.Resolved)
+            Interlocked.Increment(ref _systemDisplayCalls);
+            return new List<SystemQuery.DisplayTopologyInfo>
+            {
+                new("display_1", "Display 1", true, new(-100, 50, 1920, 1080), 1.0,
+                    fingerprint, DisplayIdentityResolutionStatus.Resolved)
+            };
         });
         ApiKeyAuth.InitializeForTesting(_temp.Path);
         _audit = new AuditLogger(Path.Combine(_temp.Path, "audit.jsonl"));
-        _engine = new RecordingEngine(_audit) { CountdownInterval = TimeSpan.FromMilliseconds(1) };
+        _engine = new RecordingEngine(_audit, bundleGenerator:new RegionBundleSpy(), microphoneProvider: _regionMic, microphoneStatusProvider: _regionMic, systemAudioEndpointProvider: _regionAudio) { CountdownInterval = TimeSpan.FromMilliseconds(1) };
         _engine.SetTray(_tray);
         _engine.BackendFactory = _ => (_backend, "ffmpeg-region");
         _server = new ApiServer(_engine, _audit, _tray, null, null, null, null, null, null, null, null, null, 0,
@@ -772,6 +777,9 @@ public sealed class CodexProfileRecordingRegressionTests : IDisposable
 
     public void Dispose()
     {
+        RecordingPreflightChecker.AudioHelperPathResolver=_regionOldHelper;
+        RecordingPreflightChecker.AudioHelperProbeRunner=_regionOldProbe;
+        RecordingPreflightChecker.ShouldUseWasapiBackend=_regionOldWasapi;
         foreach (var record in _engine._recs.Values.Where(record => !record.IsFinalized))
             _engine.Stop(record.Id, "test_cleanup");
         _engine.Dispose();
@@ -788,27 +796,39 @@ public sealed class CodexProfileRecordingRegressionTests : IDisposable
     private sealed class DisplayProvider(StandingLeaseDisplayMetadata metadata) : IFixedRegionProfileDisplayEnvironmentProvider
     {
         internal StandingLeaseDisplayMetadata Metadata = metadata;
-        public IReadOnlyList<StandingLeaseDisplayMetadata> GetExecutionMetadata() => new[] { Metadata };
-        public IReadOnlyList<DisplayTopologySnapshot> GetTopology() => new[]
+        internal int MetadataCalls;
+        internal int TopologyCalls;
+        internal StandingLeaseDisplayMetadata[] Others = Array.Empty<StandingLeaseDisplayMetadata>();
+        public IReadOnlyList<StandingLeaseDisplayMetadata> GetExecutionMetadata()
         {
-            new DisplayTopologySnapshot("display_1", Metadata.StableDisplayFingerprint,
-                Metadata.IdentityStatus, new(-100, 50, 1920, 1080))
-        };
+            MetadataCalls++;
+            return new[] { Metadata }.Concat(Others).ToArray();
+        }
+        public IReadOnlyList<DisplayTopologySnapshot> GetTopology()
+        {
+            TopologyCalls++;
+            return new[] { Metadata }.Concat(Others).Select(m => new DisplayTopologySnapshot(
+                m.PublicId, m.StableDisplayFingerprint, m.IdentityStatus, new(m.PhysicalBounds!.Value.X, m.PhysicalBounds.Value.Y, m.PhysicalBounds.Value.Width, m.PhysicalBounds.Value.Height))).ToArray();
+        }
     }
 
     private sealed class Tray : ITrayContext
     {
-        public string HostMode => "tray";
-        public bool SupportsRegionSelectionUi => true;
+        internal bool RegionUi=true;
+        public string HostMode => RegionUi?"tray":"headless";
+        public bool SupportsRegionSelectionUi => RegionUi;
         internal Action<ConfirmationDecision>? Decision;
         internal int ErrorCount;
+        internal int ConfirmationCalls;
+        internal int SelectionCalls;
         internal (string Status, int X, int Y, int W, int H, string DisplayId, string CoordinateSpace) Selection =
             ("selection_cancelled", 0, 0, 0, 0, "", "virtual_screen");
         internal string? LastSelectionPurpose;
-        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) => Decision = callback;
+        public void RequestConfirmation(RecordingConfirmationPresentation presentation, Action<ConfirmationDecision> callback) { ConfirmationCalls++; Decision = callback; }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback) { }
         public void RequestRegionSelection(int timeoutSeconds, Action<string, int, int, int, int, string, string> callback, string purpose)
         {
+            SelectionCalls++;
             LastSelectionPurpose = purpose;
             var result = Selection;
             callback(result.Status, result.X, result.Y, result.W, result.H, result.DisplayId, result.CoordinateSpace);

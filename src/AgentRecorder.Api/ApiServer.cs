@@ -1177,6 +1177,7 @@ public sealed partial class ApiServer
             parent_recording_id = item.ParentRecordingId,
             session_id = item.NestedSessionId
         },
+        profile_reuse_mode = item.ProfileReuseMode,
         profile_ref = item.ProfileId is null ? null : new
         {
             id = item.ProfileId,
@@ -1910,7 +1911,8 @@ public sealed partial class ApiServer
                     t_ms = mark.TMs,
                     label = mark.Label,
                     source = mark.Source
-                }
+                },
+                delivery = new { artifact = "bundle/marks.json", status = "pending" }
             }, reqId);
         }
     }
@@ -2018,7 +2020,7 @@ public sealed partial class ApiServer
         catch { return false; }
     }
 
-    private static void ValidateInteractiveProfile(RecurringFixedRegionProfileVersion profile)
+    private static void ValidateInteractiveProfile(RecurringFixedRegionProfileVersion profile, bool regionOnly = false)
     {
         if (Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE") == "1")
             throw new ApiException(503, "PROFILE_EXECUTION_UNAVAILABLE",
@@ -2029,28 +2031,28 @@ public sealed partial class ApiServer
             profile.CaptureSemantics != AuthorizedCaptureSemantics.DesktopRegion ||
             profile.CoordinateSpace != AuthorizedCoordinateSpace.PhysicalVirtualScreen ||
             profile.DisplayIdentityStatus != AuthorizedDisplayIdentityStatus.Resolved ||
-            profile.Backend != AuthorizedCaptureBackend.FfmpegRegion ||
-            profile.AudioMode != AuthorizedAudioMode.None ||
-            profile.OutputConflictPolicy != AuthorizedOutputConflictPolicy.FailIfExists)
+            (!regionOnly && profile.Backend != AuthorizedCaptureBackend.FfmpegRegion) ||
+            (!regionOnly && (profile.AudioMode != AuthorizedAudioMode.None ||
+            profile.OutputConflictPolicy != AuthorizedOutputConflictPolicy.FailIfExists)))
             throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
                 "The selected profile contains settings unsupported for interactive recording.",
                 new { field = "profile_ref", reason_code = "unsupported_profile_policy" });
 
-        if (profile.Duration.Ticks % TimeSpan.TicksPerSecond != 0 ||
-            profile.Duration.TotalSeconds is < 1 or > 600)
+        if (!regionOnly && (profile.Duration.Ticks % TimeSpan.TicksPerSecond != 0 ||
+            profile.Duration.TotalSeconds is < 1 or > 600))
             throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
                 "The profile duration must be a whole number of seconds from 1 through 600.",
                 new { field = "profile_ref.duration", reason_code = "unsupported_duration_precision" });
-        if (profile.CountdownSeconds is < 0 or > 10)
+        if (!regionOnly && profile.CountdownSeconds is < 0 or > 10)
             throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
                 "The profile countdown is outside the supported interactive range.",
                 new { field = "profile_ref.countdown_seconds", reason_code = "unsupported_countdown" });
         if ((profile.RegionWithinDisplay.Width & 1) != 0 || (profile.RegionWithinDisplay.Height & 1) != 0 ||
             profile.RegionWithinDisplay.Width < 32 || profile.RegionWithinDisplay.Height < 32)
             throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
-                "The fixed region must have even coordinates and dimensions and be at least 32 by 32 pixels.",
+                "The fixed region must have even dimensions and be at least 32 by 32 pixels.",
                 new { field = "profile_ref.region", reason_code = "unsupported_region_geometry" });
-        if (!Path.IsPathFullyQualified(profile.OutputDirectory))
+        if (!regionOnly && !Path.IsPathFullyQualified(profile.OutputDirectory))
             throw new ApiException(422, "PROFILE_NOT_EXECUTABLE",
                 "The profile output directory must be absolute.",
                 new { field = "profile_ref.output_directory", reason_code = "absolute_path_required" });
@@ -2102,7 +2104,7 @@ public sealed partial class ApiServer
         return null;
     }
 
-    private JsonNode BuildInteractiveProfileConfig(RecurringFixedRegionProfileVersion profile)
+    private JsonNode BuildInteractiveProfileConfig(RecurringFixedRegionProfileVersion profile, bool regionOnly = false)
     {
         var bounds = profile.VirtualScreenRegion;
         DisplayTopologySnapshot display;
@@ -2123,6 +2125,20 @@ public sealed partial class ApiServer
             throw new ApiException(409, "PROFILE_ENVIRONMENT_CHANGED",
                 "The profile display is no longer uniquely available.",
                 new { field = "profile_ref", reason_code = "display_identity_not_unique" });
+        if (regionOnly)
+            return new JsonObject
+            {
+                ["source"] = new JsonObject
+                {
+                    ["type"] = "region", ["display_id"] = display.PublicId,
+                    ["coordinate_space"] = "virtual_screen",
+                    ["bounds"] = new JsonObject
+                    {
+                        ["x"] = bounds.X, ["y"] = bounds.Y,
+                        ["width"] = bounds.Width, ["height"] = bounds.Height
+                    }
+                }
+            };
         return new JsonObject
         {
             ["source"] = new JsonObject
@@ -2352,10 +2368,17 @@ public sealed partial class ApiServer
         _tracer.IntentAccepted(traceId, endpoint, clientSentAtUtc);
 
         JsonNode body;
+        ProfileRef? regionReference = null;
         try
         {
+            regionReference = ProfileRegionQuickRequest.Validate(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody);
             body = JsonNode.Parse(string.IsNullOrWhiteSpace(reqBody) ? "{}" : reqBody)
                    ?? throw new ApiException(400, "INVALID_ARGUMENT", "Body required");
+        }
+        catch (ApiException ex)
+        {
+            _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: ex.Code);
+            throw;
         }
         catch
         {
@@ -2443,6 +2466,15 @@ public sealed partial class ApiServer
             // The placeholder is replaced once by the fixed active-window snapshot.
             cfg["source"] = new JsonObject { ["type"] = "window", ["window_id"] = "active_window" };
             ConfigParser.ValidateWindowSurfaceRequest(cfg);
+        }
+        if (regionReference is not null)
+        {
+            try { return CreateProfileRegionQuick(body, regionReference.Value, agent, traceId, endpoint, creationWaitMs, reqId); }
+            catch(ApiException ex)
+            {
+                if(!_tracer.HasValidationResult(traceId))_tracer.IntentValidated(traceId,endpoint,success:false,errorCode:ex.Code);
+                throw;
+            }
         }
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null;
 
@@ -2741,6 +2773,44 @@ public sealed partial class ApiServer
             // Context consumption is diagnostic only and must never change
             // recording state, confirmation, or API response status.
         }
+    }
+
+    private string CreateProfileRegionQuick(JsonNode body, ProfileRef reference, string agent,
+        string traceId, string endpoint, int? creationWaitMs, string reqId)
+    {
+        // Pure request checks must precede devices, display providers, UI and output creation.
+        OutputPathResolver.ValidateRequest(body["output"]);
+        if (!_tray.SupportsRegionSelectionUi || _profileManagementGateway is null)
+            throw new ApiException(503, "PROFILE_EXECUTION_UNAVAILABLE", "Interactive profile region execution is unavailable.",
+                new { reason_code = "profile_gateway_unavailable" });
+        FixedRegionProfileExactVersionSnapshot? snapshot;
+        try { snapshot = _profileManagementGateway.ReadExactVersionSnapshot(reference.ProfileId, reference.ProfileVersion); }
+        catch
+        {
+            throw new ApiException(503, "PROFILE_EXECUTION_UNAVAILABLE", "Exact profile snapshot unavailable.",
+                new { reason_code = "profile_snapshot_unavailable" });
+        }
+        if (snapshot?.Version is null)
+            throw new ApiException(404, "PROFILE_VERSION_NOT_FOUND", "Profile version not found.", new { reason_code = "profile_version_not_found" });
+        if (snapshot.Directory.IsDeleted)
+            throw new ApiException(409, "PROFILE_DELETED", "Profile is deleted.", new { reason_code = "profile_deleted" });
+        if (!reference.Matches(snapshot.Version))
+            throw new ApiException(409, "PROFILE_REF_MISMATCH", "Profile digest mismatch.", new { reason_code = "profile_digest_mismatch" });
+        var profile = snapshot.Version;
+        ValidateInteractiveProfile(profile, regionOnly: true);
+        // Geometry is projected independently; old countdown/duration/output never become defaults.
+        var cfg = BuildQuickRecordingConfig(body);
+        var audio = ConfigParser.ResolveAudioIntentDetails(cfg, EffectiveMicrophoneProvider,
+            EffectiveMicrophoneStatusProvider, EffectiveSystemAudioEndpointProvider);
+        if (audio.SystemAudioEndpoint is not null)
+            ConfigParser.BindResolvedSystemAudioEndpoint(cfg, audio.SystemAudioEndpoint);
+        cfg["source"] = BuildInteractiveProfileConfig(profile, true)["source"]!.DeepClone();
+        cfg["countdown_seconds"] = ConfigParser.NormalizeCountdownSeconds(body);
+        string? EnvironmentValidator() => ValidateProfileEnvironment(profile, _profileDisplayEnvironmentProvider);
+        var result = _engine.CreateRecordingFromFixedRegionProfile(cfg, agent, _tray, reference,
+            EnvironmentValidator, traceId, endpoint, audio.SystemAudioEndpoint, regionOnly: true);
+        return ApiResponse.Ok(ApplyCreationWait(AddQuickMetadataToObject(result, "profile_region",
+            (JsonObject)cfg["source"]!.DeepClone(), true), creationWaitMs), reqId);
     }
 
     private static JsonObject BuildQuickRecordingConfig(JsonNode body)
@@ -3665,7 +3735,7 @@ public sealed partial class ApiServer
                 source_type_match = "exact_persisted_recording_category",
                 plan_id_match = "exact_case_sensitive_plan_id_with_current_server_ownership",
                 target_key_supported_sources = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "ordinary" } : Array.Empty<string>(),
-                target_key_source_types = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "display", "region", "fixed_region_profile", "window" } : Array.Empty<string>(),
+                target_key_source_types = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true ? new[] { "display", "region", "fixed_region_profile", "fixed_region_profile_region", "window" } : Array.Empty<string>(),
                 target_key_match = "exact_frozen_screen_target_v1",
                 target_key_window_supported = _unifiedHistoryGateway?.SupportedSources.Contains("ordinary") == true,
                 target_key_window_semantics = "window_surface",
@@ -3777,6 +3847,10 @@ public sealed partial class ApiServer
             {
                 supported = true,
                 endpoint = "/api/v1/recordings/{recording_id}/marks",
+                requires_bundle = true,
+                mp4_embedded = false,
+                timestamp_basis = "server_call_on_first_frame_timeline",
+                delivery_artifact = "bundle/marks.json",
                 local_hotkey = new
                 {
                     supported = _tray.SupportsChapterMarksLocalHotkey,
@@ -3792,6 +3866,16 @@ public sealed partial class ApiServer
                 region_selection_may_block_in_headless = !_tray.SupportsRegionSelectionUi,
                 quick_recording_endpoint = "/api/v1/recordings/quick",
                 quick_recording_supported = true,
+                profile_region = new
+                {
+                    supported = _profileManagementGateway is not null && _tray.SupportsRegionSelectionUi && Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE") != "1",
+                    exact_profile_ref_required = true, duration_seconds_required = true,
+                    duration_seconds = new { min = 1, max = 600 }, countdown_default_seconds = 3,
+                    audio_modes = new[] { "none", "system_audio", "microphone" },
+                    local_confirmation_required = true, nested_supported = false,
+                    series_supported = false, artifacts_override_supported = false,
+                    reuse_mode = "region_only", plan_supported = false, lease_supported = false
+                },
                 windows_display = new
                 {
                     supported = true,
@@ -4013,7 +4097,7 @@ public sealed partial class ApiServer
 
     internal Func<WgcContinuousAvailabilityResult>? WindowSurfaceAvailabilityForTests { get; set; }
 
-    private static object[] BuildQuickRecipes(
+    private object[] BuildQuickRecipes(
         bool hasPrimaryDisplay,
         bool hasActiveWindow,
         WgcContinuousAvailabilityResult windowSurfaceProbe,
@@ -4120,6 +4204,17 @@ public sealed partial class ApiServer
             });
         }
 
+        recipes.Add(new
+        {
+            name="record_profile_region",target_type="profile_region",endpoint="/api/v1/recordings/quick",method="POST",
+            description="Reuse only a saved region using an exact reference and this request's ordinary options; local confirmation required.",
+            request_template=new {target=new{type="profile_region",profile_ref=new{id="<exact-id>",version=1,digest="<exact-digest>"}},duration_seconds=60,countdown_seconds=3},
+            available=_profileManagementGateway is not null && supportsRegionSelection && Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE")!="1",
+            unavailable_reason=_profileManagementGateway is not null && supportsRegionSelection && Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE")!="1" ? null : "interactive_profile_gateway_unavailable",
+            exact_profile_ref_required=true,duration_seconds_required=true,countdown_default_seconds=3,
+            audio=new[]{"none","system_audio","microphone"},local_confirmation_required=true,
+            nested_supported=false,series_supported=false,artifacts_override_supported=false
+        });
         return recipes.ToArray();
     }
 

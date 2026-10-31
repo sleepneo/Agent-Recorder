@@ -97,7 +97,7 @@ public sealed class RecordingUiStateBoundaryTests
         };
 
         var nextDue = started.AddSeconds(2);
-        var snapshot = RecordingEngine.CreateRecordingUiPresentationForTests(
+        var snapshot = new RecordingEngine(new CaptureAuditLogger()).CreateRecordingUiPresentationForTests(
             recording,
             RecordingUiState.Countdown,
             countdownRemainingSeconds: 2,
@@ -148,7 +148,7 @@ public sealed class RecordingUiStateBoundaryTests
                      RecordingUiState.Idle
                  })
         {
-            var snapshot = RecordingEngine.CreateRecordingUiPresentationForTests(recording, state);
+            var snapshot = new RecordingEngine(new CaptureAuditLogger()).CreateRecordingUiPresentationForTests(recording, state);
             Assert.Equal(state, snapshot.State);
             Assert.Equal(recording.Id, snapshot.RecordingId);
             Assert.Equal(new RecordingUiBounds(1, 2, 3, 4), snapshot.CaptureBounds);

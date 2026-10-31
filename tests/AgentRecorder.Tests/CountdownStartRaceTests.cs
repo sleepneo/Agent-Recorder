@@ -383,7 +383,7 @@ public sealed class CountdownStartRaceTests
         var tray = new RaceTray();
         var outerBackend = new ControlledBackend { EmitFirstFrame = true };
         var innerBackend = new ControlledBackend { EmitFirstFrame = true };
-        var engine = new RecordingEngine(audit)
+        var engine = new RecordingEngine(audit, bundleGenerator: new UnusedMarkBundleGenerator())
         {
             CountdownInterval = TimeSpan.FromMilliseconds(5)
         };

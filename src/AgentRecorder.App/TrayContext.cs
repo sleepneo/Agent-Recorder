@@ -749,9 +749,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
     private void UpdateChapterMarkHotkeyRegistration()
     {
-        // This method is called only from RunOnUi callbacks. Reading the state while
-        // holding each recording's lock gives registration the same exact-state rule
-        // as the keypress snapshot without making the global dictionary lock-heavy.
+        // Use only immutable snapshots from Core. The engine rechecks each entry
+        // at keypress time, including races with stopping/finalization.
         bool hasRecording = _activeRecordings.Values.Any(IsExactRecording);
         if (!hasRecording)
         {
@@ -832,7 +831,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     }
 
     private static bool IsExactRecording(RecordingUiPresentation presentation)
-        => presentation.State == RecordingUiState.Recording && !presentation.IsScreenshotSeries;
+        => presentation.State == RecordingUiState.Recording && presentation.ChapterMarksEligible;
 
     private RecordingUiPresentation[] SnapshotExactRecordings()
     {
@@ -1202,7 +1201,8 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
 
     public void ShowError(string text) =>
         RunOnUi(() => ShowBalloonTipIfAllowed(BubbleType.Error, 4000,
-            _uiText.Get("Tray_Balloon_ErrorTitle"), text, ToolTipIcon.Error));
+            _uiText.Get("Tray_Balloon_ErrorTitle"), text == "backend_creation_failed"
+                ? _uiText.Get("Tray_BackendCreationFailed") : text, ToolTipIcon.Error));
 
     public void ShowRecordingFailure(string recordingId, string reasonCode) =>
         RunOnUi(() => _failureNotificationManager.Request(recordingId, reasonCode));

@@ -108,7 +108,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     // lock or waits on external I/O. Registration and directory replacement
     // compete at the same linearization point.
     private readonly object _ordinaryOutputLock = new();
-    private sealed record OrdinaryOutputOwner(Recording Recording, string Path, bool IsAv);
+    private sealed record OrdinaryOutputOwner(Recording Recording, string Path, bool IsAv, string RegisteredPath);
     private readonly Dictionary<string, OrdinaryOutputOwner> _ordinaryOutputs = new();
     private readonly ConcurrentDictionary<string, byte> _ordinaryOutputCleanup = new();
 
@@ -125,12 +125,11 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             return null;
         try
         {
-            if (Volatile.Read(ref _disposeStarted) != 0 || _ordinaryOutputs.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims)
-                return null;
-            // Only immutable registration text. Do not inspect Recording, backend,
-            // Completion, cleanup, files or processes, and never retire an owner.
-            if (_ordinaryOutputs.Values.Any(owner => owner is null || string.IsNullOrEmpty(owner.Path))) return null;
-            claims = _ordinaryOutputs.Values.Select(owner => owner.Path).ToArray();
+            if (Volatile.Read(ref _disposeStarted) != 0) return null;
+            // Read immutable registrations only; never retire from a GET.
+            var paths = SnapshotOrdinaryOutputPathsUnderLock();
+            if (paths is null) return null;
+            claims = paths;
             if (_ordinaryRetentionPreparation is { } preparation) claims = claims.Append(preparation.Path).ToArray();
         }
         finally { Monitor.Exit(_ordinaryOutputLock); }
@@ -147,6 +146,9 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         var preparationRequested = requestedPath is null && rec.OrdinaryRequestedOutputPath is { } initialRequested
             ? Path.GetFullPath(initialRequested) : requested;
         var av = RecordingStoragePolicy.IsOrdinaryAv(rec);
+        // Backend evidence may take a worker lock. Observe outside the path
+        // arbitration lock, then validate the exact registration again inside it.
+        var retired = ObserveRetiredOrdinaryOutputs();
         lock (_ordinaryOutputLock)
         {
             if (_ordinaryRetentionPreparation is { } preparation &&
@@ -154,33 +156,23 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                  string.Equals(preparation.Path, preparationRequested, StringComparison.OrdinalIgnoreCase)))
                 throw new ApiException(409, "OUTPUT_PATH_IN_USE",
                     "This ordinary output path is currently in use. Wait for its finalization or select a different path.");
-            foreach (var owner in _ordinaryOutputs.Values.ToArray())
-            {
-                var prior = owner.Recording;
-                // Acquire the terminal snapshot before reading its backend and
-                // start-attempt fields. Cleanup may outlive terminal publication.
-                if (!prior.IsFinalized || _ordinaryOutputCleanup.ContainsKey(prior.Id)) continue;
-                var writerSettled = prior.Backend switch
-                {
-                    AvSplitCaptureBackend split => split.IsOutputSettled,
-                    FfmpegCaptureBackend ffmpeg => ffmpeg.IsVideoOnlyOutputSettled,
-                    _ => true
-                };
-                if (!prior.BackendStartAttempted || writerSettled)
-                    _ordinaryOutputs.Remove(prior.Id);
-            }
+            foreach (var witness in retired)
+                ReleaseRetiredOrdinaryOutputUnderLock(witness.Owner, witness.Backend);
             if (_ordinaryOutputs.Values.Any(owner => owner.Recording.Id != rec.Id &&
                 (av || owner.IsAv) && (string.Equals(owner.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(owner.Path, requested, StringComparison.OrdinalIgnoreCase))))
                 throw new ApiException(409, "OUTPUT_PATH_IN_USE",
                     "Another ordinary recording still owns this output path. Wait for its finalization or select a different path.");
-            _ordinaryOutputs[rec.Id] = new(rec, normalized, av);
+            _ordinaryOutputs[rec.Id] = new(rec, normalized, av, path);
         }
     }
 
     private void ReleaseUnregisteredOrdinaryOutput(Recording rec)
     {
-        lock (_ordinaryOutputLock) _ordinaryOutputs.Remove(rec.Id);
+        lock (_ordinaryOutputLock)
+            if (_ordinaryOutputs.TryGetValue(rec.Id, out var owner) && ReferenceEquals(owner.Recording, rec) &&
+                string.Equals(owner.RegisteredPath, rec.OutputPath, StringComparison.OrdinalIgnoreCase))
+                _ordinaryOutputs.Remove(rec.Id);
     }
     private ITrayContext? _tray;
 
@@ -328,6 +320,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     /// </summary>
     internal Action<Recording>? BeforeCreationWaitSnapshotForTests { get; set; }
     internal Action<Recording>? BeforeCreationWaitBlocksForTests { get; set; }
+    // Same signal-lock contract: coordinate only; do not enter engine/recording locks.
+    internal Action? BeforeStateWaitBlocksForTests { get; set; }
 
     /// <summary>
     /// Test-only monotonic clock seam for bounded creation-wait tests.
@@ -385,6 +379,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         get => _backendSelectionFactory;
         set => _backendSelectionFactory = value;
     }
+
+    internal Func<string, ICaptureBackend>? BackendMaterializerForTests { get; set; }
 
     /// <summary>
     /// Test seam for deterministic non-capturing plan revalidation. Production
@@ -670,6 +666,10 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 throw TimelineNotReady(rec, "monotonic_clock_invalid");
             }
 
+            if (BundleDeliveryUnavailableReason(rec) is { } deliveryReason)
+                throw new ApiException(409, "MARK_DELIVERY_UNAVAILABLE",
+                    "Marks require an eligible recording bundle.", new { reason = deliveryReason });
+
             try
             {
                 mark = new RecordingMark(tMs, label, source);
@@ -877,11 +877,12 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         ProfileRef profileRef,
         Func<string?> environmentValidator,
         string? traceId = null,
-        string? endpoint = null)
+        string? endpoint = null,
+        SystemAudioEndpointInfo? audioEndpoint = null, bool regionOnly = false)
     {
         ArgumentNullException.ThrowIfNull(environmentValidator);
-        return CreateRecordingCore(cfg, agent, tray, traceId, endpoint, null,
-            new FixedRegionProfileExecution(profileRef, environmentValidator));
+        return CreateRecordingCore(cfg, agent, tray, traceId, endpoint, audioEndpoint,
+            new FixedRegionProfileExecution(profileRef, environmentValidator, regionOnly));
     }
 
     private object CreateRecordingCore(
@@ -995,7 +996,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             {
                 rec.FixedRegionProfileReference = fixedRegionProfile.ProfileRef;
                 rec.FixedRegionProfileEnvironmentValidator = fixedRegionProfile.EnvironmentValidator;
-                rec.FixedRegionProfileStrictOutputConflict = true;
+                rec.FixedRegionProfileStrictOutputConflict = !fixedRegionProfile.RegionOnly;
+                rec.ProfileReuseMode = fixedRegionProfile.RegionOnly ? "region_only" : null;
             }
         }
         catch (ApiException ex)
@@ -1014,6 +1016,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
         rec.ApprovedCapturePlan = capturePlan;
         rec.IsOrdinaryLocalRequest = true;
+        if (rec.Mode == "video") rec.OrdinaryBackendCreation = new WorkerStartBoundary();
         var beforeConfirmationPreflight = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
         if (!beforeConfirmationPreflight.Passed)
         {
@@ -1042,7 +1045,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         // Construct the immutable, non-capturing decision before any local
         // confirmation is queued. Capability probing is allowed here; backend
         // construction and all pixel-producing work remain approval-gated.
-        if (fixedRegionProfile is not null && capturePlan.PlannedBackend != "ffmpeg-region")
+        if (fixedRegionProfile is { RegionOnly: false } && capturePlan.PlannedBackend != "ffmpeg-region")
             throw new ApiException(409, "PROFILE_BACKEND_UNAVAILABLE",
                 "Fixed-region profile execution requires the ffmpeg-region backend.",
                 new { field = "profile_ref", reason_code = "profile_backend_unavailable" });
@@ -1184,6 +1187,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                         return new
                         {
                             recording_id = rec.Id,
+                            profile_reuse_mode = rec.ProfileReuseMode,
                             profile_ref = ProfileRefObject(rec),
                             status = rec.State.ToString(),
                             stop_reason = rec.StopReason,
@@ -1205,6 +1209,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         _audit.Log("recording.requested", new
         {
             recording_id = rec.Id,
+            profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = rec.FixedRegionProfileReference is { } profileRef
                 ? new { id = profileRef.ProfileId, version = profileRef.ProfileVersion, digest = profileRef.ProfileDigest }
                 : null,
@@ -1333,6 +1338,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             {
                 status = "requires_user_confirmation",
                 recording_id = rec.Id,
+                profile_reuse_mode = rec.ProfileReuseMode,
                 profile_ref = ProfileRefObject(rec),
                 confirmation_id = conf.Id,
                 summary = summaryWithMeta,
@@ -1346,6 +1352,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             return new
             {
                 recording_id = rec.Id,
+                profile_reuse_mode = rec.ProfileReuseMode,
                 profile_ref = ProfileRefObject(rec),
                 status = "failed",
                 error = rec.Error,
@@ -1359,6 +1366,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             return new
             {
                 recording_id = rec.Id, mode = rec.Mode,
+                profile_reuse_mode = rec.ProfileReuseMode,
                 profile_ref = ProfileRefObject(rec),
                 status = rec.IsScreenshotSeries ? PublicScreenshotSeriesStatus(rec) : "recording",
                 started_at = Iso(rec.StartedAtUtc), expected_output = rec.OutputPath,
@@ -1404,7 +1412,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             rec.Id,
             new DateTimeOffset(DateTime.SpecifyKind(rec.CreatedAtUtc, DateTimeKind.Utc)),
             rec.State.ToString(),
-            profile is null ? rec.SourceType : "fixed_region_profile",
+            profile is null ? rec.SourceType : rec.ProfileReuseMode == "region_only" ? "fixed_region_profile_region" : "fixed_region_profile",
             captureSemantics,
             BoundHistoryText(rec.SourceTitle, 512),
             rec.DurationSeconds,
@@ -1842,6 +1850,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         try { _audit.Log("recording.profile_environment_changed", new
         {
             recording_id = rec.Id,
+            profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = rec.FixedRegionProfileReference is { } reference
                 ? new { id = reference.ProfileId, version = reference.ProfileVersion, digest = reference.ProfileDigest }
                 : null,
@@ -1868,7 +1877,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         public string Stage { get; } = stage;
     }
 
-    private sealed record FixedRegionProfileExecution(ProfileRef ProfileRef, Func<string?> EnvironmentValidator);
+    private sealed record FixedRegionProfileExecution(ProfileRef ProfileRef, Func<string?> EnvironmentValidator, bool RegionOnly);
 
     private bool TryValidateApprovedRegionTopology(
         CapturePlan approved,
@@ -3509,24 +3518,36 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         // Production creates the backend only from the already-approved plan.
         // Legacy test seams may still supply a concrete selection or factory.
         CaptureBackendSelection? selectionEvidence = null;
-        (ICaptureBackend Backend, string BackendType) selection;
+        (ICaptureBackend Backend, string BackendType) selection = (null!, "");
         try
         {
-            if (_backendSelectionFactory != null)
+            void SelectBackend()
             {
-                selectionEvidence = _backendSelectionFactory(rec.Config);
-                selection = selectionEvidence.AsTuple();
+                if (_backendSelectionFactory != null)
+                {
+                    selectionEvidence = _backendSelectionFactory(rec.Config);
+                    selection = selectionEvidence.AsTuple();
+                }
+                else if (_usesDefaultBackendFactory && rec.ApprovedCapturePlan != null)
+                {
+                    selection = (
+                        BackendMaterializerForTests is { } materialize
+                            ? materialize(rec.ApprovedCapturePlan.PlannedBackend)
+                            : CaptureBackendSelector.CreateBackend(rec.ApprovedCapturePlan.PlannedBackend),
+                        rec.ApprovedCapturePlan.PlannedBackend);
+                }
+                else
+                {
+                    selection = BackendFactory(rec.Config);
+                }
             }
-            else if (_usesDefaultBackendFactory && rec.ApprovedCapturePlan != null)
-            {
-                selection = (
-                    CaptureBackendSelector.CreateBackend(rec.ApprovedCapturePlan.PlannedBackend),
-                    rec.ApprovedCapturePlan.PlannedBackend);
-            }
-            else
-            {
-                selection = BackendFactory(rec.Config);
-            }
+            if (rec.IsOrdinaryLocalRequest && rec.Mode == "video")
+                (rec.OrdinaryBackendCreation ??= new WorkerStartBoundary()).Start(attempt => attempt.Launch(() =>
+                {
+                    SelectBackend();
+                    return selection.Backend is not null;
+                }, nativeProcessContract: false), () => false);
+            else SelectBackend();
         }
         catch when (rec.IsRecurringLeaseExecution)
         {
@@ -3536,6 +3557,16 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         {
             throw new CaptureAuthorizationStartException("required_once_execution_backend_unavailable");
         }
+        catch (CaptureAuthorizationStartException ex) when (IsOrdinaryInteractiveBackendCreation(rec))
+        {
+            FailCaptureAuthorizationStart(rec, traceId, tray, ex);
+            return;
+        }
+        catch (Exception ex) when (IsOrdinaryInteractiveBackendCreation(rec))
+        {
+            FailOrdinaryBackendCreation(rec, traceId, tray, ex.GetType().Name);
+            return;
+        }
 
         if (selection.Backend is null)
         {
@@ -3543,6 +3574,12 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 throw new RecurringEngineStartException("recurring_execution_backend_unavailable");
             if (rec.IsRequiredOnceExecution)
                 throw new CaptureAuthorizationStartException("required_once_execution_backend_unavailable");
+
+            if (IsOrdinaryInteractiveBackendCreation(rec))
+            {
+                FailOrdinaryBackendCreation(rec, traceId, tray, nameof(InvalidOperationException));
+                return;
+            }
 
             throw new InvalidOperationException("Capture backend factory returned null.");
         }
@@ -4196,6 +4233,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             _audit.Log("recording.started", new
             {
                 recording_id = rec.Id,
+                profile_reuse_mode = rec.ProfileReuseMode,
                 profile_ref = ProfileRefObject(rec),
                 output_path = rec.OutputPath,
                 backend = rec.BackendType,
@@ -5432,6 +5470,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 _audit.Log("recording.started", new
                 {
                     recording_id = rec.Id,
+                    profile_reuse_mode = rec.ProfileReuseMode,
                     profile_ref = rec.FixedRegionProfileReference is { } profileRef
                         ? new { id = profileRef.ProfileId, version = profileRef.ProfileVersion, digest = profileRef.ProfileDigest }
                         : null,
@@ -5542,6 +5581,20 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         }
     }
 
+    private static bool IsOrdinaryInteractiveBackendCreation(Recording rec)
+        => rec.IsOrdinaryLocalRequest && rec.Mode == "video" &&
+           !rec.IsStandingLeaseExecution && !rec.IsRecurringLeaseExecution &&
+           !rec.IsRequiredOnceExecution && !rec.IsFutureWindowOneShotExecution;
+
+    private void FailOrdinaryBackendCreation(Recording rec, string? traceId, ITrayContext tray, string errorType)
+    {
+        const string code = "backend_creation_failed";
+        // A failed materialization says nothing about resources created inside
+        // a foreign factory. Preserve WorkerStartBoundary/unknown ownership.
+        if (TryClaimStartFailure(rec, code, code, code) != StartFailureOwnership.Failed) return;
+        EmitStartFailure(rec, traceId, tray, code, errorType, code, code, "backend_selection");
+    }
+
     /// <summary>
     /// Attempts to own the failed terminal transition for a startup exception.
     /// The ownership decision and all terminal recording mutations happen under
@@ -5598,7 +5651,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         string error,
         string? stage)
     {
-        RetireNeverStartedBackend(rec.Backend);
+        // Selection failure has not transferred backend ownership to the engine.
+        if (stage != "backend_selection") RetireNeverStartedBackend(rec.Backend);
         _tracer.CaptureBackendStartFailed(traceId ?? "trace_unknown", rec.Id,
             rec.BackendType ?? "unknown", errorCode, errorType);
         _tracer.RecordingTerminal(traceId ?? "trace_unknown", rec.Id, status: "failed",
@@ -5613,7 +5667,10 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             stage = stage ?? ""
         });
         tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
-        if (rec.TrustedLifecycleAbortReason is CaptureAbortReason.StorageSpaceLow or CaptureAbortReason.StorageCapacityUnavailable &&
+        if (stage == "backend_selection" && errorCode == "backend_creation_failed" &&
+            IsOrdinaryInteractiveBackendCreation(rec) && tray is IRecordingFailureNotifier creationNotifier)
+            creationNotifier.ShowRecordingFailure(rec.Id, errorCode);
+        else if (rec.TrustedLifecycleAbortReason is CaptureAbortReason.StorageSpaceLow or CaptureAbortReason.StorageCapacityUnavailable &&
             tray is IRecordingFailureNotifier storageNotifier)
             storageNotifier.ShowRecordingFailure(rec.Id, stopReason);
         else
@@ -6043,6 +6100,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         CancelCountdown(rec.Id);
         StopDisplayRuntimeMonitor(rec.Id);
         RecordingBundleRequest? bundleRequest = null;
+        OrdinaryBundleOutputUse? bundleUse = null;
         bool finalizationSuccess = false;
         lock (rec)
         {
@@ -6198,6 +6256,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 // state. Long-polling waiters must never observe completed + pending.
                 bool bundleEligible = TryPrepareBundleGeneration(rec, meta, out var req);
                 bundleRequest = req;
+                if (bundleEligible) bundleUse = BindOrdinaryBundleOutputUse(rec, req!);
                 rec.BundleSnapshot = bundleEligible
                     ? RecordingBundleSnapshot.Generating(DeriveBundlePath(req!.MediaPath))
                     : RecordingBundleSnapshot.NotApplicable();
@@ -6346,7 +6405,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         if (bundleRequest != null)
         {
-            _ = Task.Run(() => RunBundleGenerationAsync(rec, bundleRequest));
+            DispatchBundleGeneration(rec, bundleRequest, bundleUse);
         }
 
         tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
@@ -6371,7 +6430,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         // notification surface after REC/floating controls are closed. Keep
         // this separate from user stops, pre-confirmation failures, and normal
         // completion; no tray balloon is used for this product path.
-        if (!finalizationSuccess &&
+        else if (!finalizationSuccess &&
             natural &&
             rec.StartedAtUtc != default &&
             rec.AudioSourceKind == AudioCaptureSourceKind.SystemLoopback &&
@@ -6386,6 +6445,25 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 {
                     recording_id = rec.Id,
                     reason_code = "audio_capture_discontinuous",
+                    host_mode = tray.HostMode
+                });
+        }
+        else if (!finalizationSuccess && natural &&
+                 rec.IsOrdinaryLocalRequest && rec.Mode == "video" && rec.StartedAtUtc != default &&
+                 !rec.IsStandingLeaseExecution && !rec.IsRecurringLeaseExecution &&
+                 !rec.IsRequiredOnceExecution && !rec.IsFutureWindowOneShotExecution &&
+                 rec.StopReason == "unexpected_exit")
+        {
+            // The terminal owner has closed REC/stop controls above. Specific
+            // trusted lifecycle/audio reasons win before this generic fallback.
+            // Never infer storage failure from encoder stderr or exception text.
+            if (tray is IRecordingFailureNotifier notifier)
+                notifier.ShowRecordingFailure(rec.Id, "unexpected_exit");
+            else
+                _audit.Log("recording_failure_notification.unavailable", new
+                {
+                    recording_id = rec.Id,
+                    reason_code = "unexpected_exit",
                     host_mode = tray.HostMode
                 });
         }
@@ -6486,17 +6564,33 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return Path.Combine(dir, stem + ".bundle");
     }
 
+    // Pure shared policy. Never inspect pending/generating status or consume the
+    // finalization CAS just to ask whether a mark can eventually be delivered.
+    private string? BundleDeliveryUnavailableReason(Recording rec)
+    {
+        if (!rec.GenerateBundle) return "bundle_disabled";
+        if (_bundleGenerator is null) return "bundle_generator_unavailable";
+        // Preserve FFmpeg's existing scope; WGC remains ordinary local video only.
+        bool eligibleBackend = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
+            rec.IsOrdinaryLocalRequest && rec.Mode == "video" &&
+            rec.BackendType is "wgc-continuous" or "wgc-window-av-split";
+        return eligibleBackend ? null : "backend_not_supported";
+    }
+
+    internal bool CanAddChapterMarks(Recording rec)
+    {
+        lock (rec)
+            return rec.State == RecState.recording && !rec.IsScreenshotSeries &&
+                rec.StartedAtUtc != default && rec.MarkTimelineAnchorTicks is >= 0 &&
+                BundleDeliveryUnavailableReason(rec) is null;
+    }
+
     private bool TryPrepareBundleGeneration(Recording rec, OutputMeta meta, out RecordingBundleRequest request)
     {
         request = null!;
 
-        // Keep FFmpeg's existing scope; WGC Bundle delivery is ordinary local video only.
-        bool isEligibleBackend = CaptureBackendSelector.IsFfmpegMp4Backend(rec.BackendType) ||
-            rec.IsOrdinaryLocalRequest && rec.Mode == "video" &&
-            rec.BackendType is "wgc-continuous" or "wgc-window-av-split";
         bool isMp4 = string.Equals(meta.Container ?? "mp4", "mp4", StringComparison.Ordinal);
-
-        if (!rec.GenerateBundle || _bundleGenerator == null || !isEligibleBackend || !isMp4)
+        if (BundleDeliveryUnavailableReason(rec) is not null || !isMp4)
             return false;
 
         // Exactly-once guard: natural exit and Stop() may both reach here.
@@ -6533,6 +6627,12 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             audioSourceKind: AudioSourceKindName(rec.AudioSourceKind),
             audioDeviceName: rec.MicrophoneDeviceName ?? rec.SystemAudioEndpointName,
             marks: rec.SnapshotMarks());
+        request.ProfileId=rec.FixedRegionProfileReference?.ProfileId;
+        request.ProfileVersion=rec.FixedRegionProfileReference?.ProfileVersion;
+        request.ProfileDigest=rec.FixedRegionProfileReference?.ProfileDigest;
+        request.ProfileReuseMode=rec.ProfileReuseMode;
+        request.CountdownSeconds=rec.CountdownSeconds;
+        request.VideoQuality=rec.Config.Quality;
         if (rec.OrdinaryHistoryPublication is not null)
         {
             rec.OrdinaryBundleOperation = OrdinaryRecordingBundleOperation.Create(rec.Id, request.MediaPath);
@@ -6932,7 +7032,12 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                     rec.Backend?.Cancel();
             }
             catch { }
-            finally { _ordinaryOutputCleanup.TryRemove(rec.Id, out _); }
+            finally
+            {
+                if (rec.IsOrdinaryLocalRequest && rec.Mode == "video")
+                    rec.OrdinaryBackendCreation?.CloseIfNoResources(() => true);
+                _ordinaryOutputCleanup.TryRemove(rec.Id, out _);
+            }
             _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
             _tray!.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
             return BuildStopResponse(rec);
@@ -7050,6 +7155,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return new
         {
             recording_id = rec.Id,
+            profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             status = rec.State.ToString(),
@@ -7063,6 +7169,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     private object BuildStoppingResponse(Recording rec) => new
     {
         recording_id = rec.Id,
+        profile_reuse_mode = rec.ProfileReuseMode,
         profile_ref = ProfileRefObject(rec),
         status = rec.State.ToString(),
         stop_reason = rec.StopReason ?? "",
@@ -7163,6 +7270,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return new
         {
             recording_id = rec.Id,
+            profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             status = PublicRecordingStatus(rec),
@@ -7258,6 +7366,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return new
         {
             recording_id = rec.Id,
+            profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
             output = OutputObj(rec, meta, full: true),
@@ -7515,6 +7624,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 if (remaining <= 0)
                     return true;
 
+                BeforeStateWaitBlocksForTests?.Invoke();
                 Monitor.Wait(_lock, remaining);
                 // After waking (spurious or PulseAll), re-evaluate predicate.
                 // Do NOT check _stateVersion; unrelated changes must not break the loop.
@@ -7559,6 +7669,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             RecordingId = rec.Id,
             Mode = rec.Mode,
             Status = rec.State.ToString(),
+            ProfileRef = ProfileRefObject(rec),
+            ProfileReuseMode = rec.ProfileReuseMode,
             Source = new { Type = rec.SourceType, Title = rec.SourceTitle },
             Backend = rec.BackendType,
             Config = new { CountdownSeconds = rec.CountdownSeconds, DurationSeconds = rec.DurationSeconds, Artifacts = new { Bundle = rec.GenerateBundle } },
@@ -7630,6 +7742,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     public IEnumerable<object> List() => _recs.Values.Select(r => new
     {
         recording_id = r.Id, mode = r.Mode, status = r.IsScreenshotSeries ? PublicScreenshotSeriesStatus(r) : r.State.ToString(),
+        profile_reuse_mode = r.ProfileReuseMode,
         profile_ref = ProfileRefObject(r),
         started_at = r.StartedAtUtc == default ? null : Iso(r.StartedAtUtc),
         completed_at = r.CompletedAtUtc.HasValue ? Iso(r.CompletedAtUtc.Value) : null,
@@ -8023,7 +8136,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     /// corresponding progress event; they are copied into the DTO rather than
     /// leaving the UI to read a mutable runtime object later.
     /// </summary>
-    private static RecordingUiPresentation CreateRecordingUiPresentation(
+    private RecordingUiPresentation CreateRecordingUiPresentation(
         Recording rec,
         RecordingUiState state,
         int? countdownRemainingSeconds = null,
@@ -8044,6 +8157,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 DurationSeconds = rec.DurationSeconds,
                 StartedAtUtc = rec.StartedAtUtc,
                 IsScreenshotSeries = rec.IsScreenshotSeries,
+                ChapterMarksEligible = CanAddChapterMarks(rec),
                 SeriesCapturedFrameCount = seriesCapturedFrameCount,
                 SeriesPlannedFrameCount = seriesPlannedFrameCount ?? series?.PlannedFrameCount,
                 SeriesNextCaptureDueAtUtc = seriesNextCaptureDueAtUtc,
@@ -8055,7 +8169,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         }
     }
 
-    internal static RecordingUiPresentation CreateRecordingUiPresentationForTests(
+    internal RecordingUiPresentation CreateRecordingUiPresentationForTests(
         Recording rec,
         RecordingUiState state,
         int? countdownRemainingSeconds = null,

@@ -22,7 +22,7 @@ namespace AgentRecorder.Tests;
 // The process/event provider is synthetic. Session, consent gate, final publishers,
 // mux, probes, frame extraction, digest reads and history persistence are real.
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
+public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData("display",false,false)][InlineData("display",false,true)]
@@ -173,6 +173,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
         private readonly string Parent;
         internal readonly string Root;
         private readonly bool keepEvidence;
+        private readonly bool hasGenerator;
         internal readonly HeldGenerator Generator = new(); internal readonly Tray Tray = new();
         internal SqliteOperationalStore Store = null!; internal SqliteOrdinaryRecordingHistoryStore Writer = null!;
         internal RecordingEngine Engine = null!; internal ApiServer? Api;
@@ -189,10 +190,11 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
         private readonly Func<List<SystemQuery.DisplayTopologyInfo>>? topology = Provider<Func<List<SystemQuery.DisplayTopologyInfo>>>("_displayTopologyProvider");
         private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? windows = Provider<Func<bool, bool, List<SystemQuery.WindowInfo>>>("_windowProvider");
         private bool disposed;
-        internal Fixture(bool generator = true, bool failConstruction = false,bool mediaOnlyEvidence=false)
+        internal Fixture(bool generator = true, bool failConstruction = false,bool mediaOnlyEvidence=false, string? testRoot=null, AgentRecorder.Logging.AuditLogger? runtimeAudit=null, Func<SqliteOrdinaryRecordingHistoryStore,IOrdinaryRecordingHistoryStore>? historyFactory=null)
         {
             keepEvidence=mediaOnlyEvidence;
-            Parent=Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot,mediaOnlyEvidence?".local-data/temp/task362":".local-data/temp/task346"));
+            hasGenerator = generator;
+            Parent=testRoot ?? Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot,mediaOnlyEvidence?".local-data/temp/task362":".local-data/temp/task346"));
             Root=Path.Combine(Parent,(mediaOnlyEvidence?"wgc-":"")+Guid.NewGuid().ToString("N"));
             try
             {
@@ -211,7 +213,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
                 SystemQuery.SetWindowProvider((_, _) => new() { new("window_42", "Synthetic window", "task346.exe", 7, false, false, new(0, 0, 64, 64)) });
                 if (failConstruction) throw new IOException("owned_constructor_fault");
                 Store = new(Path.Combine(Root, "history.db")); Store.Initialize(); Writer = new(Store);
-                Engine = new(new RetentionSharedOutputPathTests.QuietAudit(), systemAudioEndpointProvider: new Devices(), bundleGenerator: generator ? Generator : null)
+                Engine = new(runtimeAudit ?? new RetentionSharedOutputPathTests.QuietAudit(), systemAudioEndpointProvider: new Devices(), bundleGenerator: generator ? Generator : null)
                     { CountdownSteps = 0, DisableDeadlineWatchdogForTests = true };
                 Engine.CapturePlanFactoryForTests = cfg => CaptureBackendSelector.BuildPlan(cfg, new Probe());
                 Engine.OrdinaryWindowMetadataForTests = (_, _) => OrdinaryWindowTargetKeyTests.Facts();
@@ -221,7 +223,7 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
                     if (cfg.IsSystemLoopback) { Av = new(new AvWorkers(this), new ExternalProcessRunner(), new TempRetentionPolicy(Root)); return (Av, "wgc-window-av-split"); }
                     return (NewWgc(), "wgc-continuous");
                 };
-                Engine.ConfigureOrdinaryRecordingHistory(Writer); Engine.SetTray(Tray);
+                Engine.ConfigureOrdinaryRecordingHistory(historyFactory?.Invoke(Writer) ?? Writer); Engine.SetTray(Tray);
             }
             catch { Dispose(); throw; }
         }
@@ -278,7 +280,15 @@ public sealed class OrdinaryWgcBundleTests(ITestOutputHelper output)
             Tray.Confirm!(ConfirmationDecision.Approve()); await Until(() => rec.State == RecState.recording || rec.IsFinalized);
             Assert.True(rec.State == RecState.recording, $"Approval failed: {rec.State}; {rec.Error}; {rec.LastMeta?.StderrLog}; {rec.LastMeta?.StopReason}");
             Assert.Equal(1, FactoryCalls); Assert.Equal(1, Process!.BeginObserved); Assert.NotNull(rec.AuthorizationProof);
-            Engine.AddMark(rec.Id, "标记346", "agent");
+            if (rec.GenerateBundle && hasGenerator) Engine.AddMark(rec.Id, "标记346", "agent");
+            else
+            {
+                var denied = Assert.Throws<ApiException>(() => Engine.AddMark(rec.Id, "标记346", "agent"));
+                Assert.Equal("MARK_DELIVERY_UNAVAILABLE", denied.Code);
+                using var details = JsonDocument.Parse(JsonSerializer.Serialize(denied.Details));
+                Assert.Equal(rec.GenerateBundle ? "bundle_generator_unavailable" : "bundle_disabled", details.RootElement.GetProperty("reason").GetString());
+                Assert.Empty(rec.SnapshotMarks());
+            }
         }
         internal async Task Terminal(Recording rec, bool manual)
         {

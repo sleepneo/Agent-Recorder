@@ -10,6 +10,12 @@ namespace AgentRecorder.Capture;
 /// </summary>
 public sealed class RecordingBundleRequest
 {
+    public string? ProfileId { get; internal set; }
+    public long? ProfileVersion { get; internal set; }
+    public string? ProfileDigest { get; internal set; }
+    public string? ProfileReuseMode { get; internal set; }
+    public int? CountdownSeconds { get; internal set; }
+    public string? VideoQuality { get; internal set; }
     internal string? PublicationOperationId { get; set; }
     internal BundleMediaHashBinding? MediaHashBinding { get; private set; }
     internal void BindMediaPublication(PublicationReceipt receipt) => MediaHashBinding = BundleMediaHashBinding.Bind(this, receipt);

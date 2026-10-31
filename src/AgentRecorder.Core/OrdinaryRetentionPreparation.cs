@@ -29,15 +29,16 @@ public sealed partial class RecordingEngine
             if (RetentionHostStopping) return OrdinaryPreparationReason.ShuttingDown;
             if (session.Stopped) return OrdinaryPreparationReason.Cancelled;
             if (_ordinaryRetentionPreparation is not null) return OrdinaryPreparationReason.Busy;
-            if (_ordinaryOutputs.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims) return OrdinaryPreparationReason.Unavailable;
-            // Validate every immutable registration; never inspect Recording,
-            // Completion/backend/PID or retire terminal owners on this path.
+            var paths = SnapshotOrdinaryOutputPathsUnderLock();
+            if (paths is null) return OrdinaryPreparationReason.Unavailable;
+            // Both writer bookings and immutable Bundle main-video uses are
+            // checked without inspecting tasks or retiring any registration.
             var matching = false;
-            foreach (var owner in _ordinaryOutputs.Values)
+            foreach (var path in paths)
             {
-                if (owner is null || owner.Recording is null || !WindowsReadOnlyFileMetadataProbe.IsCanonicalLocalPath(owner.Path) ||
-                    !string.Equals(Path.GetFullPath(owner.Path), owner.Path, StringComparison.OrdinalIgnoreCase)) return OrdinaryPreparationReason.Unavailable;
-                matching |= string.Equals(owner.Path, session.Path, StringComparison.OrdinalIgnoreCase);
+                if (!WindowsReadOnlyFileMetadataProbe.IsCanonicalLocalPath(path) ||
+                    !string.Equals(Path.GetFullPath(path), path, StringComparison.OrdinalIgnoreCase)) return OrdinaryPreparationReason.Unavailable;
+                matching |= string.Equals(path, session.Path, StringComparison.OrdinalIgnoreCase);
             }
             if (matching) return OrdinaryPreparationReason.RuntimeInUse;
             Volatile.Write(ref _ordinaryRetentionPreparation, session); // linearization point

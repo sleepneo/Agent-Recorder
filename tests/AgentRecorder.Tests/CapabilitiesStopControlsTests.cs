@@ -13,7 +13,7 @@ namespace AgentRecorder.Tests;
 
 /// <summary>
 /// API-level tests for <c>capabilities.interaction.stop_controls</c> in tray and headless modes.
-/// Serialized via the HeadlessHostIntegration collection because each test binds ApiServer.Port.
+/// Serialized via the HeadlessHostIntegration collection and use private ephemeral listeners.
 /// </summary>
 [Collection("HeadlessHostIntegration")]
 public class CapabilitiesStopControlsTests
@@ -71,7 +71,7 @@ public class CapabilitiesStopControlsTests
         var audit = new AuditLogger();
         var engine = new RecordingEngine(audit);
         engine.SetTray(tray);
-        var server = new ApiServer(engine, audit, tray);
+        var server = new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0);
         return (server, dataDir);
     }
 
@@ -97,7 +97,7 @@ public class CapabilitiesStopControlsTests
         {
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -115,6 +115,10 @@ public class CapabilitiesStopControlsTests
 
             var chapterMarks = doc.RootElement.GetProperty("data").GetProperty("chapter_marks");
             Assert.True(chapterMarks.GetProperty("supported").GetBoolean());
+            Assert.True(chapterMarks.GetProperty("requires_bundle").GetBoolean());
+            Assert.False(chapterMarks.GetProperty("mp4_embedded").GetBoolean());
+            Assert.Equal("server_call_on_first_frame_timeline", chapterMarks.GetProperty("timestamp_basis").GetString());
+            Assert.Equal("bundle/marks.json", chapterMarks.GetProperty("delivery_artifact").GetString());
             var local = chapterMarks.GetProperty("local_hotkey");
             Assert.True(local.GetProperty("supported").GetBoolean());
             Assert.False(local.GetProperty("registered").GetBoolean());
@@ -137,7 +141,7 @@ public class CapabilitiesStopControlsTests
         {
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -171,7 +175,7 @@ public class CapabilitiesStopControlsTests
         {
             server.Start();
             using var client = CreateClient();
-            var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+            var response = await client.GetAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/capabilities");
             Assert.Equal(200, (int)response.StatusCode);
 
             var body = await response.Content.ReadAsStringAsync();
@@ -189,6 +193,10 @@ public class CapabilitiesStopControlsTests
 
             var chapterMarks = doc.RootElement.GetProperty("data").GetProperty("chapter_marks");
             Assert.True(chapterMarks.GetProperty("supported").GetBoolean());
+            Assert.True(chapterMarks.GetProperty("requires_bundle").GetBoolean());
+            Assert.False(chapterMarks.GetProperty("mp4_embedded").GetBoolean());
+            Assert.Equal("server_call_on_first_frame_timeline", chapterMarks.GetProperty("timestamp_basis").GetString());
+            Assert.Equal("bundle/marks.json", chapterMarks.GetProperty("delivery_artifact").GetString());
             var local = chapterMarks.GetProperty("local_hotkey");
             Assert.False(local.GetProperty("supported").GetBoolean());
             Assert.False(local.GetProperty("registered").GetBoolean());

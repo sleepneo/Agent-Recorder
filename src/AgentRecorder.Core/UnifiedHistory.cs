@@ -45,7 +45,7 @@ public sealed record UnifiedHistoryEntry(
 public static class UnifiedHistoryFilterCodes
 {
     // Query allowlist only: older durable source types remain readable without a filter.
-    public static IReadOnlyList<string> SourceTypes { get; } = Array.AsReadOnly(new[] { "display", "window", "region", "fixed_region_profile" });
+    public static IReadOnlyList<string> SourceTypes { get; } = Array.AsReadOnly(new[] { "display", "window", "region", "fixed_region_profile", "fixed_region_profile_region" });
     // Same canonical boundary as the dedicated plan history/status APIs.
     public static bool IsValidPlanId(string? id) => !string.IsNullOrWhiteSpace(id) && id.Length <= 128 && id == id.Trim() &&
         id.All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.');

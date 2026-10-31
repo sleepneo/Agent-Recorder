@@ -22,7 +22,7 @@ namespace AgentRecorder.Tests;
 /// tray tests run on an STA without creating a real global registration.
 /// </summary>
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class ChapterMarksHotkeyTests : IDisposable
+public sealed partial class ChapterMarksHotkeyTests : IDisposable
 {
     private readonly TempDirectory _uiDataDir = new();
 
@@ -100,10 +100,11 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
         public void ShowBalloonTip(int timeout, string title, string body, ToolTipIcon icon) => Calls++;
     }
 
-    private static Recording MakeRecording(RecState state, long anchor, string? role = null)
+    private static Recording MakeRecording(RecState state, long anchor, string? role = null, bool bundle = true)
     {
-        return new Recording
+        return new Recording(bundle)
         {
+            BackendType = "ffmpeg-region",
             State = state,
             StartedAtUtc = new DateTime(2026, 8, 20, 8, 0, 0, DateTimeKind.Utc),
             MarkTimelineAnchorTicks = anchor,
@@ -139,7 +140,7 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
         ITrayBalloonTip? balloonTip = null)
     {
         var audit = new CaptureAuditLogger();
-        var engine = new RecordingEngine(audit)
+        var engine = new RecordingEngine(audit, bundleGenerator: new UnusedMarkBundleGenerator())
         {
             MonotonicFrequencyForTests = 1000,
             MonotonicTimestampProviderForTests = () => 1000
@@ -236,15 +237,15 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var recording = MakeRecording(RecState.recording, 0);
             Add(setup.engine, recording);
 
-            context.SetPreparing(RecordingUiPresentationTestData.FromRecording(preparing, RecordingUiState.Preparing));
+            context.SetPreparing(RecordingUiPresentationTestData.FromRecording(preparing, RecordingUiState.Preparing, engine: setup.engine));
             Assert.Equal(0, setup.markHotkey.RegisterCallCount);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording, engine: setup.engine));
             Assert.Equal(1, setup.markHotkey.RegisterCallCount);
             Assert.True(context.IsChapterMarksHotkeyRegistered);
 
             recording.State = RecState.finalizing;
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(recording, RecordingUiState.Finalizing));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(recording, RecordingUiState.Finalizing, engine: setup.engine));
             Assert.Equal(1, setup.markHotkey.UnregisterCallCount);
             Assert.False(context.IsChapterMarksHotkeyRegistered);
         });
@@ -260,7 +261,7 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var series = MakeScreenshotSeriesRecording(RecState.recording, 0);
             Add(setup.engine, series);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(series));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(series, engine: setup.engine));
             Assert.Equal(0, setup.markHotkey.RegisterCallCount);
             Assert.False(context.IsChapterMarksHotkeyRegistered);
 
@@ -281,8 +282,8 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var series = MakeScreenshotSeriesRecording(RecState.recording, 0);
             Add(setup.engine, video, series);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(video));
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(series));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(video, engine: setup.engine));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(series, engine: setup.engine));
             setup.markHotkey.SimulatePressed();
 
             Assert.Single(video.SnapshotMarks());
@@ -303,16 +304,16 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var inner = MakeRecording(RecState.recording, 200, "inner");
             Add(setup.engine, outer, inner);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(outer));
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(inner));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(outer, engine: setup.engine));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(inner, engine: setup.engine));
             Assert.Equal(1, setup.markHotkey.RegisterCallCount);
 
             outer.State = RecState.finalizing;
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(outer, RecordingUiState.Finalizing));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(outer, RecordingUiState.Finalizing, engine: setup.engine));
             Assert.Equal(0, setup.markHotkey.UnregisterCallCount);
 
             inner.State = RecState.finalizing;
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(inner, RecordingUiState.Finalizing));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(inner, RecordingUiState.Finalizing, engine: setup.engine));
             Assert.Equal(1, setup.markHotkey.UnregisterCallCount);
         });
     }
@@ -327,16 +328,16 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var first = MakeRecording(RecState.recording, 0);
             Add(setup.engine, first);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first));
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first, engine: setup.engine));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first, engine: setup.engine));
             Assert.Equal(1, setup.markHotkey.RegisterCallCount);
             Assert.Single(setup.audit.Events, e => e.evt == "tray.chapter_mark_hotkey_state");
 
             first.State = RecState.finalizing;
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing, engine: setup.engine));
             var second = MakeRecording(RecState.recording, 0);
             Add(setup.engine, second);
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(second));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(second, engine: setup.engine));
 
             Assert.Equal(2, setup.markHotkey.RegisterCallCount);
             Assert.Equal(2, setup.audit.Events.Count(e => e.evt == "tray.chapter_mark_hotkey_state"));
@@ -365,9 +366,9 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var first = MakeRecording(RecState.recording, 0);
             Add(setup.engine, first);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(first, engine: setup.engine));
             first.State = RecState.finalizing;
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing, engine: setup.engine));
 
             Assert.Single(created);
             Assert.Equal(1, created[0].UnregisterCallCount);
@@ -384,8 +385,8 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             Assert.False(ReadChapterMarksHotkeyCapability(setup.engine, setup.audit, context));
 
             // Repeated finalizing/idle callbacks do not retry or emit another failure.
-            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing));
-            context.SetIdle(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Idle));
+            context.SetFinalizing(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Finalizing, engine: setup.engine));
+            context.SetIdle(RecordingUiPresentationTestData.FromRecording(first, RecordingUiState.Idle, engine: setup.engine));
             context.SetAllIdle();
             Assert.Equal(1, created[0].UnregisterCallCount);
             Assert.Equal(1, created[0].DisposeCallCount);
@@ -394,7 +395,7 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
 
             var second = MakeRecording(RecState.recording, 0);
             Add(setup.engine, second);
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(second));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(second, engine: setup.engine));
 
             Assert.Equal(2, created.Count);
             Assert.Equal(1, created[1].RegisterCallCount);
@@ -416,9 +417,9 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             Add(setup.engine, outer, inner, preparing);
             setup.engine.MonotonicTimestampProviderForTests = () => 1100;
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(outer));
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(inner));
-            context.SetPreparing(RecordingUiPresentationTestData.FromRecording(preparing, RecordingUiState.Preparing));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(outer, engine: setup.engine));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(inner, engine: setup.engine));
+            context.SetPreparing(RecordingUiPresentationTestData.FromRecording(preparing, RecordingUiState.Preparing, engine: setup.engine));
             setup.markHotkey.SimulatePressed();
 
             Assert.Equal(1000, Assert.Single(outer.SnapshotMarks()).TMs);
@@ -447,8 +448,8 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             var missingFromDomain = MakeRecording(RecState.recording, 0);
             Add(setup.engine, good);
 
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(good));
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(missingFromDomain));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(good, engine: setup.engine));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(missingFromDomain, engine: setup.engine));
             setup.markHotkey.SimulatePressed();
 
             Assert.Single(good.SnapshotMarks());
@@ -468,7 +469,7 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             using var context = setup.context;
             var recording = MakeRecording(RecState.recording, 0);
             Add(setup.engine, recording);
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording, engine: setup.engine));
             setup.markHotkey.SimulatePressed();
 
             var setLanguage = typeof(TrayContext).GetMethod("SetLanguage", BindingFlags.NonPublic | BindingFlags.Instance);
@@ -593,7 +594,7 @@ public sealed class ChapterMarksHotkeyTests : IDisposable
             using var context = setup.context;
             var recording = MakeRecording(RecState.recording, 0);
             Add(setup.engine, recording);
-            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording));
+            context.SetRecording(RecordingUiPresentationTestData.FromRecording(recording, engine: setup.engine));
             setup.markHotkey.SimulatePressed();
 
             Assert.Equal(0, balloon.Calls);

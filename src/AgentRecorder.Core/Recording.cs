@@ -49,6 +49,7 @@ public sealed class Recording
     // Original built filename before the existing on-disk conflict policy.
     // Internal only: runtime preparation must also arbitrate this requested path.
     internal string? OrdinaryRequestedOutputPath { get; set; }
+    internal string? ProfileReuseMode { get; set; }
     internal ProfileRef? FixedRegionProfileReference { get; set; }
     internal Func<string?>? FixedRegionProfileEnvironmentValidator { get; set; }
     internal bool FixedRegionProfileStrictOutputConflict { get; set; }
@@ -71,6 +72,10 @@ public sealed class Recording
     /// asked to start and then failed.
     /// </summary>
     internal bool BackendStartAttempted { get; set; }
+    // Ordinary admission owns backend materialization separately from physical
+    // Start. A cancelled, sealed NoResources boundary is explicit evidence;
+    // a null Backend or an unset Start flag alone is not.
+    internal WorkerStartBoundary? OrdinaryBackendCreation { get; set; }
 
     /// <summary>
     /// Timestamp when the countdown phase began. Used to anchor the transition
@@ -308,6 +313,12 @@ public sealed class Recording
     {
         if (State is not (RecState.completed or RecState.failed or RecState.cancelled or RecState.rejected or RecState.expired))
             return false;
+
+        // Only a boundary bound by ordinary admission/start can prove that no
+        // backend was materialized. Seal it before publishing terminal state so
+        // late creation cannot turn a NoResources observation into a new owner.
+        if (IsOrdinaryLocalRequest && Mode == "video")
+            OrdinaryBackendCreation?.CloseIfNoResources(() => true);
 
         // Interlocked.CompareExchange is an acquire/release-equivalent
         // atomic publication and keeps duplicate publication impossible even

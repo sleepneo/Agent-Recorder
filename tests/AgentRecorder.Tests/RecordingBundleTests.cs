@@ -17,7 +17,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("NonParallel-AgentRecorderEnvVar")]
-public class RecordingBundleTests : IDisposable
+public partial class RecordingBundleTests : IDisposable
 {
     private readonly string _tmpDir;
 

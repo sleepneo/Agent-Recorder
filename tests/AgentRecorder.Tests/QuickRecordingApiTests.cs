@@ -1020,12 +1020,13 @@ public class QuickRecordingApiTests
             Assert.True(interaction.GetProperty("quick_recording_supported").GetBoolean());
 
             var recipes = interaction.GetProperty("quick_recipes");
-            Assert.Equal(5, recipes.GetArrayLength());
+            Assert.Equal(6, recipes.GetArrayLength());
 
             var recipeNames = new List<string>();
             foreach (var r in recipes.EnumerateArray())
                 recipeNames.Add(r.GetProperty("name").GetString()!);
 
+            Assert.Contains("record_profile_region", recipeNames);
             Assert.Contains("record_primary_display", recipeNames);
             Assert.Contains("record_active_window", recipeNames);
             Assert.Contains("record_selected_region", recipeNames);
@@ -1947,7 +1948,7 @@ public class QuickRecordingApiTests
             using var doc = JsonDocument.Parse(body);
             var recipes = doc.RootElement.GetProperty("data").GetProperty("interaction").GetProperty("quick_recipes");
 
-            Assert.Equal(5, recipes.GetArrayLength());
+            Assert.Equal(6, recipes.GetArrayLength());
 
             foreach (var recipe in recipes.EnumerateArray())
             {

@@ -26,7 +26,7 @@ namespace AgentRecorder.Tests;
 /// subprocess tree.
 /// </summary>
 [Collection("NonParallel-WindowBackend")]
-public sealed class WgcContinuousCaptureBackendTests : IDisposable
+public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly string _finalDir;

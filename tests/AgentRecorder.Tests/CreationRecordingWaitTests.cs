@@ -116,7 +116,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         var backend = new ObservableFakeBackend();
         engine.SetTray(tray);
         engine.BackendFactory = _ => (backend, useObservableBackend ? "ffmpeg" : "fake");
-        var server = new ApiServer(engine, audit, tray, tracer: tracer);
+        var server = new ApiServer(engine, audit, tray, null, null, null, tracer, null, null, null, null, null, 0);
 
         _engine = engine;
         _server = server;
@@ -177,7 +177,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var rawResponse = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings",
             JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
         var raw = await ReadData(rawResponse);
         Assert.Equal(200, (int)rawResponse.StatusCode);
@@ -188,7 +188,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         Assert.False(raw.TryGetProperty("recording", out _));
 
         var quickResponse = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings/quick",
             JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
         var quick = await ReadData(quickResponse);
         Assert.Equal(200, (int)quickResponse.StatusCode);
@@ -213,10 +213,10 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var raw = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings?wait_ms=1",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings?wait_ms=1",
             JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"}}"));
         var quick = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick?wait_for=unsupported",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings/quick?wait_for=unsupported",
             JsonContent("{\"target\":{\"type\":\"primary_display\"}}"));
 
         Assert.Equal(400, (int)raw.StatusCode);
@@ -245,7 +245,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings",
             JsonContent(body));
 
         Assert.Equal(400, (int)response.StatusCode);
@@ -264,7 +264,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick?wait_for=recording&wait_ms=25000",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings/quick?wait_for=recording&wait_ms=25000",
             JsonContent("{\"target\":{\"type\":\"selected_region\"},\"duration_seconds\":60}"));
         var data = await ReadData(response);
 
@@ -287,7 +287,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick?wait_for=recording&wait_ms=100",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings/quick?wait_for=recording&wait_ms=100",
             JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
         var data = await ReadData(response);
 
@@ -317,7 +317,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
         var response = await client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings?wait_for=recording&wait_ms=1",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings?wait_for=recording&wait_ms=1",
             JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
 
         var data = await ReadData(response);
@@ -341,7 +341,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
         var requestTask = client.PostAsync(
-            $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings?wait_for=recording&wait_ms=5000",
+            $"http://127.0.0.1:{_server!.BoundPort}/api/v1/recordings?wait_for=recording&wait_ms=5000",
             JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"countdown_seconds\":2,\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
 
         Assert.True(tray.ConfirmationRequested.Wait(TimeSpan.FromSeconds(2)));
@@ -376,7 +376,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
         using var client = CreateClient();
         client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
-        var response = await client.GetAsync($"http://127.0.0.1:{ApiServer.Port}/api/v1/capabilities");
+        var response = await client.GetAsync($"http://127.0.0.1:{_server!.BoundPort}/api/v1/capabilities");
         var data = await ReadData(response);
         var wait = data.GetProperty("interaction").GetProperty("creation_wait");
 

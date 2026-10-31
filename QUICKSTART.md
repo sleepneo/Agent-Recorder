@@ -331,4 +331,9 @@ Check `capabilities.host_shutdown.supported` first. This build supports authenti
 
 Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
 
-The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.
+The tray App host supports this exit operation. Other hosts, including Headless, advertise `supported=false`; the CLI returns `unsupported` without falling back to an unauthenticated event, process kill or UI automation.
+
+
+## Saved Regions
+
+Ask your agent to reuse a saved region with this recording's duration and either system audio or microphone. The agent uses quick `target.type=profile_region` with the exact Profile ref; it does not modify the saved configuration. Each call still requires local confirmation. Omitted audio means silence and countdown defaults to 3 seconds; supported default-device resolution avoids requiring a device name every time. Raw `profile_ref` retains its full silent-configuration semantics. See the [API contract](docs/api.md#quick-recording-from-a-saved-region-profile_region).

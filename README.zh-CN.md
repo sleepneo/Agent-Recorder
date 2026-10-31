@@ -143,7 +143,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示克制呼吸的红色边框和计时标签，支持 outer/inner；系统关闭动画时自动降级为静态显示 |
 | 本地停止控制 | 已实现 | 每条录制有独立圆角胶囊停止控件；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |
-| 章节标记 | 已实现 | 录制中可通过鉴权 API 或 `Ctrl+Shift+F11` 添加标记；嵌套录制会分别标记 outer/inner，并在各自 bundle 的 `marks.json` 中保留首帧时间轴位置 |
+| 章节标记 | 已实现 | 具备Bundle资格的活动录制可通过鉴权 API 或 `Ctrl+Shift+F11` 接受待交付标记；仅MP4拒绝，嵌套录制仅标记合格 outer/inner，并在各自 bundle 的 `marks.json` 中保留首帧时间轴位置 |
 | 自有 UI 隔离 | 已实现 | 默认 FFmpeg 路径已通过真实桌面验收；普通控件尽力排除，安全的 inner 控件可由 outer 记录 |
 | 双语与高 DPI | 已实现 | 本地选区、确认、REC、停止控件支持中文/英文，并适配 100%-200% DPI；选区显示四角强调和实时 `W×H @ display` 标签 |
 | 阻止 HTTP 自批准 | 已实现 | `/confirmations/{id}/approve` 返回 405 |
@@ -256,4 +256,9 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 
 确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
 
-本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+托盘 App 宿主支持此退出操作；未接入的宿主（含 Headless）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+
+
+### 保存区域复用
+
+保存的区域可以搭配本次时长和声音使用，无需修改原配置。每次仍需本地确认，声音默认关闭、倒计时默认3秒。参见[使用说明](QUICKSTART.zh-CN.md#保存区域复用)及[API请求](AGENT-API-REFERENCE.zh-CN.md#仅复用保存区域普通-quick)。

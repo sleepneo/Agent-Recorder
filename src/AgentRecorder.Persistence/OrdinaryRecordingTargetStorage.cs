@@ -15,7 +15,7 @@ internal static class OrdinaryRecordingTargetStorage
                 throw new InvalidDataException("Window target binding is invalid.");
             return;
         }
-        var kind = row.SourceType == "fixed_region_profile" ? "region" : row.SourceType;
+        var kind = row.SourceType is "fixed_region_profile" or "fixed_region_profile_region" ? "region" : row.SourceType;
         if (!OrdinaryScreenTargetKey.IsValid(key) || kind is not ("display" or "region") ||
             !key.StartsWith("target:v1:" + kind + ":", StringComparison.Ordinal) ||
             kind == "display" && row.CaptureSemantics is not ("display_capture" or "display_surface" or "screen_rectangle") ||

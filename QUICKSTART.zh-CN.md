@@ -278,4 +278,9 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 
 确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
 
-本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+托盘 App 宿主支持此退出操作；未接入的宿主（含 Headless）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+
+
+## 保存区域复用
+
+可让Agent使用保存区域，搭配本次时长和系统声音或麦克风；Agent通过quick `target.type=profile_region`及精确Profile ref调用，不修改原配置。每次仍需本地确认，省略声音即无声，倒计时默认3秒。可使用已有默认设备解析，不要求每次人工报设备名称；不能唯一确定设备时才需选择。旧raw `profile_ref`仍复用完整无声配置。参见[区域复用请求](AGENT-API-REFERENCE.zh-CN.md#仅复用保存区域普通-quick)。

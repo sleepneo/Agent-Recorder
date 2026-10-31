@@ -21,7 +21,9 @@ public sealed partial class RecordingEngine
             // Physical owners may outlive a terminal public state.
             foreach (var rec in _recs.Values)
             {
-                if (rec.BundleGenerationStarted != 0 && rec.BundleSnapshot.Status is "pending" or "generating") return "bundle_in_flight";
+                if (!rec.IsOrdinaryLocalRequest && rec.BundleGenerationStarted != 0 && rec.BundleSnapshot.Status is "pending" or "generating") return "bundle_in_flight";
+                if (rec.IsOrdinaryLocalRequest && rec.Mode == "video" && rec.Backend is null &&
+                    rec.OrdinaryBackendCreation?.KnownNoResources != true) return "worker_retirement_unknown";
                 if (rec.Backend is not null && !BackendRetired(rec.Backend)) return "worker_retirement_unknown";
                 if (rec.Config.StorageSafety is { } storage &&
                     (!storage.MonitorCompletion.IsCompleted || !storage.ProbeRetirementCompletion.IsCompletedSuccessfully || storage.ProbeRetirementFailure is not null))
@@ -30,6 +32,7 @@ public sealed partial class RecordingEngine
             if (!Monitor.TryEnter(_ordinaryOutputLock)) return "output_owner_unknown";
             try
             {
+                if (_ordinaryBundleOutputUses.Count != 0) return "bundle_in_flight";
                 if (_ordinaryRetentionPreparation is not null || !_ordinaryOutputCleanup.IsEmpty)
                     return "retention_resources_pending";
                 var reason = otherOwners();

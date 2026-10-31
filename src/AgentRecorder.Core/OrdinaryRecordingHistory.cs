@@ -43,6 +43,7 @@ public sealed record OrdinaryRecordingHistorySnapshot(
     long? OutputSizeBytes = null,
     double? OutputDurationSeconds = null)
 {
+    public string? ProfileReuseMode => SourceType == "fixed_region_profile_region" ? "region_only" : null;
     public OrdinaryRecordingBundleSnapshot? Bundle { get; internal init; }
     public OrdinaryMediaHashSnapshot? MediaHash => Bundle?.MediaHash;
     public string? TargetKey { get; internal init; }

@@ -208,6 +208,12 @@ public sealed class RecordingFailureNotificationTests : IDisposable
 
         manager.Request("rec-no-toast", reasonCode);
 
+        if (reasonCode == "unexpected_exit")
+        {
+            Assert.Equal(reasonCode, Assert.Single(presenter.Attempts).Request.ReasonCode);
+            Assert.Contains(audit.Events, e => e == "recording_failure_notification.shown");
+            return;
+        }
         Assert.Empty(presenter.Attempts);
         Assert.Contains(audit.Payloads, p => p.Event == "recording_failure_notification.suppressed" &&
                                              p.Json.Contains("unsupported", StringComparison.Ordinal));

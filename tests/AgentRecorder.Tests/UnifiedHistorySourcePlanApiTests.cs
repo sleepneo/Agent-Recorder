@@ -74,7 +74,7 @@ public sealed class UnifiedHistorySourcePlanApiTests : IDisposable
             else{var data=await Data(plan);Assert.Equal("Plan-A",data.GetProperty("filters").GetProperty("plan_id").GetString());Assert.Equal(JsonValueKind.Null,Assert.Single(data.GetProperty("items").EnumerateArray()).GetProperty("source_type").ValueKind);}
         }
         using(var all=await client.GetAsync("/api/v1/history?limit=100"))
-        {var data=await Data(all);Assert.Equal(headless?4:6,data.GetProperty("items").GetArrayLength());foreach(var i in data.GetProperty("items").EnumerateArray().Where(i=>i.GetProperty("source").GetString()!="ordinary"))Assert.Equal(JsonValueKind.Null,i.GetProperty("source_type").ValueKind);}
+        {var data=await Data(all);Assert.Equal(headless?5:7,data.GetProperty("items").GetArrayLength());foreach(var i in data.GetProperty("items").EnumerateArray().Where(i=>i.GetProperty("source").GetString()!="ordinary"))Assert.Equal(JsonValueKind.Null,i.GetProperty("source_type").ValueKind);}
         using(var cap=await client.GetAsync("/api/v1/capabilities"))
         {
             var h=(await Data(cap)).GetProperty("unified_history");Assert.Equal(UnifiedHistoryFilterCodes.SourceTypes,h.GetProperty("supported_source_types").EnumerateArray().Select(e=>e.GetString()));

@@ -58,8 +58,17 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
             System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name == "AgentRecorder.Headless"
                 ? "AgentRecorder.Headless.exe" : "AgentRecorder.App.exe");
 
-    public async Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(
+    public Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(
         IReadOnlyList<string> paths, CancellationToken token)
+    {
+        var evidence = new QueryEvidence(this);
+        var query = QueryOwnedAsync(paths, token, evidence);
+        evidence.Query = query;
+        return query;
+    }
+
+    private async Task<IReadOnlyList<StorageVolumeSample>> QueryOwnedAsync(
+        IReadOnlyList<string> paths, CancellationToken token, QueryEvidence evidence)
     {
         var process = new Process
         {
@@ -175,9 +184,54 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
         }
         if (lifetime.CleanupFailure is { } cleanup)
             throw primary is null ? cleanup : new AggregateException("Storage probe query and retirement failed.", primary, cleanup);
-        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (primary is OperationCanceledException cancellation)
+            throw new RetiredQueryCancellation(evidence, lifetime, cancellation);
+        if (primary is not null) throw new RetiredQueryFailure(evidence, lifetime, primary);
         return samples!;
     }
+
+    // Only this sealed provider can issue the evidence, after its exact process,
+    // awaited reads/hooks, cancellation registration and handles have retired.
+    // The receiving guard also binds it to the actual faulted query Task; LastProbe
+    // is diagnostic only and may already describe a different concurrent query.
+    private sealed class QueryEvidence(ProcessStorageCapacityProvider owner)
+    {
+        internal ProcessStorageCapacityProvider Owner { get; } = owner;
+        internal Task<IReadOnlyList<StorageVolumeSample>>? Query { get; set; }
+    }
+
+    private interface IRetiredQueryFailure
+    {
+        QueryEvidence Evidence { get; }
+        StorageProbeLifetime Lifetime { get; }
+    }
+
+    private sealed class RetiredQueryFailure(QueryEvidence evidence,
+        StorageProbeLifetime lifetime, Exception queryFailure)
+        : IOException("storage_capacity_unavailable", queryFailure), IRetiredQueryFailure
+    {
+        public QueryEvidence Evidence { get; } = evidence;
+        public StorageProbeLifetime Lifetime { get; } = lifetime;
+    }
+
+    // Preserve cancellation semantics for other capacity consumers (Bundle copies
+    // also use this provider), while carrying the same exact owner certificate.
+    private sealed class RetiredQueryCancellation(QueryEvidence evidence,
+        StorageProbeLifetime lifetime, OperationCanceledException queryFailure)
+        : OperationCanceledException("storage_capacity_unavailable", queryFailure, queryFailure.CancellationToken), IRetiredQueryFailure
+    {
+        public QueryEvidence Evidence { get; } = evidence;
+        public StorageProbeLifetime Lifetime { get; } = lifetime;
+    }
+
+    internal bool HasCleanRetirementEvidence(Exception error, Task<IReadOnlyList<StorageVolumeSample>>? query)
+        => error is IRetiredQueryFailure failure && ReferenceEquals(failure.Evidence.Owner, this) &&
+           ReferenceEquals(failure.Evidence.Query, query) &&
+           (query is { IsFaulted: true } && query.Exception!.InnerExceptions.Any(e => ReferenceEquals(e, error)) ||
+            query is { IsCanceled: true } && error is RetiredQueryCancellation) &&
+           failure.Lifetime.RetirementCompletion.IsCompletedSuccessfully &&
+           failure.Lifetime.Started && failure.Lifetime.ExitCompletion.IsCompletedSuccessfully &&
+           failure.Lifetime.CleanupFailure is null;
 }
 
 // Internal observations refer to a single started instance. Completion signals
@@ -247,12 +301,14 @@ internal sealed class WindowStorageSafety : IDisposable
     private int _retirementOwners;
     private TaskCompletionSource _retired = CompletedRetirement();
     private readonly List<Exception> _retirementErrors = new();
+    private readonly List<Exception> _queryErrors = new();
     internal Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
     internal TimeSpan QueryTimeout { get; init; } = TimeSpan.FromSeconds(2);
     internal Action? BeforeFailureClaimForTests { get; set; }
     internal Task MonitorCompletion => _monitor ?? Task.CompletedTask;
     internal Task ProbeRetirementCompletion { get { lock (_gate) return _retired.Task; } }
     internal AggregateException? ProbeRetirementFailure { get { lock (_gate) return _retirementErrors.Count == 0 ? null : new AggregateException(_retirementErrors); } }
+    internal AggregateException? ProbeQueryFailure { get { lock (_gate) return _queryErrors.Count == 0 ? null : new AggregateException(_queryErrors); } }
     internal string? FailureCode { get { lock (_gate) return _failure; } }
     internal bool Committed { get { lock (_gate) return _committed; } }
     internal CancellationToken AbortToken => _abortToken;
@@ -471,9 +527,14 @@ internal sealed class WindowStorageSafety : IDisposable
             }
             return null;
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested || _cts.IsCancellationRequested) { return null; }
-        catch (OperationCanceledException) { return UnavailableCode; }
-        catch (Exception error) { RecordRetirementError(error); return UnavailableCode; }
+        catch (OperationCanceledException error)
+        {
+            // The outer deadline says nothing about the query's physical owner.
+            // RetireProbeAsync observes the actual task, including late faults.
+            if (samplingHeld && query is null) RecordProbeFailure(error, query);
+            return token.IsCancellationRequested || _cts.IsCancellationRequested ? null : UnavailableCode;
+        }
+        catch (Exception error) { RecordProbeFailure(error, query); return UnavailableCode; }
         finally { _ = RetireProbeAsync(query, timeout, samplingHeld); }
     }
 
@@ -500,12 +561,18 @@ internal sealed class WindowStorageSafety : IDisposable
         lock (_gate) if (!_retirementErrors.Contains(error)) _retirementErrors.Add(error);
     }
 
+    private void RecordProbeFailure(Exception error, Task<IReadOnlyList<StorageVolumeSample>>? query)
+    {
+        lock (_gate) if (!_queryErrors.Contains(error)) _queryErrors.Add(error);
+        if (_provider is not ProcessStorageCapacityProvider process || !process.HasCleanRetirementEvidence(error, query))
+            RecordRetirementError(error);
+    }
+
     private async Task RetireProbeAsync(Task<IReadOnlyList<StorageVolumeSample>>? query,
         CancellationTokenSource timeout, bool samplingHeld)
     {
         try { if (query is not null) await query.ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
-        catch (Exception error) { RecordRetirementError(error); }
+        catch (Exception error) { RecordProbeFailure(error, query); }
         finally
         {
             timeout.Dispose();

@@ -24,12 +24,13 @@ public sealed class UnifiedHistorySourcePlanFilterTests(ITestOutputHelper output
 
     [Theory]
     [InlineData("display")] [InlineData("window")] [InlineData("region")] [InlineData("fixed_region_profile")]
+    [InlineData("fixed_region_profile_region")]
     public void FourPersistentTypesFilterBeforeLimitWithoutChangingOldRows(string type)
     {
         using var d=Database();foreach(var t in UnifiedHistoryFilterCodes.SourceTypes)Seed(d,t,t);
         Seed(d,"legacy","legacy-source");var before=d.Snapshot();
         var row=Assert.Single(d.Page(1,new("ordinary",SourceType:type)).Items);Assert.Equal(type,row.RecordingId);Assert.Equal(type,row.SourceType);
-        Assert.Equal(5,d.Page(100,new("ordinary")).Items.Count);Assert.Equal(before,d.Snapshot());
+        Assert.Equal(6,d.Page(100,new("ordinary")).Items.Count);Assert.Equal(before,d.Snapshot());
     }
 
     [Fact]
@@ -134,7 +135,7 @@ public sealed class UnifiedHistorySourcePlanFilterTests(ITestOutputHelper output
         d.Query.OrdinaryFileProbeForTests=_=>throw new Exception("SECRET_EARLY_FILE_PROBE");
         d.Query.CandidateCommandForTests=(_,sql,args)=>{Assert.DoesNotContain("$source_type",sql);Assert.DoesNotContain("$plan_id",sql);};
         var page=d.Query.GetOrdinaryEvidencePage(Sid,Session,100,At.AddDays(1),null);
-        Assert.Equal(5,page.Items.Count);Assert.Null(page.Filters.SourceType);Assert.Null(page.Filters.PlanId);
+        Assert.Equal(6,page.Items.Count);Assert.Null(page.Filters.SourceType);Assert.Null(page.Filters.PlanId);
     }
 
     [Theory]

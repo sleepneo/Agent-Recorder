@@ -198,7 +198,7 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   it stops only that recording.
 - A global stop hotkey (`Ctrl+Shift+F10`) that stops all active recordings.
 - Chapter marks through the authenticated API or `Ctrl+Shift+F11` while
-  recording. The local hotkey marks every active nested recording, shows brief
+  recording. The local hotkey marks eligible active Bundle recordings, shows brief
   in-app feedback, and writes the accepted marks to each bundle's `marks.json`.
 - Tray menu stop entry that adapts to one or multiple active recordings.
 - Chinese and English local UI with DPI-aware confirmation, selection, recording
@@ -361,4 +361,9 @@ Check `capabilities.host_shutdown.supported` first. This build supports authenti
 
 Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
 
-The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.
+The tray App host supports this exit operation. Other hosts, including Headless, advertise `supported=false`; the CLI returns `unsupported` without falling back to an unauthenticated event, process kill or UI automation.
+
+
+### Saved Regions
+
+Reuse a saved region with a new duration and audio choice, without changing the saved configuration. Each recording still needs local confirmation. Audio defaults to off and countdown to 3 seconds. See [saved-region usage](QUICKSTART.md#saved-regions) and the [API contract](docs/api.md#quick-recording-from-a-saved-region-profile_region).

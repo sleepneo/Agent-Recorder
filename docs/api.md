@@ -338,6 +338,10 @@ Chapter-mark capabilities are reported at the response root:
   "chapter_marks": {
     "supported": true,
     "endpoint": "/api/v1/recordings/{recording_id}/marks",
+    "requires_bundle": true,
+    "mp4_embedded": false,
+    "timestamp_basis": "server_call_on_first_frame_timeline",
+    "delivery_artifact": "bundle/marks.json",
     "local_hotkey": {
       "supported": true,
       "registered": false,
@@ -348,8 +352,9 @@ Chapter-mark capabilities are reported at the response root:
 }
 ```
 
-The tray host registers the local hotkey only while at least one recording is
-in the exact `recording` state. The headless host reports API support but no
+The tray host registers the local hotkey only while at least one Bundle-eligible
+recording is in the exact `recording` state. MP4-only entries are skipped without
+counting them as failures. `supported` describes the API, not per-recording eligibility. The headless host reports API support but no
 local hotkey.
 
 Quick recipe fields:
@@ -1726,8 +1731,11 @@ returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
 
 Marks are timeline annotations, not embedded MP4 chapters or burned-in text.
 They are delivered in `marks.json` only when a recording bundle is enabled.
-MP4-only requests can currently accept marks without producing a durable mark
-artifact; this is a known combination limitation, not embedded-chapter support.
+MP4-only recordings reject marks with HTTP 409 `MARK_DELIVERY_UNAVAILABLE`.
+Marks also require an available Bundle generator and an already supported backend;
+they never enable Bundle automatically, add a sidecar, or modify the MP4.
+Acceptance returns `delivery.status=pending`, not a delivery guarantee. Later Bundle
+failure is reported through the existing Bundle status and leaves the MP4 intact.
 The mark refers to server call time, not the time a human sent natural language.
 
 Add a labeled mark to one active recording:
@@ -1757,7 +1765,8 @@ Success returns the accepted mark without requiring another GET:
       "t_ms": 1234,
       "label": "Important decision",
       "source": "agent"
-    }
+    },
+    "delivery": { "artifact": "bundle/marks.json", "status": "pending" }
   },
   "request_id": "req_xxx"
 }
@@ -1773,6 +1782,8 @@ on the recording's trusted first-frame monotonic timeline.
 | 400 | `INVALID_ARGUMENT` | Invalid JSON, label, or source. |
 | 404 | `RECORDING_NOT_FOUND` | Recording ID does not exist. |
 | 409 | `RECORDING_NOT_ACTIVE` | Recording is not in the exact `recording` state or has no trusted first-frame anchor. |
+| 409 | `MARK_DELIVERY_UNAVAILABLE` | `details.reason`: `bundle_disabled`, `bundle_generator_unavailable`, or `backend_not_supported`. |
+| 409 | `UNSUPPORTED_FEATURE` | Screenshot series does not support marks. |
 
 ## Recording Bundle
 
@@ -3097,3 +3108,45 @@ Check `capabilities.host_shutdown.supported` first. This build supports authenti
 Active confirmation/selection/authorization, preparation/countdown/recording/finalization, deletion and unretired or unknown resources return 409 `HOST_BUSY` with a stable `error.details.reason_code`; service admission stays open. To stop an active recording, use its existing stop API only when authorized, wait for resources, then request exit. Exiting Recorder does not authorize stopping recordings, revoking saved plans/grants, restarting or replaying work. No process killing or tray automation is part of this command. After a confirmed exit, a separately requested restart uses the usual `ensure-running --json --app "<desired build>" --data-dir "<same directory>"`.
 
 The exit dispatcher is wired for the tray App host in this increment. Other hosts, including the current Headless composition, advertise `supported=false`; the CLI returns `unsupported` and does not fall back to an unauthenticated event, process kill or UI automation.
+
+
+## Quick recording from a saved region (`profile_region`)
+
+Read `GET /api/v1/profiles` and its exact version first. Check
+`capabilities.interaction.profile_region.supported`. POST `/api/v1/recordings/quick`:
+
+```json
+{"target":{"type":"profile_region","profile_ref":{"id":"<id>","version":1,"digest":"<exact digest>"}},"duration_seconds":10}
+```
+
+This records silently, with this request's ordinary output/video defaults and a
+3-second countdown. Only geometry, physical capture semantics and stable display
+constraints come from the immutable Profile; its duration/countdown/output never
+become request defaults. For 20 seconds with system audio, set duration_seconds=20
+and add `"audio":{"system_audio":{"enabled":true,"device_id":"<render ID from /audio/devices>"}}`.
+For microphone instead use `"audio":{"microphone":{"enabled":true,"device_id":"<microphone ID from /audio/devices>"}}`.
+Choose one source; an ambiguous audio request needs agent clarification.
+
+Every call still requires the standard local preview/audio/output confirmation.
+Saving a Profile does not approve capture. Display/DPI/topology changes fail closed,
+including after approval; the API never reselects, intersects or falls back to desktop.
+Physical X/Y origins may be odd; width and height must remain even and at least 32 pixels.
+Output directory, filename and filename_template syntax is checked with the shared ordinary
+output resolver before device/display queries, UI requests or output creation.
+Exact id/version/digest is mandatory, not a name/latest alias. A later Profile edit
+does not change a pending request. Headless or missing gateway is unavailable.
+
+duration_seconds is required, a JSON integer 1–600. countdown_seconds defaults to
+3 and optionally accepts the ordinary 0–10 integer contract. Unknown, duplicate,
+mistyped or conflicting fields fail before target/device/UI/file operations.
+Only video, nonnested, default Bundle is supported: reject artifacts (including
+true/false), nested, series fields, source, raw profile_ref and stop_condition.
+Plans, Leases and unattended execution cannot use this target.
+
+Creation/status/audit/Bundle expose the original profile_ref and
+profile_reuse_mode=region_only. Durable history retains the exact reference and
+effective duration/audio/output under source_type=fixed_region_profile_region;
+its target key remains a normal region key. Older rows have an unknown/null reuse
+mode, never an invented full-configuration claim. No database migration is needed.
+The raw POST `/recordings` single profile_ref body remains immutable full-policy,
+silent execution; mixing duration/audio overrides remains invalid.

@@ -241,6 +241,7 @@ internal sealed class RecordingFailureNotificationManager : IDisposable
     }
 
     internal static bool IsSupportedReason(string? reasonCode) => reasonCode is
+        "backend_creation_failed" or "unexpected_exit" or
         "storage_space_low" or "storage_capacity_unavailable" or
         "display_unavailable" or "window_closed" or "window_minimized" or "size_changed" or "capture_semantics_changed" or
         "audio_capture_discontinuous";
@@ -359,6 +360,11 @@ internal sealed class RecordingFailureNotificationForm : Form
     private bool _displayAffinityApplied;
     private Exception? _displayAffinityError;
     private bool _timerDisposed;
+    private bool _visualReady, _layingOut;
+    private Font? _titleFont, _bodyFont, _buttonFont;
+    private (int Dpi, Rectangle Area, bool? Contrast)? _testViewport;
+    private int _visualDpi = 96;
+    private float _contentScale = 1;
 
     internal const int AutoDismissMilliseconds = 8000;
     internal const string WindowClassPurpose = "recording_failure_notification";
@@ -373,6 +379,10 @@ internal sealed class RecordingFailureNotificationForm : Form
     internal int ExtendedStyleForTests => CreateParams.ExStyle;
     internal Label BodyLabelForTests { get; }
     internal Label TitleLabelForTests { get; }
+    internal int BorderPixelsForTests => RecordingFailureNotificationLayout.Pixels(3, _visualDpi / 96f);
+    internal Color BorderColorForTests => (_testViewport?.Contrast ?? SystemInformation.HighContrast)
+        ? SystemColors.WindowText : Color.FromArgb(0xD6, 0xA0, 0x00);
+    internal float ContentScaleForTests => _contentScale;
 
     public RecordingFailureNotificationForm(
         RecordingFailureNotificationRequest request,
@@ -384,9 +394,10 @@ internal sealed class RecordingFailureNotificationForm : Form
         _displayAffinity = displayAffinity;
         _onClosed = onClosed;
 
-        string title = textProvider.Get("Tray_RecordingFailure_Title");
+        string title = textProvider.Get(RecordingFailureNotificationLayout.TitleKey(request.ReasonCode));
         string body = textProvider.Get(request.ReasonCode switch
         {
+            "backend_creation_failed" => "Tray_BackendCreationFailed",
             "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
             "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
             "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
@@ -406,75 +417,48 @@ internal sealed class RecordingFailureNotificationForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         KeyPreview = true;
-        AutoScaleMode = AutoScaleMode.Dpi;
+        // This one container uses explicit pixel fonts/geometry at the current
+        // monitor DPI, avoiding a second WinForms autoscale of measured bounds.
+        AutoScaleMode = AutoScaleMode.None;
         Text = title;
         BackColor = SystemColors.Window;
         ForeColor = SystemColors.WindowText;
-        Padding = new Padding(16, 14, 16, 12);
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
         TitleLabelForTests = new Label
         {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            AutoSize = false,
+            UseMnemonic = false,
+            UseCompatibleTextRendering = false,
             Text = title,
-            TextAlign = ContentAlignment.MiddleLeft,
+            TextAlign = ContentAlignment.TopLeft,
             AccessibleName = title
         };
         BodyLabelForTests = new Label
         {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            Font = new Font("Segoe UI", 9f, FontStyle.Regular),
+            AutoSize = false,
+            UseMnemonic = false,
+            UseCompatibleTextRendering = false,
             Text = body,
-            MaximumSize = new Size(348, 0),
-            Padding = new Padding(0, 8, 0, 8),
+            TextAlign = ContentAlignment.TopLeft,
             AccessibleName = body
         };
         _closeButton = new Button
         {
-            AutoSize = true,
+            AutoSize = false,
+            UseCompatibleTextRendering = false,
             Text = textProvider.Get("Tray_RecordingFailure_Close"),
             AccessibleName = textProvider.Get("Tray_RecordingFailure_Close"),
             AccessibleRole = AccessibleRole.PushButton,
             TabIndex = 0,
             TabStop = true,
-            MinimumSize = new Size(84, 30),
-            Padding = new Padding(12, 2, 12, 2)
+            UseMnemonic = false
         };
         _closeButton.Click += (_, _) => CloseFor(RecordingFailureNotificationCloseReason.UserDismissed);
 
-        var buttonPanel = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
-        buttonPanel.Controls.Add(_closeButton);
-
-        var layout = new TableLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(TitleLabelForTests, 0, 0);
-        layout.Controls.Add(BodyLabelForTests, 0, 1);
-        layout.Controls.Add(buttonPanel, 0, 2);
-        Controls.Add(layout);
-
-        ClientSize = RecordingFailureNotificationLayout.MeasurePreferredSize(title, body, 96);
-        MinimumSize = new Size(320, Math.Max(140, Height));
+        Controls.AddRange([TitleLabelForTests, BodyLabelForTests, _closeButton]);
+        MinimumSize = Size.Empty;
         AcceptButton = _closeButton;
         CancelButton = _closeButton;
 
@@ -485,6 +469,8 @@ internal sealed class RecordingFailureNotificationForm : Form
             if (e.KeyCode == Keys.Escape)
                 CloseFor(RecordingFailureNotificationCloseReason.UserDismissed);
         };
+        _visualReady = true;
+        PositionNearWorkingArea();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -505,6 +491,7 @@ internal sealed class RecordingFailureNotificationForm : Form
     {
         base.OnHandleCreated(e);
         ApplyDisplayAffinity(Handle);
+        PositionNearWorkingArea();
     }
 
     internal void ApplyDisplayAffinity(IntPtr hWnd)
@@ -535,6 +522,7 @@ internal sealed class RecordingFailureNotificationForm : Form
 
     private void PositionNearWorkingArea()
     {
+        if (!_visualReady || _layingOut || IsDisposed) return;
         Rectangle area;
         try
         {
@@ -545,10 +533,74 @@ internal sealed class RecordingFailureNotificationForm : Form
             area = new Rectangle(0, 0, 1280, 720);
         }
 
-        int margin = Math.Max(12, (int)Math.Round(12 * (DeviceDpi > 0 ? DeviceDpi / 96.0 : 1.0)));
-        Location = new Point(
-            Math.Max(area.Left, area.Right - Width - margin),
-            Math.Max(area.Top, area.Bottom - Height - margin));
+        ApplyVisualLayout(_testViewport?.Dpi ?? Math.Max(96, DeviceDpi), _testViewport?.Area ?? area);
+    }
+
+    internal void ApplyViewportForTests(int dpi, Rectangle area, bool? highContrast = null)
+    {
+        _testViewport = (dpi, area, highContrast);
+        ApplyVisualLayout(dpi, area);
+    }
+
+    private void ApplyVisualLayout(int dpi, Rectangle area)
+    {
+        if (!_visualReady || _layingOut || IsDisposed) return;
+        _layingOut = true;
+        try
+        {
+            _visualDpi = Math.Max(96, dpi);
+            if (area.Width <= 0 || area.Height <= 0) area = new Rectangle(0, 0, 1280, 720);
+            var scale = _visualDpi / 96f;
+            int margin = Math.Min(RecordingFailureNotificationLayout.Pixels(12, scale), Math.Min(area.Width, area.Height) / 8);
+            var frame = SizeFromClientSize(Size.Empty);
+            var available = new Size(Math.Max(1, area.Width - 2 * margin - frame.Width), Math.Max(1, area.Height - 2 * margin - frame.Height));
+            var layout = RecordingFailureNotificationLayout.Arrange(TitleLabelForTests.Text, BodyLabelForTests.Text, _closeButton.Text, _visualDpi, available);
+            _contentScale = layout.Scale;
+            ReplaceFont(ref _titleFont, TitleLabelForTests, RecordingFailureNotificationLayout.TitleFont(layout.Scale));
+            ReplaceFont(ref _bodyFont, BodyLabelForTests, RecordingFailureNotificationLayout.BodyFont(layout.Scale));
+            ReplaceFont(ref _buttonFont, _closeButton, RecordingFailureNotificationLayout.BodyFont(layout.Scale));
+            ClientSize = layout.Client;
+            TitleLabelForTests.Bounds = layout.Title;
+            BodyLabelForTests.Bounds = layout.Body;
+            _closeButton.Bounds = layout.Button;
+            Location = new Point(Math.Max(area.Left, area.Right - Width - margin), Math.Max(area.Top, area.Bottom - Height - margin));
+            Invalidate();
+        }
+        finally { _layingOut = false; }
+    }
+
+    private static void ReplaceFont(ref Font? previous, Control control, Font next)
+    {
+        // Control.Font can keep the original object when values are equal.
+        // Retain that owned instance instead of disposing a font still in use.
+        if (previous is not null && previous.Equals(next)) { next.Dispose(); return; }
+        var old = previous; previous = next; control.Font = next; old?.Dispose();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        PositionNearWorkingArea();
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs e)
+    {
+        base.OnSystemColorsChanged(e);
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        // Solid strips remain entirely inside the client area. Child bounds
+        // start beyond them, so Dock/OS non-client painting cannot cover them.
+        int edge = Math.Min(BorderPixelsForTests, Math.Min(ClientSize.Width, ClientSize.Height) / 2);
+        if (edge <= 0) return;
+        using var brush = new SolidBrush(BorderColorForTests);
+        e.Graphics.FillRectangle(brush, 0, 0, ClientSize.Width, edge);
+        e.Graphics.FillRectangle(brush, 0, ClientSize.Height - edge, ClientSize.Width, edge);
+        e.Graphics.FillRectangle(brush, 0, edge, edge, ClientSize.Height - 2 * edge);
+        e.Graphics.FillRectangle(brush, ClientSize.Width - edge, edge, edge, ClientSize.Height - 2 * edge);
     }
 
     internal void CloseFor(RecordingFailureNotificationCloseReason reason)
@@ -581,9 +633,11 @@ internal sealed class RecordingFailureNotificationForm : Form
 
         if (disposing)
         {
+            _visualReady = false;
             TitleLabelForTests?.Dispose();
             BodyLabelForTests?.Dispose();
             _closeButton?.Dispose();
+            _titleFont?.Dispose(); _bodyFont?.Dispose(); _buttonFont?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -591,53 +645,67 @@ internal sealed class RecordingFailureNotificationForm : Form
 
 internal static class RecordingFailureNotificationLayout
 {
-    internal static Size MeasurePreferredSize(string title, string body, int dpi)
+    internal const int WidthDip = 460;
+    internal const float TitlePoints = 12, BodyPoints = 11;
+    internal sealed record Geometry(Size Client, Rectangle Title, Rectangle Body, Rectangle Button, float Scale, bool Fits);
+    internal static int Pixels(float dip, float scale) => Math.Max(1, (int)Math.Round(dip * scale, MidpointRounding.AwayFromZero));
+    internal static Font TitleFont(float scale) => new("Segoe UI", TitlePoints * 96 / 72 * scale, FontStyle.Bold, GraphicsUnit.Pixel);
+    internal static Font BodyFont(float scale) => new("Segoe UI", BodyPoints * 96 / 72 * scale, FontStyle.Regular, GraphicsUnit.Pixel);
+    internal static string TitleKey(string reasonCode) => reasonCode == "backend_creation_failed"
+        ? "Tray_RecordingFailure_BackendCreationTitle" : "Tray_RecordingFailure_Title";
+    internal static string BodyKey(string reasonCode) => reasonCode switch
     {
-        int effectiveDpi = Math.Max(96, dpi);
-        float scale = effectiveDpi / 96f;
-        int width = (int)Math.Ceiling(380 * scale);
-        int innerWidth = Math.Max(240, width - (int)Math.Ceiling(32 * scale));
+        "backend_creation_failed" => "Tray_BackendCreationFailed",
+        "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
+        "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
+        "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
+        "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
+        "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
+        "size_changed" => "Tray_RecordingFailure_SizeChangedBody",
+        "capture_semantics_changed" => "Tray_RecordingFailure_CaptureSemanticsChangedBody",
+        "audio_capture_discontinuous" => "Tray_RecordingFailure_SystemAudioBody",
+        _ => "Tray_RecordingFailure_GenericBody"
+    };
+    private static Size TextSize(string text, Font font, int width) => TextRenderer.MeasureText(text, font,
+        new Size(Math.Max(1, width), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
 
-        using var titleFont = new Font("Segoe UI", 10f * scale, FontStyle.Bold);
-        using var bodyFont = new Font("Segoe UI", 9f * scale, FontStyle.Regular);
-        var titleSize = TextRenderer.MeasureText(title, titleFont,
-            new Size(innerWidth, 0), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
-        var bodySize = TextRenderer.MeasureText(body, bodyFont,
-            new Size(innerWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-        int buttonHeight = (int)Math.Ceiling(30 * scale);
-        int height = (int)Math.Ceiling(26 * scale) + titleSize.Height +
-                     bodySize.Height + (int)Math.Ceiling(16 * scale) + buttonHeight;
-        return new Size(width, Math.Max((int)Math.Ceiling(140 * scale), height));
+    internal static Geometry Arrange(string title, string body, string close, int dpi, Size available)
+    {
+        float requested = Math.Max(96, dpi) / 96f;
+        int width = Math.Max(1, Math.Min(Pixels(WidthDip, requested), available.Width));
+        int edge = Pixels(3, requested);
+        Geometry result;
+        float scale = requested;
+        // Small work areas keep the OS frame and border DPI, but compact the
+        // content together rather than clipping text or imposing a large minimum.
+        for (int attempt = 0; ; attempt++)
+        {
+            using var titleFont = TitleFont(scale);
+            using var bodyFont = BodyFont(scale);
+            int side = Math.Min(edge + Pixels(18, scale), Math.Max(edge + 1, width / 6));
+            int inner = Math.Max(1, width - side * 2);
+            int y = edge + Pixels(16, scale);
+            var titleRect = new Rectangle(side, y, inner, TextSize(title, titleFont, inner).Height + Pixels(2, scale));
+            var bodyRect = new Rectangle(side, titleRect.Bottom + Pixels(10, scale), inner, TextSize(body, bodyFont, inner).Height + Pixels(2, scale));
+            var closeSize = TextSize(close, bodyFont, inner);
+            int buttonWidth = Math.Min(inner, Math.Max(Pixels(96, requested), closeSize.Width + Pixels(24, scale)));
+            int buttonHeight = Math.Max(Pixels(34, requested), closeSize.Height + Pixels(10, scale));
+            var buttonRect = new Rectangle(width - side - buttonWidth, bodyRect.Bottom + Pixels(14, scale), buttonWidth, buttonHeight);
+            int height = buttonRect.Bottom + edge + Pixels(14, scale);
+            bool fits = height <= available.Height;
+            result = new(new Size(width, Math.Min(height, Math.Max(1, available.Height))), titleRect, bodyRect, buttonRect, scale, fits);
+            if (fits || attempt >= 40) return result;
+            scale *= .94f;
+        }
     }
+
+    internal static Size MeasurePreferredSize(string title, string body, int dpi)
+        => Arrange(title, body, "Close", dpi, new Size(int.MaxValue, int.MaxValue)).Client;
 
     internal static bool FitsAtDpi(IUiTextProvider textProvider, string reasonCode, int dpi)
     {
-        string bodyKey = reasonCode switch
-        {
-            "storage_space_low" => "Tray_RecordingFailure_StorageSpaceLowBody",
-            "storage_capacity_unavailable" => "Tray_RecordingFailure_StorageCapacityUnavailableBody",
-            "display_unavailable" => "Tray_RecordingFailure_DisplayUnavailableBody",
-            "window_closed" => "Tray_RecordingFailure_WindowClosedBody",
-            "window_minimized" => "Tray_RecordingFailure_WindowMinimizedBody",
-            "size_changed" => "Tray_RecordingFailure_SizeChangedBody",
-            "capture_semantics_changed" => "Tray_RecordingFailure_CaptureSemanticsChangedBody",
-            "audio_capture_discontinuous" => "Tray_RecordingFailure_SystemAudioBody",
-            _ => "Tray_RecordingFailure_GenericBody"
-        };
-        int effectiveDpi = Math.Max(96, dpi);
-        float scale = effectiveDpi / 96f;
-        int width = (int)Math.Ceiling(380 * scale);
-        int innerWidth = Math.Max(240, width - (int)Math.Ceiling(32 * scale));
-        using var titleFont = new Font("Segoe UI", 10f * scale, FontStyle.Bold);
-        using var bodyFont = new Font("Segoe UI", 9f * scale, FontStyle.Regular);
-        var titleSize = TextRenderer.MeasureText(textProvider.Get("Tray_RecordingFailure_Title"), titleFont,
-            new Size(innerWidth, 0), TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
-        var bodySize = TextRenderer.MeasureText(textProvider.Get(bodyKey), bodyFont,
-            new Size(innerWidth, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-        var size = MeasurePreferredSize(textProvider.Get("Tray_RecordingFailure_Title"), textProvider.Get(bodyKey), dpi);
-        int contentHeight = size.Height - (int)Math.Ceiling(26 * scale) -
-                            titleSize.Height - (int)Math.Ceiling(16 * scale) -
-                            (int)Math.Ceiling(30 * scale);
-        return bodySize.Width <= innerWidth && bodySize.Height <= contentHeight;
+        var layout = Arrange(textProvider.Get(TitleKey(reasonCode)), textProvider.Get(BodyKey(reasonCode)),
+            textProvider.Get("Tray_RecordingFailure_Close"), dpi, new Size(int.MaxValue, int.MaxValue));
+        return layout.Fits && layout.Title.Bottom <= layout.Body.Top && layout.Body.Bottom <= layout.Button.Top && layout.Button.Bottom < layout.Client.Height;
     }
 }

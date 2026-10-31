@@ -337,6 +337,10 @@ Chapter Marks 的能力位于返回顶层 `chapter_marks`：
   "chapter_marks": {
     "supported": true,
     "endpoint": "/api/v1/recordings/{recording_id}/marks",
+    "requires_bundle": true,
+    "mp4_embedded": false,
+    "timestamp_basis": "server_call_on_first_frame_timeline",
+    "delivery_artifact": "bundle/marks.json",
     "local_hotkey": {
       "supported": true,
       "registered": false,
@@ -347,9 +351,9 @@ Chapter Marks 的能力位于返回顶层 `chapter_marks`：
 }
 ```
 
-- `chapter_marks.supported` 表示 marks API/domain/bundle 能力，独立于本地 UI 是否存在。
-- tray 宿主的 `local_hotkey.supported=true`；`registered` 只在至少一条录制处于 exact `recording` 状态时可能为 true，空闲、准备、倒计时、停止或保存状态均为 false。
-- 本地按一次 `Ctrl+Shift+F11` 会对 UI 线程快照中所有 exact `recording` 录制各添加一个标记；outer/inner 并发录制各使用自己的首帧单调时间轴。准备中或 finalizing 的条目会被忽略。
+- `chapter_marks.supported` 表示 marks API能力，独立于本地 UI，不保证每条录制都有交付资格。
+- tray 宿主的 `local_hotkey.supported=true`；`registered` 只在至少一条具备Bundle交付资格的录制处于 exact `recording` 状态时可能为 true，空闲、准备、倒计时、停止或保存状态均为 false。
+- 本地按一次 `Ctrl+Shift+F11` 会对 UI 线程快照中所有具备Bundle交付资格的 exact `recording` 录制各添加一个标记；outer/inner 并发录制各使用自己的首帧单调时间轴。准备中或 finalizing 的条目会被忽略。
 - headless 宿主仍报告 `chapter_marks.supported=true`，但 `local_hotkey.supported=false`、`registered=false`、`gesture=null`，不得据此声称存在本地热键。
 
 返回中还包含 `host.autostart` 字段，提供自启状态：
@@ -1668,7 +1672,7 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 8.1 Chapter Marks（录制标记）
 
-当前为录制时间注释，不是 MP4 内嵌章节或画面字幕。启用 Bundle 才将标记交付到 `marks.json`；仅 MP4 模式仍可接受添加请求，但没有最终标记产物。这是已知组合限制，不能将 API 接收成功报告为视频已带章节。调用时间不等于用户发送自然语言的时间。
+当前为录制时间注释，不是 MP4 内嵌章节或画面字幕。启用 Bundle、存在生成器且后端具备既有 Bundle 资格时才能接受标记，最终交付到 `bundle/marks.json`；仅 MP4 模式返回409 `MARK_DELIVERY_UNAVAILABLE`。不会自动启用Bundle、创建侧车或改写MP4。成功只表示内存接受且 `delivery.status=pending`，不保证最终交付；后续生成失败沿既有Bundle状态报告，主MP4保留。调用时间不等于用户发送自然语言的时间。
 
 ### 添加标记
 
@@ -1696,7 +1700,8 @@ X-Agent-Recorder-Key: <api-key>
       "t_ms": 1234,
       "label": "Important decision",
       "source": "agent"
-    }
+    },
+    "delivery": { "artifact": "bundle/marks.json", "status": "pending" }
   },
   "request_id": "req_xxx"
 }
@@ -1710,9 +1715,9 @@ X-Agent-Recorder-Key: <api-key>
 
 ### 本地 Chapter Marks 热键
 
-tray 宿主在第一条录制进入 exact `recording` 时，在 WinForms UI 线程注册 `Ctrl+Shift+F11`；最后一条 exact `recording` 离开该状态时 unregister。注册失败不影响录制，能力状态保持 `registered=false`，并通过稳定审计事件记录结果；同一活动窗口不会循环重试，下一次真实的零到一条录制转换可以再次尝试。F10 全局停止热键保持独立生命周期。
+tray 宿主在第一条具备Bundle交付资格的录制进入 exact `recording` 时，在 WinForms UI 线程注册 `Ctrl+Shift+F11`；最后一条合格的 exact `recording` 离开该状态时 unregister。注册失败不影响录制，能力状态保持 `registered=false`，并通过稳定审计事件记录结果；同一活动窗口不会循环重试，下一次真实的零到一条录制转换可以再次尝试。F10 全局停止热键保持独立生命周期。
 
-热键回调在 UI 线程取得 `_activeRecordings` 中 exact `recording` 条目的稳定快照，并逐条调用与 API 相同的 `RecordingEngine.AddMark(recording_id, localized_label, "hotkey")`。一次按键可能为并发 outer/inner 都添加标记；任一条失败不会阻止其他条目，领域审计仍是每个成功标记恰好一个 `recording.mark_added`，不含 label。反馈使用现有 REC 指示器层中的短暂 badge，不调用 `NotifyIcon.ShowBalloonTip` 或 Windows shell notification；重复按键替换同一 badge/timer，不改变 stop 控件几何或焦点策略。
+热键回调在 UI 线程取得 `_activeRecordings` 中具备Bundle交付资格的 exact `recording` 条目的稳定快照，并逐条调用与 API 相同的 `RecordingEngine.AddMark(recording_id, localized_label, "hotkey")`。仅MP4条目不注册热键，也不计为失败；一次按键可能为并发且合格的 outer/inner 都添加标记；任一条失败不会阻止其他条目，领域审计仍是每个成功标记恰好一个 `recording.mark_added`，不含 label。反馈使用现有 REC 指示器层中的短暂 badge，不调用 `NotifyIcon.ShowBalloonTip` 或 Windows shell notification；重复按键替换同一 badge/timer，不改变 stop 控件几何或焦点策略。
 
 稳定错误：
 
@@ -1721,6 +1726,8 @@ tray 宿主在第一条录制进入 exact `recording` 时，在 WinForms UI 线�
 | 400 | `INVALID_ARGUMENT` | JSON、`label` 或 `source` 无效；`source` 只允许省略或 `agent`。 |
 | 404 | `RECORDING_NOT_FOUND` | 目标录制不存在。 |
 | 409 | `RECORDING_NOT_ACTIVE` | 目标录制不在 `recording`，响应 details 包含 `current_state` 与建议动作。 |
+
+`409 MARK_DELIVERY_UNAVAILABLE` 的 `details.reason` 为 `bundle_disabled`、`bundle_generator_unavailable` 或 `backend_not_supported`；截图序列保留 `UNSUPPORTED_FEATURE`。后端资格复用原FFmpeg MP4及ordinary local video的wgc-continuous/wgc-window-av-split范围，不扩大Plan/Lease/未来窗口资格。
 
 ## 9. 停止手动录制
 
@@ -2816,3 +2823,19 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 确认/选区/授权交互、准备/倒计时/录制/收尾、删除及未退休或状态未知的实际资源返回409 `HOST_BUSY`，稳定原因在 `error.details.reason_code`，busy 后服务仍可用。退出不强制取消任务，不撤销已保存计划/授权，也不授予重启或重放许可。需要停止录制时，必须有相应授权，再使用原录制停止 API 并等待资源收敛；不得把“退出应用”猜成强停录制、强杀进程或模拟托盘点击。旧服务返回 unsupported，不将每次手动托盘操作当成产品能力。已证实退出后，另行获准的重启/切换构建使用原 `ensure-running --json --app "<目标构建>" --data-dir "<同一目录>"`。
 
 本增量在托盘 App 宿主接入退出调度；未接入的宿主（含当前 Headless 组合）公布 supported=false，CLI 如实返回 unsupported，不降级为未鉴权事件、强杀或 UI 自动化。
+
+
+### 仅复用保存区域（普通 quick）
+
+读取 profiles 精确 id/version/digest，并检查 `interaction.profile_region.supported`。
+调用 `POST /api/v1/recordings/quick`，target 为
+`{"type":"profile_region","profile_ref":{"id":"<id>","version":1,"digest":"<digest>"}}`，
+本次必须传 `duration_seconds`（1–600整秒）。例如“测试区域10秒无声”省略audio；
+“20秒系统声音”传20及 `audio.system_audio={"enabled":true,"device_id":"<真实输出设备ID>"}`；
+“20秒麦克风”改用 `audio.microphone` 和真实麦克风ID。声音种类不明先询问，不猜测。
+省略倒计时固定为本次普通默认3秒；不沿用旧配置的时长、声音、倒计时或目录。
+仍须本地逐次预览批准，可在确认窗改目录；不能自动重选、换屏或批准。
+只支持普通video、非nested和默认Bundle，拒绝artifacts、series、raw source/profile_ref/stop_condition混入。
+来源以原ref及 `profile_reuse_mode:region_only` 返回，Profile本身不会被修改。
+旧raw单独profile_ref仍为完整无声配置执行，计划/Lease不支持本目标。
+完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。

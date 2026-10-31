@@ -59,12 +59,14 @@ public sealed class StorageProbeRetirementTests(ITestOutputHelper output)
         release.SetResult();
         await guard.ProbeRetirementCompletion.WaitAsync(Bound);
         Assert.Equal(0, guard.RemainingPublicationCopyBytes);
-        Assert.Equal(lateFault, guard.ProbeRetirementFailure is not null);
+        // An unknown provider's cancellation is not physical-retirement evidence.
+        Assert.NotNull(guard.ProbeRetirementFailure);
         if (lateFault) Assert.Contains("late-finally-fault", guard.ProbeRetirementFailure!.ToString());
         else
         {
             p.Query = (paths, _) => Task.FromResult<IReadOnlyList<StorageVolumeSample>>(Samples(paths));
-            Assert.Null(await guard.CheckAsync(false));
+            Assert.Equal(WindowStorageSafety.UnavailableCode, await guard.CheckAsync(false));
+            Assert.Equal(1, p.Calls); // Unknown cancelled owner cannot admit a replacement query.
         }
     }
 
@@ -170,6 +172,7 @@ public sealed class StorageProbeRetirementTests(ITestOutputHelper output)
             Assert.True(provider.LastProbe!.ExitCompletion.IsCompletedSuccessfully);
             Assert.True(provider.LastProbe.RetirementCompletion.IsCompletedSuccessfully);
             Assert.Null(provider.LastProbe.CleanupFailure);
+            Assert.Null(guard.ProbeRetirementFailure);
             Assert.True(f.Workers.Single(p => p.Id == provider.LastProbe.ProcessId).HasExited);
         }
         finally { await f.DisposeAsync(); }
@@ -195,6 +198,7 @@ public sealed class StorageProbeRetirementTests(ITestOutputHelper output)
         Assert.True(Assert.Single(f.Workers).HasExited);
         Assert.True(provider.LastProbe!.RetirementCompletion.IsCompletedSuccessfully);
         Assert.Null(provider.LastProbe.CleanupFailure); Assert.Null(guard.FailureCode);
+        Assert.Null(guard.ProbeRetirementFailure);
     }
 
     [Fact]
@@ -268,7 +272,10 @@ public sealed class StorageProbeRetirementTests(ITestOutputHelper output)
         var provider = f.Provider(fault == "pipe", hooks); var guard = f.Guard(provider);
         Assert.Equal(WindowStorageSafety.UnavailableCode, await guard.CheckAsync(false).WaitAsync(Bound));
         await guard.ProbeRetirementCompletion.WaitAsync(Bound);
-        Assert.Contains("injected-" + fault, guard.ProbeRetirementFailure!.ToString());
+        Assert.Contains("injected-" + fault, guard.ProbeQueryFailure!.ToString());
+        // An awaited read failure has exact clean provider evidence. An unknown
+        // start outcome and cleanup-hook failure remain retirement uncertainty.
+        Assert.Equal(fault != "pipe", guard.ProbeRetirementFailure is not null);
         Assert.True(provider.LastProbe!.RetirementCompletion.IsCompletedSuccessfully);
         Assert.Equal(fault != "start", provider.LastProbe.ExitCompletion.IsCompletedSuccessfully);
         Assert.Equal(fault == "dispose-hook", provider.LastProbe.CleanupFailure is not null);

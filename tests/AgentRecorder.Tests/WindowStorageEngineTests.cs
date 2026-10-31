@@ -15,7 +15,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("NonParallel-SystemQueryProviders")]
-public sealed class WindowStorageEngineTests : IDisposable
+public sealed partial class WindowStorageEngineTests : IDisposable
 {
     private readonly TempDirectory _temp = new();
     private readonly IStorageCapacityProvider _original = RecordingPreflightChecker.StorageCapacityProvider;

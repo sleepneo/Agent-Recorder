@@ -241,7 +241,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
                 var video = new FakeVideoCaptureWorker(firstFrameDelayMs:!cfg.AudioRequested && !Ready ? -1 : 0);
                 var backend = new AvSplitCaptureBackend(new CountingFactory(this, audio, video), runner ?? new FakeExternalProcessRunner(), new TempRetentionPolicy(F.Root));
                 Workers.Add((backend,audio,video));
-                if(!cfg.AudioRequested)return ((ICaptureBackend)new SilentBackend(this,video),cfg.SourceKind=="region" ? "ffmpeg-region" : "ffmpeg");
+                if(!cfg.AudioRequested)return ((ICaptureBackend)backend,cfg.SourceKind=="region" ? "ffmpeg-region" : "ffmpeg");
                 return (backend, cfg.SourceKind == "region" ? cfg.AudioRequested ? "ffmpeg-region-av-split" : "ffmpeg-region" : cfg.AudioRequested ? "ffmpeg-av-split" : "ffmpeg");
             };
         }
@@ -298,7 +298,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
         public long? FirstProgressOutTimeUs=>inner.FirstProgressOutTimeUs;public double? ProgressAnchorDeltaMs=>inner.ProgressAnchorDeltaMs;
         public long LaunchAnchorTicks=>inner.LaunchAnchorTicks;public long FirstFrameAnchorTicks=>inner.FirstFrameAnchorTicks;
         public void Start(CaptureConfig cfg,string path) { Interlocked.Increment(ref pair.Starts);if(pair.VideoFixture is not null)File.Copy(pair.VideoFixture,path);inner.Start(cfg,path); }
-        public OutputMeta Stop()=>inner.Stop();public bool WaitForExit(TimeSpan timeout)=>inner.WaitForExit(timeout);
+        public OutputMeta Stop() { pair.BeforeVideoStop?.Invoke();return inner.Stop(); } public bool WaitForExit(TimeSpan timeout)=>inner.WaitForExit(timeout);
         public string GetStderrLog()=>inner.GetStderrLog();public void Dispose()=>inner.Dispose();
     }
 
@@ -308,7 +308,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
     public async Task FormalApiSamePathRejectsBeforeAnyConflictingWorker(bool outerAv,bool innerAv,string spelling)
     {
         using var p=new Pair();var f=p.F;var outer=await p.Accept(p.Request(f.Root,"same.mp4","outer",av:outerAv));
-        f.Tray.Approve();await Until(()=>outer.State==RecState.recording);var starts=p.Starts;
+        f.Tray.Approve();if(!outerAv)p.Workers[0].Backend.StartVideo();await Until(()=>outer.State==RecState.recording);var starts=p.Starts;
         var dir=spelling switch { "case"=>f.Root.ToUpperInvariant(),"segments"=>Path.Combine(f.Root,"..",Path.GetFileName(f.Root)),"slashes"=>f.Root.Replace('\\','/'),_=>f.Root };
         using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(dir,"same.mp4","inner",outer,innerAv));
         Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Contains("OUTPUT_PATH_IN_USE",await response.Content.ReadAsStringAsync());
@@ -425,7 +425,7 @@ public sealed class OrdinaryAvOutputOwnershipTests
     [Fact]
     public async Task SilentPartnerCancellationAlsoRetainsPathUntilItsCleanupEnds()
     {
-        using var p=new Pair(ready:false);var f=p.F;var old=await p.Accept(p.Request(f.Root,"same.mp4","outer",av:false));f.Tray.Approve();
+        using var p=new Pair(ready:false);var f=p.F;var old=await p.Accept(p.Request(f.Root,"same.mp4","outer",av:false));f.Tray.Approve();p.Workers[0].Backend.StartVideo();
         await Until(()=>p.Starts==1 && old.State==RecState.preparing);
         using var entered=new ManualResetEventSlim();using var release=new ManualResetEventSlim();
         p.BeforeVideoStop=()=> { entered.Set();Assert.True(release.Wait(TimeSpan.FromSeconds(10))); };

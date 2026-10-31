@@ -16,6 +16,54 @@ namespace AgentRecorder.Core;
 /// </summary>
 internal static class OutputPathResolver
 {
+    /// <summary>
+    /// Checks request syntax without reading defaults, enumerating devices, creating
+    /// directories, or probing existing files. Runtime conflict checks remain separate.
+    /// </summary>
+    public static void ValidateRequest(JsonNode? output)
+    {
+        if (Str(output?["directory"]) is { } directory && directory != "default")
+            ValidateDirectory(directory);
+        // Template substitutions are safe single-component values. Validate through
+        // the same expansion and filename rules used when constructing the real path.
+        _ = BuildFileName(output, new Recording("validation") { SourceTitle = "region" });
+    }
+
+    private static void ValidateDirectory(string directory)
+    {
+        PolicyEngine.ValidateDirectory(directory);
+        try
+        {
+            var full = Path.GetFullPath(directory);
+            var root = Path.GetPathRoot(full)!;
+            foreach (var part in full[root.Length..].Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+                ValidateName(part, "output.directory");
+            if (directory.Any(c => char.IsControl(c) || "\"<>|?*".Contains(c))) throw InvalidPath("output.directory");
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw InvalidPath("output.directory");
+        }
+    }
+
+    private static string ValidateName(string name, string field)
+    {
+        var stem = name.Split('.')[0].TrimEnd(' ');
+        if (string.IsNullOrWhiteSpace(name) || name is "." or ".." ||
+            name.EndsWith('.') || name.EndsWith(' ') || Path.IsPathRooted(name) ||
+            name.Any(c => char.IsControl(c) || Path.GetInvalidFileNameChars().Contains(c)) ||
+            new[] { "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" }.Contains(stem, StringComparer.OrdinalIgnoreCase) ||
+            (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+                stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+                "123456789¹²³".Contains(stem[3])))
+            throw InvalidPath(field);
+        return name;
+    }
+
+    private static ApiException InvalidPath(string field) => new(400, "OUTPUT_PATH_INVALID",
+        "Output must use a valid absolute directory and a single valid filename.", new { field });
+
     public static string BuildScreenshotSeriesPath(JsonNode? output, Recording rec)
     {
         var directory = Str(output?["directory"]) is { } d && d != "default"
@@ -63,12 +111,12 @@ internal static class OutputPathResolver
     /// </summary>
     public static string BuildOutputPath(JsonNode? output, Recording rec)
     {
+        ValidateRequest(output);
         string dir = Str(output?["directory"]) is { } d && d != "default"
             ? d : Paths.DefaultOutputDir;
-        PolicyEngine.ValidateDirectory(dir);
-        Directory.CreateDirectory(dir);
-
+        ValidateDirectory(dir);
         string name = BuildFileName(output, rec);
+        Directory.CreateDirectory(dir);
         var policy = Str(output?["conflict_policy"]) ?? "rename";
         var full = Path.Combine(dir, name);
         rec.OrdinaryRequestedOutputPath = full;
@@ -87,7 +135,7 @@ internal static class OutputPathResolver
         if (string.IsNullOrWhiteSpace(directory))
             throw new ArgumentException("Directory cannot be empty", nameof(directory));
 
-        PolicyEngine.ValidateDirectory(directory);
+        ValidateDirectory(directory);
         Directory.CreateDirectory(directory);
 
         var name = Path.GetFileName(existingOutputPath);
@@ -127,10 +175,14 @@ internal static class OutputPathResolver
     private static string BuildFileName(JsonNode? output, Recording rec)
     {
         if (Str(output?["filename"]) is { } fn)
-            return fn.EndsWith(".mp4") ? fn : fn + ".mp4";
+        {
+            ValidateName(fn, "output.filename");
+            return ValidateName(fn.EndsWith(".mp4") ? fn : fn + ".mp4", "output.filename");
+        }
 
         var tmpl = Str(output?["filename_template"]) ?? "recording-{datetime}";
-        return ApplyTemplate(tmpl, rec) + ".mp4";
+        var name = ValidateName(ApplyTemplate(tmpl, rec), "output.filename_template");
+        return ValidateName(name + ".mp4", "output.filename_template");
     }
 
     private static string ApplyTemplate(string t, Recording rec)

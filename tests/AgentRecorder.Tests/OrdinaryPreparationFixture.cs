@@ -47,7 +47,7 @@ internal sealed class OrdinaryPreparationFixture : IDisposable
     {
         var type = typeof(RecordingEngine).GetNestedType("OrdinaryOutputOwner", BindingFlags.NonPublic)!;
         var owner = nullOwner ? null : Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            null, [rec, path, false], null);
+            null, [rec, path, false, path], null);
         var dict = (IDictionary)typeof(RecordingEngine).GetField("_ordinaryOutputs", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(engine)!;
         dict[rec.Id] = owner;
     }

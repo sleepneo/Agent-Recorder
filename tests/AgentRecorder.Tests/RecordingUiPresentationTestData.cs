@@ -11,7 +11,8 @@ internal static class RecordingUiPresentationTestData
         int? countdownRemainingSeconds = null,
         int? seriesCapturedFrameCount = null,
         int? seriesPlannedFrameCount = null,
-        DateTime? seriesNextCaptureDueAtUtc = null)
+        DateTime? seriesNextCaptureDueAtUtc = null,
+        RecordingEngine? engine = null)
     {
         lock (recording)
         {
@@ -25,6 +26,7 @@ internal static class RecordingUiPresentationTestData
                 DurationSeconds = recording.DurationSeconds,
                 StartedAtUtc = recording.StartedAtUtc,
                 IsScreenshotSeries = recording.IsScreenshotSeries,
+                ChapterMarksEligible = engine?.CanAddChapterMarks(recording) ?? false,
                 SeriesCapturedFrameCount = seriesCapturedFrameCount,
                 SeriesPlannedFrameCount = seriesPlannedFrameCount ?? recording.ScreenshotSeries?.PlannedFrameCount,
                 SeriesNextCaptureDueAtUtc = seriesNextCaptureDueAtUtc,

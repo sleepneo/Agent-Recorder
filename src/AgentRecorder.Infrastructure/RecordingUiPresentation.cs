@@ -35,6 +35,7 @@ public sealed record RecordingUiPresentation
     public int? DurationSeconds { get; init; }
     public DateTime StartedAtUtc { get; init; }
     public bool IsScreenshotSeries { get; init; }
+    public bool ChapterMarksEligible { get; init; }
     public int? SeriesCapturedFrameCount { get; init; }
     public int? SeriesPlannedFrameCount { get; init; }
     public DateTime? SeriesNextCaptureDueAtUtc { get; init; }
