@@ -8,7 +8,7 @@ False keeps the actual App generator installed but skips Bundle preparation/gene
 
 A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. The policy is not deletion approval. Its main-output claim retires at a known production backend's actual settlement boundary; live or unknown work remains protected. Default Bundle outputs remain protected. Independent source/synthetic-input checks and one real 5-second silent FFmpeg selected-region run with local cancellation, approval and idempotent replay have passed. This does not establish all-backend or general retention acceptance.
 
-This reference describes v0.1.16 contracts through SQLite v44:
+This reference describes v0.1.18 contracts through SQLite v44:
 history, health, artifacts, generation digests, read-only retention preview and
 locally confirmed single deletion request plumbing. The restricted implementation
 has passed source checks. App recordings default to Bundles and remain protected;
@@ -728,6 +728,8 @@ Use this endpoint first for common natural-language intents.
 }
 ```
 
+For a new video request that omits both `output.filename` and `output.filename_template`, the automatic filename is `recording-{datetime}-{id}.mp4`, using that recording's existing ID. `filename` retains priority; explicit templates (including the example above) are unchanged. Local confirmation may change the directory without regenerating the initial timestamp or ID; an existing-file conflict may still add a suffix under the original conflict policy. This distinguishes recordings without promising permanent global uniqueness; active-path protection and static conflict policies still apply.
+
 `audio.microphone.enabled` may be `true` to include microphone audio. Omit `audio.microphone.device_id` to auto-select: when exactly one active device is present, or when exactly one device is the current CoreAudio multimedia default, that device is chosen; otherwise provide the input `id` from `GET /api/v1/audio/devices`. Set `audio.system_audio.enabled=true` to capture system audio; omit its `device_id` to use the current Windows multimedia default output, or provide an exact `id` from `output_devices`. The endpoint approved in local confirmation is fixed for that recording. Changing the Windows default output does not switch capture to another endpoint; returning to the approved endpoint uses bounded same-endpoint recovery, with objectively measured gaps represented as silence and reported through continuity/recovery metrics. Microphone and system audio are mutually exclusive.
 
 The default audio capture backend is the isolated WASAPI helper. Set the environment variable `AGENT_RECORDER_AUDIO_BACKEND=dshow` before starting Agent Recorder to use the FFmpeg dshow diagnostic fallback instead; any other value is rejected.
@@ -745,10 +747,53 @@ microphone is not supported. The capability must be shown as ready by
 `GET /api/v1/capabilities` (`recording.window_surface.supported=true`), and a
 usable render endpoint is also required for the system-audio variant.
 
+For independent window recording, submit two separate ordinary raw
+`POST /api/v1/recordings` requests with different fixed `window_id` values and no
+`nested`, parent or session fields. Each must be silent strict window video,
+1–1800 seconds, with its own local confirmation, Proof, countdown, first frame,
+output and Bundle. Neither run depends on the other's state. Pending confirmation,
+preparing, countdown, recording, stopping and finalizing each occupy a slot;
+the default budget is two (startup configuration allows 1–10). Same HWND, over-budget requests, audio and mixed contracts
+fail before an additional confirmation or worker. Quick, Profile, display/region,
+screenshot-series and Plan/Lease/future-window cannot join this parallel contract.
+Single-window system audio remains available separately.
+
+`recording.window_surface.independent_windows` publishes support, actual WGC
+availability, raw/configured-budget/silent/per-run-approval limits and no parent relationship.
+Availability is a capability probe, not GPU stress validation (`stress_tested=false`).
+Confirmation, REC and stop controls show a stable process-local window number and
+target title: WIN1/WIN2 or 窗口1/窗口2. Later numbers may be larger. These are display
+labels, not HWNDs, display IDs, persisted keys or API identities. Stop and query by
+the returned Recording ID; Stop All keeps its existing meaning.
+
+Enumerate current windows and use their exact returned IDs in two separate requests
+(the following IDs are illustrative):
+
+```json
+{"source":{"type":"window","window_id":"window_12345"},"stop_condition":{"type":"duration","seconds":120}}
+```
+
+```json
+{"source":{"type":"window","window_id":"window_67890"},"stop_condition":{"type":"duration","seconds":20}}
+```
+
+Audio defaults to none; omitted explicit capture semantics still requires strict
+window content. No parallel group or parent ID is needed. Each HWND captures its
+own content despite overlap. Region OUTER/INNER captures actual desktop rectangles
+and retains its parent-visible policy. Neither contract automatically composites
+picture-in-picture. Independent native desktop, cross-DPI and long-run acceptance
+remains pending; ten windows is not a supported limit.
+
+The older raw window `nested.role=outer/inner` contract remains for compatibility:
+two distinct silent strict windows, separate local approvals and durations of
+1–1800 seconds. An inner still requires a recording outer and matching parent/session;
+it cannot mix with independent runs. Per-ID stops remain independent; Stop All
+stops all. `recording.window_surface.nested` retains the legacy scope and availability.
+
 Quick video `target.type="active_window"` fixes the resolved window identity and
 uses the same contract; send `duration_seconds` (1–1800 whole seconds) or the
 equivalent duration stop condition. Manual/missing/unbounded duration, microphone
-and nested window video fail before confirmation or workers. The quick request
+and nested window video through quick fail before confirmation or workers. The quick request
 shape does not accept the raw-only `required_capture_semantics` field. The recipe's
 60-second example and the shared countdown/wait/auth rules are unchanged.
 
@@ -823,9 +868,12 @@ start; monitoring covers audio preparation too. Native final publication account
 only for actual remaining copy bytes, synchronized with capacity samples.
 `storage_space_low` and `storage_capacity_unavailable` stop both owned workers
 and prevent successful publication when failure wins the existing commit arbiter.
-Region Profiles remain silent only; API fields, endpoint binding, A/V coverage and
+Raw Region Profile execution remains silent; ordinary quick region-only reuse
+uses the existing per-request audio contract. API fields, endpoint binding, A/V coverage and
 synchronization tolerances do not change. Point-in-time checks are not a disk
-reservation, quota or retention execution; real full-disk/remount acceptance is pending.
+reservation, quota or retention execution. Controlled low-capacity and virtual-volume
+disconnect/recovery passed for the tested silent path; actual OS ENOSPC and
+all audio/backend combinations remain unverified.
 
 Ordinary video requests cannot concurrently occupy the same normalized final path
 when either Run is ordinary FFmpeg AV. Registration returns `409 OUTPUT_PATH_IN_USE`;
@@ -844,8 +892,9 @@ directory reparse aliases.
 An invalid field, ineligible request, unavailable helper/endpoint, changed HWND
 identity/size, or minimized/closed target fails explicitly. In particular,
 `WINDOW_SURFACE_UNAVAILABLE` does not fall back to `screen_rectangle`.
-The explicit field is rejected by quick, screenshot-series, nested,
-and plan requests. New ordinary window video without it uses the same strict
+The explicit field is rejected by quick, screenshot-series and plan requests.
+Only the restricted legacy raw window nested contract accepts it with nested;
+other nested source combinations remain unchanged. New ordinary window video without it uses the same strict
 contract. Display/region, plans, future-window authorization and frozen history
 are not reinterpreted. See
 [Window capture semantics](#window-capture-semantics) for the distinction from
@@ -1787,7 +1836,7 @@ on the recording's trusted first-frame monotonic timeline.
 
 ## Recording Bundle
 
-Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Source acceptance covers synthetic inputs with the production session/publication pipeline; dedicated native-capture acceptance remains pending.
+Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Three silent native windows passed scoped MP4, Bundle, history and digest acceptance; this does not certify all backend combinations or long-running stress.
 
 Successful supported FFmpeg and ordinary WGC MP4 recordings produce a structured bundle next
 to the video file. For `D:\Videos\demo.mp4` the bundle is:
@@ -1947,7 +1996,8 @@ but deliberately excludes the label text.
 | `SOURCE_NOT_FOUND` | Display/window/source is unavailable |
 | `SOURCE_UNAVAILABLE` | Source blocked by safety policy |
 | `PERMISSION_DENIED` | Output path or operation denied |
-| `RECORDING_ALREADY_RUNNING` | Non-nested recording already active |
+| `RECORDING_ALREADY_RUNNING` | Active run is incompatible with the requested concurrency contract |
+| `WINDOW_TARGET_IN_USE` | An active window run already uses this HWND |
 | `OUTER_RECORDING_ALREADY_EXISTS` | Nested outer already active |
 | `INNER_RECORDING_ALREADY_EXISTS` | Nested inner already active |
 | `PARENT_NOT_RECORDING` | Nested inner parent is not recording |
@@ -2452,12 +2502,14 @@ registration: underlying source kind, capture semantics, coordinate space,
 explicitly resolved stable display identity, display bounds and actual normalized
 pixel bounds. A manual region and an equivalent fixed_region_profile share a
 region key. Backend, title, duration, audio, output and Profile version are excluded.
-Screenshot series, legacy window screen_rectangle, nested window requests, other
+Screenshot series, legacy window screen_rectangle, other
 history sources, old rows and unsupported or untrusted facts remain null. No old-row
 backfill supplies a key. Strict ordinary window_surface video freezes HWND bits, PID,
 process creation UTC FILETIME, Windows session ID, semantics and approved surface
 width/height from the accepted plan and one read-only native metadata observation
-before durable registration. No pixels, executable paths or signatures are read.
+before durable registration. Independent raw windows and the supported silent legacy
+window nested contract use these same facts; display numbering is not part of the
+key. No pixels, executable paths or signatures are read.
 Missing, exited or changed metadata yields null without disabling a legal recording.
 Title, window position, audio, output and duration do not affect the key. The value
 is a frozen-fact retrieval key, not a permanent Windows window UUID: the same process
@@ -3150,3 +3202,12 @@ its target key remains a normal region key. Older rows have an unknown/null reus
 mode, never an invented full-configuration claim. No database migration is needed.
 The raw POST `/recordings` single profile_ref body remains immutable full-policy,
 silent execution; mixing duration/audio overrides remains invalid.
+
+
+### Independent-window startup budget
+
+Set `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS` only in the host launch environment. Missing means 2; strict decimal integers 1–10 are valid (10 is the software hard limit). The Engine freezes this policy at initialization; changing the environment later or sending request fields cannot alter it. Invalid/overflow/out-of-range values disable this independent capability and raw requests return `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` before confirmation or worker creation. No HTTP limit mutation exists.
+
+`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports null effective limit/remaining; `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output and queued/generating/original Bundle host work demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
+
+This budget covers this Engine's independent ordinary raw silent windows and their unretired delivery, not all OS workers or hardware capacity. Top-level concurrency is a descriptive maximum across separate contracts; legacy nested/region rules remain two, and quick/Profile/Plan/Lease/future/audio/mixed sources gain no extra capability. Every accepted recording still needs its own local confirmation. `stress_tested=false`; no quality reduction, backend substitution, desktop fallback or automatic PiP composition. WIN1…WIN10 identify local controls only; API identity remains Recording ID.

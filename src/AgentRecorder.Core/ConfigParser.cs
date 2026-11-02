@@ -36,7 +36,7 @@ public static partial class ConfigParser
         IMicrophoneStatusProvider? microphoneStatusProvider = null,
         ISystemAudioEndpointProvider? systemAudioEndpointProvider = null,
         SystemAudioEndpointInfo? preResolvedSystemAudioEndpoint = null,
-        SystemQuery.WindowInfo? preResolvedWindow = null)
+        SystemQuery.WindowInfo? preResolvedWindow = null, bool createOutputDirectory = true)
     {
         bool generateBundle = NormalizeArtifactBundle(cfg);
         // Normalize this before audio/device/source resolution so malformed
@@ -344,7 +344,7 @@ public static partial class ConfigParser
             throw Inv("output.conflict_policy must be one of rename, fail, overwrite");
         cap.OutputConflictPolicy = outputConflictPolicy;
         rec.OutputPath = seriesConfig == null
-            ? OutputPathResolver.BuildOutputPath(cfg["output"], rec)
+            ? OutputPathResolver.BuildOutputPath(cfg["output"], rec, createOutputDirectory)
             : OutputPathResolver.BuildScreenshotSeriesPath(cfg["output"], rec);
         cap.OutputPath = rec.OutputPath;
         rec.Config = cap;
@@ -505,8 +505,14 @@ public static partial class ConfigParser
         if (!required) return false;
         if (seriesConfig is not null)
             throw Inv("required_capture_semantics is supported only for ordinary video recordings.");
-        if (cfg["nested"] is not null)
-            throw Inv("Window-surface video cannot be combined with nested recording.");
+        if (cfg["nested"] is JsonNode nested)
+        {
+            if (nested is not JsonObject || StrictString(nested["role"], "nested.role") is not ("outer" or "inner"))
+                throw Inv("Nested window_surface requires role outer or inner.");
+            if (cfg["audio"] is JsonObject audio && audio["system_audio"] is JsonObject system && system["enabled"] is JsonNode enabled &&
+                (enabled is not JsonValue value || !value.TryGetValue<bool>(out var requested) || requested))
+                throw Inv("Nested window_surface supports no audio only.");
+        }
         foreach (var field in new[] { "target", "schedule", "plan", "lease", "authorization_mode" })
             if (cfg[field] is not null)
                 throw Inv($"Window-surface video cannot be combined with '{field}'.");

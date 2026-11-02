@@ -84,7 +84,7 @@ public sealed class OrdinaryWindowTargetKeyTests
         foreach(var bad in new[]{Key.ToUpperInvariant(),Key+"0",Key[..^1],Key.Replace("window","Window"),Key[..^1]+"g"," "+Key})
             Assert.False(OrdinaryWindowTargetKey.IsValid(bad));
         var rec=new Recording("r"){SourceType="window",NestedRole="outer",Config=new(){RequireWindowSurface=true}};
-        rec.FreezeOrdinaryTarget(Plan(),Facts());Assert.Null(rec.OrdinaryTargetKey);
+        rec.FreezeOrdinaryTarget(Plan(),Facts());Assert.Equal(Key,rec.OrdinaryTargetKey);
     }
 }
 

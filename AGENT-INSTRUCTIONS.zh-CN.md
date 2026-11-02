@@ -619,9 +619,9 @@ GET /api/v1/recordings/{recording_id}?wait_ms=25000&since_status=recording
 好的，请在弹出的选区界面中框选要录制的区域。录制需要你在本地确认后才会开始。
 ```
 
-## 场景 3：用户说“开始外层录制，然后在里面再录制一个窗口 1 分钟”
+## 场景 3：用户说“开始外层区域录制，然后在里面再录一个区域 1 分钟”
 
-这是嵌套录制。外层记录整个过程，内层记录再次选择的区域。
+这是区域分层录制。外层记录矩形内的实际桌面过程，内层记录再次选择的区域；两个固定窗口各自录内容使用后文的无父关系窗口并行请求。
 
 1. 创建外层录制：
 
@@ -696,7 +696,8 @@ AGENT-API-REFERENCE.zh-CN.md
 自然语言“录某窗口”应使用窗口自身内容合同。新普通 video 的 raw `source.type=window`
 和 quick `target.type=active_window` 默认要求 `window_surface`，不需要补救字段；
 raw 可显式传同名严格要求，quick 不传该 raw 字段。固定窗口身份、1–1800 整秒、
-无音频或系统声音，窗口麦克风、nested、manual/缺少必要时长明确失败，不降级。
+单窗口支持无音频或系统声音。用户说“同时录这两个窗口”时，先枚举得到原样window_id，再分别发两个普通raw无声请求，不传nested/parent/session，不要求用户说outer/inner；每条1–1800秒、各自确认/倒计时/首帧、输出和Recording ID，任意目标可先发起。默认两份预算，可在宿主启动时显式配置1–10，终态后自身交付未退休仍占用；同HWND、超预算请求、音频、混合display/region、quick/Profile/计划/Lease/未来窗口不能混入。按各自Recording ID停止/查询，停止全部仍影响全部。窗口编号及标题只供本地辨识，后续编号可增大，不把WIN编号当API定位依据。
+旧raw窗口outer/inner仅兼容，仍要求outer已recording及匹配parent/session，不与新独立路径混用。区域分层继续用OUTER/INNER，捕获各矩形实际桌面；窗口并行捕获各自内容，遮挡不构成画面层级，均不自动合成画中画。本轮可配置预算的真人跨DPI及10窗口压力未验收。窗口麦克风、manual/缺少必要时长仍失败，不降级。
 先核对 capabilities 的 `recording.window_surface.default_for_ordinary_window_video`、
 当前 `supported/status/reason_code` 和 active-window recipe 的可用性；静态支持不等于
 当前目标一定可录。旧版服务缺少此默认能力时，应结合能力/版本明确说明其默认不满足
@@ -833,3 +834,12 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 来源以原ref及 `profile_reuse_mode:region_only` 返回，Profile本身不会被修改。
 旧raw单独profile_ref仍为完整无声配置执行，计划/Lease不支持本目标。
 完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。
+
+
+### 独立窗口启动预算
+
+宿主启动环境可选 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS`：缺省2，严格十进制整数1–10合法，软件硬上限10。Engine初始化时读取并冻结；运行中修改环境或请求字段不改变实例，不提供HTTP改限额接口。非法、溢出或越界使该独立能力不可用，raw请求在新增确认/worker前返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，不截断或按成功默认值忽略。无需修改本机持久环境。
+
+能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效配置的有效上限及余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出、Bundle排队/生成/原host收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
+
+预算只覆盖本Engine普通raw无声独立窗口及其未退休交付，不是全机worker、GPU/编码器/磁盘容量保证。顶层并发值只是各合同描述性上界；旧nested/区域仍最多两路，quick/Profile/截图序列/Plan/Lease/未来窗口/声音和混合目标不扩展。每条仍需独立本地确认。stress_tested=false，不自动降画质、换后端/目标或回退桌面区域，也不自动合成画中画。WIN1…WIN10/窗口1…窗口10只供显示，API仍按Recording ID启停。

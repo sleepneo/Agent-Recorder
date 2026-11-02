@@ -968,7 +968,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
     [Theory]
     [InlineData("publish_failed")]
     [InlineData("probe_exception")]
-    public void PublishOrProbeFailure_Failed_CleansStaging_PreservesExistingFinal(string failureMode)
+    public async Task PublishOrProbeFailure_Failed_CleansStaging_PreservesExistingFinal(string failureMode)
     {
         string outputPath = Path.Combine(_finalDir, "preserve.mp4");
         byte[] existingContent = Encoding.UTF8.GetBytes("existing-final-content");
@@ -1019,6 +1019,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
 
         // Staging directory must be removed.
         string stagingDir = Directory.GetParent(_lastHarness!.Options.OutputPath)!.FullName;
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(stagingDir), "Staging directory should be cleaned up.");
 
         // No publish tmp residue in final dir.
@@ -1149,7 +1150,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
     // -----------------------------------------------------------------
 
     [Fact]
-    public void MultipleStop_Dispose_Idempotent_NoResidue()
+    public async Task MultipleStop_Dispose_Idempotent_NoResidue()
     {
         string outputPath = Path.Combine(_finalDir, "idempotent.mp4");
         long stagingSize = 10000;
@@ -1182,6 +1183,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
 
         // No staging residue.
         string stagingDir = Directory.GetParent(_lastHarness!.Options.OutputPath)!.FullName;
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(stagingDir), "Staging directory should be removed.");
 
         // No signal files.
@@ -1302,7 +1304,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
     }
 
     [Fact]
-    public void StartAsync_ThrowsSynchronously_RollbacksAndFails()
+    public async Task StartAsync_ThrowsSynchronously_RollbacksAndFails()
     {
         string outputPath = Path.Combine(_finalDir, "sync-throw.mp4");
         FakeSession? session = null;
@@ -1323,11 +1325,12 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         var meta = backend.Stop();
         Assert.False(meta.OutputFileExists);
         Assert.Contains("wgc_continuous_start_failed", string.Join(" ", meta.Warnings));
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(session.Options.OutputPath)!));
     }
 
     [Fact]
-    public void StartAsync_ReturnsFaultedTask_RollbacksAndFails()
+    public async Task StartAsync_ReturnsFaultedTask_RollbacksAndFails()
     {
         string outputPath = Path.Combine(_finalDir, "faulted-task.mp4");
         FakeSession? session = null;
@@ -1348,6 +1351,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         var meta = backend.Stop();
         Assert.False(meta.OutputFileExists);
         Assert.Contains("wgc_continuous_start_failed", string.Join(" ", meta.Warnings));
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(session.Options.OutputPath)!));
     }
 
@@ -1464,7 +1468,8 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         Assert.Contains("factory failed", ex.Message);
 
         Assert.NotNull(capturedStagingDir);
-        Assert.False(Directory.Exists(capturedStagingDir!));
+        Assert.True(Directory.Exists(capturedStagingDir!));
+        Assert.False(backend.OutputRetirement.IsCompleted); // A throwing factory has not proved no resources.
 
         var meta = backend.Stop();
         Assert.False(meta.OutputFileExists);
@@ -1555,7 +1560,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
     }
 
     [Fact]
-    public void DisposeDuringRunning_WinsRace_CompletesWithoutPublishingOrCallback()
+    public async Task DisposeDuringRunning_WinsRace_CompletesWithoutPublishingOrCallback()
     {
         string outputPath = Path.Combine(_finalDir, "dispose-running.mp4");
         FakeSession? session = null;
@@ -1581,6 +1586,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         Assert.Equal(0, publisher.CallCount);
         Assert.Equal(0, callbackCount);
         Assert.True(session!.Disposed);
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(session.Options.OutputPath)!));
     }
 
@@ -1638,6 +1644,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         var meta = backend.Stop();
         Assert.True(meta.OutputFileExists);
         Assert.Equal(1, publisher.CallCount);
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(session!.Options.OutputPath)!));
     }
 
@@ -1688,6 +1695,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         var meta = backend.Stop();
         Assert.True(meta.OutputFileExists);
         Assert.Equal(1, publisher.CallCount);
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(session!.Options.OutputPath)!));
     }
 
@@ -1697,7 +1705,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
     [InlineData("zero_size")]
     [InlineData("zero_duration")]
     [InlineData("too_small")]
-    public void ProbeValidation_Failure_DoesNotPublish(string mode)
+    public async Task ProbeValidation_Failure_DoesNotPublish(string mode)
     {
         string outputPath = Path.Combine(_finalDir, $"probe-{mode}.mp4");
         long stagingSize = mode == "too_small" ? 100 : 10000;
@@ -1726,6 +1734,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         Assert.False(meta.OutputFileExists);
         Assert.Equal(0, publisher.CallCount);
         Assert.Contains("wgc_continuous_output_validation_failed", string.Join(" ", meta.Warnings));
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(_lastHarness!.Options.OutputPath)!));
     }
 
@@ -1850,6 +1859,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         Assert.False(meta.OutputFileExists);
         Assert.Equal(0, publisher.CallCount);
         Assert.Contains($"{mode}_mismatch", string.Join(" ", meta.Warnings));
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(Path.GetDirectoryName(_lastHarness!.Options.OutputPath)!));
     }
 
@@ -2087,9 +2097,10 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         probeBarrier.TrySetResult();
 
         // Wait for the late completion owner to finish its finally block.
-        await Task.Delay(200);
+        // Observe the real retirement fact rather than a delay.
 
         string? stagingDir = Path.GetDirectoryName(_lastHarness!.Options.OutputPath);
+        await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(Directory.Exists(stagingDir), "Staging directory should be cleaned by the completion owner.");
     }
 
@@ -3481,13 +3492,15 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         FaultedTask
     }
 
-    private sealed class FakeSession : IWgcContinuousBackendSession
+    private sealed class FakeSession : IWgcContinuousBackendSession, IWgcContinuousResourceOwner
     {
         private readonly TaskCompletionSource<object?> _startTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _authorizeTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _stopTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<WgcContinuousSessionResult> _completionTcs;
 
+        private readonly TaskCompletionSource _resourceRetired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task ResourceRetirement => _resourceRetired.Task;
         public FakeSession(WgcContinuousSessionOptions options, bool runCompletionContinuationsAsynchronously = true)
         {
             Options = options;
@@ -3495,6 +3508,10 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
                 runCompletionContinuationsAsynchronously
                     ? TaskCreationOptions.RunContinuationsAsynchronously
                     : TaskCreationOptions.None);
+            _ = _completionTcs.Task.ContinueWith(done => {
+                if (!done.IsCompletedSuccessfully || done.Result?.ProcessExitConfirmed != false)
+                    _resourceRetired.TrySetResult();
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
 
         public WgcContinuousSessionOptions Options { get; }
@@ -3578,6 +3595,9 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
                     FailureCategory = "disposed"
                 });
             }
+            // This no-process fake is sealed on Dispose, independently of callback scheduling.
+            if (!_completionTcs.Task.IsCompletedSuccessfully || _completionTcs.Task.Result?.ProcessExitConfirmed != false)
+                _resourceRetired.TrySetResult();
         }
     }
 
@@ -4196,6 +4216,10 @@ public sealed class WgcContinuousCaptureBackendRealProcessTests : IDisposable
                 $"Child helper process (PID={childPid}) is not alive before Dispose.");
 
             backend!.Dispose();
+
+            // Dispose is bounded; observe this owner's actual cleanup before
+            // checking directory absence, without an emergency-cleanup retry.
+            await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
 
             // Record backend cleanup results *before* any emergency cleanup so a
             // product defect is not masked by the finally block.

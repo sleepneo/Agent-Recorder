@@ -148,7 +148,9 @@ public sealed class WgcAuthorizationPublicationTests : IDisposable
         var owner = callAuthorization ? session.AuthorizeCapture() : Task.FromResult(false);
         if (callAuthorization) await writer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(File.Exists(o.BeginSignalPath));
-        await transport.Emit(Started(o) + FirstFrame());
+        try { await transport.Emit(Started(o) + FirstFrame()); }
+        catch (ObjectDisposedException) when (transport.Killed) { /* Expected: unauthorized helper was terminated. */ }
+        catch (IOException) when (transport.Killed) { /* Same bounded pipe shutdown; assertions below still required. */ }
         var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(5));
         writer.BeforeRelease.TrySetResult();
         Assert.False(await owner.WaitAsync(TimeSpan.FromSeconds(5)));

@@ -41,6 +41,7 @@ public sealed record RecordingUiPresentation
     public DateTime? SeriesNextCaptureDueAtUtc { get; init; }
     public int? CountdownRemainingSeconds { get; init; }
     public string? NestedRole { get; init; }
+    public WindowRecordingIdentity? WindowIdentity { get; init; }
     public string? ParentRecordingId { get; init; }
     public string? NestedSessionId { get; init; }
 }

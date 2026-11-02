@@ -50,7 +50,7 @@ public sealed class OrdinaryPreparationContractTests
     public async Task FullClaimBoundAndSeparatePreparationCountArePreserved(int count)
     {
         using var f = new OrdinaryPreparationFixture(); var unrelated = f.Files.Root + @"\other.mp4";
-        for (var i = 0; i < count; i++) Claim(f.Engine, Recording(unrelated), unrelated);
+        for (var i = 0; i < count; i++) InjectSyntheticClaimForBound(f.Engine, Recording(unrelated), unrelated);
         var result = await f.Service().AcquireAsync(f.Anchor); Assert.Equal(count, OwnerCount(f.Engine));
         if (count == 501) { Assert.Equal(OrdinaryPreparationReason.Unavailable, result.Reason); Assert.Empty(f.Api.Calls); Assert.Null(Read(f.Engine, f.Anchor.Path)); }
         else

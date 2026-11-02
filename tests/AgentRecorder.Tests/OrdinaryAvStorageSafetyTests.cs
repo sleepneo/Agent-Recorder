@@ -353,6 +353,9 @@ public sealed class OrdinaryAvStorageSafetyTests
         else if(fault=="remount")f.Capacity.Volume="replacement";else f.Capacity.Query=(_,_)=>throw new IOException("unknown");
         f.Clock.Tick();await Until(()=>f.Single.IsFinalized && f.Audio.StopCalled);Assert.True(f.Audio.HasExited);
         if(ready)Assert.True(f.Video.StopCalled);else { Assert.Null(f.Video.OutputPath);f.Backend.StartVideo();Assert.Null(f.Video.OutputPath); }
+        // IsFinalized precedes the history callback/queue. Observe its actual
+        // projection within the existing lifecycle bound before asserting it.
+        await Until(()=>f.History.Read(f.Single.Id)?.Status=="failed");
         var code=fault=="low" ? WindowStorageSafety.LowSpaceCode : WindowStorageSafety.UnavailableCode;f.TerminalOnce(f.Single,code);
         Assert.False(f.Single.Config.StorageSafety!.TryAbort(code));await f.Single.Config.StorageSafety.MonitorCompletion.WaitAsync(TimeSpan.FromSeconds(5));
     }

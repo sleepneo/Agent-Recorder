@@ -274,10 +274,11 @@ internal static class ScreenshotSeriesArtifacts
         return manifestPath;
     }
 
-    public static string Publish(Recording rec, ScreenshotSeriesRuntime series, string conflictPolicy)
+    public static string Publish(Recording rec, ScreenshotSeriesRuntime series, string conflictPolicy, Action<string>? beforeMove = null)
     {
         var desired = series.OutputDirectory;
         var final = ResolveDirectoryConflict(desired, conflictPolicy);
+        beforeMove?.Invoke(final);
         Directory.Move(series.StagingDirectory!, final);
         series.FinalDirectory = final;
         series.StagingDirectory = null;

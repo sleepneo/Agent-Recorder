@@ -28,7 +28,14 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     private readonly TaskCompletionSource<object?> _terminalSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<object?> _stagingReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
     // Completion-owner cleanup and staging retirement, not logical publication.
-    internal Task OutputRetirement => Task.WhenAll(_completionSignal.Task,_stagingReleased.Task);
+    private readonly TaskCompletionSource _setupFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _unknownResources = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Task _resourceRetirement;
+    private int _resultOwners, _resultHosts;
+    private readonly TaskCompletionSource _resultHostRetired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _callbackOwnerThread, _disposeAfterCallback;
+    private bool _cleanupRunning;
+    internal Task OutputRetirement => Task.WhenAll(_completionSignal.Task, _stagingReleased.Task, _resultHostRetired.Task);
     private readonly CancellationTokenSource _finalizationCts = new();
     private readonly IFileCommitGate _commitGate = new FileCommitGate();
 
@@ -160,6 +167,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         _probe = probe ?? throw new ArgumentNullException(nameof(probe));
         _helperPathResolver = helperPathResolver ?? throw new ArgumentNullException(nameof(helperPathResolver));
+        _resourceRetirement = _unknownResources.Task;
         _tempRoot = tempRoot ?? throw new ArgumentNullException(nameof(tempRoot));
     }
 
@@ -284,6 +292,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         string? helperExePath = null;
         WgcContinuousSessionOptions? options = null;
 
+        bool factoryEntered = false;
         try
         {
             helperExePath = _helperPathResolver();
@@ -291,6 +300,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             cfg.WritePaths?.ValidateOutputPath(cfg);
             cfg.StorageSafety?.EnsureAdmission();
             stagingDir = CreateStagingDirectory(cfg.WritePaths?.WgcTempRoot ?? _tempRoot);
+            lock (_lifecycleLock) _stagingDir = stagingDir;
 
             stagingOutput = Path.Combine(stagingDir, "capture.mp4");
             beginSignal = Path.Combine(stagingDir, "begin.signal");
@@ -298,9 +308,14 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             token = GenerateBeginToken();
 
             options = BuildSessionOptions(cfg, helperExePath, stagingOutput, beginSignal, stopSignal, token);
+            AgentRecorder.Logging.DiagnosticLog.Write("wgc.session_binding", authorizationProof.RecordingId, "created", options.RecordingId);
             cfg.CommandArgs = BuildRedactedCommandArgs(options, token);
 
+            factoryEntered = true;
             session = _sessionFactory(options);
+            if (session is IWgcContinuousResourceOwner owner) _resourceRetirement = owner.ResourceRetirement;
+            _ = _resourceRetirement.ContinueWith(_ => CleanupStaging(), CancellationToken.None,
+                TaskContinuationOptions.None, TaskScheduler.Default);
 
             lock (_lifecycleLock)
             {
@@ -352,9 +367,10 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                                 _finalMeta = faultedMeta;
                         }
                         SignalPublish();
-                        _stagingReleased.TrySetResult(null);
+                        CleanupStaging();
                         _terminalSignal.TrySetResult(null);
                         _completionSignal.TrySetResult(null);
+                        TryRetireResultHost();
                     }
                     else
                     {
@@ -377,6 +393,15 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             // Ensure we do not leave a half-initialized backend behind.
             RollbackStart(session, stagingDir, cfg, ex);
             throw;
+        }
+        finally
+        {
+            // No factory entry is an explicit no-allocation fact only after
+            // setup is sealed; a throwing/null/legacy factory is unknown.
+            if (!factoryEntered) _resourceRetirement = Task.CompletedTask;
+            _setupFinished.TrySetResult();
+            CleanupStaging();
+            TryRetireResultHost();
         }
     }
 
@@ -446,6 +471,12 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     /// <inheritdoc />
     public void Dispose()
     {
+        if (Volatile.Read(ref _callbackOwnerThread) == Environment.CurrentManagedThreadId)
+        {
+            Volatile.Write(ref _disposeAfterCallback, 1);
+            _commitGate.Close();
+            return; // the current callback cannot wait for its own completion
+        }
         int current = _lifecycleState;
 
         while (true)
@@ -453,6 +484,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             switch ((LifecycleState)current)
             {
                 case LifecycleState.Disposed:
+                    CleanupStaging();
                     return;
 
                 case LifecycleState.Completed:
@@ -470,6 +502,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                         ReleaseStagingIfCleaned();
                         _terminalSignal.TrySetResult(null);
                         _completionSignal.TrySetResult(null);
+                        TryRetireResultHost();
                     }
                     return;
 
@@ -526,6 +559,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                         ReleaseStagingIfCleaned();
                         _terminalSignal.TrySetResult(null);
                         _completionSignal.TrySetResult(null);
+                        TryRetireResultHost();
                         return;
                     }
                     current = _lifecycleState;
@@ -566,6 +600,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                     ReleaseStagingIfCleaned();
                     _terminalSignal.TrySetResult(null);
                     _completionSignal.TrySetResult(null);
+                    TryRetireResultHost();
                     return;
 
                 case LifecycleState.Disposing:
@@ -648,24 +683,17 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
 
     private void CompleteUnstartedDisposal()
     {
+        _resourceRetirement = Task.CompletedTask;
+        _setupFinished.TrySetResult();
         _finalMeta = new OutputMeta();
         SignalPublish();
         ReleaseStagingIfCleaned();
         _terminalSignal.TrySetResult(null);
         _completionSignal.TrySetResult(null);
+        TryRetireResultHost();
     }
 
-    private void ReleaseStagingIfCleaned()
-    {
-        string? dir;
-        lock (_lifecycleLock) dir = _stagingDir;
-
-        if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
-        {
-            // Staging is either absent or already removed; it is safe to release waiters.
-            _stagingReleased.TrySetResult(null);
-        }
-    }
+    private void ReleaseStagingIfCleaned() => CleanupStaging();
 
     private void RollbackStart(
         IWgcContinuousBackendSession? session,
@@ -727,7 +755,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             }
         }
 
-        CleanupDirectory(stagingDir);
+        CleanupStaging();
 
         var failure = BuildFailureMetaFromException(ex, cfg);
         lock (_lifecycleLock)
@@ -737,9 +765,10 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         }
 
         SignalPublish();
-        _stagingReleased.TrySetResult(null);
+        CleanupStaging();
         _terminalSignal.TrySetResult(null);
         _completionSignal.TrySetResult(null);
+        TryRetireResultHost();
     }
 
     private static OutputMeta BuildFailureMetaFromException(Exception ex, CaptureConfig cfg)
@@ -1048,7 +1077,17 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             };
         }
 
-        ProcessResult(result);
+        lock (_lifecycleLock) _resultHosts++;
+        try { ProcessResult(result); }
+        finally { lock (_lifecycleLock) _resultHosts--; TryRetireResultHost(); }
+    }
+
+    private void TryRetireResultHost()
+    {
+        lock (_lifecycleLock)
+            if (_setupFinished.Task.IsCompletedSuccessfully && _resultHosts == 0 &&
+                (LifecycleState)_lifecycleState is LifecycleState.Completed or LifecycleState.Disposed)
+                _resultHostRetired.TrySetResult();
     }
 
     private void ProcessResult(WgcContinuousSessionResult result)
@@ -1061,7 +1100,12 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             stagingOutput = _stagingOutputPath;
         }
 
-        int previous = Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completing, (int)LifecycleState.Running);
+        int previous;
+        lock (_lifecycleLock)
+        {
+            previous = Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completing, (int)LifecycleState.Running);
+            if (previous == (int)LifecycleState.Running) _resultOwners++;
+        }
         if (previous == (int)LifecycleState.Disposed || previous == (int)LifecycleState.Disposing)
         {
             // Dispose is responsible for cleanup; do not publish or fire callbacks.
@@ -1073,7 +1117,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
                     _finalMeta = disposedMeta;
             }
             SignalPublish();
-            _stagingReleased.TrySetResult(null);
+            CleanupStaging();
             _terminalSignal.TrySetResult(null);
             return;
         }
@@ -1087,8 +1131,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         // Inform tests that we have claimed the completion-owner role and are
         // about to perform probe/publish work while holding the Completing state.
         OutputMeta meta;
-        bool shouldPublish = result.State is WgcContinuousManagedSessionState.Success
-            or WgcContinuousManagedSessionState.Stopped;
+        bool shouldPublish = result.ProcessExitConfirmed != false && (result.State is WgcContinuousManagedSessionState.Success
+            or WgcContinuousManagedSessionState.Stopped);
 
         try
         {
@@ -1137,8 +1181,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         }
         finally
         {
-            CleanupStaging();
-            _stagingReleased.TrySetResult(null);
+            lock (_lifecycleLock) _resultOwners--;
+            CleanupStaging(); // file-producing owner is done; callback retirement remains separate
 
             bool stoppedByCaller;
             lock (_lifecycleLock)
@@ -1177,8 +1221,15 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             // moved us to Disposed/Disposing. This guarantees a late completion
             // owner can never revert Disposed back to Completed.
             Interlocked.CompareExchange(ref _lifecycleState, (int)LifecycleState.Completed, (int)LifecycleState.Completing);
+            if (Volatile.Read(ref _disposeAfterCallback) != 0)
+            {
+                Interlocked.Exchange(ref _lifecycleState, (int)LifecycleState.Disposed);
+                DisposeSession();
+            }
+            CleanupStaging();
             _terminalSignal.TrySetResult(null);
             _completionSignal.TrySetResult(null);
+            TryRetireResultHost();
         }
     }
 
@@ -1546,6 +1597,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             Action<int, OutputMeta>? cb;
             lock (_lifecycleLock) cb = _onNaturalExit;
 
+            Volatile.Write(ref _callbackOwnerThread, Environment.CurrentManagedThreadId);
             try
             {
                 cb?.Invoke(exitCode, meta);
@@ -1554,6 +1606,7 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             {
                 // Callback handler exceptions must not corrupt backend state.
             }
+            finally { Volatile.Write(ref _callbackOwnerThread, 0); }
         }
     }
 
@@ -1601,29 +1654,28 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     private void CleanupStaging()
     {
         string? dir;
-        lock (_lifecycleLock) dir = _stagingDir;
-        CleanupDirectory(dir);
-
-        // Remove the shared wgc-continuous container if it is now empty so
-        // staging does not leave an empty parent directory behind.
-        if (!string.IsNullOrEmpty(dir))
+        lock (_lifecycleLock)
         {
-            string? parent = Path.GetDirectoryName(dir);
-            if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
-            {
-                try
-                {
-                    if (Directory.GetFiles(parent).Length == 0 &&
-                        Directory.GetDirectories(parent).Length == 0)
-                    {
-                        Directory.Delete(parent, recursive: false);
-                    }
-                }
-                catch
-                {
-                    // Best effort; other concurrent sessions may own the parent.
-                }
-            }
+            if (!_setupFinished.Task.IsCompletedSuccessfully || !_resourceRetirement.IsCompletedSuccessfully ||
+                _resultOwners != 0 || _cleanupRunning || _stagingReleased.Task.IsCompleted ||
+                (LifecycleState)_lifecycleState is not (LifecycleState.Completed or LifecycleState.Disposed or LifecycleState.Completing)) return;
+            _cleanupRunning = true;
+            dir = _stagingDir;
+        }
+        bool cleaned = false;
+        try
+        {
+            CleanupDirectory(dir);
+            // GetAttributes distinguishes absence from inaccessible/unknown.
+            if (dir is null) cleaned = true;
+            else { try { _ = File.GetAttributes(dir); }
+                catch (DirectoryNotFoundException) { cleaned = true; }
+                catch (FileNotFoundException) { cleaned = true; } }
+        }
+        catch { /* retain ownership when cleanup is unknown */ }
+        finally
+        {
+            lock (_lifecycleLock) { if (cleaned) _stagingReleased.TrySetResult(null); _cleanupRunning = false; }
         }
     }
 

@@ -218,8 +218,10 @@ internal static class RecordingStatusVisualModel
         return new Region(path);
     }
 
-    public static string RecordingPrefix(IUiTextProvider text, string? nestedRole)
+    public static string RecordingPrefix(IUiTextProvider text, string? nestedRole, WindowRecordingIdentity? window = null)
     {
+        if (window is not null)
+            return $"{text.Get("Indicator_Recording")} · {WindowRecordingText.Format(text, window, compact: true)}";
         if (string.Equals(nestedRole, "outer", StringComparison.OrdinalIgnoreCase))
             return text.Get("Indicator_Recording_Outer");
         if (string.Equals(nestedRole, "inner", StringComparison.OrdinalIgnoreCase))
@@ -227,19 +229,19 @@ internal static class RecordingStatusVisualModel
         return text.Get("Indicator_Recording");
     }
 
-    public static string StopButtonText(IUiTextProvider text, string? nestedRole, bool stopping)
+    public static string StopButtonText(IUiTextProvider text, string? nestedRole, bool stopping, WindowRecordingIdentity? window = null)
     {
         var stateText = text.Get(stopping
             ? "StopControl_Button_Stopping"
             : "StopControl_Button_Stop");
-        var roleText = StopRoleText(text, nestedRole);
+        var roleText = window is null ? StopRoleText(text, nestedRole) : WindowRecordingText.Format(text, window, compact: true);
         return roleText.Length == 0 ? stateText : $"{roleText} · {stateText}";
     }
 
-    public static string StopTooltip(IUiTextProvider text, string? nestedRole)
+    public static string StopTooltip(IUiTextProvider text, string? nestedRole, WindowRecordingIdentity? window = null)
     {
         var baseText = text.Get("StopControl_Tooltip");
-        var roleText = StopRoleText(text, nestedRole);
+        var roleText = window is null ? StopRoleText(text, nestedRole) : WindowRecordingText.Format(text, window);
         return roleText.Length == 0 ? baseText : $"{baseText} ({roleText})";
     }
 

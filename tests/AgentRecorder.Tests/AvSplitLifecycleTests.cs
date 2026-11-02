@@ -1774,7 +1774,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         }
     }
 
-    private sealed class FakeWgcSession : IWgcContinuousBackendSession
+    private sealed class FakeWgcSession : IWgcContinuousBackendSession, IWgcContinuousResourceOwner
     {
         private readonly TaskCompletionSource<WgcContinuousSessionResult> _completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1794,6 +1794,8 @@ public sealed class AvSplitLifecycleTests : IDisposable
         public int StopCallCount => Volatile.Read(ref _stopCallCount);
         public int DisposeCallCount => Volatile.Read(ref _disposeCallCount);
         public Task<WgcContinuousSessionResult> CompletionTask => _completion.Task;
+        // This transport creates no native worker; its completion seals all simulated resource work.
+        public Task ResourceRetirement => CompletionTask;
         public event Action<FirstFrameObservation>? FirstFrameObserved;
 
         public Task StartAsync(CancellationToken cancellationToken = default)

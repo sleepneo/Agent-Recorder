@@ -151,9 +151,9 @@ public class RecordingEnginePreflightTests : IDisposable
             as Func<List<SystemQuery.DisplayInfo>>;
     }
 
-    private static RecordingEngine MakeEngine(AuditLogger audit, ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null)
+    private static RecordingEngine MakeEngine(AuditLogger audit, ControllableTray tray, IMicrophoneDeviceProvider? microphoneProvider = null, ISystemAudioEndpointProvider? endpoints = null)
     {
-        var engine = new RecordingEngine(audit, microphoneProvider: microphoneProvider);
+        var engine = new RecordingEngine(audit, microphoneProvider: microphoneProvider, systemAudioEndpointProvider: endpoints);
         engine.SetTray(tray);
         engine.BackendFactory = _ => (new FakeCaptureBackend(), "fake");
         return engine;
@@ -184,8 +184,7 @@ public class RecordingEnginePreflightTests : IDisposable
             ["video"] = new JsonObject { ["fps"] = 30 },
             ["output"] = output
         };
-        if (durationSeconds is int s)
-            root["duration_seconds"] = s;
+        root["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = durationSeconds ?? 30 };
         return root;
     }
 
@@ -209,8 +208,73 @@ public class RecordingEnginePreflightTests : IDisposable
                     ["device_id"] = deviceId
                 }
             },
+            ["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 30 },
             ["output"] = output
         };
+    }
+
+    private sealed class WindowAvailability : IWgcContinuousAvailabilityProbe
+    {
+        public WgcContinuousAvailabilityResult Check(CaptureConfig config) => new(true, "synthetic-window-provider", "test");
+    }
+    private static RecordingEngine MakeWindowEngine(CapturingAuditLogger audit, ControllableTray tray, ISystemAudioEndpointProvider? endpoints = null)
+    {
+        var engine = MakeEngine(audit, tray, endpoints: endpoints);
+        engine.CapturePlanFactoryForTests = config => CaptureBackendSelector.BuildPlan(config, new WindowAvailability());
+        return engine;
+    }
+
+    private sealed class WindowCapacity : IDisposable, IStorageCapacityProvider
+    {
+        private readonly IStorageCapacityProvider previous = RecordingPreflightChecker.StorageCapacityProvider;
+        internal WindowCapacity() => RecordingPreflightChecker.StorageCapacityProvider = this;
+        public Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(IReadOnlyList<string> paths, CancellationToken token) =>
+            Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(p => new StorageVolumeSample(p, "synthetic-volume", 1L << 40)).ToArray());
+        public void Dispose() => RecordingPreflightChecker.StorageCapacityProvider = previous;
+    }
+    private sealed class WindowEndpoints : ISystemAudioEndpointProvider
+    {
+        internal static readonly SystemAudioEndpointInfo Endpoint = new("window-render", "Synthetic render", "render", "active", true);
+        public Task<IReadOnlyList<SystemAudioEndpointInfo>> GetRenderEndpointsAsync(CancellationToken token = default) =>
+            Task.FromResult<IReadOnlyList<SystemAudioEndpointInfo>>(new[] { Endpoint });
+        public Task<SystemAudioEndpointInfo?> GetDefaultMultimediaRenderEndpointAsync(CancellationToken token = default) => Task.FromResult<SystemAudioEndpointInfo?>(Endpoint);
+        public Task<SystemAudioEndpointInfo?> GetEndpointAsync(string id, CancellationToken token = default) => Task.FromResult<SystemAudioEndpointInfo?>(id == Endpoint.Id ? Endpoint : null);
+    }
+    private static JsonNode WindowConfigWithSystemAudio(string id, string file)
+    {
+        var cfg = WindowConfig(id, file);
+        cfg["audio"] = new JsonObject { ["system_audio"] = new JsonObject { ["enabled"] = true, ["device_id"] = WindowEndpoints.Endpoint.Id } };
+        return cfg;
+    }
+    private static void AssertWindowPending(Recording rec, CapturingAuditLogger audit)
+    {
+        Assert.Equal(RecState.pending_confirmation, rec.State);
+        Assert.Equal("window", rec.SourceType); Assert.True(rec.Config.RequireWindowSurface);
+        Assert.Equal(30, rec.Config.DurationSeconds); Assert.Equal(42, rec.Config.WindowProcessId);
+        Assert.Equal((nint)12345, rec.Config.WindowHandle);
+        Assert.NotNull(rec.ApprovedCapturePlan); Assert.True(rec.ApprovedCapturePlan.IsWindowSurface);
+        Assert.Contains(audit.Events, x => x.Event == "confirmation.created");
+        Assert.DoesNotContain(audit.Events, x => x.Event == "recording.preflight_failed");
+        Assert.Null(rec.Backend); Assert.False(rec.BackendStartAttempted);
+    }
+    private static void ChangeWindowAfterPlanRevalidation(CapturingAuditLogger audit, Action change)
+    {
+        // Log is emitted after plan revalidation and before CheckBeforeStart.
+        // This drives a lifecycle boundary, not an enum-call count or real window.
+        audit.AfterLog = name => { if (name == "recording.capture_plan_revalidated") change(); };
+    }
+    private static void AssertWindowPreflightFailure(Recording rec, CapturingAuditLogger audit, string code, string action)
+    {
+        Assert.Equal(RecState.failed, rec.State); Assert.True(rec.IsFinalized);
+        Assert.Null(rec.Backend); Assert.False(rec.BackendStartAttempted);
+        var plan = Assert.Single(audit.Payloads, x => x.Event == "recording.capture_plan_revalidated").Data;
+        Assert.False(plan.GetProperty("semantics_changed").GetBoolean());
+        Assert.Equal("matched", plan.GetProperty("window_target_status").GetString());
+        var failure = Assert.Single(audit.Payloads, x => x.Event == "recording.preflight_failed").Data;
+        Assert.Equal("before_start", failure.GetProperty("stage").GetString());
+        Assert.Equal(code, failure.GetProperty("error_code").GetString());
+        Assert.Equal(action, failure.GetProperty("suggested_action").GetString());
+        Assert.Equal(rec.Error, failure.GetProperty("message").GetString());
     }
 
     private static JsonNode DisplayConfig(string filename) =>
@@ -284,6 +348,7 @@ public class RecordingEnginePreflightTests : IDisposable
     [Fact]
     public void CreateRecording_BeforeStart_WindowDisappeared_DoesNotStartBackend()
     {
+        using var capacity = new WindowCapacity();
         var hwnd = new nint(12345);
         var windowId = $"window_{hwnd.ToInt64()}";
         SystemQuery.SetWindowProvider((_, _) => new()
@@ -294,17 +359,18 @@ public class RecordingEnginePreflightTests : IDisposable
 
         var audit = new CapturingAuditLogger();
         var tray = new ControllableTray { DeferCallback = true };
-        var engine = MakeEngine(audit, tray);
+        using var engine = MakeWindowEngine(audit, tray);
 
         // Create a pending confirmation without invoking the callback yet.
         engine.CreateRecording(WindowConfig(windowId, "out.mp4"), "test-agent", tray);
         var rec = engine._recs.Values.Single();
+        AssertWindowPending(rec, audit);
         Assert.Equal(RecState.pending_confirmation, rec.State);
         var conf = engine._confs.Values.Single();
         Assert.Equal("pending", conf.Status);
 
         // Now simulate the window disappearing before the user confirms.
-        SystemQuery.SetWindowProvider((_, _) => new());
+        ChangeWindowAfterPlanRevalidation(audit, () => SystemQuery.SetWindowProvider((_, _) => new()));
         tray.InvokeApproved();
 
         Assert.Equal(RecState.failed, rec.State);
@@ -319,11 +385,13 @@ public class RecordingEnginePreflightTests : IDisposable
             e.Stage == "before_start");
 
         Assert.NotNull(tray.LastError);
+        AssertWindowPreflightFailure(rec, audit, "SOURCE_NOT_FOUND", "choose_source_again");
     }
 
     [Fact]
     public async Task CreationWait_BeforeStartPreflightFailureWhileBlocked_ReturnsCoherentTerminalSnapshot()
     {
+        using var capacity = new WindowCapacity();
         var hwnd = new nint(12345);
         var windowId = $"window_{hwnd.ToInt64()}";
         SystemQuery.SetWindowProvider((_, _) => new()
@@ -334,16 +402,17 @@ public class RecordingEnginePreflightTests : IDisposable
 
         var audit = new CapturingAuditLogger();
         var tray = new ControllableTray { DeferCallback = true };
-        var engine = MakeEngine(audit, tray);
+        using var engine = MakeWindowEngine(audit, tray);
         engine.CreateRecording(WindowConfig(windowId, "out.mp4"), "test-agent", tray);
         var rec = engine._recs.Values.Single();
+        AssertWindowPending(rec, audit);
 
         using var aboutToBlock = new ManualResetEventSlim();
         engine.BeforeCreationWaitBlocksForTests = _ => aboutToBlock.Set();
         var waitTask = Task.Run(() => engine.GetCreationRecordingWait(rec.Id, 5000));
 
         Assert.True(aboutToBlock.Wait(TimeSpan.FromSeconds(2)));
-        SystemQuery.SetWindowProvider((_, _) => new());
+        ChangeWindowAfterPlanRevalidation(audit, () => SystemQuery.SetWindowProvider((_, _) => new()));
         tray.InvokeApproved();
 
         var result = await waitTask;
@@ -352,17 +421,21 @@ public class RecordingEnginePreflightTests : IDisposable
         var wait = result.GetType().GetProperty("Wait")!.GetValue(result)!;
 
         Assert.Equal("failed", status);
+        var snapshotWarnings = (string[])recording.GetType().GetProperty("warnings")!.GetValue(recording)!;
+        Assert.Contains(snapshotWarnings, warning => warning.StartsWith("preflight_failed: SOURCE_NOT_FOUND"));
         Assert.Equal("failed", recording.GetType().GetProperty("status")!.GetValue(recording));
         Assert.False((bool)wait.GetType().GetProperty("GoalReached")!.GetValue(wait)!);
         Assert.True((bool)wait.GetType().GetProperty("Terminal")!.GetValue(wait)!);
         Assert.False((bool)wait.GetType().GetProperty("TimedOut")!.GetValue(wait)!);
         Assert.Equal(RecState.failed, rec.State);
         Assert.Contains(rec.Warnings, warning => warning.StartsWith("preflight_failed: SOURCE_NOT_FOUND"));
+        AssertWindowPreflightFailure(rec, audit, "SOURCE_NOT_FOUND", "choose_source_again");
     }
 
     [Fact]
     public void CreateRecording_BeforeStart_WindowMinimized_DoesNotStartBackend()
     {
+        using var capacity = new WindowCapacity();
         var hwnd = new nint(12345);
         var windowId = $"window_{hwnd.ToInt64()}";
         SystemQuery.SetWindowProvider((_, _) => new()
@@ -373,18 +446,22 @@ public class RecordingEnginePreflightTests : IDisposable
 
         var audit = new CapturingAuditLogger();
         var tray = new ControllableTray { DeferCallback = true };
-        var engine = MakeEngine(audit, tray);
+        using var engine = MakeWindowEngine(audit, tray);
 
         // Create a pending confirmation without invoking the callback yet.
         engine.CreateRecording(WindowConfig(windowId, "out.mp4"), "test-agent", tray);
         var rec = engine._recs.Values.Single();
+        AssertWindowPending(rec, audit);
         Assert.Equal(RecState.pending_confirmation, rec.State);
 
-        // Simulate minimization before the user confirms.
-        SystemQuery.SetWindowProvider((_, _) => new()
+        // Approve a valid plan, then minimize before the start preflight reads it.
+        ChangeWindowAfterPlanRevalidation(audit, () =>
         {
-            new SystemQuery.WindowInfo(windowId, "Notepad", "notepad.exe", 42, false, true,
-                new SystemQuery.Bounds(0, 0, 1280, 720))
+            SystemQuery.SetWindowProvider((_, _) => new()
+            {
+                new SystemQuery.WindowInfo(windowId, "Notepad", "notepad.exe", 42, false, true,
+                    new SystemQuery.Bounds(0, 0, 1280, 720))
+            });
         });
         tray.InvokeApproved();
 
@@ -399,6 +476,7 @@ public class RecordingEnginePreflightTests : IDisposable
             e.ErrorCode == "SOURCE_UNAVAILABLE");
 
         Assert.NotNull(tray.LastError);
+        AssertWindowPreflightFailure(rec, audit, "SOURCE_UNAVAILABLE", "restore_or_move_window_then_retry");
     }
 
     [Fact]
@@ -466,6 +544,7 @@ public class RecordingEnginePreflightTests : IDisposable
     [Fact]
     public void CreateRecording_WasapiProbeSuccess_ApprovalThenWindowDisappears_FailsBeforeStartWithoutBackend()
     {
+        using var capacity = new WindowCapacity();
         var hwnd = new nint(12345);
         var windowId = $"window_{hwnd.ToInt64()}";
         SystemQuery.SetWindowProvider((_, _) => new()
@@ -476,19 +555,22 @@ public class RecordingEnginePreflightTests : IDisposable
 
         RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
         RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(_tmp.Path, "helper.exe");
-        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => SuccessfulProbe();
+        int probeCalls = 0;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => { probeCalls++; return SuccessfulProbe(); };
 
         var audit = new CapturingAuditLogger();
         var tray = new ControllableTray { DeferCallback = true };
-        var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
-        var engine = MakeEngine(audit, tray, mic);
+        using var engine = MakeWindowEngine(audit, tray, endpoints: new WindowEndpoints());
 
-        engine.CreateRecording(WindowConfigWithMicrophone(windowId, "out.mp4"), "test-agent", tray);
+        engine.CreateRecording(WindowConfigWithSystemAudio(windowId, "out.mp4"), "test-agent", tray);
         var rec = engine._recs.Values.Single();
+        AssertWindowPending(rec, audit);
         Assert.Equal(RecState.pending_confirmation, rec.State);
+        Assert.Equal(1, probeCalls); Assert.Equal(AudioCaptureSourceKind.SystemLoopback, rec.Config.AudioSourceKind);
+        Assert.Equal(WindowEndpoints.Endpoint.Id, rec.Config.SystemLoopbackEndpoint);
 
         // Simulate the window disappearing between confirmation approval and capture start.
-        SystemQuery.SetWindowProvider((_, _) => new());
+        ChangeWindowAfterPlanRevalidation(audit, () => SystemQuery.SetWindowProvider((_, _) => new()));
         tray.InvokeApproved();
 
         Assert.Equal(RecState.failed, rec.State);
@@ -501,11 +583,28 @@ public class RecordingEnginePreflightTests : IDisposable
             e.Event == "recording.preflight_failed" &&
             e.ErrorCode == "SOURCE_NOT_FOUND" &&
             e.Stage == "before_start");
+        AssertWindowPreflightFailure(rec, audit, "SOURCE_NOT_FOUND", "choose_source_again");
+    }
+
+    [Fact]
+    public void WindowSurfaceMicrophoneSelectionRemainsInvalidBeforePreflightOrConfirmation()
+    {
+        int probes = 0;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => { probes++; return SuccessfulProbe(); };
+        var audit = new CapturingAuditLogger(); var tray = new ControllableTray { DeferCallback = true };
+        using var engine = MakeWindowEngine(audit, tray);
+        var request = WindowConfigWithMicrophone("window_12345", "invalid-mic.mp4");
+        var error = Assert.Throws<ApiException>(() => engine.CreateRecording(request, "invalid-window-mic", tray));
+        Assert.Equal("INVALID_ARGUMENT", error.Code); Assert.Equal(0, probes);
+        Assert.Empty(engine._recs); Assert.Empty(engine._confs);
+        Assert.DoesNotContain(audit.Events, x => x.Event == "confirmation.created" || x.Event == "recording.preflight_failed");
     }
 
     private sealed class CapturingAuditLogger : AuditLogger
     {
         public List<(string Event, string? ErrorCode, string? Stage)> Events { get; } = new();
+        internal List<(string Event, JsonElement Data)> Payloads { get; } = new();
+        internal Action<string>? AfterLog;
 
         public override void Log(string evt, object payload)
         {
@@ -522,7 +621,9 @@ public class RecordingEnginePreflightTests : IDisposable
             }
             catch { }
             Events.Add((evt, errorCode, stage));
+            Payloads.Add((evt, JsonSerializer.SerializeToElement(payload)));
             base.Log(evt, payload);
+            AfterLog?.Invoke(evt);
         }
     }
 }

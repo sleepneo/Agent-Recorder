@@ -44,6 +44,8 @@ public sealed class OrdinaryOutputClaimRetirementTests : IDisposable
         Other(engine);
         Assert.True(Read(engine, rec.OutputPath)!.Paths.Single().InUse);
         Assert.Equal(2, OwnerCount(engine));
+        var conflict = Assert.Throws<TargetInvocationException>(() => Claim(engine, Owner(rec.OutputPath, attempted: false), rec.OutputPath));
+        Assert.Equal("OUTPUT_PATH_IN_USE", Assert.IsType<ApiException>(conflict.InnerException).Code);
     }
 
     [Theory]
@@ -71,10 +73,14 @@ public sealed class OrdinaryOutputClaimRetirementTests : IDisposable
         ICaptureBackend backend = kind switch { "ffmpeg" => new FfmpegCaptureBackend(), "av" => new AvSplitCaptureBackend(), _ => new WgcContinuousCaptureBackend() };
         var rec = Owner(PathFor(kind), backend, attempted: false); Claim(engine, rec, rec.OutputPath); Terminal(rec);
         Other(engine, "before"); Assert.True(Read(engine, rec.OutputPath)!.Paths.Single().InUse);
+        var conflict = Assert.Throws<TargetInvocationException>(() => Claim(engine, Owner(rec.OutputPath, attempted: false), rec.OutputPath));
+        Assert.Equal("OUTPUT_PATH_IN_USE", Assert.IsType<ApiException>(conflict.InnerException).Code);
         if (backend is FfmpegCaptureBackend ffmpeg) { ffmpeg.Dispose(); Assert.True(ffmpeg.HostResourcesRetired); }
         if (backend is AvSplitCaptureBackend av) { av.RetireUnstartedHostResources(); Assert.True(av.HostResourcesRetired); }
         if (backend is WgcContinuousCaptureBackend wgc) { wgc.RetireUnstartedHostResources(); Assert.True(wgc.OutputRetirement.IsCompletedSuccessfully); }
         Other(engine, "after"); Assert.False(Read(engine, rec.OutputPath)!.Paths.Single().InUse); backend.Dispose();
+        Claim(engine, Owner(rec.OutputPath, attempted: false), rec.OutputPath);
+        Assert.True(Read(engine, rec.OutputPath)!.Paths.Single().InUse);
     }
 
     [Theory]

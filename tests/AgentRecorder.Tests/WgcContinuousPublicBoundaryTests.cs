@@ -30,6 +30,7 @@ public class WgcContinuousPublicBoundaryTests
         var cfg = Cfg(new
         {
             capture_kind = "continuous",
+            stop_condition = new { type = "duration", seconds = 1 },
             source = new { type = "display", display_id = "DISPLAY_1" }
         });
 
@@ -43,6 +44,7 @@ public class WgcContinuousPublicBoundaryTests
         var cfg = Cfg(new
         {
             recording_mode = "continuous",
+            stop_condition = new { type = "duration", seconds = 1 },
             source = new { type = "display", display_id = "DISPLAY_1" }
         });
 
@@ -88,6 +90,7 @@ public class WgcContinuousPublicBoundaryTests
         var cfg = Cfg(new
         {
             capture_kind = "continuous",
+            stop_condition = new { type = "duration", seconds = 1 },
             source = new { type = "window", window_id = "window_999999999" }
         });
 
@@ -103,6 +106,7 @@ public class WgcContinuousPublicBoundaryTests
         var cfg = Cfg(new
         {
             recording_mode = "continuous",
+            stop_condition = new { type = "duration", seconds = 1 },
             source = new { type = "window", window_id = "window_999999999" }
         });
 

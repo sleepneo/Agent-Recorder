@@ -25,15 +25,13 @@ public sealed partial class WindowStorageEngineTests
         var runtime = false;
         var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var provider = new ProcessStorageCapacityProvider
-        {
-            HooksForTests = new StorageProbeHooks { BeforeDispose = async () =>
+        var evidence = new StorageStartupEvidence(mode);
+        var provider = evidence.CreateProvider(() => runtime, beforeDispose: async () =>
             {
                 if (!runtime) return;
                 if (mode == "cleanup") throw new IOException("owned-cleanup-fault");
                 if (mode == "late-probe") { held.TrySetResult(); await release.Task; }
-            } }
-        };
+            });
         IStorageCapacityProvider selected = mode.StartsWith("unknown")
             ? new FakeStorageProvider { Query = (paths, _) => !runtime
                 ? Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(p => new StorageVolumeSample(p, "owned-volume", 1L << 40)).ToArray())
@@ -72,10 +70,13 @@ public sealed partial class WindowStorageEngineTests
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false })
             { BaseAddress = new Uri($"http://127.0.0.1:{server.BoundPort}"), Timeout = TimeSpan.FromSeconds(10) };
         http.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
+        backend.FirstFrameObserved += _ => evidence.FirstFrame();
         try
         {
             engine.StartCaptureForTests(rec, tray);
-            await Until(() => rec.State == RecState.recording);
+            var startup = await StorageStartupWait(engine, rec, 10_000);
+            var startupEvidence = evidence.Save("startup-" + startup, rec, cfg.StorageSafety, session, audit);
+            Assert.True(startup == "recording", startupEvidence);
             await clock.WaitForDelay();
             Assert.Empty(Directory.EnumerateFileSystemEntries(output));
             Directory.Delete(output, recursive: false);
@@ -93,8 +94,9 @@ public sealed partial class WindowStorageEngineTests
             Assert.False(File.Exists(cfg.OutputPath));
             if (mode == "late-probe")
             {
-                Assert.True(provider.LastProbe!.ExitCompletion.IsCompletedSuccessfully);
-                Assert.False(provider.LastProbe.RetirementCompletion.IsCompleted);
+                var exactRuntimeLife = evidence.SingleRuntimeLifetime();
+                Assert.True(exactRuntimeLife.ExitCompletion.IsCompletedSuccessfully);
+                Assert.False(exactRuntimeLife.RetirementCompletion.IsCompleted);
                 using var busy = await http.PostAsync("/api/v1/host/shutdown", new StringContent("{}"));
                 Assert.Equal(HttpStatusCode.Conflict, busy.StatusCode);
                 Assert.Contains("storage_resources_pending", await busy.Content.ReadAsStringAsync());
@@ -120,6 +122,12 @@ public sealed partial class WindowStorageEngineTests
             Assert.Equal("failed", durable.Status);
             Assert.Equal(WindowStorageSafety.UnavailableCode, durable.ReasonCode);
             Assert.NotNull(durable.CompletedAtUtc);
+            evidence.Save("passed-before-cleanup", rec, cfg.StorageSafety, session, audit);
+        }
+        catch
+        {
+            evidence.Save("failure-before-cleanup", rec, cfg.StorageSafety, session, audit);
+            throw;
         }
         finally
         {

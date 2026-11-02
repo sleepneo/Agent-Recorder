@@ -19,6 +19,7 @@ internal sealed class RecordingStopControlForm : Form
     private readonly Size? _explicitControlSize;
     private readonly CaptureVisibilityMode _captureVisibilityMode;
     private readonly string? _nestedRole;
+    private WindowRecordingIdentity? _windowIdentity;
     private RecordingStopButton _button = null!;
     private ToolTip _tooltip = null!;
     private int _clicked;
@@ -44,7 +45,7 @@ internal sealed class RecordingStopControlForm : Form
     internal Size MeasuredSizeForTests => RecordingStopControlLayout.MeasurePreferredSize(
         _text,
         _button?.Font ?? new Font("Segoe UI", 8, FontStyle.Bold),
-        _nestedRole);
+        _nestedRole, window: _windowIdentity);
     internal Rectangle ButtonBoundsForTests => _button?.Bounds ?? Rectangle.Empty;
     internal int ButtonPaintCountForTests => _button?.PaintCountForTests ?? 0;
     internal int StoppingPaintCountForTests => _button?.StoppingPaintCountForTests ?? 0;
@@ -219,10 +220,24 @@ internal sealed class RecordingStopControlForm : Form
     }
 
     private string GetButtonText(bool stopping)
-        => RecordingStatusVisualModel.StopButtonText(_text, _nestedRole, stopping);
+        => RecordingStatusVisualModel.StopButtonText(_text, _nestedRole, stopping, _windowIdentity);
 
     private string GetTooltipText()
-        => RecordingStatusVisualModel.StopTooltip(_text, _nestedRole);
+        => RecordingStatusVisualModel.StopTooltip(_text, _nestedRole, _windowIdentity);
+
+    internal void SetWindowIdentity(WindowRecordingIdentity? window)
+    {
+        if (window is null) return;
+        if (_windowIdentity is not null && _windowIdentity != window)
+            throw new InvalidOperationException("A stop control cannot change its window display identity.");
+        _windowIdentity = window;
+        _button.UseMnemonic = false;
+        _button.Text = GetButtonText(stopping: _clicked != 0);
+        _button.AccessibleName = _button.Text;
+        _tooltip.SetToolTip(_button, GetTooltipText());
+        if (_explicitControlSize is null)
+            ClientSize = RecordingStopControlLayout.MeasurePreferredSize(_text, _button.Font, _nestedRole, this, window);
+    }
 
     private void OnButtonClick(object? sender, EventArgs e)
     {

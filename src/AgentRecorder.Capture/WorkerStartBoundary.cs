@@ -15,6 +15,9 @@ internal sealed class WorkerStartBoundary
     private long _generation;
     private bool _starting, _closed, _cleanupRunning, _cleanupComplete, _previousUnknown;
     private Func<bool>? _cleanup;
+    private readonly TaskCompletionSource _noResourcesRetired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // A cheap published fact; readers never acquire the start/cleanup gate.
+    internal Task NoResourcesRetired => _noResourcesRetired.Task;
     internal static bool NoAssociatedProcess(Process process)
     {
         try { _ = process.Id; return false; }
@@ -90,7 +93,11 @@ internal sealed class WorkerStartBoundary
         }
         bool complete = false;
         try { complete = cleanup(); } catch { }
-        finally { lock (_gate) { _cleanupRunning = false; _cleanupComplete = complete; } }
+        finally { lock (_gate) {
+            _cleanupRunning = false; _cleanupComplete = complete;
+            if (_closed && complete && !_starting && !_previousUnknown && _state == ResourceState.NoResources)
+                _noResourcesRetired.TrySetResult();
+        } }
     }
 
     internal sealed class Attempt(WorkerStartBoundary owner, long generation)

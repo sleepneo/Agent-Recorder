@@ -2833,6 +2833,8 @@ public sealed partial class ApiServer
             cfg["output"] = outputNode.DeepClone();
 
         var nestedNode = body["nested"];
+        if (nestedNode != null && body["target"]?["type"]?.GetValue<string>() == "active_window")
+            throw new ApiException(400, "INVALID_ARGUMENT", "Quick active_window does not support nested recording; use the bounded raw window contract.");
         if (nestedNode != null)
             cfg["nested"] = nestedNode.DeepClone();
 
@@ -3592,6 +3594,8 @@ public sealed partial class ApiServer
         lock (_regionLock) { lastRegion = _lastSelectedRegion; }
         bool hasLastRegion = lastRegion != null;
         var windowSurfaceProbe = (WindowSurfaceAvailabilityForTests ?? CaptureBackendSelector.ProbeWindowSurfaceAvailability)();
+        var independentPolicy = _engine.IndependentWindowPolicy;
+        var independentBudget = _engine.GetIndependentWindowBudget();
         var systemAudioAvailability = GetFreshSystemAudioAvailability();
         bool systemAudioHelperChecked = systemAudioAvailability == "ready";
         var systemAudioHelperAvailability = systemAudioHelperChecked
@@ -3662,7 +3666,34 @@ public sealed partial class ApiServer
                     contract_supported = true,
                     default_for_ordinary_window_video = true,
                     automatic_fallback = false,
-                    nested_supported = false,
+                    nested_supported = true,
+                    independent_windows = new
+                    {
+                        supported = true, available = windowSurfaceProbe.Available && independentPolicy.Valid,
+                        configuration_valid = independentPolicy.Valid,
+                        reason_code = independentPolicy.Valid ? null : "invalid_host_configuration",
+                        configured_limit = independentPolicy.ConfiguredLimit, default_limit = IndependentWindowPolicy.DefaultLimit,
+                        hard_limit = IndependentWindowPolicy.HardLimit, policy_source = independentPolicy.Source,
+                        environment_variable = IndependentWindowPolicy.EnvironmentVariable,
+                        budget_scope = "engine_independent_windows_and_unretired_delivery",
+                        budget = new { reserved = independentBudget.Reserved, finalizing_or_unknown = independentBudget.FinalizingOrUnknown,
+                            remaining = independentBudget.Remaining, snapshot_is_reservation = false },
+                        endpoint = "/api/v1/recordings", max_concurrent = independentPolicy.ConfiguredLimit,
+                        mode = "ordinary_interactive_raw_video", audio = new[] { "none" },
+                        per_run_confirmation_required = true, parent_relationship_required = false,
+                        nested_fields_allowed = false, legacy_nested_mix_supported = false,
+                        distinct_window_handles_required = true, mixed_targets_supported = false,
+                        quick_supported = false, profile_supported = false, stress_tested = false
+                    },
+                    nested = new
+                    {
+                        endpoint = "/api/v1/recordings", mode = "ordinary_interactive_raw_video",
+                        available = windowSurfaceProbe.Available, audio = new[] { "none" },
+                        sources = new[] { "window", "window" }, max_concurrent = 2,
+                        distinct_window_handles_required = true, per_run_confirmation_required = true,
+                        outer_must_be_recording = true, mixed_targets_supported = false,
+                        quick_supported = false, stress_tested = false
+                    },
                     duration_required = true,
                     supported = windowSurfaceProbe.Available,
                     status = windowSurfaceProbe.Available ? "ready" : "unavailable",
@@ -3709,8 +3740,9 @@ public sealed partial class ApiServer
                 fps = new[] { 15, 24, 30, 60 },
                 stop_conditions = new[] { "duration", "manual" },
                 max_duration_seconds = 7200,
-                max_concurrent_recordings = 2,
-                default_concurrency_policy = "single_unless_explicit_nested",
+                max_concurrent_recordings = Math.Max(2, independentPolicy.ConfiguredLimit ?? 0),
+                max_concurrent_recordings_scope = "descriptive_upper_bound_by_contract_not_mixed_admission",
+                default_concurrency_policy = "single_except_bounded_silent_raw_windows_or_explicit_nested_pair",
                 pause_resume = false,
                 nested_recording_mvp = new
                 {

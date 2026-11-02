@@ -8,7 +8,7 @@ false不卸载App生产generator，只为当前ordinary视频跳过Bundle准备/
 
 成功仅MP4成片只有原锚点/大小、固定Videos范围与现有限定用途保护都通过时，才可用录制ID申请独立删除；政策本身不是删除授权。运行期主输出登记只在已知生产后端实际收尾后退休，活资源/未知继续保护。默认Bundle录制仍受保护。本源码/合成输入正式链及一次5秒无声FFmpeg选区的本地取消/批准删除与同键重放已独立验收，不代表全部后端或完整保留执行。
 
-本文描述v0.1.16 合同（SQLite v44），包含历史、健康、产物元数据检查、生成阶段持久媒体及附件摘要、显式主视频和五附件内容核验、计划和未来窗口成片原始身份、只读保留预览，以及本机确认的单项删除申请。后者及显式仅MP4正式发布路径已通过独立源码/自动化与上述限定桌面验收，默认App录制仍生成受保护Bundle。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用文末独立本机授权合同。
+本文描述 v0.1.18 合同（SQLite v44），包括区域复用、独立窗口并行、历史、健康、产物及内容核验、只读保留预览和受限本机批准删除。默认 App 录制仍生成受保护 Bundle。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
@@ -277,7 +277,7 @@ GET /capabilities
 
 该接口不需要 API key。
 
-**WGC 能力边界**：display/region 的实验性 WGC 路径仍是内部受控功能，默认关闭。新普通 window video（raw/quick）默认使用公共严格窗口内容合同，见“窗口捕获语义”；只有 `recording.window_surface.supported=true` 时当前运行时可用，探测失败不会回退桌面矩形。`contract_supported` 表示静态合同，`default_for_ordinary_window_video=true` 表示新默认值，`status/reason_code` 与 active-window recipe 另报当前可用性/原因，不以“有活动窗口”替代 WGC 探测；同一响应复用一次非采集探测。窗口时长为 1–1800 整秒、无音频或系统声音、非 nested 且必须有界；不是全部设备长时稳定性保证。系统声音还要求 `system_audio_supported=true` 及可用输出端点。display/region 和明确旧内部实验仍维持各自范围。截图序列的 `window_capture_semantics=screen_rectangle`、`window_surface_supported=false` 与视频分开声明。
+**WGC 能力边界**：display/region 的实验性 WGC 路径仍是内部受控功能，默认关闭。新普通 window video（raw/quick）默认使用公共严格窗口内容合同，见“窗口捕获语义”；只有 `recording.window_surface.supported=true` 时当前运行时可用，探测失败不会回退桌面矩形。`contract_supported` 表示静态合同，`default_for_ordinary_window_video=true` 表示新默认值，`status/reason_code` 与 active-window recipe 另报当前可用性/原因，不以“有活动窗口”替代 WGC 探测；同一响应复用一次非采集探测。窗口时长为1–1800整秒且必须有界，系统声音限单窗口；普通raw无声独立窗口默认两路、启动可配置1–10；精确旧nested兼容合同仍最多两路；不是全部设备长时稳定性保证。系统声音还要求 `system_audio_supported=true` 及可用输出端点。display/region 和明确旧内部实验仍维持各自范围。截图序列的 `window_capture_semantics=screen_rectangle`、`window_surface_supported=false` 与视频分开声明。
 
 **音频能力**：麦克风和系统声音均由隔离的 Windows WASAPI helper 捕获，最终合流编码为 AAC；FFmpeg dshow 仅作为显式诊断回退。蓝牙 Hands-Free 输入会被动识别传输类型，并自动发现同一设备容器的渲染端点，通过静音 render prime 建立并保持 HFP 双工链路。AirPods Pro 与 Focal Bathys 已通过真实产品路径验收，但不同设备、固件和驱动仍可能失败；失败会进入明确终态，不会发布静音成功视频。终态响应和审计包含 capture strategy、配对证据、render-prime 延迟、current/max gap、恢复和 discontinuity 诊断。`recording.audio` 保留为兼容性数组，现在报告 `["microphone", "system_audio"]`。`recording.audio_capabilities.microphone` 与 `.system_audio` 都返回 `supported: true`，状态为新鲜的 `ready`、`no_devices` 或 `unavailable`。系统声音请求仍须本地确认；批准的 render endpoint 在本次录制中保持固定，默认输出切换不会自动跟随，切回批准端点后执行有界同端点恢复并通过连续性指标披露缺口。麦克风和系统声音不能在同一请求中同时启用。
 
@@ -817,6 +817,8 @@ X-Agent-Name: <agent-name>
   }
 }
 ```
+
+新视频请求同时省略 `output.filename` 与 `output.filename_template` 时，自动名称为 `recording-{datetime}-{id}.mp4`，其中 ID 是该次录制已有的 recording_id。`filename` 优先级及显式模板（包括上方示例）不变；本地改保存目录不会重新生成初次命名的时间或 ID，但已有文件冲突仍可能按原策略添加后缀。自动名称用于区分录制，不承诺永久全局唯一；运行占用保护和静态冲突策略保持。
 
 字段说明：
 
@@ -1758,7 +1760,7 @@ X-Agent-Recorder-Key: <api-key>
 
 ## 10. 结构化录制产物（Recording Bundle）
 
-普通本地逐次确认 video 的成功 MP4，明确后端 `wgc-continuous`（无声显示器、选区或严格窗口）及 `wgc-window-av-split`（严格窗口固定系统 loopback）也复用下述五附件 Bundle 和持久生成摘要链。既有 raw/quick/Profile/nested 请求规则、后端资格、实验开关和音频矩阵继续有效；不扩大 standing/recurring/required/future 独立执行。Bundle 异步生成，失败保留已完成 MP4。历史 GET 不哈希或补填内容，显式核验复用既有端点和预算；native 证据不可用时保持原兼容未知合同。源码验收使用合成输入与正式会话/发布链；native helper真实采集下的专项交付验收尚待进行。v0.1.16包含本能力。
+普通本地逐次确认 video 的成功 MP4，明确后端 `wgc-continuous`（无声显示器、选区或严格窗口）及 `wgc-window-av-split`（严格窗口固定系统 loopback）也复用下述五附件 Bundle 和持久生成摘要链。既有 raw/quick/Profile/nested 请求规则、后端资格、实验开关和音频矩阵继续有效；不扩大 standing/recurring/required/future 独立执行。Bundle 异步生成，失败保留已完成 MP4。历史 GET 不哈希或补填内容，显式核验复用既有端点和预算；native 证据不可用时保持原兼容未知合同。三路真实无声窗口的 MP4、Bundle、历史及摘要已通过限定验收，不代表所有后端组合或长期压力通过。
 
 上述支持范围内的FFmpeg及普通WGC MP4录制成功后，会在视频文件旁自动生成结构化产物包。例如 `D:\Videos\demo.mp4` 对应：
 
@@ -1969,7 +1971,7 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 }
 ```
 
-限制：当前 MVP 最多 2 个并发录制，即 1 个 outer + 1 个 inner。
+限制：本节区域分层/兼容nested最多1个outer与1个inner；普通独立窗口另有默认两路、启动可配置1–10的raw无声预算合同，不与本节混用。
 
 ## 12. AI agent 推荐轮询策略
 
@@ -2041,9 +2043,14 @@ bundle 准备时使用独立的不可变 mark 快照，不会让异步生成过�
 }
 ```
 
+推荐窗口并行：向普通raw `POST /api/v1/recordings` 分别提交两个不同固定window_id（同进程不同HWND允许），省略nested/parent/session，不需group或父ID。各自为无声严格窗口video、1–1800秒、逐次本地确认、独立Proof/倒计时/首帧、输出、Bundle和历史；任意目标可先请求/启动，另一条拒绝/超时/失败/完成不停止它。默认两份预算，宿主启动可配置1–10；终态后自身交付未退休仍占用；超预算请求、同HWND、音频及混合源在额外确认/worker前拒绝。单窗口系统声音仍可用，不能加入并行；quick单窗口、Profile、截图序列、Plan/Lease/未来窗口不扩展。
+`recording.window_surface.independent_windows` 公布raw、实例有效max_concurrent、default_limit=2、hard_limit=10、audio=none、逐次确认、无父关系及实际WGC可用性，stress_tested=false。确认窗、REC和停止控件显示稳定“窗口1/窗口2”或“WIN1/WIN2”和目标标题；后续进程内编号可增大，只供显示，不是显示器ID/HWND/持久键，API按Recording ID定位，停止全部仍停止全部。
+示例分别为 `{"source":{"type":"window","window_id":"window_12345"},"stop_condition":{"type":"duration","seconds":120}}` 与 `{"source":{"type":"window","window_id":"window_67890"},"stop_condition":{"type":"duration","seconds":20}}`；实际须用枚举返回的原样ID，省略音频默认无声。
+旧raw无声窗口outer/inner仅兼容：仍要求outer处于recording后创建inner并匹配parent/session，不与独立路径混用；`recording.window_surface.nested` 保留其范围。窗口并行捕获各HWND自身内容；区域OUTER/INNER捕获各矩形实际桌面，保留parent-visible策略；均不自动合成画中画。新独立合同仅合成验证，不宣称真人遮挡/跨DPI、10窗口或长期GPU压力通过。
+
 该字段只接受精确字符串 `window_surface`。仅支持固定 `window_id`、普通
 `video` 模式、1–1800 整秒以及无音频或 system audio；不支持窗口麦克风、
-`screenshot_series` 的窗口表面、`nested` 或借此扩展计划/Lease。quick 普通视频
+`screenshot_series` 的窗口表面或借此扩展计划/Lease。普通raw推荐无父关系独立无声窗口（默认预算2、启动可配置1–10），旧nested仅兼容，范围见上文；quick 普通视频
 `target.type=active_window` 固定解析到的窗口身份并自动进入同一合同，仍不接受
 外部显式传此 raw 字段。quick 需给出有界时长，原 60 秒 recipe、倒计时、wait_for、
 鉴权不变。manual、缺少必要时长及不支持组合在确认/worker 前拒绝。请求仍须本地逐次确认，HTTP
@@ -2072,7 +2079,8 @@ WGC/AV TEMP。确认前、批准改目录后及真正 backend.Start 前复核；
 尚未写入的复制字节复核，已写入字节不重复预留。本地批准改目录只替换本 Run 的布局和
 monitor，不回退其他目录。容量不足或不可验证沿用上述稳定错误及 failed 终态。新增范围
 不包含 Standing/Recurring/Required Plan、实验 WGC 显示器/选区、截图序列或其他
-后端，不是配额或自动保留/删除；真实满盘、重挂载及桌面故障验收仍待完成。
+后端，不是配额或自动保留/删除。受控低容量和专用虚拟卷断开/恢复已通过无声路径验收，
+不等于实际 OS ENOSPC 或全部后端组合通过。
 
 普通逐次本地确认的有声 video，系统声音或麦克风且正式后端为
 `ffmpeg-av-split/ffmpeg-region-av-split` 的 display/region，同样受存储保护。
@@ -2081,8 +2089,8 @@ monitor，不回退其他目录。容量不足或不可验证沿用上述稳定�
 每卷一份 256 MiB 水位。确认前、批准后、真正音频启动前及倒计时结束视频启动前
 复核，音频准备期即开始监测。最终原句柄发布按实际剩余复制字节与容量采样同步记账。
 故障赢得原提交仲裁时，`storage_space_low/storage_capacity_unavailable` 停止本 Run
-两个 worker 并阻止成功发布；提交已赢时迟到故障不能改写成功历史。region Profile
-仍仅无音频；API 外形、音频端点绑定、同步容差和覆盖合同不变。检查只是点时判断，
+两个 worker 并阻止成功发布；提交已赢时迟到故障不能改写成功历史。raw region Profile
+执行仍无声，普通 quick 仅复用区域沿本次声音合同；API 外形、音频端点绑定、同步容差和覆盖合同不变。检查只是点时判断，
 不是物理空间预留、配额或保留执行；真实满盘/异卷拔除仍待桌面验收。
 
 普通 video 的并发 Run 中，只要一方属于普通 FFmpeg AV，就不能同时占用同一规范化
@@ -2839,3 +2847,12 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 来源以原ref及 `profile_reuse_mode:region_only` 返回，Profile本身不会被修改。
 旧raw单独profile_ref仍为完整无声配置执行，计划/Lease不支持本目标。
 完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。
+
+
+### 独立窗口启动预算
+
+宿主启动环境可选 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS`：缺省2，严格十进制整数1–10合法，软件硬上限10。Engine初始化时读取并冻结；运行中修改环境或请求字段不改变实例，不提供HTTP改限额接口。非法、溢出或越界使该独立能力不可用，raw请求在新增确认/worker前返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，不截断或按成功默认值忽略。无需修改本机持久环境。
+
+能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效配置的有效上限及余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出、Bundle排队/生成/原host收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
+
+预算只覆盖本Engine普通raw无声独立窗口及其未退休交付，不是全机worker、GPU/编码器/磁盘容量保证。顶层并发值只是各合同描述性上界；旧nested/区域仍最多两路，quick/Profile/截图序列/Plan/Lease/未来窗口/声音和混合目标不扩展。每条仍需独立本地确认。stress_tested=false，不自动降画质、换后端/目标或回退桌面区域，也不自动合成画中画。WIN1…WIN10/窗口1…窗口10只供显示，API仍按Recording ID启停。

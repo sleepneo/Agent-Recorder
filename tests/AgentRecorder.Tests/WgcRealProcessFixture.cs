@@ -140,7 +140,7 @@ internal static class Program
         Console.WriteLine("Fps: 30");
         Console.WriteLine("Width: 1920");
         Console.WriteLine("Height: 1080");
-        Console.WriteLine("CaptureMethod: WGC_TEST_HELPER");
+        Console.WriteLine("CaptureMethod: WGC_D3D11_FRAME_STREAM");
         Console.WriteLine("EncoderMode: software");
         Console.WriteLine("EncoderSelectionReason: software_default");
         Console.WriteLine();

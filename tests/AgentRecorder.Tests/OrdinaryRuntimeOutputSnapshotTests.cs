@@ -53,7 +53,7 @@ public sealed class OrdinaryRuntimeOutputSnapshotTests
     {
         using var engine=new RecordingEngine(new RetentionSharedOutputPathTests.QuietAudit());
         var path=@"C:\sample\Videos\same.mp4";
-        for(var i=0;i<count;i++)Claim(engine,Owner(path),path);
+        for(var i=0;i<count;i++)InjectSyntheticClaimForBound(engine,Owner(path),path);
         Assert.Equal(count,OwnerCount(engine));var snapshot=Read(engine,path);
         if(count==500)Assert.True(snapshot!.Paths.Single().InUse);else Assert.Null(snapshot);
         Assert.Equal(count,OwnerCount(engine));

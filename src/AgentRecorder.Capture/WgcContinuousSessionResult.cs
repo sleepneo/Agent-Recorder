@@ -11,6 +11,9 @@ public sealed class WgcContinuousSessionResult
     /// <summary>Helper process exit code, or -1 if unavailable.</summary>
     public int ExitCode { get; set; } = -1;
 
+    /// <summary>Actual managed process-exit observation; null for legacy injected sessions or an explicitly unattempted launch.</summary>
+    public bool? ProcessExitConfirmed { get; set; }
+
     /// <summary>Parsed and validated event-stream summary.</summary>
     public WgcContinuousSessionSummary? Summary { get; set; }
 

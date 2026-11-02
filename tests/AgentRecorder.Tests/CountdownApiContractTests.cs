@@ -14,8 +14,10 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("HeadlessHostIntegration")]
-public sealed class CountdownApiContractTests
+public sealed class CountdownApiContractTests : IDisposable
 {
+    private readonly string? previousDataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
+    public void Dispose() => Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", previousDataDir);
     [Theory]
     [InlineData("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"}}", 3)]
     [InlineData("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"countdown_seconds\":0}", 0)]
@@ -34,7 +36,7 @@ public sealed class CountdownApiContractTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
 
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings",
                 JsonContent(requestBody));
 
             Assert.Equal(200, (int)response.StatusCode);
@@ -46,14 +48,14 @@ public sealed class CountdownApiContractTests
             Assert.NotNull(recordingId);
 
             var statusResponse = await client.GetAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/{recordingId}");
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/{recordingId}");
             Assert.Equal(200, (int)statusResponse.StatusCode);
             using var statusDocument = JsonDocument.Parse(await statusResponse.Content.ReadAsStringAsync());
             Assert.Equal(expectedSeconds,
                 statusDocument.RootElement.GetProperty("data").GetProperty("config").GetProperty("countdown_seconds").GetInt32());
 
             var waitResponse = await client.GetAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/{recordingId}?wait_ms=10&since_status=pending_confirmation");
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/{recordingId}?wait_ms=10&since_status=pending_confirmation");
             Assert.Equal(200, (int)waitResponse.StatusCode);
             using var waitDocument = JsonDocument.Parse(await waitResponse.Content.ReadAsStringAsync());
             Assert.Equal(expectedSeconds,
@@ -64,6 +66,7 @@ public sealed class CountdownApiContractTests
         finally
         {
             server.Stop();
+            engine.Dispose();
             Cleanup(dataDir);
         }
     }
@@ -90,7 +93,7 @@ public sealed class CountdownApiContractTests
 
             var body = $"{{\"source\":{{\"type\":\"display\",\"display_id\":\"display_1\"}},\"countdown_seconds\":{value}}}";
             var response = await client.PostAsync(
-                $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
+                $"http://127.0.0.1:{server.BoundPort}/api/v1/recordings",
                 JsonContent(body));
 
             Assert.Equal(400, (int)response.StatusCode);
@@ -102,6 +105,7 @@ public sealed class CountdownApiContractTests
         finally
         {
             server.Stop();
+            engine.Dispose();
             Cleanup(dataDir);
         }
     }
@@ -115,7 +119,7 @@ public sealed class CountdownApiContractTests
         var audit = new AuditLogger();
         engine = new RecordingEngine(audit);
         engine.SetTray(tray);
-        return new ApiServer(engine, audit, tray);
+        return new ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0);
     }
 
     private static void ConfigureDisplay()

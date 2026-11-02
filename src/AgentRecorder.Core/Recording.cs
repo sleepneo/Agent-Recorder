@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using AgentRecorder.Capture;
+using AgentRecorder.Infrastructure;
 using AgentRecorder.Core.Automation;
 using AgentRecorder.Windows;
 namespace AgentRecorder.Core;
@@ -335,6 +336,7 @@ public sealed class Recording
     internal Action<Recording>? OrdinaryHistoryPublication { get; set; }
 
     public string? NestedRole { get; set; }
+    internal WindowRecordingIdentity? WindowIdentity { get; set; }
     public string? NestedSessionId { get; set; }
     public string? ParentRecordingId { get; set; }
     public bool IsNestedParent { get; set; }
@@ -357,7 +359,7 @@ public sealed class Recording
     {
         if (_ordinaryTargetFrozen) throw new InvalidOperationException("Ordinary target was already frozen.");
         OrdinaryTargetKey = OrdinaryScreenTargetKey.Create(plan) ??
-            (Mode == "video" && SourceType == "window" && Config.RequireWindowSurface && NestedRole is null
+            (Mode == "video" && SourceType == "window" && Config.RequireWindowSurface
                 ? OrdinaryWindowTargetKey.Create(plan, metadata) : null);
         _ordinaryTargetFrozen = true;
     }

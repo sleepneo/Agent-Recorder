@@ -246,7 +246,7 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
     // Supporting fakes
     // -----------------------------------------------------------------
 
-    private sealed class DeferredFakeSession : IWgcContinuousBackendSession
+    private sealed class DeferredFakeSession : IWgcContinuousBackendSession, IWgcContinuousResourceOwner
     {
         private readonly TaskCompletionSource<bool> _authorizeTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<WgcContinuousSessionResult> _completionTcs =
@@ -283,6 +283,8 @@ public sealed class WgcContinuousDeferredStartBackendTests : IDisposable
         }
 
         public Task<WgcContinuousSessionResult> CompletionTask => _completionTcs.Task;
+        // This transport creates no native worker; its completion seals all simulated resource work.
+        public Task ResourceRetirement => CompletionTask;
 
         public event Action<FirstFrameObservation>? FirstFrameObserved;
 

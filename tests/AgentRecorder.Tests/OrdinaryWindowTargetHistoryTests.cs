@@ -58,7 +58,7 @@ public sealed class OrdinaryWindowTargetHistoryTests
     public void ExternalOrConflictingBindingsCannotBeRegistered(string fault)
     {
         using var d=Database();var row=Row(d,"r");
-        row=fault switch {"source"=>row with {SourceType="display"},"semantics"=>row with {CaptureSemantics="screen_rectangle"},_=>row with {NestedRole="outer"}};
+        row=fault switch {"source"=>row with {SourceType="display"},"semantics"=>row with {CaptureSemantics="screen_rectangle"},_=>row with {NestedRole="outer",AudioMode="system_audio"}};
         Assert.Throws<InvalidDataException>(()=>d.Ordinary.Register(row));Assert.Equal(0,d.Scalar("SELECT COUNT(*) FROM ordinary_recording_history;"));
     }
 

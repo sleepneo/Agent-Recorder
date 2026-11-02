@@ -20,7 +20,7 @@ using Xunit;
 namespace AgentRecorder.Tests;
 
 [Collection("NonParallel-AgentRecorderDataDir")]
-public sealed class OrdinaryAvOutputOwnershipTests
+public sealed partial class OrdinaryAvOutputOwnershipTests
 {
     private sealed class Provider : IStorageCapacityProvider
     {
@@ -303,14 +303,19 @@ public sealed class OrdinaryAvOutputOwnershipTests
     }
 
     [Theory]
-    [InlineData(true,true,"exact")] [InlineData(true,false,"exact")] [InlineData(false,true,"exact")]
+    [InlineData(true,true,"exact")] [InlineData(true,false,"exact")] [InlineData(false,true,"exact")] [InlineData(false,false,"exact")]
     [InlineData(true,true,"case")] [InlineData(true,true,"segments")] [InlineData(true,true,"slashes")]
+    [InlineData(false,false,"case")] [InlineData(false,false,"segments")] [InlineData(false,false,"slashes")]
     public async Task FormalApiSamePathRejectsBeforeAnyConflictingWorker(bool outerAv,bool innerAv,string spelling)
     {
         using var p=new Pair();var f=p.F;var outer=await p.Accept(p.Request(f.Root,"same.mp4","outer",av:outerAv));
         f.Tray.Approve();if(!outerAv)p.Workers[0].Backend.StartVideo();await Until(()=>outer.State==RecState.recording);var starts=p.Starts;
         var dir=spelling switch { "case"=>f.Root.ToUpperInvariant(),"segments"=>Path.Combine(f.Root,"..",Path.GetFileName(f.Root)),"slashes"=>f.Root.Replace('\\','/'),_=>f.Root };
         using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(dir,"same.mp4","inner",outer,innerAv));
+        File.WriteAllText(Path.Combine(f.Root,"same-path-evidence.json"),JsonSerializer.Serialize(new {
+            outerAv,innerAv,spelling,status=(int)response.StatusCode,body=await response.Content.ReadAsStringAsync(),
+            starts_before=starts,starts_after=p.Starts,workers=p.Workers.Count,confirmations=f.Tray.Confirmations.Count,
+            recordings=f.Engine._recs.Count,outer_state=outer.State.ToString(),output_exists=File.Exists(outer.OutputPath) }));
         Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Contains("OUTPUT_PATH_IN_USE",await response.Content.ReadAsStringAsync());
         Assert.Single(f.Engine._recs);Assert.Empty(f.Tray.Confirmations);Assert.Equal(starts,p.Starts);Assert.Equal(RecState.recording,outer.State);
         Assert.Equal("recording",f.History.Read(outer.Id)!.Status);Assert.False(File.Exists(outer.OutputPath));
@@ -433,10 +438,10 @@ public sealed class OrdinaryAvOutputOwnershipTests
         try {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));Assert.True(old.IsFinalized);
             Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
-            using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer"));
+            using var response=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer",av:false));
             Assert.Equal(HttpStatusCode.Conflict,response.StatusCode);Assert.Contains("OUTPUT_PATH_IN_USE",await response.Content.ReadAsStringAsync());Assert.Equal(1,p.Starts);
         } finally { release.Set();await stopping.WaitAsync(TimeSpan.FromSeconds(10));p.BeforeVideoStop=null; }
-        var next=await p.Accept(p.Request(f.Root,"same.mp4","outer"));Assert.Equal(old.OutputPath,next.OutputPath);Assert.True(old.IsFinalized);
+        var next=await p.Accept(p.Request(f.Root,"same.mp4","outer",av:false));Assert.Equal(old.OutputPath,next.OutputPath);Assert.True(old.IsFinalized);
     }
     [Fact]
     public async Task DurableRegistrationFailureDoesNotLeaveAnOutputClaim()

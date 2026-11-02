@@ -733,12 +733,14 @@ public sealed partial class WindowStorageEngineTests : IDisposable
         await cfg.StorageSafety!.MonitorCompletion.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
-    private sealed class StorageWgcSession : IWgcContinuousBackendSession
+    private sealed class StorageWgcSession : IWgcContinuousBackendSession, IWgcContinuousResourceOwner
     {
         private readonly TaskCompletionSource<WgcContinuousSessionResult> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal int Stops;
         internal int Authorizations;
         public Task<WgcContinuousSessionResult> CompletionTask => _completion.Task;
+        // This transport creates no native worker; its completion seals all simulated resource work.
+        public Task ResourceRetirement => CompletionTask;
         public event Action<FirstFrameObservation>? FirstFrameObserved;
         public Task StartAsync(CancellationToken token = default) => Task.CompletedTask;
         public Task<bool> AuthorizeCapture(CancellationToken token = default)

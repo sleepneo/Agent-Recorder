@@ -54,10 +54,13 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         public bool StopRequested;
         public int FrameInFlight;
         public bool FinalizationClaimed;
+        public OrdinarySeriesOutputUse? OutputUse;
+        public int HostEntered;
     }
 
     private readonly ConcurrentDictionary<string, ScreenshotSeriesOperation> _seriesOps = new();
     internal int ActiveScreenshotSeriesOperationCountForTests => _seriesOps.Count;
+    internal Func<Recording, Task>? ScreenshotSeriesHostTailForTests { get; set; }
 
     private sealed class DisplayRuntimeMonitorOperation
     {
@@ -103,7 +106,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     private Func<CaptureConfig, CaptureBackendSelection>? _backendSelectionFactory =
         null;
     private readonly object _lock = new();
-    // Only process-local ordinary video admission. Entries retain immutable
+    // Only process-local ordinary output admission. Entries retain immutable
     // path/mode snapshots; this lock never enters an engine/recording/backend
     // lock or waits on external I/O. Registration and directory replacement
     // compete at the same linearization point.
@@ -127,7 +130,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         {
             if (Volatile.Read(ref _disposeStarted) != 0) return null;
             // Read immutable registrations only; never retire from a GET.
-            var paths = SnapshotOrdinaryOutputPathsUnderLock();
+            var paths = SnapshotOrdinaryOutputPathsUnderLock(candidates);
             if (paths is null) return null;
             claims = paths;
             if (_ordinaryRetentionPreparation is { } preparation) claims = claims.Append(preparation.Path).ToArray();
@@ -138,9 +141,10 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return new(candidates.Select(path => new OrdinaryRuntimeOutputUse(path, occupied.Contains(path))));
     }
 
-    private void ClaimOrdinaryOutput(Recording rec, string path, string? requestedPath = null)
+    private sealed record OrdinaryOutputClaim(OrdinaryOutputOwner Current, OrdinaryOutputOwner? Previous);
+    private OrdinaryOutputClaim? ClaimOrdinaryOutput(Recording rec, string path, string? requestedPath = null)
     {
-        if (!rec.IsOrdinaryLocalRequest || rec.Mode != "video") return;
+        if (!rec.IsOrdinaryLocalRequest || rec.Mode != "video") return null;
         var normalized = Path.GetFullPath(path);
         var requested = requestedPath is null ? normalized : Path.GetFullPath(requestedPath);
         var preparationRequested = requestedPath is null && rec.OrdinaryRequestedOutputPath is { } initialRequested
@@ -151,6 +155,9 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         var retired = ObserveRetiredOrdinaryOutputs();
         lock (_ordinaryOutputLock)
         {
+            if (HasBundleNamespaceConflictUnderLock(normalized, requested, preparationRequested) ||
+                HasSeriesNamespaceConflictUnderLock(normalized, requested, preparationRequested))
+                throw new ApiException(409, "OUTPUT_PATH_IN_USE", "An ordinary output or Bundle publication still reserves this output directory.");
             if (_ordinaryRetentionPreparation is { } preparation &&
                 (string.Equals(preparation.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(preparation.Path, preparationRequested, StringComparison.OrdinalIgnoreCase)))
@@ -158,12 +165,41 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                     "This ordinary output path is currently in use. Wait for its finalization or select a different path.");
             foreach (var witness in retired)
                 ReleaseRetiredOrdinaryOutputUnderLock(witness.Owner, witness.Backend);
-            if (_ordinaryOutputs.Values.Any(owner => owner.Recording.Id != rec.Id &&
-                (av || owner.IsAv) && (string.Equals(owner.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(owner.Path, requested, StringComparison.OrdinalIgnoreCase))))
+            bool MatchesOutput(string path) => string.Equals(path, normalized, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(path, requested, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(path, preparationRequested, StringComparison.OrdinalIgnoreCase);
+            if (_ordinaryOutputs.Values.Any(owner => owner.Recording.Id != rec.Id && MatchesOutput(owner.Path)) ||
+                _ordinaryBundleOutputUses.Any(use => !ReferenceEquals(use.Recording, rec) && MatchesOutput(use.Path)))
                 throw new ApiException(409, "OUTPUT_PATH_IN_USE",
                     "Another ordinary recording still owns this output path. Wait for its finalization or select a different path.");
-            _ordinaryOutputs[rec.Id] = new(rec, normalized, av, path);
+            _ordinaryOutputs.TryGetValue(rec.Id, out var previous);
+            var current = new OrdinaryOutputOwner(rec, normalized, av, path);
+            _ordinaryOutputs[rec.Id] = current;
+            return new(current, previous);
+        }
+    }
+
+    private void ClaimAndCreateOrdinaryOutput(Recording rec, string path, string? requestedPath = null)
+    {
+        if (rec.IsOrdinaryLocalRequest && rec.IsScreenshotSeries)
+        {
+            ClaimAndCreateOrdinarySeriesOutput(rec, path, requestedPath);
+            return;
+        }
+        var claim = ClaimOrdinaryOutput(rec, path, requestedPath);
+        if (claim is null) return;
+        // No filesystem I/O under the output lock. A competing Bundle bind now
+        // sees this writer; a rejected claim has made no directories at all.
+        try { Directory.CreateDirectory(Path.GetDirectoryName(path)!); }
+        catch
+        {
+            lock (_ordinaryOutputLock)
+                if (_ordinaryOutputs.TryGetValue(rec.Id, out var current) && ReferenceEquals(current, claim.Current))
+                {
+                    if (claim.Previous is null) _ordinaryOutputs.Remove(rec.Id);
+                    else _ordinaryOutputs[rec.Id] = claim.Previous;
+                }
+            throw;
         }
     }
 
@@ -908,6 +944,11 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         string? sessionId = cfg["nested"]?["session_id"]?.GetValue<string>();
 
         bool isNested = nestedRole == "outer" || nestedRole == "inner";
+        bool nestedWindow = isNested && cfg["source"]?["type"]?.GetValue<string>() == "window";
+        if (nestedWindow && (endpoint != "recordings" || fixedRegionProfile is not null))
+            throw new ApiException(400, "INVALID_ARGUMENT", "Nested window_surface is supported only by ordinary raw video.");
+        bool independentWindow = IsIndependentWindowRequest(cfg,
+            endpoint == "recordings" && fixedRegionProfile is null && preResolvedWindow is null);
 
         // =====================================================================
         // Phase 2: Pre-flight concurrency + nested role/parent gate
@@ -918,6 +959,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             var active = _recs.Values
                 .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing)
                 .ToList();
+
+            if (independentWindow) ValidateIndependentWindowAdmission(null, active);
 
             if (isNested)
             {
@@ -958,6 +1001,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                             "nested.session_id does not match parent's session_id.");
                 }
 
+                ValidateNestedWindowAdmission(nestedWindow, null, nestedRole!, parentId, active);
                 // Count check only reached if role-specific checks passed
                 if (active.Count >= 2)
                     throw new ApiException(409, "TOO_MANY_CONCURRENT_RECORDINGS",
@@ -965,7 +1009,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             }
             else
             {
-                if (active.Count >= 1)
+                if (!independentWindow && active.Count >= 1)
                     throw new ApiException(409, "RECORDING_ALREADY_RUNNING",
                         "Another recording is already running. Stop it before starting a new one. " +
                         "To use nested recording, specify nested.role=outer/inner in the request body.");
@@ -991,7 +1035,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 _microphoneStatusProvider,
                 _systemAudioEndpointProvider,
                 preResolvedSystemAudioEndpoint,
-                preResolvedWindow);
+                preResolvedWindow, createOutputDirectory: false);
             if (fixedRegionProfile is not null)
             {
                 rec.FixedRegionProfileReference = fixedRegionProfile.ProfileRef;
@@ -1016,6 +1060,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
         rec.ApprovedCapturePlan = capturePlan;
         rec.IsOrdinaryLocalRequest = true;
+        independentWindow &= rec.Mode == "video" && rec.Config.RequireWindowSurface &&
+            !rec.Config.AudioRequested && rec.NestedRole is null && capturePlan.IsWindowSurface;
         if (rec.Mode == "video") rec.OrdinaryBackendCreation = new WorkerStartBoundary();
         var beforeConfirmationPreflight = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
         if (!beforeConfirmationPreflight.Passed)
@@ -1062,7 +1108,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         {
             WindowProcessMetadata? metadata = null;
             if (rec.Mode == "video" && rec.SourceType == "window" && rec.Config.RequireWindowSurface &&
-                rec.NestedRole is null && capturePlan.IsWindowSurface && capturePlan.TargetWindowProcessId is > 0)
+                capturePlan.IsWindowSurface && capturePlan.TargetWindowProcessId is > 0)
             {
                 // Optional historical facts must never disable an otherwise valid request.
                 try { metadata = OrdinaryWindowMetadataForTests(capturePlan.WindowHandle, capturePlan.TargetWindowProcessId.Value); }
@@ -1087,6 +1133,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             var currentActive = _recs.Values
                 .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing)
                 .ToList();
+
+            if (independentWindow) ValidateIndependentWindowAdmission(rec.Config.WindowHandle, currentActive);
 
             if (isNested)
             {
@@ -1137,13 +1185,25 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             else
             {
                 // Re-check: non-nested still enforces single recording
-                if (currentActive.Count >= 1)
+                if (!independentWindow && currentActive.Count >= 1)
                     throw new ApiException(409, "RECORDING_ALREADY_RUNNING",
                         "Another recording is already running. Stop it before starting a new one. " +
                         "To use nested recording, specify nested.role=outer/inner in the request body.");
             }
 
-            ClaimOrdinaryOutput(rec, rec.OutputPath);
+            if (isNested) ValidateNestedWindowAdmission(rec.Config.RequireWindowSurface, rec.Config.WindowHandle,
+                nestedRole!, parentId, currentActive);
+            var windowIdentity = independentWindow
+                ? new WindowRecordingIdentity(checked(_nextIndependentWindowNumber + 1),
+                    string.IsNullOrWhiteSpace(rec.SourceTitle) ? capturePlan.TargetIdentity ?? $"HWND {rec.Config.WindowHandle}" : rec.SourceTitle)
+                : null;
+            ClaimAndCreateOrdinaryOutput(rec, rec.OutputPath);
+            if (windowIdentity is not null)
+            {
+                rec.WindowIdentity = windowIdentity;
+                _nextIndependentWindowNumber = windowIdentity.Number;
+                _independentWindowReservations.Add(rec.Id, rec);
+            }
             _recs[rec.Id] = rec;
             if (rec.OrdinaryHistoryPublication is not null)
             {
@@ -1169,6 +1229,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                     {
                         _recs.TryRemove(rec.Id, out _);
                         ReleaseUnregisteredOrdinaryOutput(rec);
+                        _independentWindowReservations.Remove(rec.Id);
                     }
                     _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: "RECORDING_HISTORY_UNAVAILABLE");
                     throw new ApiException(503, "RECORDING_HISTORY_UNAVAILABLE",
@@ -1242,93 +1303,105 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             var presentation = BuildConfirmationPresentation(summary, rec, conf, capturePlan, traceId);
             var summaryWithMeta = RecordingConfirmationApiProjection.ToObject(presentation);
 
+            var initialSeriesUse = FindOrdinarySeriesOutputUse(rec);
             tray.RequestConfirmation(presentation, decision =>
             {
-                if (decision.Approved)
+                var seriesUse = initialSeriesUse;
+                var ownsDecision = false;
+                try
                 {
-                    // Atomically claim the decision. If another callback or the
-                    // timeout has already claimed it, this call must not modify
-                    // recording state or emit events.
-                    if (!conf.TryDecide("approved"))
-                        return;
-
-                    BumpStateVersion();
-                    _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
-                    _tracer.ConfirmationApproved(traceId, rec.Id, conf.Id);
-
-                    // Revalidate the non-capturing decision before applying any
-                    // output override or starting a countdown/backend. A window
-                    // semantic change fails closed and requires a fresh request.
-                    if (!TryRevalidateCapturePlan(rec, traceId, tray))
-                        return;
-
-                    var applied = TryApplyConfirmationOutputDirectory(rec, decision, conf.Id, out var outputFailure);
-                    if (!applied)
+                    if (decision.Approved)
                     {
-                        // This thread already won TryDecide("approved"); setting Status
-                        // here is an owned-state adjustment after the output-directory
-                        // override failed, not a bypass of the atomic decision gate.
-                        conf.Status = "rejected";
+                        // Atomically claim the decision. If another callback or the
+                        // timeout has already claimed it, this call must not modify
+                        // recording state or emit events.
+                        if (!conf.TryDecide("approved"))
+                            return;
+                        ownsDecision = true;
+
+                        BumpStateVersion();
+                        _audit.Log("confirmation.approved", new { recording_id = rec.Id, confirmation_id = conf.Id });
+                        _tracer.ConfirmationApproved(traceId, rec.Id, conf.Id);
+
+                        // Revalidate the non-capturing decision before applying any
+                        // output override or starting a countdown/backend. A window
+                        // semantic change fails closed and requires a fresh request.
+                        if (!TryRevalidateCapturePlan(rec, traceId, tray))
+                            return;
+
+                        var applied = TryApplyConfirmationOutputDirectory(rec, decision, conf.Id, out var outputFailure, use => seriesUse = use);
+                        if (!applied)
+                        {
+                            // This thread already won TryDecide("approved"); setting Status
+                            // here is an owned-state adjustment after the output-directory
+                            // override failed, not a bypass of the atomic decision gate.
+                            conf.Status = "rejected";
+                            lock (rec)
+                            {
+                                if (rec.IsFinalized || IsTerminalState(rec.State)) return;
+                                rec.CompletedAtUtc = DateTime.UtcNow;
+                                rec.StopReason = outputFailure ?? "directory_override_failed";
+                                rec.State = RecState.rejected;
+                                MarkBundleNotApplicable(rec);
+                                BumpStateVersion();
+                                rec.PublishFinalized();
+                            }
+                            _audit.Log("confirmation.output_directory_rejected", new
+                            {
+                                recording_id = rec.Id,
+                                confirmation_id = conf.Id,
+                                directory = decision.OutputDirectory,
+                                reason = outputFailure ?? "directory_override_failed"
+                            });
+                            _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
+                            _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected", errorCode: outputFailure ?? "directory_override_failed");
+                            tray.ShowError(outputFailure == "OUTPUT_PATH_IN_USE"
+                                ? "该输出路径仍由另一段录制占用，录制未开始。" : "保存目录不可用，录制未开始。");
+                            TrySetIdleOnAllDone(tray);
+                            return;
+                        }
+
+                        PublishOrdinaryHistorySnapshot(rec);
+
+                        // The proof is issued only after the real local approval,
+                        // plan revalidation and output-directory application have
+                        // succeeded. Its bounded post-approval startup deadline
+                        // begins here so it covers preflight, preparation and the
+                        // app-owned countdown. Rejected, stale-plan and failed
+                        // approval paths never receive a usable proof.
+                        if (!TryIssueInteractiveConfirmationProof(rec, conf, capturePlan, traceId, tray))
+                            return;
+
+                        if (!TryPreflightBeforeStart(rec, conf, tray))
+                            return;
+
+                        StartCapture(rec, traceId, tray);
+                    }
+                    else
+                    {
+                        if (!conf.TryDecide("rejected"))
+                            return;
+                        ownsDecision = true;
+
                         lock (rec)
                         {
                             if (rec.IsFinalized || IsTerminalState(rec.State)) return;
                             rec.CompletedAtUtc = DateTime.UtcNow;
-                            rec.StopReason = outputFailure ?? "directory_override_failed";
+                            rec.StopReason = "user_rejected";
                             rec.State = RecState.rejected;
                             MarkBundleNotApplicable(rec);
                             BumpStateVersion();
                             rec.PublishFinalized();
                         }
-                        _audit.Log("confirmation.output_directory_rejected", new
-                        {
-                            recording_id = rec.Id,
-                            confirmation_id = conf.Id,
-                            directory = decision.OutputDirectory,
-                            reason = outputFailure ?? "directory_override_failed"
-                        });
+                        _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
                         _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
-                        _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected", errorCode: outputFailure ?? "directory_override_failed");
-                        tray.ShowError(outputFailure == "OUTPUT_PATH_IN_USE"
-                            ? "该输出路径仍由另一段录制占用，录制未开始。" : "保存目录不可用，录制未开始。");
+                        _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected");
                         TrySetIdleOnAllDone(tray);
-                        return;
                     }
-
-                    PublishOrdinaryHistorySnapshot(rec);
-
-                    // The proof is issued only after the real local approval,
-                    // plan revalidation and output-directory application have
-                    // succeeded. Its bounded post-approval startup deadline
-                    // begins here so it covers preflight, preparation and the
-                    // app-owned countdown. Rejected, stale-plan and failed
-                    // approval paths never receive a usable proof.
-                    if (!TryIssueInteractiveConfirmationProof(rec, conf, capturePlan, traceId, tray))
-                        return;
-
-                    if (!TryPreflightBeforeStart(rec, conf, tray))
-                        return;
-
-                    StartCapture(rec, traceId, tray);
                 }
-                else
+                finally
                 {
-                    if (!conf.TryDecide("rejected"))
-                        return;
-
-                    lock (rec)
-                    {
-                        if (rec.IsFinalized || IsTerminalState(rec.State)) return;
-                        rec.CompletedAtUtc = DateTime.UtcNow;
-                        rec.StopReason = "user_rejected";
-                        rec.State = RecState.rejected;
-                        MarkBundleNotApplicable(rec);
-                        BumpStateVersion();
-                        rec.PublishFinalized();
-                    }
-                    _audit.Log("confirmation.rejected", new { recording_id = rec.Id, confirmation_id = conf.Id });
-                    _tracer.ConfirmationRejected(traceId, rec.Id, conf.Id);
-                    _tracer.RecordingTerminal(traceId, rec.Id, status: "rejected");
-                    TrySetIdleOnAllDone(tray);
+                    if (ownsDecision) RetireUnstartedOrdinarySeriesOutput(seriesUse);
                 }
             });
 
@@ -1455,7 +1528,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     private bool ApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId)
         => TryApplyConfirmationOutputDirectory(rec, decision, confirmationId, out _);
 
-    private bool TryApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId, out string? failureCode)
+    private bool TryApplyConfirmationOutputDirectory(Recording rec, ConfirmationDecision decision, string confirmationId, out string? failureCode,
+        Action<OrdinarySeriesOutputUse?>? seriesClaimed = null)
     {
         failureCode = null;
         try
@@ -1475,13 +1549,12 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 var requestedPath = newPath;
                 if (!string.IsNullOrWhiteSpace(decision.OutputDirectory))
                 {
-                    PolicyEngine.ValidateDirectory(decision.OutputDirectory);
-                    Directory.CreateDirectory(decision.OutputDirectory);
-                    requestedPath = Path.Combine(decision.OutputDirectory, Path.GetFileName(rec.OutputPath));
+                    var directory = OutputPathResolver.CanonicalizeDirectory(decision.OutputDirectory);
+                    requestedPath = Path.Combine(directory, Path.GetFileName(rec.OutputPath));
                     newPath = rec.IsScreenshotSeries
-                        ? OutputPathResolver.MoveScreenshotSeriesToDirectory(rec.OutputPath, decision.OutputDirectory, rec)
-                        : OutputPathResolver.MoveToDirectory(rec.OutputPath, decision.OutputDirectory,
-                            rec.FixedRegionProfileStrictOutputConflict ? "fail" : "rename");
+                        ? OutputPathResolver.MoveScreenshotSeriesToDirectory(rec.OutputPath, directory, rec)
+                        : OutputPathResolver.MoveToDirectory(rec.OutputPath, directory,
+                            rec.FixedRegionProfileStrictOutputConflict ? "fail" : "rename", createDirectory: false);
                 }
 
                 // The confirmation-preflight snapshot is tentative. Only this
@@ -1491,7 +1564,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 // Compute/validate paths before the atomic replacement. A
                 // losing approval retains its old claim until rejection; it
                 // never releases it first or silently chooses another name.
-                ClaimOrdinaryOutput(rec, newPath, requestedPath);
+                ClaimAndCreateOrdinaryOutput(rec, newPath, requestedPath);
+                seriesClaimed?.Invoke(FindOrdinarySeriesOutputUse(rec));
                 if (paths is not null)
                 {
                     rec.Config.StorageSafety?.Dispose();
@@ -4413,21 +4487,22 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         };
         runtime.OutputDirectory = rec.OutputPath;
         rec.BackendType = plan.PlannedBackend;
+        var op = new ScreenshotSeriesOperation();
         lock (rec)
         {
+            if (rec.IsFinalized || IsTerminalState(rec.State)) return;
+            op.OutputUse = BindOrdinarySeriesHost(rec);
+            if (!_seriesOps.TryAdd(rec.Id, op))
+                throw new InvalidOperationException("A screenshot-series worker is already active for this recording.");
             rec.State = RecState.preparing;
             BumpStateVersion();
         }
-
-        var op = new ScreenshotSeriesOperation();
-        if (!_seriesOps.TryAdd(rec.Id, op))
-            throw new InvalidOperationException("A screenshot-series worker is already active for this recording.");
 
         tray.SetPreparing(CreateRecordingUiPresentation(rec, RecordingUiState.Preparing));
         // Never pass the operation CTS as Task.Run's scheduling token. Stop can
         // cancel before the delegate is scheduled; the worker must still start,
         // observe ownership, and retire the operation deterministically.
-        _ = Task.Run(() => RunScreenshotSeriesAsync(rec, op, traceId, tray));
+        DispatchOrdinarySeriesHost(rec, op, traceId, tray);
     }
 
     private async Task RunScreenshotSeriesAsync(
@@ -4657,9 +4732,10 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         }
         finally
         {
-            _seriesOps.TryRemove(rec.Id, out _);
+            ((ICollection<KeyValuePair<string, ScreenshotSeriesOperation>>)_seriesOps).Remove(new(rec.Id, op));
             try { op.Cts.Dispose(); } catch { }
             op.Completion.TrySetResult(null);
+            if (ScreenshotSeriesHostTailForTests is { } tail) await tail(rec).ConfigureAwait(false);
         }
     }
 
@@ -4801,7 +4877,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             if (status == "completed" || (status == "cancelled" && frameSnapshot.Length > 0))
             {
                 ScreenshotSeriesArtifacts.WriteManifest(rec, runtime, status, errorCode, finalStopReason, frameSnapshot);
-                ScreenshotSeriesArtifacts.Publish(rec, runtime, rec.Config.OutputConflictPolicy);
+                ScreenshotSeriesArtifacts.Publish(rec, runtime, rec.Config.OutputConflictPolicy,
+                    target => ClaimOrdinarySeriesPublication(op.OutputUse, target));
             }
             else
             {
@@ -6642,12 +6719,14 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return true;
     }
 
-    private async Task RunBundleGenerationAsync(Recording rec, RecordingBundleRequest request)
+    private async Task RunBundleGenerationAsync(Recording rec, RecordingBundleRequest request, bool namespaceBlocked = false)
     {
         RecordingBundleGenerationResult result;
         try
         {
-            result = await _bundleGenerator!.GenerateAsync(request);
+            result = namespaceBlocked
+                ? RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.GenerationFailed, "bundle_namespace_in_use")
+                : await _bundleGenerator!.GenerateAsync(request);
         }
         catch (OperationCanceledException)
         {
@@ -7100,6 +7179,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     {
         ScreenshotSeriesOperation? op;
         bool cancelledWithoutOperation = false;
+        OrdinarySeriesOutputUse? unstartedUse = null;
         lock (rec)
         {
             if (IsTerminalState(rec.State))
@@ -7108,6 +7188,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 return BuildStoppingResponse(rec);
             if (!_seriesOps.TryGetValue(rec.Id, out op))
             {
+                unstartedUse = FindOrdinarySeriesOutputUse(rec);
                 rec.State = RecState.cancelled;
                 rec.StopReason = NormalizeStopReason(reason);
                 rec.CompletedAtUtc = DateTime.UtcNow;
@@ -7132,10 +7213,14 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         if (cancelledWithoutOperation)
         {
-            _audit.Log("recording.cancelled", new { recording_id = rec.Id, mode = ScreenshotSeriesConfig.ModeName, reason = rec.StopReason });
-            _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
-            _tray?.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
-            return BuildStopResponse(rec);
+            try
+            {
+                _audit.Log("recording.cancelled", new { recording_id = rec.Id, mode = ScreenshotSeriesConfig.ModeName, reason = rec.StopReason });
+                _tracer.RecordingTerminal(GetTraceIdForRecording(rec.Id), rec.Id, status: "cancelled", stopReason: rec.StopReason);
+                _tray?.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
+                return BuildStopResponse(rec);
+            }
+            finally { RetireUnstartedOrdinarySeriesOutput(unstartedUse); }
         }
 
         try { op!.Cts.Cancel(); } catch { }
@@ -7931,22 +8016,27 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         if (!conf.TryDecide("expired"))
             return;
 
-        lock (rec)
+        var seriesUse = FindOrdinarySeriesOutputUse(rec);
+        try
         {
-            if (rec.State == RecState.pending_confirmation)
+            lock (rec)
             {
-                rec.CompletedAtUtc = DateTime.UtcNow;
-                rec.StopReason = "confirmation_expired";
-                rec.State = RecState.expired;
-                MarkBundleNotApplicable(rec);
-                rec.PublishFinalized();
+                if (rec.State == RecState.pending_confirmation)
+                {
+                    rec.CompletedAtUtc = DateTime.UtcNow;
+                    rec.StopReason = "confirmation_expired";
+                    rec.State = RecState.expired;
+                    MarkBundleNotApplicable(rec);
+                    rec.PublishFinalized();
+                }
+                BumpStateVersion();
             }
-            BumpStateVersion();
+            _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
+            _tracer.ConfirmationExpired(traceId, rec.Id, conf.Id);
+            _tracer.RecordingTerminal(traceId, rec.Id, status: "expired");
+            TrySetIdleOnAllDone(tray);
         }
-        _audit.Log("confirmation.expired", new { recording_id = rec.Id, confirmation_id = conf.Id });
-        _tracer.ConfirmationExpired(traceId, rec.Id, conf.Id);
-        _tracer.RecordingTerminal(traceId, rec.Id, status: "expired");
-        TrySetIdleOnAllDone(tray);
+        finally { RetireUnstartedOrdinarySeriesOutput(seriesUse); }
     }
 
     private Recording Get(string id) =>
@@ -8103,6 +8193,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         return new RecordingConfirmationPresentation
         {
+            WindowIdentity = rec.WindowIdentity,
             Summary = summary,
             RecordingId = rec.Id,
             ConfirmationId = confirmation.Id,
@@ -8163,6 +8254,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 SeriesNextCaptureDueAtUtc = seriesNextCaptureDueAtUtc,
                 CountdownRemainingSeconds = countdownRemainingSeconds,
                 NestedRole = rec.NestedRole,
+                WindowIdentity = rec.WindowIdentity,
                 ParentRecordingId = rec.ParentRecordingId,
                 NestedSessionId = rec.NestedSessionId
             };

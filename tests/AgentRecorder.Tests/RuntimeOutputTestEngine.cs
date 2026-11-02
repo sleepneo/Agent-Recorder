@@ -15,6 +15,16 @@ internal static class RuntimeOutputTestEngine
         => ((IDictionary)typeof(RecordingEngine).GetField("_ordinaryOutputs", Private)!.GetValue(engine)!).Count;
     internal static void Claim(RecordingEngine engine, Recording recording, string path)
         => typeof(RecordingEngine).GetMethod("ClaimOrdinaryOutput", Private)!.Invoke(engine, [recording, path, null]);
+    // Deliberately impossible production state: duplicated paths with 500/501
+    // distinct owners test bounded read-side uncertainty, not legal admission.
+    internal static void InjectSyntheticClaimForBound(RecordingEngine engine, Recording recording, string path)
+    {
+        var type = typeof(RecordingEngine).GetNestedType("OrdinaryOutputOwner", BindingFlags.NonPublic)!;
+        var owner = Activator.CreateInstance(type, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            null, new object[] { recording, path, false, path }, null)!;
+        lock (OutputLock(engine))
+            ((IDictionary)typeof(RecordingEngine).GetField("_ordinaryOutputs", Private)!.GetValue(engine)!)[recording.Id] = owner;
+    }
     internal static void Release(RecordingEngine engine, Recording recording)
         => typeof(RecordingEngine).GetMethod("ReleaseUnregisteredOrdinaryOutput", Private)!.Invoke(engine, [recording]);
     internal static OrdinaryRuntimeOutputSnapshot? Read(RecordingEngine engine, params string[] paths)

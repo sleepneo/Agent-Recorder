@@ -1188,7 +1188,10 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
                 : (rawAudio == "No audio" ? _text.Get("Confirmation_Info_NoAudio") : rawAudio);
         }
         AddInfoRow(_infoTable, row++, audioLabel, audioDisplayValue);
-        AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), DisplayValue(summary.NestedRole));
+        if (presentation.WindowIdentity is { } window)
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_WindowRecording"), WindowRecordingText.Format(_text, window), literal: true);
+        else
+            AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_NestedRole"), DisplayValue(summary.NestedRole));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_RecordingId"), DisplayValue(presentation.RecordingId));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_ConfirmationId"), DisplayValue(presentation.ConfirmationId));
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Timeout"), presentation.TimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -1580,7 +1583,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         return new Size(width, height);
     }
 
-    private void AddInfoRow(TableLayoutPanel table, int row, string label, string value)
+    private void AddInfoRow(TableLayoutPanel table, int row, string label, string value, bool literal = false)
     {
         var labelLabel = new Label
         {
@@ -1593,6 +1596,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
 
         var valueLabel = new Label
         {
+            UseMnemonic = !literal,
             Text = value,
             Font = new Font("Segoe UI", 9),
             AutoSize = false,

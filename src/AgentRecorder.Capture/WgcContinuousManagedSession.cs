@@ -16,7 +16,7 @@ namespace AgentRecorder.Capture;
 /// adapter; it does not itself change public API behavior or default backends.
 /// </para>
 /// </summary>
-public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBackendSession
+public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBackendSession, IWgcContinuousResourceOwner
 {
     // Output/input hard bounds to prevent a misbehaving helper from unbounded
     // memory growth in the supervising process.
@@ -57,6 +57,16 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     private string? _startedRecordingId;
     private bool _seenTerminalEvent;
     private int _exitCode = -1;
+    private string _stdoutOutcome = "not_started", _stderrOutcome = "not_started";
+    private readonly Stopwatch _lifecycleClock = Stopwatch.StartNew();
+    private long _exitObservedMs = -1;
+    private bool _processExitConfirmed;
+    private bool _launchAttempted;
+    private readonly TaskCompletionSource _processRetired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task ProcessRetirement => _processRetired.Task;
+    Task IWgcContinuousResourceOwner.ResourceRetirement => Task.WhenAll(ProcessRetirement, CompletionTask);
+    private readonly WorkerStartBoundary _launchBoundary = new();
+    private int _lateExitObservation, _sharedResourcesDisposed, _processHandleDisposed;
     private string? _failureReason;
     private string? _protocolViolation;
     private CancellationTokenRegistration? _externalCancellationRegistration;
@@ -111,6 +121,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         _process = process ?? throw new ArgumentNullException(nameof(process));
         _signalWriter = signalWriter ?? throw new ArgumentNullException(nameof(signalWriter));
         _stderrBuffer = new BoundedStringBuilder(MaxStderrChars);
+        _ = _launchBoundary.NoResourcesRetired.ContinueWith(_ => _processRetired.TrySetResult(),
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>Current session state snapshot.</summary>
@@ -140,6 +152,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     {
         lock (_lock)
         {
+            if (_completed) throw new ObjectDisposedException(nameof(WgcContinuousManagedSession));
             if (_started)
                 throw new InvalidOperationException("Session has already been started.");
             _started = true;
@@ -148,8 +161,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         // Already-cancelled token must not launch a process.
         if (cancellationToken.IsCancellationRequested)
         {
-            TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Cancelled, "caller_cancelled");
-            _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Cancelled, _failureReason));
+            if (TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Cancelled, "caller_cancelled"))
+                _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Cancelled, _failureReason));
             return Task.CompletedTask;
         }
 
@@ -159,8 +172,8 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         // consent gate of this session. Failure here is fatal.
         if (!CleanupSignalsBeforeStart())
         {
-            TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Failed, "pre_start_cleanup_failed");
-            _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Failed, _failureReason));
+            if (TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Failed, "pre_start_cleanup_failed"))
+                _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Failed, _failureReason));
             return Task.CompletedTask;
         }
 
@@ -168,12 +181,16 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
         try
         {
-            _process.Start(_options.HelperExePath, args);
+            _launchBoundary.Start(attempt => attempt.Launch(() => {
+                _launchAttempted = true;
+                _process.Start(_options.HelperExePath, args);
+                return true;
+            }, nativeProcessContract: false), () => false);
         }
         catch
         {
-            TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Failed, "process_start_failed");
-            _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Failed, _failureReason));
+            if (TryEnterCompletionWithReason(WgcContinuousManagedSessionState.Failed, "process_start_failed"))
+                _ = Task.Run(() => FinalizeAsync(WgcContinuousManagedSessionState.Failed, _failureReason));
             return Task.CompletedTask;
         }
 
@@ -400,12 +417,17 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             catch { /* best effort */ }
         }
 
-        try { _externalCancellationRegistration?.Dispose(); }
-        catch { /* best effort */ }
-        try { _sessionCts.Dispose(); }
-        catch { /* best effort */ }
-        try { _process.Dispose(); }
-        catch { /* best effort */ }
+        // A bounded Dispose return cannot tear down resources still used by
+        // the finalizer, or lose the handle needed to observe a late exit.
+        _ = CompletionTask.ContinueWith(_ => {
+            if (Interlocked.Exchange(ref _sharedResourcesDisposed, 1) != 0) return;
+            try { _externalCancellationRegistration?.Dispose(); } catch { }
+            try { _sessionCts.Dispose(); } catch { }
+        }, TaskScheduler.Default);
+        _ = ProcessRetirement.ContinueWith(_ => {
+            if (Interlocked.Exchange(ref _processHandleDisposed, 1) != 0) return;
+            try { _process.Dispose(); } catch { }
+        }, TaskScheduler.Default);
     }
 
     private void ValidateOptions()
@@ -720,14 +742,16 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             await using var stream = _process.StandardOutputStream;
             var reader = new BoundedStdoutReader(stream, _sessionCts.Token, OnBlockParsed, OnProtocolViolation);
             await reader.ReadAsync().ConfigureAwait(false);
+            _stdoutOutcome = reader.EndOfStreamReached ? "eof" : "protocol_limit";
         }
         catch (OperationCanceledException)
         {
-            // Expected during finalization.
+            _stdoutOutcome = "cancelled";
         }
         catch
         {
-            // Stdout reader failures must not stop the recording flow.
+            _stdoutOutcome = "faulted";
+            lock (_lock) { if (!_completed) OnProtocolViolation("stdout_reader_fault"); }
         }
     }
 
@@ -741,7 +765,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             // authorization is a consent/protocol violation.
             if (!_authorized && evt.Result != ContinuousEventResult.Fail)
             {
-                _protocolViolation = "event_before_authorization";
+                if (string.IsNullOrEmpty(_failureReason)) _protocolViolation ??= "event_before_authorization";
                 _ = TriggerCompletionAsync(WgcContinuousManagedSessionState.Failed, "event_before_authorization");
                 return;
             }
@@ -773,7 +797,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     {
         lock (_lock)
         {
-            _protocolViolation = category;
+            _protocolViolation ??= category;
         }
         _ = TriggerCompletionAsync(WgcContinuousManagedSessionState.Failed, category);
     }
@@ -785,14 +809,15 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             await using var stream = _process.StandardErrorStream;
             var reader = new BoundedStderrReader(stream, _sessionCts.Token, _stderrBuffer, MaxStderrChars);
             await reader.ReadAsync().ConfigureAwait(false);
+            _stderrOutcome = "eof";
         }
         catch (OperationCanceledException)
         {
-            // Expected during finalization.
+            _stderrOutcome = "cancelled";
         }
         catch
         {
-            // Stderr reader failures must not stop the recording flow.
+            _stderrOutcome = "faulted";
         }
     }
 
@@ -1093,13 +1118,18 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         }
         catch { /* best effort */ }
 
-        // Release the process handle/wrapper so a late process does not keep
-        // native resources alive. Repeated Dispose calls are safe.
+        // Only a positive exit observation can release a late-created owner.
+        // Keep the process wrapper usable while exit is still unknown.
         try
         {
-            _process.Dispose();
+            if (_process.HasExited && _launchBoundary.ObserveRetired(() => true)) _processRetired.TrySetResult();
+            else _ = Task.Run(async () => {
+                try { await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                    if (_process.HasExited && _launchBoundary.ObserveRetired(() => true)) _processRetired.TrySetResult(); }
+                catch { /* still unknown */ }
+            });
         }
-        catch { /* best effort */ }
+        catch { /* still unknown */ }
     }
 
     private Task TriggerCompletionAsync(WgcContinuousManagedSessionState suggestedState, string? failureReason)
@@ -1119,35 +1149,19 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             _completed = true;
             if (!string.IsNullOrEmpty(failureReason) && string.IsNullOrEmpty(_failureReason))
                 _failureReason = failureReason;
-            return true;
         }
+        _launchBoundary.Close(() => true);
+        return true;
     }
 
     private async Task FinalizeAsync(WgcContinuousManagedSessionState suggestedState, string? failureReason)
     {
+        var completionTrigger = suggestedState;
         WgcContinuousManagedSessionState finalState;
         WgcContinuousSessionSummary summary;
 
         try
         {
-            // Allow stdout/stderr readers to drain buffered events before
-            // cancellation. This is especially important when the process exits
-            // quickly and the watcher would otherwise cancel the readers before
-            // they parse the terminal event and bounded stderr tail.
-            await DrainStdoutReaderAsync();
-
-            if (_stderrReader != null)
-            {
-                try
-                {
-                    using var drainCts = new CancellationTokenSource(ReaderDrainTimeout);
-                    await _stderrReader.WaitAsync(drainCts.Token).ConfigureAwait(false);
-                }
-                catch { /* proceed */ }
-            }
-
-            _sessionCts.Cancel();
-
             if (_stopRequested)
                 CreateStopSignal();
 
@@ -1178,6 +1192,20 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
                 catch { /* best effort */ }
             }
 
+            // Exit/kill is resolved before draining. In particular RequestStop
+            // must not cancel stdout while the encoder is still finalizing.
+            _processExitConfirmed = _process.HasExited;
+            if (_processExitConfirmed) _exitObservedMs = _lifecycleClock.ElapsedMilliseconds;
+            else { suggestedState = WgcContinuousManagedSessionState.Failed; _failureReason ??= "process_exit_unconfirmed"; }
+            await DrainStdoutReaderAsync();
+            if (_stderrReader is not null)
+            {
+                try { await _stderrReader.WaitAsync(ReaderDrainTimeout).ConfigureAwait(false); }
+                catch { _stderrOutcome = "drain_timeout"; }
+            }
+            if (_stdoutReader is { IsCompleted: false })
+            { suggestedState = WgcContinuousManagedSessionState.Failed; _failureReason ??= "stdout_drain_timeout"; }
+            _sessionCts.Cancel();
             _exitCode = _process.ExitCode;
 
             lock (_lock)
@@ -1225,6 +1253,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             result = new WgcContinuousSessionResult
             {
                 State = finalState,
+                ProcessExitConfirmed = !_launchAttempted ? null : _processExitConfirmed,
                 FailurePhase = "lifecycle",
                 FailureCategory = "finalize_exception",
                 ExitCode = _exitCode,
@@ -1237,6 +1266,24 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             _state = finalState;
         }
 
+        try
+        {
+            AgentRecorder.Logging.DiagnosticLog.Write("wgc.session_finalization", _options.RecordingId, result.State.ToString(),
+                System.Text.Json.JsonSerializer.Serialize(new { trigger=completionTrigger.ToString(), stop=_stopRequested,
+                    exit_confirmed=_processExitConfirmed, launch_attempted=_launchAttempted, exit_code=_exitCode, exit_ms=_exitObservedMs,
+                    finish_ms=_lifecycleClock.ElapsedMilliseconds, stdout=_stdoutOutcome, stderr=_stderrOutcome,
+                    stdout_done=_stdoutReader?.IsCompleted, terminals=_events.Count(e=>e.Result is ContinuousEventResult.Ok or ContinuousEventResult.Stopped or ContinuousEventResult.Fail),
+                    parsed=summary.State.ToString(), phase=result.FailurePhase }));
+        }
+        catch { }
+        if (_processExitConfirmed && _launchBoundary.ObserveRetired(() => true)) _processRetired.TrySetResult();
+        else if (_launchAttempted && Interlocked.Exchange(ref _lateExitObservation, 1) == 0)
+            _ = Task.Run(async () => {
+                try {
+                    await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                    if (_process.HasExited && _launchBoundary.ObserveRetired(() => true)) _processRetired.TrySetResult();
+                } catch { /* unknown retains ownership */ }
+            });
         _completionTcs.TrySetResult(result);
     }
 
@@ -1429,6 +1476,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
         var result = new WgcContinuousSessionResult
         {
             State = finalState,
+            ProcessExitConfirmed = !_launchAttempted ? null : _processExitConfirmed,
             ExitCode = _exitCode,
             Summary = summary,
             StopRequestedByCaller = _stopRequested,
@@ -1478,7 +1526,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
             "disposed",
             "caller_cancelled",
             "watcher_error",
-            "finalize_exception"
+            "finalize_exception", "process_exit_unconfirmed", "stdout_drain_timeout"
         };
 
         var authenticityCategories = new HashSet<string>(StringComparer.Ordinal)
@@ -1613,6 +1661,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
     /// </summary>
     private sealed class BoundedStdoutReader
     {
+        public bool EndOfStreamReached { get; private set; }
         private readonly Stream _stream;
         private readonly CancellationToken _cancellationToken;
         private readonly Action<WgcContinuousEvent> _onEvent;
@@ -1654,6 +1703,7 @@ public sealed class WgcContinuousManagedSession : IDisposable, IWgcContinuousBac
 
                 if (read == 0)
                 {
+                    EndOfStreamReached = true;
                     _completed = true;
                     // Flush any remaining bytes (handles truncated UTF-8 at EOF).
                     Decode(0, true);

@@ -88,9 +88,12 @@ public sealed class OrdinaryPreparationEngineTests
     public void WithoutPreparationExistingAvOwnerKeepsOriginalIndependentOnDiskRenameAdmission()
     {
         using var f = new OrdinaryPreparationEngineFixture(); File.WriteAllBytes(f.Media, new byte[12]);
-        var prior = Recording(f.Media, "ffmpeg-av-split", "microphone"); Assert.True(RecordingStoragePolicy.IsOrdinaryAv(prior));
+        // Keep the AV owner on a distinct path: static-file rename remains
+        // independent, while a live owner of f.Media must now reject admission.
+        var prior = Recording(Path.Combine(f.Root, "unrelated.mp4"), "ffmpeg-av-split", "microphone"); Assert.True(RecordingStoragePolicy.IsOrdinaryAv(prior));
         OrdinaryPreparationFixture.Claim(f.Engine, prior, prior.OutputPath);
         var rec = f.Create(policy: "rename"); Assert.Equal(RecState.pending_confirmation, rec.State); Assert.NotEqual(prior.OutputPath, rec.OutputPath);
+        Assert.NotEqual(f.Media, rec.OutputPath); Assert.Equal(new byte[12], File.ReadAllBytes(f.Media));
         Assert.Equal(2, OwnerCount(f.Engine)); Assert.Equal(0, f.Capture.Starts); Assert.Empty(f.Api.Calls);
     }
 }

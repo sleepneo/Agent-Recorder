@@ -16,3 +16,10 @@ internal interface IWgcContinuousBackendSession : IDisposable
     Task<WgcContinuousSessionResult> CompletionTask { get; }
     event Action<FirstFrameObservation>? FirstFrameObserved;
 }
+
+// Implementers must seal future resource creation before publishing this per-session
+// resource fact. Completion/status/Dispose return alone are not evidence.
+internal interface IWgcContinuousResourceOwner
+{
+    Task ResourceRetirement { get; }
+}

@@ -11,6 +11,8 @@ Primary flow:
 human natural language -> local AI agent -> quick API -> local selection/confirmation UI -> MP4 output
 ```
 
+When neither `output.filename` nor `output.filename_template` is specified, a new video uses `recording-{datetime}-{id}.mp4` with its existing recording ID. This distinguishes automatic names across recordings; it is not a promise of permanent global uniqueness. Explicit names/templates and conflict policies remain unchanged. Changing the save directory does not regenerate the timestamp or recording ID; existing-file conflicts still follow the selected policy.
+
 ## Why It Exists
 
 - Humans can ask naturally: "record the current window for 5 minutes" or
@@ -24,13 +26,13 @@ human natural language -> local AI agent -> quick API -> local selection/confirm
 
 ## Release And Scope
 
-Version v0.1.17 is a prerelease for validation. It adds default isolated
-window-content recording, authenticated idle-only agent shutdown, bounded
-loopback clock diagnostics and runtime observation, and earlier native audio
-buffer release. Intermittent system-audio failures remain an open stability
-issue: the new candidate has completed one 200-second QB run, not the planned
-repeatability acceptance. Do not rely on this prerelease for unattended critical
-recordings. See [QUICKSTART](QUICKSTART.md) for current test procedures.
+Version v0.1.18 is a prerelease with independent window recordings, per-recording
+audio when reusing a saved region, recording-specific automatic file names,
+and safer output ownership and WGC finalization. Three silent windows passed
+180/90/30-second desktop acceptance. QB system audio passed controlled
+silence/resume and repeated 200-second acceptance on the tested setup; these
+results do not certify every device or long-running workload.
+See [QUICKSTART](QUICKSTART.md) for practical recording requests.
 
 Existing capabilities include durable
 ordinary recording history, unified indexed history, on-demand health and
@@ -80,9 +82,12 @@ changing the Windows default does not switch capture to another device.
 
 Check the audio mode and device in the local confirmation dialog. If requested
 audio is unavailable, the agent must explain the failure rather than substitute
-a silent recording or enable a microphone without permission. Fixed-region
-profiles, fixed-region unattended plans and screenshot sequences retain their
-separate audio-free scope. Inspect live capabilities before recording.
+a silent recording or enable a microphone without permission. Executing a raw
+fixed-region profile retains its complete silent specification. Ordinary quick
+recording can instead reuse only its region via `target.type=profile_region`,
+with this request's duration and system audio or microphone; the stored profile
+is unchanged. Fixed-region unattended plans and screenshot sequences remain
+silent. Inspect live capabilities before recording.
 
 ## Recommended Agent Path
 
@@ -158,7 +163,7 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   combinations fail explicitly, without a desktop fallback or experiment flag.
   Confirmation/preview and the approved backend share this meaning. The raw
   default passed a 15-second occlusion test; quick has automated coverage but
-  still awaits its dedicated desktop test. The default is included in v0.1.17.
+  still awaits its dedicated desktop test.
 - Ordinary window video fixes a `window_id`. This public strict path uses
   WGC to capture the selected window even while another window obscures it,
   supports no audio or an explicitly approved system-loopback endpoint, and
@@ -167,9 +172,21 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   desktop acceptance. The separately authorized future-window flow also passed
   a supervised 30-minute run on the current hardware; this is not a guarantee
   for every device or a full livestream.
-  Microphone, nested and manual/unbounded window video are rejected. Window
+  Microphone and manual/unbounded window video are rejected. Independent silent
+  windows use separate ordinary raw requests with distinct window IDs and no
+  nested/parent/session fields. Each has its own local approval, countdown,
+  output and stop action. The default budget is two, configurable at host
+  startup from 1 through 10; unretired delivery work still holds its slot.
+  Controls show WIN1/WIN2 and subsequent process-local numbers with target titles.
+  Three windows passed 180/90/30-second desktop acceptance. The software limit
+  is not a ten-window hardware or long-run stability guarantee. Quick, Profile,
+  audio, display/region and unattended flows do not join this parallel contract;
+  the older window outer/inner contract remains separate and compatible. Window
   title bars/controls are included; the player area is not cropped automatically.
   System sound covers the approved output endpoint, not only that window.
+  Independent window content is unaffected by overlap. Region OUTER/INNER captures
+  actual desktop rectangles and retains its layered controls. Neither mode
+  automatically composites a picture-in-picture video.
   Desktop rectangles use region/selected_region/last_region. Window screenshot
   series remains a composed screen rectangle; frozen legacy history is unchanged.
 - One-shot future-window authorization binds an exact local executable, a new
@@ -181,8 +198,10 @@ across Windows accounts; without an appropriate execution channel, fail closed.
 - Reusable fixed-region profiles: save a fresh local selection, manage immutable
   versions through authenticated APIs with ETag/If-Match, and request an ordinary
   recording using an exact profile reference. Reuse still requires local approval
-  and unchanged display geometry. This path is silent and bounded to 1-600 seconds;
-  a profile is configuration, not capture authorization or a plan request.
+  and unchanged display geometry. Raw `profile_ref` executes the full silent
+  specification. Quick `profile_region` reuses only the region, with a per-request
+  1-600 second duration and optional system audio or microphone. The stored
+  profile is unchanged; configuration is not capture authorization or a plan.
 - Interactive selected-region UI with precise coordinates, size presets, edge/window
   snapping, click-to-pick visible windows, and resilient top-most behavior across
   multi-monitor desktops.
@@ -367,3 +386,12 @@ The tray App host supports this exit operation. Other hosts, including Headless,
 ### Saved Regions
 
 Reuse a saved region with a new duration and audio choice, without changing the saved configuration. Each recording still needs local confirmation. Audio defaults to off and countdown to 3 seconds. See [saved-region usage](QUICKSTART.md#saved-regions) and the [API contract](docs/api.md#quick-recording-from-a-saved-region-profile_region).
+
+
+### Independent-window startup budget
+
+Set `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS` only in the host launch environment. Missing means 2; strict decimal integers 1–10 are valid (10 is the software hard limit). The Engine freezes this policy at initialization; changing the environment later or sending request fields cannot alter it. Invalid/overflow/out-of-range values disable this independent capability and raw requests return `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` before confirmation or worker creation. No HTTP limit mutation exists.
+
+`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports null effective limit/remaining; `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output and queued/generating/original Bundle host work demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
+
+This budget covers this Engine's independent ordinary raw silent windows and their unretired delivery, not all OS workers or hardware capacity. Top-level concurrency is a descriptive maximum across separate contracts; legacy nested/region rules remain two, and quick/Profile/Plan/Lease/future/audio/mixed sources gain no extra capability. Every accepted recording still needs its own local confirmation. `stress_tested=false`; no quality reduction, backend substitution, desktop fallback or automatic PiP composition. WIN1…WIN10 identify local controls only; API identity remains Recording ID.

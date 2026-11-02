@@ -119,8 +119,8 @@ public sealed class WorkerStartBoundaryTests
                 OutputPath = Path.Combine(root, "no.mp4") };
             Assert.ThrowsAny<Exception>(() => worker.Start(cfg, cfg.OutputPath));
             worker.Dispose();
-            Assert.Equal(!unknownFactory, worker.HostResourcesRetired);
-            if (!unknownFactory) Assert.True(backend.OutputRetirement.IsCompletedSuccessfully);
+            Assert.False(worker.HostResourcesRetired); // Even the returned backend still owns an unproven throwing session factory.
+            if (!unknownFactory) Assert.False(backend.OutputRetirement.IsCompleted);
             Assert.False(worker.HasBackendForTests);
             Assert.False(File.Exists(cfg.OutputPath));
         }

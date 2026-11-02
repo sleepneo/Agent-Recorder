@@ -171,7 +171,17 @@ internal static class RecordingPreflightChecker
 
         try
         {
-            Directory.CreateDirectory(dir);
+            if (rec.IsOrdinaryLocalRequest && (rec.Mode == "video" || rec.IsScreenshotSeries))
+            {
+                // Admission owns directory creation only after its writer claim.
+                // Probe an existing ancestor without materializing a Bundle target.
+                while (!Directory.Exists(dir))
+                {
+                    if (File.Exists(dir)) throw new IOException("Output ancestor is a file.");
+                    dir = Path.GetDirectoryName(dir) ?? throw new IOException("Output ancestor unavailable.");
+                }
+            }
+            else Directory.CreateDirectory(dir);
         }
         catch (Exception ex)
         {

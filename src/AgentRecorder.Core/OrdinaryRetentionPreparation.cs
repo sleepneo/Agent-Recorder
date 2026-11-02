@@ -29,7 +29,7 @@ public sealed partial class RecordingEngine
             if (RetentionHostStopping) return OrdinaryPreparationReason.ShuttingDown;
             if (session.Stopped) return OrdinaryPreparationReason.Cancelled;
             if (_ordinaryRetentionPreparation is not null) return OrdinaryPreparationReason.Busy;
-            var paths = SnapshotOrdinaryOutputPathsUnderLock();
+            var paths = SnapshotOrdinaryOutputPathsUnderLock(new[] { session.Path });
             if (paths is null) return OrdinaryPreparationReason.Unavailable;
             // Both writer bookings and immutable Bundle main-video uses are
             // checked without inspecting tasks or retiring any registration.

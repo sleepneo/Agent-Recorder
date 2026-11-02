@@ -465,6 +465,7 @@ internal sealed class RecordingIndicatorForm : Form
     private readonly DateTime _startedAtUtc;
     private readonly int? _durationSeconds;
     private readonly string? _nestedRole;
+    private WindowRecordingIdentity? _windowIdentity;
     private readonly IWindowDisplayAffinity _displayAffinity;
     private readonly Func<IUiTextProvider> _textProviderFactory;
     private readonly IRecordingMotionPreference _motionPreference;
@@ -501,6 +502,7 @@ internal sealed class RecordingIndicatorForm : Form
     internal Exception? DisplayAffinityErrorForTests => _displayAffinityError;
     internal CaptureVisibilityMode CaptureVisibilityModeForTests => _presentation.Mode;
     internal RecordingIndicatorPresentation PresentationForTests => _presentation;
+    internal Rectangle ScreenLabelBounds => _presentation.LabelBounds;
     internal Rectangle[] BorderRectanglesForTests => _presentation.BorderRectangles;
     internal RecordingIndicatorPhase PhaseForTests => _phase;
     internal int? CountdownValueForTests => _countdownValue;
@@ -721,25 +723,26 @@ internal sealed class RecordingIndicatorForm : Form
         int? durationSeconds,
         Font font,
         Padding padding,
-        IUiTextProvider textProvider)
+        IUiTextProvider textProvider, WindowRecordingIdentity? window = null)
     {
-        var prefix = RecordingStatusVisualModel.RecordingPrefix(textProvider, nestedRole);
-
-        string maxText;
+        string time;
         if (durationSeconds.HasValue && durationSeconds.Value > 0)
         {
             var total = TimeSpan.FromSeconds(durationSeconds.Value);
             var longestElapsed = total; // elapsed never exceeds total
-            maxText = $"{prefix} {FormatTime(longestElapsed)} / {FormatTime(total)}";
+            time = $"{FormatTime(longestElapsed)} / {FormatTime(total)}";
         }
         else
         {
             var longestElapsed = TimeSpan.FromSeconds(MaxManualRecordingSeconds);
-            maxText = $"{prefix} {FormatTime(longestElapsed)}";
+            time = FormatTime(longestElapsed);
         }
-
-        var textSize = TextRenderer.MeasureText(maxText, font, Size.Empty, TextFormatFlags.SingleLine);
-        return new Size(textSize.Width + padding.Horizontal, textSize.Height + padding.Vertical);
+        var providers = window is null ? new[] { textProvider } :
+            new IUiTextProvider[] { textProvider, new UiTextProvider(UiLanguage.ZhCn), new UiTextProvider(UiLanguage.EnUs) };
+        var flags = TextFormatFlags.SingleLine | (window is null ? 0 : TextFormatFlags.NoPrefix);
+        var sizes = providers.Select(text => TextRenderer.MeasureText(
+            $"{RecordingStatusVisualModel.RecordingPrefix(text, nestedRole, window)} {time}", font, Size.Empty, flags)).ToArray();
+        return new Size(sizes.Max(s => s.Width) + padding.Horizontal, sizes.Max(s => s.Height) + padding.Vertical);
     }
 
     /// <summary>
@@ -757,7 +760,7 @@ internal sealed class RecordingIndicatorForm : Form
         Font font,
         Padding padding,
         DisplayDpiInfo dpiInfo,
-        IUiTextProvider textProvider)
+        IUiTextProvider textProvider, WindowRecordingIdentity? window = null)
     {
         int effectiveDpi = Math.Max(dpiInfo.DpiX, dpiInfo.DpiY);
         if (effectiveDpi <= 0)
@@ -766,7 +769,7 @@ internal sealed class RecordingIndicatorForm : Form
         // Measure at the current process/screen DPI, then scale to the target monitor DPI.
         // This keeps measurement consistent with the runtime Label rendering (which uses
         // the same font at the monitor DPI) while remaining testable with forced DPI values.
-        var screenSize = MeasureLabelSize(nestedRole, durationSeconds, font, padding, textProvider);
+        var screenSize = MeasureLabelSize(nestedRole, durationSeconds, font, padding, textProvider, window);
         int screenDpi = GetSystemDpi();
         if (screenDpi <= 0)
             screenDpi = 96;
@@ -819,7 +822,7 @@ internal sealed class RecordingIndicatorForm : Form
             ? _recordingBorderColor
             : _visualPalette.Border;
 
-        if (_presentation.Mode == CaptureVisibilityMode.ParentVisible)
+        if (_presentation.Mode == CaptureVisibilityMode.ParentVisible || _presentation.BorderRectangles.Length > 0)
         {
             // In parent-visible mode the frame is drawn as four explicit rectangles
             // just outside the inner capture rectangle, keeping the inner capture clean.
@@ -962,7 +965,7 @@ internal sealed class RecordingIndicatorForm : Form
     {
         if (_label == null) return;
 
-        if (_presentation.Mode == CaptureVisibilityMode.ParentVisible)
+        if (_presentation.Mode == CaptureVisibilityMode.ParentVisible || _windowIdentity is not null)
         {
             // The plan has already placed the label outside the inner capture rectangle.
             // The full measured label size must be used; cropping is not allowed in
@@ -1178,6 +1181,8 @@ internal sealed class RecordingIndicatorForm : Form
                 break;
         }
 
+        if (_windowIdentity is not null && phase is not RecordingIndicatorPhase.Recording)
+            _label.Text = $"{WindowRecordingText.Format(textProvider, _windowIdentity, compact: true)} · {_label.Text}";
         Invalidate();
     }
 
@@ -1323,7 +1328,7 @@ internal sealed class RecordingIndicatorForm : Form
 
     private string FormatLabel(TimeSpan elapsed)
     {
-        var prefix = RecordingStatusVisualModel.RecordingPrefix(_textProviderFactory(), _nestedRole);
+        var prefix = RecordingStatusVisualModel.RecordingPrefix(_textProviderFactory(), _nestedRole, _windowIdentity);
 
         if (_durationSeconds.HasValue && _durationSeconds.Value > 0)
         {
@@ -1331,5 +1336,21 @@ internal sealed class RecordingIndicatorForm : Form
             return $"{prefix} {FormatTime(elapsed)} / {FormatTime(total)}";
         }
         return $"{prefix} {FormatTime(elapsed)}";
+    }
+
+    internal void SetWindowIdentity(WindowRecordingIdentity? window)
+    {
+        if (window is null) return;
+        if (_windowIdentity is not null && _windowIdentity != window)
+            throw new InvalidOperationException("An indicator cannot change its window display identity.");
+        _windowIdentity = window;
+        _label.UseMnemonic = false;
+        // Production's combined plan already measured this identity at target DPI.
+        // A standalone hidden form uses the same text measure at its current DPI.
+        var measured = MeasureLabelSize(_nestedRole, _durationSeconds, _label.Font, _label.Padding, _textProviderFactory(), window);
+        _label.Size = new Size(Math.Max(_label.Width, measured.Width), Math.Max(_label.Height, measured.Height));
+        _label.Text = FormatLabel(TimeSpan.Zero);
+        _label.AccessibleName = WindowRecordingText.Format(_textProviderFactory(), window);
+        PositionLabel();
     }
 }

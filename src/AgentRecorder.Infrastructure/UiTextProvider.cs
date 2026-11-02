@@ -75,6 +75,8 @@ public sealed class UiTextProvider : IUiTextProvider
 
             // Confirmation form
             ["Confirmation_Title"] = "Agent Recorder — 录屏确认",
+            ["Recording_WindowName"] = "窗口{0}",
+            ["Confirmation_Info_WindowRecording"] = "窗口任务",
             ["Confirmation_RequestTitle"] = "AI 助手请求开始录屏",
             ["Confirmation_QueuePosition"] = "队列位置：{0} / {1}",
             ["Confirmation_Info_Source"] = "录制范围",
@@ -403,6 +405,8 @@ public sealed class UiTextProvider : IUiTextProvider
 
             // Confirmation form
             ["Confirmation_Title"] = "Agent Recorder — Recording Confirmation",
+            ["Recording_WindowName"] = "WIN{0}",
+            ["Confirmation_Info_WindowRecording"] = "Window recording",
             ["Confirmation_RequestTitle"] = "AI assistant requests to start recording",
             ["Confirmation_QueuePosition"] = "Queue position: {0} / {1}",
             ["Confirmation_Info_Source"] = "Source",

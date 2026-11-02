@@ -5,15 +5,17 @@ namespace AgentRecorder.Core;
 
 public sealed partial class RecordingEngine
 {
-    // Main-video uses only. This is not an attachment/arbitrary-reader registry.
+    // Main-video use and derived final-directory reservation only.
     private sealed class OrdinaryBundleOutputUse(Recording recording, OrdinaryOutputOwner? owner,
-        ICaptureBackend? backend, string path)
+        ICaptureBackend? backend, string path, string bundleDirectory, bool namespaceReserved)
     {
         internal readonly string Id = Guid.NewGuid().ToString("N");
         internal readonly Recording Recording = recording;
         internal readonly OrdinaryOutputOwner? Owner = owner;
         internal readonly ICaptureBackend? Backend = backend;
         internal readonly string Path = path;
+        internal readonly string BundleDirectory = bundleDirectory;
+        internal readonly bool NamespaceReserved = namespaceReserved;
         internal int Started;
         internal Task? Worker;
     }
@@ -24,12 +26,27 @@ public sealed partial class RecordingEngine
     {
         if (!rec.IsOrdinaryLocalRequest || rec.Mode != "video") return null;
         var path = Path.GetFullPath(request.MediaPath);
+        var directory = DeriveBundlePath(path);
+        var retired = ObserveRetiredOrdinaryOutputs();
         lock (_ordinaryOutputLock)
         {
+            foreach (var witness in retired) ReleaseRetiredOrdinaryOutputUnderLock(witness.Owner, witness.Backend);
             _ordinaryOutputs.TryGetValue(rec.Id, out var owner);
             if (owner is not null && (!ReferenceEquals(owner.Recording, rec) ||
                 !string.Equals(owner.Path, path, StringComparison.OrdinalIgnoreCase))) owner = null;
-            var use = new OrdinaryBundleOutputUse(rec, owner, rec.Backend, path);
+            // Same linearization point as ordinary claims and local directory changes.
+            // Uncertain/still-live writers and other exact uses remain protective.
+            var reserved = _ordinaryOutputs.Count <= OrdinaryRuntimeOutputSnapshot.MaxClaims &&
+                _ordinaryBundleOutputUses.Count < OrdinaryRuntimeOutputSnapshot.MaxClaims &&
+                _ordinarySeriesOutputUses.Count <= OrdinaryRuntimeOutputSnapshot.MaxClaims &&
+                _ordinarySeriesHostUses.Count <= OrdinaryRuntimeOutputSnapshot.MaxClaims &&
+                _ordinaryOutputs.Count + SeriesPathsUnderLock().Count() <= OrdinaryRuntimeOutputSnapshot.MaxClaims &&
+                !HasSeriesDirectoryOverlapUnderLock(directory) &&
+                !_ordinaryOutputs.Values.Any(o => InBundleDirectory(o.Path, directory)) &&
+                !_ordinaryBundleOutputUses.Any(u => InBundleDirectory(u.Path, directory) ||
+                    u.NamespaceReserved && (InBundleDirectory(u.BundleDirectory, directory) || InBundleDirectory(directory, u.BundleDirectory))) &&
+                !(_ordinaryRetentionPreparation is { } preparation && InBundleDirectory(preparation.Path, directory));
+            var use = new OrdinaryBundleOutputUse(rec, owner, rec.Backend, path, directory, reserved);
             _ordinaryBundleOutputUses.Add(use); // before the completed publication
             return use;
         }
@@ -38,19 +55,31 @@ public sealed partial class RecordingEngine
     private bool HasOrdinaryBundleOutputUseUnderLock(OrdinaryOutputOwner owner)
         => _ordinaryBundleOutputUses.Any(use => ReferenceEquals(use.Owner, owner));
 
-    private string[]? SnapshotOrdinaryOutputPathsUnderLock()
+    private static bool InBundleDirectory(string path, string directory) =>
+        string.Equals(path, directory, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private bool HasBundleNamespaceConflictUnderLock(params string[] paths) =>
+        _ordinaryBundleOutputUses.Any(use => use.NamespaceReserved && paths.Any(path => InBundleDirectory(path, use.BundleDirectory)));
+
+    private string[]? SnapshotOrdinaryOutputPathsUnderLock(IEnumerable<string>? candidates = null)
     {
-        // Reject oversized registries before enumerating either collection.
+        // Reject oversized registries before enumerating their frozen claims.
         if (_ordinaryOutputs.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims ||
-            _ordinaryBundleOutputUses.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims) return null;
+            _ordinaryBundleOutputUses.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims ||
+            _ordinarySeriesOutputUses.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims ||
+            _ordinarySeriesHostUses.Count > OrdinaryRuntimeOutputSnapshot.MaxClaims) return null;
         if (_ordinaryOutputs.Values.Any(owner => owner is null || owner.Recording is null || string.IsNullOrEmpty(owner.Path))) return null;
         // A use on its still-current owner is one booking. Replaced/orphan uses
         // count separately, so replacing an ID cannot bypass the 500-claim bound.
         var orphanUses = _ordinaryBundleOutputUses.Count(use => use.Owner is null ||
             !_ordinaryOutputs.TryGetValue(use.Recording.Id, out var current) || !ReferenceEquals(current, use.Owner));
-        if (_ordinaryOutputs.Count + orphanUses > OrdinaryRuntimeOutputSnapshot.MaxClaims) return null;
+        var seriesPaths = SeriesPathsUnderLock().ToArray();
+        if (_ordinaryOutputs.Count + orphanUses + seriesPaths.Length > OrdinaryRuntimeOutputSnapshot.MaxClaims) return null;
         return _ordinaryOutputs.Values.Select(owner => owner.Path)
-            .Concat(_ordinaryBundleOutputUses.Select(use => use.Path)).ToArray();
+            .Concat(_ordinaryBundleOutputUses.Select(use => use.Path))
+            .Concat(seriesPaths)
+            .Concat((candidates ?? Array.Empty<string>()).Where(path => HasBundleNamespaceConflictUnderLock(path) || HasSeriesNamespaceConflictUnderLock(path))).ToArray();
     }
 
     private void DispatchBundleGeneration(Recording rec, RecordingBundleRequest request, OrdinaryBundleOutputUse? use)
@@ -67,7 +96,7 @@ public sealed partial class RecordingEngine
             // The actual original host method includes publication/history/audit.
             // Only its returned task can prove that method has exited. A queue
             // acknowledgement, timeout or failed dispatcher cannot retire this use.
-            var work = RunBundleGenerationAsync(rec, request);
+            var work = RunBundleGenerationAsync(rec, request, namespaceBlocked: !use.NamespaceReserved);
             Volatile.Write(ref use.Worker, work);
             _ = work.ContinueWith(done =>
             {

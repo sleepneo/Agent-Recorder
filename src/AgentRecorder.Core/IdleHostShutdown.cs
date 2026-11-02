@@ -33,6 +33,8 @@ public sealed partial class RecordingEngine
             try
             {
                 if (_ordinaryBundleOutputUses.Count != 0) return "bundle_in_flight";
+                if (_ordinarySeriesOutputUses.Count != 0 || _ordinarySeriesHostUses.Count != 0)
+                    return "recording_resources_pending";
                 if (_ordinaryRetentionPreparation is not null || !_ordinaryOutputCleanup.IsEmpty)
                     return "retention_resources_pending";
                 var reason = otherOwners();

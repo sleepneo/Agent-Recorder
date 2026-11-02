@@ -15,7 +15,7 @@ namespace AgentRecorder.Tests;
 /// never runs concurrently with other real process-tree fixtures.
 /// </summary>
 [Collection("NonParallel-RealProcess")]
-public sealed class WgcContinuousManagedSessionTests : IDisposable
+public sealed partial class WgcContinuousManagedSessionTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly ITestOutputHelper _output;
@@ -2355,7 +2355,7 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
         // Make begin signal path a directory so writing the token fails.
         Directory.CreateDirectory(opts.BeginSignalPath);
 
-        var initial = Started(recId, opts.OutputPath);
+        var initial = Array.Empty<string>(); // A failed begin-token publication cannot authorize capture events.
         var final = Ok();
         var fake = new FakeWgcContinuousProcess(initial, final,
             waitForBeginSignalPath: opts.BeginSignalPath);
@@ -2420,12 +2420,13 @@ public sealed class WgcContinuousManagedSessionTests : IDisposable
                 ""
             })
             .ToArray();
-        var fake = new FakeWgcContinuousProcess(flood);
+        var fake = new FakeWgcContinuousProcess(Array.Empty<string>(), finalStdout: flood);
         using var session = new WgcContinuousManagedSession(opts, fake);
         _disposables.Add(session);
 
         await session.StartAsync();
-        await session.AuthorizeCapture();
+        Assert.True(await session.AuthorizeCapture());
+        fake.Continue();
         var result = await session.CompletionTask.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(WgcContinuousManagedSessionState.Failed, result.State);

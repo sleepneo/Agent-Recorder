@@ -11,7 +11,7 @@ internal static class OrdinaryRecordingTargetStorage
         if (key is null) return;
         if (OrdinaryWindowTargetKey.IsValid(key))
         {
-            if (row.SourceType != "window" || row.CaptureSemantics != "window_surface" || row.NestedRole is not null)
+            if (row.SourceType != "window" || row.CaptureSemantics != "window_surface" || (row.NestedRole is not null && (row.NestedRole is not ("outer" or "inner") || row.AudioMode != "none")))
                 throw new InvalidDataException("Window target binding is invalid.");
             return;
         }

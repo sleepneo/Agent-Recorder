@@ -51,8 +51,10 @@ Record the primary display for 15 seconds without any audio.
   including other applications; it is not a window-exclusive audio track.
 - **Microphone** capture is supported for ordinary region and display video,
   not window-content recording.
-- **System audio and microphone cannot be enabled together.** Fixed-region
-  profiles, fixed-region unattended plans and screenshot sequences remain silent.
+- **System audio and microphone cannot be enabled together.** Raw fixed-region
+  profile execution remains silent; ordinary quick region-only reuse can choose
+  audio for this recording. Fixed-region unattended plans and screenshot
+  sequences remain silent.
 - With no device specified, use the current Windows multimedia default output
   or a uniquely determined microphone input. The locally approved device stays
   fixed; changing the default does not switch capture to another device.
@@ -124,7 +126,8 @@ not silently postponed or retried.
 
 Window video captures the window's own content, including its controls, even
 when another application covers it. Use 1–1800 whole seconds with no audio or
-system audio; microphone and nested window recording are not supported.
+system audio; microphone capture is not supported. Independent silent windows
+use separate raw requests, rather than this quick request.
 Unavailable window capture fails explicitly instead of recording the desktop.
 For detailed limits, see [the API reference](docs/api.md#strict-wgc-window-surface-recording).
 
@@ -170,9 +173,11 @@ confirmation summary and returned under recording `config`.
 ## Saved Regions And Future Windows
 
 Ask the agent to save a named recording region when the same area is used
-often. Select it locally once; each later recording uses the exact saved
-version and still needs local confirmation. Current saved-region reuse is
-silent, lasts 1-600 seconds, and rejects changed display geometry.
+often. Select it locally once; later recordings use the exact saved version
+and still need local confirmation. Ask to reuse its region with this request's
+1-600 second duration and optional system audio or microphone. The agent uses
+quick `profile_region`; raw `profile_ref` retains the full silent specification.
+Changed display geometry is rejected rather than silently adjusted.
 
 For a window opened later, the agent can request a one-shot authorization for
 an exact local executable, output directory, and optional fixed system-audio

@@ -172,6 +172,15 @@ internal sealed class RecordingIndicatorManager
             (int)Math.Ceiling(screenSize.Height * scale));
     }
 
+    private static Size MeasureWindowStopControl(IUiTextProvider text, Font font, DisplayDpiInfo dpi, WindowRecordingIdentity window)
+    {
+        var size = RecordingStopControlLayout.MeasurePreferredSize(text, font, null, window: window);
+        int effectiveDpi = Math.Max(dpi.DpiX, dpi.DpiY);
+        int screenDpi = GetSystemDpi();
+        var scale = (effectiveDpi > 0 ? effectiveDpi : 96) / (float)(screenDpi > 0 ? screenDpi : 96);
+        return new Size((int)Math.Ceiling(size.Width * scale), (int)Math.Ceiling(size.Height * scale));
+    }
+
     private static int GetSystemDpi()
     {
         using var temp = new Control();
@@ -321,10 +330,12 @@ internal sealed class RecordingIndicatorManager
                 labelFont,
                 new Padding(4, 2, 4, 2),
                 dpiInfo,
-                textProvider);
+                textProvider, recording.WindowIdentity);
 
         using var stopControlFont = new Font("Segoe UI", 8, FontStyle.Bold);
-        var controlSize = _stopControlSizeProvider(textProvider, stopControlFont, dpiInfo, recording.NestedRole);
+        var controlSize = recording.WindowIdentity is { } window
+            ? MeasureWindowStopControl(textProvider, stopControlFont, dpiInfo, window)
+            : _stopControlSizeProvider(textProvider, stopControlFont, dpiInfo, recording.NestedRole);
 
         var indicatorPlan = RecordingIndicatorGeometry.ComputePresentationPlan(
             recording,
@@ -333,6 +344,13 @@ internal sealed class RecordingIndicatorManager
             labelSize,
             virtualScreen,
             parentFallbackReason);
+
+        if (recording.WindowIdentity is not null)
+        {
+            var occupied = _stopControls.Values.Select(s => s.PlacementBounds)
+                .Concat(_indicators.Values.Select(i => IndependentWindowControlLayout.AsOccupied(i.ScreenLabelBounds)));
+            indicatorPlan = IndependentWindowControlLayout.PlaceLabel(indicatorPlan, labelSize, virtualScreen, occupied);
+        }
 
         // For parent-visible mode, the stop control must also fit safely outside the inner
         // capture rectangle and inside the parent capture rectangle, without overlapping any
@@ -399,6 +417,11 @@ internal sealed class RecordingIndicatorManager
             recording.NestedRole,
             virtualScreen);
         var ordinaryOccupied = _stopControls.Values.Select(s => s.PlacementBounds).ToList();
+        if (recording.WindowIdentity is not null)
+        {
+            ordinaryOccupied.Add(IndependentWindowControlLayout.AsOccupied(indicatorPlan.LabelBounds));
+            ordinaryOccupied.AddRange(_indicators.Values.Select(i => IndependentWindowControlLayout.AsOccupied(i.ScreenLabelBounds)));
+        }
         var resolvedOrdinaryStop = RecordingStopControlGeometry.ResolveCollision(
             ordinaryStopBounds,
             controlSize,
@@ -608,6 +631,9 @@ internal sealed class RecordingIndicatorManager
                 plan.IndicatorPresentation.Mode,
                 recording.NestedRole);
 
+            indicator.SetWindowIdentity(recording.WindowIdentity);
+            stopControl.SetWindowIdentity(recording.WindowIdentity);
+
             // Create hidden HWNDs so we can read the actual DPI before any window becomes visible.
             _ = indicator.Handle;
             _ = stopControl.Handle;
@@ -663,6 +689,9 @@ internal sealed class RecordingIndicatorManager
                     retryPlan.DpiInfo,
                     retryPlan.IndicatorPresentation.Mode,
                     recording.NestedRole);
+
+                indicator.SetWindowIdentity(recording.WindowIdentity);
+                stopControl.SetWindowIdentity(recording.WindowIdentity);
 
                 return new VerificationResult(indicator, stopControl, retryPlan, true);
             }

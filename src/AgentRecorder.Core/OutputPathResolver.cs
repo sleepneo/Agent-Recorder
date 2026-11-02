@@ -23,23 +23,38 @@ internal static class OutputPathResolver
     public static void ValidateRequest(JsonNode? output)
     {
         if (Str(output?["directory"]) is { } directory && directory != "default")
-            ValidateDirectory(directory);
+            CanonicalizeDirectory(directory);
         // Template substitutions are safe single-component values. Validate through
         // the same expansion and filename rules used when constructing the real path.
         _ = BuildFileName(output, new Recording("validation") { SourceTitle = "region" });
     }
 
-    private static void ValidateDirectory(string directory)
+    // Validate the original spelling before lexical normalization. Only local
+    // absolute DOS paths enter ordinary output binding; this never resolves links
+    // or substitutes a persistent publication/identity check.
+    internal static string CanonicalizeDirectory(string directory)
     {
         PolicyEngine.ValidateDirectory(directory);
         try
         {
+            // GetFullPath may trim trailing dots/spaces. Do not turn an unsafe
+            // original component into an accepted name while normalizing separators.
+            var originalRoot = Path.GetPathRoot(directory)!;
+            if (originalRoot.Length != 3 || !char.IsAsciiLetter(originalRoot[0]) || originalRoot[1] != ':')
+                throw InvalidPath("output.directory");
+            foreach (var part in directory[originalRoot.Length..].Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
+                if (part is not ("." or "..")) ValidateName(part, "output.directory");
             var full = Path.GetFullPath(directory);
             var root = Path.GetPathRoot(full)!;
+            if (root.Length != 3 || !char.IsAsciiLetter(root[0]) || root[1] != ':' || root[2] != Path.DirectorySeparatorChar)
+                throw InvalidPath("output.directory");
+            PolicyEngine.ValidateDirectory(full);
             foreach (var part in full[root.Length..].Split(
                 new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries))
                 ValidateName(part, "output.directory");
             if (directory.Any(c => char.IsControl(c) || "\"<>|?*".Contains(c))) throw InvalidPath("output.directory");
+            return Path.TrimEndingDirectorySeparator(full);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -69,7 +84,7 @@ internal static class OutputPathResolver
         var directory = Str(output?["directory"]) is { } d && d != "default"
             ? d
             : Paths.DefaultOutputDir;
-        PolicyEngine.ValidateDirectory(directory);
+        directory = CanonicalizeDirectory(directory);
         var template = Str(output?["filename_template"]) ?? "screenshot-series-{datetime}-{id}";
         var name = BuildSafeScreenshotSeriesName(ApplyTemplate(template, rec));
         return Path.Combine(directory, name);
@@ -77,7 +92,7 @@ internal static class OutputPathResolver
 
     public static string MoveScreenshotSeriesToDirectory(string existingPath, string directory, Recording rec)
     {
-        PolicyEngine.ValidateDirectory(directory);
+        directory = CanonicalizeDirectory(directory);
         var name = Path.GetFileName(existingPath);
         if (string.IsNullOrWhiteSpace(name))
             name = ApplyTemplate("screenshot-series-{datetime}-{id}", rec);
@@ -109,14 +124,14 @@ internal static class OutputPathResolver
     /// <summary>
     /// Builds the final output path from the request's output node and recording metadata.
     /// </summary>
-    public static string BuildOutputPath(JsonNode? output, Recording rec)
+    public static string BuildOutputPath(JsonNode? output, Recording rec, bool createDirectory = true)
     {
         ValidateRequest(output);
         string dir = Str(output?["directory"]) is { } d && d != "default"
             ? d : Paths.DefaultOutputDir;
-        ValidateDirectory(dir);
+        dir = CanonicalizeDirectory(dir);
         string name = BuildFileName(output, rec);
-        Directory.CreateDirectory(dir);
+        if (createDirectory) Directory.CreateDirectory(dir);
         var policy = Str(output?["conflict_policy"]) ?? "rename";
         var full = Path.Combine(dir, name);
         rec.OrdinaryRequestedOutputPath = full;
@@ -128,15 +143,15 @@ internal static class OutputPathResolver
     /// The target directory is validated and created if necessary. Conflicts are resolved
     /// according to <paramref name="conflictPolicy"/> (default "rename").
     /// </summary>
-    public static string MoveToDirectory(string existingOutputPath, string directory, string conflictPolicy = "rename")
+    public static string MoveToDirectory(string existingOutputPath, string directory, string conflictPolicy = "rename", bool createDirectory = true)
     {
         if (string.IsNullOrWhiteSpace(existingOutputPath))
             throw new ArgumentException("Existing output path cannot be empty", nameof(existingOutputPath));
         if (string.IsNullOrWhiteSpace(directory))
             throw new ArgumentException("Directory cannot be empty", nameof(directory));
 
-        ValidateDirectory(directory);
-        Directory.CreateDirectory(directory);
+        directory = CanonicalizeDirectory(directory);
+        if (createDirectory) Directory.CreateDirectory(directory);
 
         var name = Path.GetFileName(existingOutputPath);
         if (string.IsNullOrWhiteSpace(name))
@@ -180,7 +195,7 @@ internal static class OutputPathResolver
             return ValidateName(fn.EndsWith(".mp4") ? fn : fn + ".mp4", "output.filename");
         }
 
-        var tmpl = Str(output?["filename_template"]) ?? "recording-{datetime}";
+        var tmpl = Str(output?["filename_template"]) ?? "recording-{datetime}-{id}";
         var name = ValidateName(ApplyTemplate(tmpl, rec), "output.filename_template");
         return ValidateName(name + ".mp4", "output.filename_template");
     }

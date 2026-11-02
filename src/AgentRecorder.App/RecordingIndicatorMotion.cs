@@ -105,7 +105,7 @@ internal static class RecordingIndicatorMotion
             return Array.Empty<Rectangle>();
 
         var regions = new List<Rectangle>();
-        if (includeBorder && presentation.Mode == CaptureVisibilityMode.ParentVisible)
+        if (includeBorder && (presentation.Mode == CaptureVisibilityMode.ParentVisible || presentation.BorderRectangles.Length > 0))
         {
             foreach (var border in presentation.BorderRectangles)
             {

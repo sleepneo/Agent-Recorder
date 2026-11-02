@@ -75,7 +75,11 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         private readonly CancellationTokenSource cancellation = new();
         private readonly TaskCompletionSource exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal Task? Worker; internal int BeginObserved; internal bool FailMedia;
+        internal WgcContinuousSessionOptions Options => options;
+        internal string? MediaClipOverride;
+        internal int? DurationMsOverride;
+        internal long? SourceTimeHnsOverride;
+        internal Task? Worker; internal int BeginObserved; internal bool FailMedia; internal string FailureCode = "ENCODER_UNAVAILABLE", FailureReason = "owned_media_fault";
         public int Id => 346; public bool HasExited => exited.Task.IsCompleted; public int ExitCode { get; private set; }
         public Stream StandardOutputStream => events; public Stream StandardErrorStream => Stream.Null;
         public void Start(string exe, IReadOnlyList<string> args)
@@ -89,14 +93,16 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
                     Assert.Equal(options.BeginToken, File.ReadAllText(options.BeginSignalPath)); BeginObserved++;
                     var method = options.TargetKind switch { WgcContinuousTargetKind.Region => "WGC_D3D11_REGION_FRAME_STREAM", WgcContinuousTargetKind.Window => "WGC_D3D11_WINDOW_FRAME_STREAM", _ => "WGC_D3D11_FRAME_STREAM" };
                     events.Send($"RESULT: STARTED\nRecordingId: {options.RecordingId}\nOutput: {options.OutputPath}\nContainer: mp4\nCodec: h264\nFps: 15\nWidth: 64\nHeight: 64\nCaptureMethod: {method}\nEncoderMode: software\nEncoderSelectionReason: software_default\n\n");
-                    events.Send($"RESULT: FIRST_FRAME\nStage: Capturing\nRecordingId: {options.RecordingId}\nFrameNumber: 1\nElapsedMs: 10\nSourceTimeHns: {anchor()}\n\n");
+                    events.Send($"RESULT: FIRST_FRAME\nStage: Capturing\nRecordingId: {options.RecordingId}\nFrameNumber: 1\nElapsedMs: 10\nSourceTimeHns: {SourceTimeHnsOverride ?? anchor()}\n\n");
                     await Until(() => Finish.Task.IsCompleted || File.Exists(options.StopSignalPath), cancellation.Token);
                     var stopped = File.Exists(options.StopSignalPath);
-                    if (FailMedia) events.Send("RESULT: FAIL\nErrorCode: ENCODER_UNAVAILABLE\nReason: owned_media_fault\nFramesCaptured: 0\nBytesWritten: 0\n\n");
+                    if (FailMedia) events.Send($"RESULT: FAIL\n{(FailureCode == "ENCODER_UNAVAILABLE" ? "" : "EncoderMode: software\nEncoderSelectionReason: software_default\n")}ErrorCode: {FailureCode}\nReason: {FailureReason}\nFramesCaptured: 0\nBytesWritten: 0\n\n");
                     else
                     {
-                        File.Copy(clip, options.OutputPath, false);
-                        events.Send($"RESULT: {(stopped ? "STOPPED" : "OK")}\nEncoderMode: software\nEncoderSelectionReason: software_default\nStopReason: {(stopped ? "user_requested" : "duration_reached")}\nFramesCaptured: 15\nFramesDropped: 0\nDurationMs: 1000\nFileSize: {new FileInfo(clip).Length} bytes\nWidth: 64\nHeight: 64\n\n");
+                        var media = MediaClipOverride ?? clip;
+                        var durationMs = DurationMsOverride ?? 1000;
+                        File.Copy(media, options.OutputPath, false);
+                        events.Send($"RESULT: {(stopped ? "STOPPED" : "OK")}\nEncoderMode: software\nEncoderSelectionReason: software_default\nStopReason: {(stopped ? "user_requested" : "duration_reached")}\nFramesCaptured: {15 * durationMs / 1000}\nFramesDropped: 0\nDurationMs: {durationMs}\nFileSize: {new FileInfo(media).Length} bytes\nWidth: 64\nHeight: 64\n\n");
                     }
                     ExitCode = FailMedia ? 1 : 0;
                 }
@@ -132,10 +138,19 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
     private sealed class Tray : ITrayContext
     {
         internal Action<ConfirmationDecision>? Confirm;
+        internal readonly System.Collections.Concurrent.ConcurrentDictionary<string, Action<ConfirmationDecision>> Confirmations = new();
+        internal readonly System.Collections.Concurrent.ConcurrentDictionary<string, RecordingConfirmationPresentation> Presentations = new();
+        internal readonly System.Collections.Concurrent.ConcurrentQueue<RecordingUiPresentation> UiEvents = new();
         public string HostMode => "tray"; public bool SupportsRegionSelectionUi => true;
-        public void RequestConfirmation(RecordingConfirmationPresentation p, Action<ConfirmationDecision> c) => Confirm = c;
+        public void RequestConfirmation(RecordingConfirmationPresentation p, Action<ConfirmationDecision> c)
+        { Confirm = c; Confirmations[p.RecordingId] = c; Presentations[p.RecordingId] = p; }
         public void RequestRegionSelection(int t, Action<string, int, int, int, int, string, string> c) => c("selected", 0, 0, 64, 64, "display_1", "virtual_screen");
-        public void SetRecording(RecordingUiPresentation r) { } public void SetIdle(RecordingUiPresentation r) { }
+        public void SetRecording(RecordingUiPresentation r) => UiEvents.Enqueue(r);
+        public void SetIdle(RecordingUiPresentation r) => UiEvents.Enqueue(r);
+        public void SetPreparing(RecordingUiPresentation r) => UiEvents.Enqueue(r);
+        public void SetCountdown(RecordingUiPresentation r) => UiEvents.Enqueue(r);
+        public void SetStopping(RecordingUiPresentation r) => UiEvents.Enqueue(r);
+        public void SetFinalizing(RecordingUiPresentation r) => UiEvents.Enqueue(r);
         public void SetAllIdle() { } public void ShowError(string s) { }
     }
     private sealed class Probe : IWgcContinuousAvailabilityProbe
@@ -179,6 +194,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         internal RecordingEngine Engine = null!; internal ApiServer? Api;
         internal WgcContinuousCaptureBackend? Wgc; internal AvSplitCaptureBackend? Av; internal SyntheticProcess? Process;
         internal FakeAudioCaptureWorker? Audio; internal int FactoryCalls; internal bool UnknownNative;
+        internal Action<SyntheticProcess>? SyntheticProcessCreatedForTests;
         private readonly List<WgcContinuousCaptureBackend> backends = new(); private readonly List<SyntheticProcess> processes = new();
         internal string Clip => Path.Combine(Root, "prepared.mp4"); internal string Wav => Path.Combine(Root, "prepared.wav");
         private readonly Dictionary<string, string?> environment = new();
@@ -189,6 +205,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         private readonly Func<List<SystemQuery.DisplayInfo>>? displays = Provider<Func<List<SystemQuery.DisplayInfo>>>("_displayProvider");
         private readonly Func<List<SystemQuery.DisplayTopologyInfo>>? topology = Provider<Func<List<SystemQuery.DisplayTopologyInfo>>>("_displayTopologyProvider");
         private readonly Func<bool, bool, List<SystemQuery.WindowInfo>>? windows = Provider<Func<bool, bool, List<SystemQuery.WindowInfo>>>("_windowProvider");
+        private readonly Func<SystemQuery.WindowInfo?>? activeWindow = Provider<Func<SystemQuery.WindowInfo?>>("_activeWindowProvider");
         private bool disposed;
         internal Fixture(bool generator = true, bool failConstruction = false,bool mediaOnlyEvidence=false, string? testRoot=null, AgentRecorder.Logging.AuditLogger? runtimeAudit=null, Func<SqliteOrdinaryRecordingHistoryStore,IOrdinaryRecordingHistoryStore>? historyFactory=null)
         {
@@ -219,8 +236,8 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
                 Engine.OrdinaryWindowMetadataForTests = (_, _) => OrdinaryWindowTargetKeyTests.Facts();
                 Engine.BackendFactory = cfg =>
                 {
-                    FactoryCalls++;
-                    if (cfg.IsSystemLoopback) { Av = new(new AvWorkers(this), new ExternalProcessRunner(), new TempRetentionPolicy(Root)); return (Av, "wgc-window-av-split"); }
+                    Interlocked.Increment(ref FactoryCalls);
+                    if (cfg.IsSystemLoopback) { var av = new AvSplitCaptureBackend(new AvWorkers(this), new ExternalProcessRunner(), new TempRetentionPolicy(Root)); Av = av; return (av, "wgc-window-av-split"); }
                     return (NewWgc(), "wgc-continuous");
                 };
                 Engine.ConfigureOrdinaryRecordingHistory(historyFactory?.Invoke(Writer) ?? Writer); Engine.SetTray(Tray);
@@ -233,13 +250,17 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         {
             IStagingToFinalPublisher publisher = UnknownNative
                 ? new StagingToFinalPublisher(new PhysicalFileSystemOperations(), identityApi: new BundlePublicationIdentityTests.NoIdentityApi()) : StagingToFinalPublisher.Instance;
-            Wgc = new(options =>
+            var backend = new WgcContinuousCaptureBackend(options =>
             {
-                Process = new(options, Clip, () => (long)((decimal)(Audio is null ? Stopwatch.GetTimestamp() : Audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10) * 10_000_000 / Stopwatch.Frequency));
-                lock (processes) processes.Add(Process);
-                return new WgcContinuousManagedSession(options, Process);
+                var process = new SyntheticProcess(options, Clip, () => (long)((decimal)(Audio is null ? Stopwatch.GetTimestamp() : Audio.MediaStartAnchorTicks + Stopwatch.Frequency / 10) * 10_000_000 / Stopwatch.Frequency));
+                Process = process;
+                SyntheticProcessCreatedForTests?.Invoke(process);
+                lock (processes) processes.Add(process);
+                return new WgcContinuousManagedSession(options, process);
             }, publisher, FfmpegCaptureBackend.Probe, () => Path.Combine(Root, "wgc-helper.exe"), Root);
-            backends.Add(Wgc); return Wgc;
+            Wgc = backend;
+            lock (backends) backends.Add(backend);
+            return backend;
         }
         internal async Task Prepare(bool audio = false)
         {
@@ -319,7 +340,8 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
             foreach (var job in jobs) Clean(() => job.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult());
             // Backend Dispose can already own process disposal; retained Worker is joined
             // separately so an exceptional backend teardown cannot leave fixture work alive.
-            Clean(() => Av?.Dispose()); foreach (var backend in backends) Clean(backend.Dispose);
+            WgcContinuousCaptureBackend[] ownedBackends; lock (backends) ownedBackends = backends.ToArray();
+            Clean(() => Av?.Dispose()); foreach (var backend in ownedBackends) Clean(backend.Dispose);
             SyntheticProcess[] owned; lock (processes) owned = processes.ToArray();
             foreach (var process in owned) Clean(() => { if (process.Worker is { } w) { if (!w.IsCompleted) process.KillEntireTree(); w.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); } });
             Clean(() =>
@@ -333,6 +355,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
                 }
             });
             Clean(() => SystemQuery.SetDisplayProvider(displays)); Clean(() => SystemQuery.SetDisplayTopologyProvider(topology)); Clean(() => SystemQuery.SetWindowProvider(windows));
+            Clean(() => SystemQuery.SetActiveWindowProvider(activeWindow));
             Clean(() => RecordingPreflightChecker.StorageCapacityProvider = capacity);
             Clean(() => RecordingPreflightChecker.AudioHelperPathResolver = helper); Clean(() => RecordingPreflightChecker.AudioHelperProbeRunner = probe);
             Clean(() => { if (priorDir is null) DataDirResolver.ClearOverride(); else DataDirResolver.SetOverride(priorDir); });

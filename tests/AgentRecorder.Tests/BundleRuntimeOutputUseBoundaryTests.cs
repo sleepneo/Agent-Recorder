@@ -112,8 +112,10 @@ public sealed partial class OrdinaryWgcBundleTests
         {
             Assert.True(entered.Wait(TimeSpan.FromSeconds(10)));Assert.True(f.Generator.Work!.IsCompleted);Assert.False(host.IsCompleted);
             Assert.Equal(fail?"failed":"ready",rec.BundleSnapshot.Status);
+            await BundleSourceDenied(f, rec);
             await f.Wgc!.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));RegisterOtherOutput(f);
             Assert.True(Read(f.Engine,rec.OutputPath)!.Paths.Single().InUse);
+            Assert.True(Read(f.Engine,Path.Combine(Path.ChangeExtension(rec.OutputPath,".bundle"),"tail.mp4"))!.Paths.Single().InUse);
             Assert.Equal("bundle_in_flight",f.Engine.TryReserveIdleHostShutdown(()=>null));Assert.False(f.Engine.RetentionHostStopping);
             AssertRuntimeDbProtected(f,rec,fail?"bundle_artifact_state_unknown":"bundle_artifact_reference");
         }
@@ -151,6 +153,8 @@ public sealed partial class OrdinaryWgcBundleTests
         };
         var rec=f.Create("display");await f.Approve(rec);await f.Terminal(rec,false);await f.Wgc!.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.NotNull(queued);Assert.Equal(0,f.Generator.Calls);RegisterOtherOutput(f);
+        await BundleSourceDenied(f, rec);
+        Assert.True(Read(f.Engine,Path.Combine(Path.ChangeExtension(rec.OutputPath,".bundle"),"late.mp4"))!.Paths.Single().InUse);
         Assert.True(Read(f.Engine,rec.OutputPath)!.Paths.Single().InUse);Assert.Contains("recording.bundle_output_use",audit.Events);
         Assert.Equal("bundle_in_flight",f.Engine.TryReserveIdleHostShutdown(()=>null));Assert.False(f.Engine.RetentionHostStopping);
         // A late arrival is the original queued job, not an automatic retry.
@@ -173,6 +177,15 @@ public sealed partial class OrdinaryWgcBundleTests
         if(replacement=="registration")Claim(f.Engine,rec,path);
         if(replacement=="backend")rec.Backend=new WgcContinuousCaptureBackend();
         Assert.True(Read(f.Engine,original)!.Paths.Single().InUse);
+        if (replacement is "recording" or "backend")
+        {
+            // A normal admission can legitimately retire the settled replacement
+            // in the other two synthetic cases. Keep their late-callback-only
+            // assertion free of an intervening business-path retirement.
+            var conflict = Assert.Throws<TargetInvocationException>(() => Claim(f.Engine,
+                new Recording(false) { IsOrdinaryLocalRequest = true, OutputPath = original }, original));
+            Assert.Equal("OUTPUT_PATH_IN_USE", Assert.IsType<ApiException>(conflict.InnerException).Code);
+        }
         f.Generator.Release.TrySetResult();await host.WaitAsync(TimeSpan.FromSeconds(10));
         await Until(()=>BundleUseCount(f)==0);
         Assert.True(Read(f.Engine,path)!.Paths.Single().InUse);
@@ -206,6 +219,9 @@ public sealed partial class OrdinaryWgcBundleTests
             Assert.False(backend.OutputRetirement.IsCompleted);f.Generator.Release.TrySetResult();await host.WaitAsync(TimeSpan.FromSeconds(10));
             await Until(()=>BundleUseCount(f)==0);RegisterOtherOutput(f);
             Assert.True(Read(f.Engine,rec.OutputPath)!.Paths.Single().InUse); // actual writer owner is still blocked
+            var conflict = Assert.Throws<TargetInvocationException>(() => Claim(f.Engine,
+                new Recording(false) { IsOrdinaryLocalRequest = true, OutputPath = rec.OutputPath }, rec.OutputPath));
+            Assert.Equal("OUTPUT_PATH_IN_USE", Assert.IsType<ApiException>(conflict.InnerException).Code);
         }
         finally {release.Set();await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));}
         await Until(()=>!Read(f.Engine,rec.OutputPath)!.Paths.Single().InUse);

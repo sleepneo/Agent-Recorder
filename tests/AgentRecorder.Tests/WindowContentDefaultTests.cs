@@ -153,7 +153,7 @@ public sealed class WindowContentDefaultTests : IDisposable
         switch (fault)
         {
             case "microphone": request["audio"] = JsonNode.Parse("""{"microphone":{"enabled":true}}"""); break;
-            case "nested": request["nested"] = JsonNode.Parse("""{"role":"outer"}"""); break;
+            case "nested": request["nested"] = JsonNode.Parse(quick ? """{"role":"outer"}""" : "{}"); break;
             case "manual": request["stop_condition"] = JsonNode.Parse("""{"type":"manual"}"""); break;
             case "missing": request.Remove("stop_condition"); break;
             case "too_long": request["stop_condition"]!["seconds"] = 1801; break;

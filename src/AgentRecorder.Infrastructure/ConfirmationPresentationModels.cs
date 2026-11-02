@@ -56,6 +56,7 @@ public sealed record RecordingRequestSummary
 /// </summary>
 public sealed record RecordingConfirmationPresentation
 {
+    public WindowRecordingIdentity? WindowIdentity { get; init; }
     public RecordingRequestSummary Summary { get; init; } = new();
     public string RecordingId { get; init; } = "";
     public string ConfirmationId { get; init; } = "";
