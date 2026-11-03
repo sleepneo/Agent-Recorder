@@ -14,11 +14,13 @@ internal sealed class DeletionRequestAdmission
 {
     internal static readonly DeletionRequestAdmission Host=new();
     private object? _active;
+    internal object? Active=>Volatile.Read(ref _active);
     internal bool Acquire(object f)=>Interlocked.CompareExchange(ref _active,f,null) is null;
+    internal bool Owns(object f)=>ReferenceEquals(Volatile.Read(ref _active),f);
     internal void Release(object f)=>Interlocked.CompareExchange(ref _active,null,f);
 }
 internal sealed class DeletionQueryAdmission
-{internal static readonly DeletionQueryAdmission Host=new();internal int Busy;}
+{internal static readonly DeletionQueryAdmission Host=new();internal int Busy;internal object? Owner;}
 
 /// <summary>One host-owned local deletion flow. HTTP lifetime never owns its Permit or resources.</summary>
 public sealed class RetentionDeletionCoordinator:IDisposable
@@ -33,10 +35,32 @@ public sealed class RetentionDeletionCoordinator:IDisposable
     private Flight? _last;
     private QueryFlight? _query;
     private readonly DeletionQueryAdmission _queryAdmission;
+    private readonly SqliteOperationalStore _operational;
+    private readonly string _sid,_session,_root;
     internal Func<CancellationToken,Task> DeadlineForTests {get;set;}=c=>Task.Delay(TimeSpan.FromSeconds(3),c);
     internal RetentionDeletionCoordinator(SqliteOperationalStore store,string sid,string session,string root,LocalRetentionApproval authority,
         TimeProvider? clock=null,DeletionLedgerDatabase? database=null,DeletionRequestAdmission? admission=null,DeletionQueryAdmission? queryAdmission=null)
-    { _authority=authority;_clock=clock??TimeProvider.System;_store=new(store,sid,session,root,_clock,database);_admission=admission??DeletionRequestAdmission.Host;_queryAdmission=queryAdmission??DeletionQueryAdmission.Host; }
+    { _operational=store;_sid=sid;_session=session;_root=root;_authority=authority;_clock=clock??TimeProvider.System;_store=new(store,sid,session,root,_clock,database);_admission=admission??DeletionRequestAdmission.Host;_queryAdmission=queryAdmission??DeletionQueryAdmission.Host; }
+    public RetentionBatchDeletionCoordinator CreateBatchCoordinator()=>new(_operational,_sid,_session,_root,this,_clock);
+    internal DeletionRequestAdmission Admission=>_admission;
+    internal bool OwnsRequest {get {lock(_gate)return _active is not null&&_admission.Owns(_active);}}
+    internal bool OwnsQuery {get {lock(_gate)return _query is not null&&ReferenceEquals(Volatile.Read(ref _queryAdmission.Owner),_query);}}
+    internal sealed record BatchChildRetirement(bool Retired,bool CompletedSuccessfully,string? LocalDecisionState);
+    internal sealed record BatchChild(Task<RetentionDeletionRequestResult> Created,Task<BatchChildRetirement> Retirement);
+    // Only the actual holder of the original host admission can lend it to one
+    // child. This is an internal composition seam, never an approval or Permit.
+    internal BatchChild StartBatchChild(string recording,string key,string frozenId,object reservation,CancellationToken cancellation)
+    {
+        if(!ValidRecordingId(recording)||!DeletionLedger.Id(frozenId))throw new ArgumentException();
+        key=NormalizeKey(key);Flight f;
+        lock(_gate)
+        {
+            if(!Supported||_active is not null||!_admission.Owns(reservation))throw new DeletionRequestUnavailableException("busy");
+            f=new(this,recording,Digest(key),RequestHash(recording),_clock.GetTimestamp(),frozenId,reservation,cancellation);
+            _active=f;f.Work=Task.Run(()=>Run(f));
+        }
+        return new(f.Created.Task,f.BatchDone.Task);
+    }
     public string? HostShutdownBusyReason
     { get { lock (_gate) return _active is not null || _query is not null ? "deletion_in_flight" :
         _last is { Retired: false } || _last is not null && _last.RequestRetired != true ? "deletion_retirement_unknown" : null; } }
@@ -66,7 +90,7 @@ public sealed class RetentionDeletionCoordinator:IDisposable
             else
             {
                 flight=new(this,recordingId,hash,requestHash,_clock.GetTimestamp());
-                if(_admission.Acquire(flight)){_active=flight;var owned=flight;flight.Work=Task.Run(()=>Run(owned));}else flight=null;
+                if(_admission.Acquire(flight)){_active=flight;var owned=flight;flight.Work=Task.Run(()=>Run(owned));}else {flight.Cancellation.Dispose();flight=null;}
             }
         }
         if(flight is null)
@@ -95,7 +119,7 @@ public sealed class RetentionDeletionCoordinator:IDisposable
         lock(_gate)
         {
             if(_query is not null||Interlocked.CompareExchange(ref _queryAdmission.Busy,1,0)!=0){stop.Dispose();throw new DeletionRequestUnavailableException("query_busy");}
-            q=new(stop);_query=q;
+            q=new(this,stop);_query=q;Volatile.Write(ref _queryAdmission.Owner,q);
         }
         using var deadlineStop=CancellationTokenSource.CreateLinkedTokenSource(cancellation,_stop.Token);
         var work=Task.Run(()=>
@@ -103,7 +127,7 @@ public sealed class RetentionDeletionCoordinator:IDisposable
             DeletionRequestIo<DeletionRequestFacts> result;
             try{result=_store.Run("query",false,started,stop.Token,(c,t)=>_store.Facts(c,t,id,key));}
             catch{result=new(null,DeletionLedgerCommit.NotCommitted,false,false,null);}
-            lock(_gate){q.Retired=result.Retired;if(result.Retired){if(ReferenceEquals(_query,q))_query=null;Volatile.Write(ref _queryAdmission.Busy,0);}}
+            lock(_gate){q.Retired=result.Retired;if(result.Retired){if(ReferenceEquals(_query,q))_query=null;Volatile.Write(ref _queryAdmission.Owner,null);Volatile.Write(ref _queryAdmission.Busy,0);}}
             q.Done.TrySetResult(result.Retired);stop.Dispose();return result;
         });
         try
@@ -120,25 +144,27 @@ public sealed class RetentionDeletionCoordinator:IDisposable
         var retired=true;LocalDeletionResult? outcome=null;
         try
         {
-            var lookup=_store.Run("lookup",false,f.Started,_stop.Token,(c,t)=>_store.Facts(c,t,f.Key,true));
+            var lookup=_store.Run("lookup",false,f.Started,f.Cancellation.Token,(c,t)=>_store.Facts(c,t,f.Key,true));
             retired&=lookup.Retired;lock(_gate)f.RequestRetired=lookup.Retired;
             if(!lookup.Usable)throw new DeletionRequestUnavailableException("request_store_unknown");
             if(lookup.Value is not null)
-            {if(lookup.Value.Row.RequestHash!=f.Hash)throw new DeletionRequestConflictException();lock(_gate){f.Row=lookup.Value.Row;f.LastCommit=DeletionLedgerCommit.Committed;}f.Created.TrySetResult(Project(lookup.Value));return;}
+            {if(lookup.Value.Row.RequestHash!=f.Hash||f.Reservation is not null&&lookup.Value.Row.Id!=f.Id)throw new DeletionRequestConflictException();lock(_gate){f.Row=lookup.Value.Row;f.LastCommit=DeletionLedgerCommit.Committed;}f.Created.TrySetResult(Project(lookup.Value));return;}
             lock(_gate){f.RequestRetired=null;f.LastCommit=DeletionLedgerCommit.Unknown;}
-            var created=_store.Run("create",true,f.Started,_stop.Token,(c,t)=>_store.Create(c,t,f.Id,f.Recording,f.Key,f.Hash));
+            var created=_store.Run("create",true,f.Started,f.Cancellation.Token,(c,t)=>_store.Create(c,t,f.Id,f.Recording,f.Key,f.Hash));
             retired&=created.Retired;lock(_gate){f.LastCommit=created.Commit;f.RequestRetired=created.Retired;}
             if(created.Error is DeletionRequestConflictException)throw created.Error;
             if(!created.Usable||created.Commit!=DeletionLedgerCommit.Committed||created.Value is null)throw new DeletionRequestUnavailableException("request_store_unknown");
+            if(f.Reservation is not null&&created.Value.Row.Id!=f.Id)throw new DeletionRequestConflictException();
             lock(_gate){f.Row=created.Value.Row;f.CreatedHere=created.Value.Created;}f.Created.TrySetResult(Project(new(f.Row,null)));
             if(!created.Value.Created)return; // Persisted replay never re-enters the UI.
-            if(_stop.IsCancellationRequested)return;
-            var session=_authority.Request(f.Recording,_stop.Token);lock(_gate)f.Session=session;
+            if(f.Cancellation.IsCancellationRequested)return;
+            var session=_authority.Request(f.Recording,f.Cancellation.Token);lock(_gate)f.Session=session;
             var decision=await f.Session.Response.ConfigureAwait(false);
+            f.LocalDecisionState=LocalName(decision.State);
             if(decision.Permit is not null)
             {
                 lock(_gate){f.RequestRetired=null;f.LastCommit=DeletionLedgerCommit.Unknown;}
-                var reserve=_store.Run("reserve",true,_clock.GetTimestamp(),_stop.Token,
+                var reserve=_store.Run("reserve",true,_clock.GetTimestamp(),f.Cancellation.Token,
                     (c,t)=>_store.Update(c,t,f.Row,decision.Permit.ApprovalId,"approved",null,false));
                 retired&=reserve.Retired;lock(_gate){f.LastCommit=reserve.Commit;f.RequestRetired=reserve.Retired;}
                 if(!reserve.Usable||reserve.Commit!=DeletionLedgerCommit.Committed||reserve.Value is null)return;
@@ -159,6 +185,9 @@ public sealed class RetentionDeletionCoordinator:IDisposable
                     (c,t)=>_store.Update(c,t,f.Row,f.Row.ApprovalId,local,outcome,true));
                 retired&=finish.Retired;lock(_gate){f.LastCommit=finish.Commit;f.RequestRetired=finish.Retired;
                 if(finish.Commit==DeletionLedgerCommit.Committed&&finish.Value is not null)f.Row=finish.Value;}
+                f.CompletedSuccessfully=finish.Usable&&finish.Commit==DeletionLedgerCommit.Committed&&
+                    f.Operation?.SettlementUsable==true&&outcome is {Progress:LocalDeletionProgress.DispositionAccepted,
+                    Preparation:DeletionLedgerCommit.Committed,Settlement:DeletionLedgerCommit.Committed,OurResourcesRetired:true};
             }
         }
         catch(Exception e){f.Created.TrySetException(e is DeletionRequestConflictException?e:new DeletionRequestUnavailableException("request_store_unknown"));}
@@ -167,11 +196,13 @@ public sealed class RetentionDeletionCoordinator:IDisposable
             if(f.Session is not null)
             {f.Session.Dispose();try{retired&=await f.Session.Retirement.ConfigureAwait(false);}catch{retired=false;}}
             f.Created.TrySetException(new DeletionRequestUnavailableException("request_store_unknown"));
-            lock(_gate){f.Retired=retired;if(retired){if(f.Session is not null)_last=f;if(ReferenceEquals(_active,f))_active=null;_admission.Release(f);}}
+            lock(_gate){f.Retired=retired;if(retired){if(f.Session is not null)_last=f;if(ReferenceEquals(_active,f))_active=null;if(f.Reservation is null)_admission.Release(f);}}
+            f.Cancellation.Dispose();
             f.Done.TrySetResult(retired);
+            f.BatchDone.TrySetResult(new(retired,retired&&f.CompletedSuccessfully,f.LocalDecisionState));
         }
     }
-    private RetentionDeletionRequestResult Project(DeletionRequestFacts facts)
+    internal RetentionDeletionRequestResult Project(DeletionRequestFacts facts)
     {
         lock(_gate)
         {
@@ -199,17 +230,23 @@ public sealed class RetentionDeletionCoordinator:IDisposable
     public void Dispose(){_stop.Cancel();_authority.Dispose();}
     public async Task<bool> WaitForIdleAsync()
     {Flight? f;QueryFlight? q;lock(_gate){f=_active;q=_query;}var a=f is null||await f.Done.Task.ConfigureAwait(false);var b=q is null||await q.Done.Task.ConfigureAwait(false);return a&&b;}
-    private sealed class Flight(RetentionDeletionCoordinator owner,string recording,string key,string hash,long started)
+    private sealed class Flight(RetentionDeletionCoordinator owner,string recording,string key,string hash,long started,
+        string? frozenId=null,object? reservation=null,CancellationToken cancellation=default)
     {
-        internal readonly string Id=Guid.NewGuid().ToString("N"),Recording=recording,Key=key,Hash=hash;
+        internal readonly string Id=frozenId??Guid.NewGuid().ToString("N"),Recording=recording,Key=key,Hash=hash;
+        internal readonly object? Reservation=reservation;
+        internal readonly CancellationTokenSource Cancellation=CancellationTokenSource.CreateLinkedTokenSource(owner._stop.Token,cancellation);
         internal readonly long Started=started;
         internal readonly TaskCompletionSource<RetentionDeletionRequestResult> Created=new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<bool> Done=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource<BatchChildRetirement> BatchDone=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool CompletedSuccessfully;
+        internal string? LocalDecisionState;
         internal DeletionRequestRow? Row;internal LocalRetentionApproval.Session? Session;internal LocalRetentionApproval.DeletionOperation? Operation;
         internal Task? Work;internal bool Retired,CreatedHere;internal bool? RequestRetired;internal DeletionLedgerCommit LastCommit;
         // Keep the actual authority rooted even when its provider retirement is unknown.
         private readonly RetentionDeletionCoordinator _owner=owner;
     }
-    private sealed class QueryFlight(CancellationTokenSource stop)
-    {internal readonly CancellationTokenSource Stop=stop;internal bool Retired;internal readonly TaskCompletionSource<bool> Done=new(TaskCreationOptions.RunContinuationsAsynchronously);}
+    private sealed class QueryFlight(RetentionDeletionCoordinator owner,CancellationTokenSource stop)
+    {private readonly RetentionDeletionCoordinator _owner=owner;internal readonly CancellationTokenSource Stop=stop;internal bool Retired;internal readonly TaskCompletionSource<bool> Done=new(TaskCreationOptions.RunContinuationsAsynchronously);}
 }

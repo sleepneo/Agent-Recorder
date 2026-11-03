@@ -44,9 +44,11 @@ public sealed class SqliteOperationalStoreTests
         // Keep the complete legacy table contract and explicitly require v43's addition.
         Assert.Contains(SqliteSchemaV43.Table, GetTables(connection));
         Assert.Contains(SqliteSchemaV44.Table, GetTables(connection));
+        Assert.Contains("ordinary_deletion_batches", GetTables(connection));
+        Assert.Contains("ordinary_deletion_batch_items", GetTables(connection));
         Assert.Equal(
             new[] { "authorized_capture_scopes", "consent_leases", "fixed_region_profile_create_idempotency", "fixed_region_profile_directory", "future_window_authorizations", "future_window_publication_anchors", "future_window_publication_boundary", "lease_uses", "ordinary_bundle_attachment_hash", "ordinary_bundle_attachment_hash_boundary", "ordinary_bundle_attachment_hash_items", "ordinary_bundle_contents", "ordinary_bundle_contents_boundary", "ordinary_bundle_contents_items", "ordinary_bundle_identity", "ordinary_bundle_identity_boundary", "ordinary_bundle_identity_items", "ordinary_media_hash", "ordinary_media_hash_boundary", "ordinary_publication_anchors", "ordinary_recording_bundles", "ordinary_recording_history", "ordinary_recording_target_boundary", "ordinary_recording_targets", "ordinary_recording_window_targets", "ordinary_window_target_boundary", "plan_history_locator", "plan_media_publication_anchors", "plan_media_publication_boundary", "plan_occurrences", "plans", "recording_run_output_evidence", "recording_runs", "recurring_advancement_operations", "recurring_consent_leases", "recurring_fixed_region_profile_versions", "recurring_lease_local_approvals", "recurring_lease_uses", "recurring_occurrence_execution_specs", "recurring_occurrence_slots", "recurring_plan_profile_bindings", "recurring_schedule_cursors", "recurring_schedule_versions", "recurring_setup_preparations", "required_once_authorized_specs", "required_once_execution_authorizations", "required_once_setup_intents", "schema_migrations", "setup_intents", "standing_lease_safety_operations", "unattended_safety_state" },
-            GetTables(connection).Where(name => name != SqliteSchemaV43.Table && name != SqliteSchemaV44.Table).OrderBy(name => name));
+            GetTables(connection).Where(name => name != SqliteSchemaV43.Table && name != SqliteSchemaV44.Table && name is not ("ordinary_deletion_batches" or "ordinary_deletion_batch_items")).OrderBy(name => name));
 
         Assert.Equal(new[]
         {
@@ -836,7 +838,7 @@ public sealed class SqliteOperationalStoreTests
 
         using var connection = database.Store.OpenConnection();
         Assert.Equal((long)SqliteOperationalStore.CurrentSchemaVersion, ScalarInt64(connection, "SELECT COUNT(*) FROM schema_migrations;"));
-        Assert.Equal(52, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
+        Assert.Equal(54, ScalarInt64(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name <> 'schema_migrations';"));
         Assert.Contains("lease_uses", GetTables(connection));
         Assert.Contains("ordinary_recording_history", GetTables(connection));
     }
@@ -1044,6 +1046,10 @@ public sealed class SqliteOperationalStoreTests
             (42, SqliteSchemaV42.MigrationName, SqliteSchemaV42.MigrationChecksum),
             (43, SqliteSchemaV43.MigrationName, SqliteSchemaV43.MigrationChecksum),
             (44, SqliteSchemaV44.Name, SqliteSchemaV44.Checksum),
+            (45, SqliteSchemaV45.Name, SqliteSchemaV45.Checksum),
+            (46, "schema_v46_bundle_persisted_references", "0738f76e2af141ab528b733f95f4f112adab631742a97d35152b23e0e41f268c"),
+            (47, "schema_v47_bundle_namespaces", "2353d44a84e7dcde1760b3a25be30276a302256e73d39bb06ed2ff04ffffff0c"),
+            (48, SqliteSchemaV48.Name, SqliteSchemaV48.Checksum),
         };
 
         var actual = SqliteSchemaCatalog.Migrations

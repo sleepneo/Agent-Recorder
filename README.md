@@ -26,7 +26,7 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-Version v0.1.18 is a prerelease with independent window recordings, per-recording
+Version v0.1.19 is a prerelease with independent window recordings, per-recording
 audio when reusing a saved region, recording-specific automatic file names,
 and safer output ownership and WGC finalization. Three silent windows passed
 180/90/30-second desktop acceptance. QB system audio passed controlled
@@ -42,14 +42,18 @@ previews, ordinary WGC Bundle generation, and durable plan and future-window
 publication identity. Ordinary raw/quick video requests may select MP4-only
 output with `artifacts.bundle=false`; the default still includes a recording
 bundle. Eligible completed MP4-only recordings in the host's Videos directory
-can be submitted by ID for separate local deletion confirmation. Cancellation
+can be submitted by ID for separate local deletion confirmation. Explicit-ID
+read-only evaluation accepts up to 20 recordings. Ordered cleanup requests
+accept up to five recordings, with a separate local approval for every file;
+refusal or uncertainty stops the remaining items. They are not atomic and
+never resume deletion after restart. Cancellation
 preserves the file; retries with the same key return the original result.
 Default Bundle outputs remain protected. Automatic cleanup, disk quotas,
 signing and an installer remain unfinished. Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 When upgrading an existing installation, back up its data directory first.
-This version upgrades the history database to SQLite schema v44; keep upgraded
+This version upgrades the history database to SQLite schema v48; keep upgraded
 data with the new binaries rather than reopening it with an older release.
 
 ## Recording Audio

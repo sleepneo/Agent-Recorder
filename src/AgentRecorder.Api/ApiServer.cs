@@ -48,7 +48,9 @@ public sealed partial class ApiServer
     private readonly IPlanExecutionHistoryGateway? _planExecutionHistoryGateway;
     private readonly IUnifiedHistoryGateway? _unifiedHistoryGateway;
     private readonly IRetentionPreviewGateway? _retentionPreviewGateway;
+    private readonly IRetentionEvaluationGateway? _retentionEvaluationGateway;
     private readonly IRetentionDeletionGateway? _retentionDeletionGateway;
+    private readonly IRetentionBatchDeletionGateway? _retentionBatchDeletionGateway;
     private readonly IOrdinaryArtifactCheckGateway? _artifactCheckGateway;
     private readonly IHistoryArtifactCheckGateway? _historyArtifactCheckGateway;
     private readonly IOrdinaryMediaVerificationGateway? _mediaVerificationGateway;
@@ -134,11 +136,13 @@ public sealed partial class ApiServer
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
         IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
         IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null,
-        IRetentionDeletionGateway? retentionDeletionGateway = null)
+        IRetentionDeletionGateway? retentionDeletionGateway = null,
+        IRetentionEvaluationGateway? retentionEvaluationGateway = null,
+        IRetentionBatchDeletionGateway? retentionBatchDeletionGateway = null)
         : this(engine, audit, tray, readiness, autoStart, ffmpegPrewarmer, tracer, ensureContextStore,
             performanceSummaryProvider, standingPlanSetupGateway, recurringPlanSetupGateway,
             planExecutionStatusGateway, Port, requiredOncePlanSetupGateway, futureWindowOneShotGateway,
-            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway, historyArtifactCheckGateway, retentionDeletionGateway)
+            profileManagementGateway, null, planExecutionHistoryGateway, unifiedHistoryGateway, retentionPreviewGateway, artifactCheckGateway, mediaVerificationGateway, attachmentVerificationGateway, historyArtifactCheckGateway, retentionDeletionGateway, retentionEvaluationGateway, retentionBatchDeletionGateway)
     {
     }
 
@@ -164,7 +168,9 @@ public sealed partial class ApiServer
         IOrdinaryMediaVerificationGateway? mediaVerificationGateway = null,
         IOrdinaryAttachmentVerificationGateway? attachmentVerificationGateway = null,
         IHistoryArtifactCheckGateway? historyArtifactCheckGateway = null,
-        IRetentionDeletionGateway? retentionDeletionGateway = null)
+        IRetentionDeletionGateway? retentionDeletionGateway = null,
+        IRetentionEvaluationGateway? retentionEvaluationGateway = null,
+        IRetentionBatchDeletionGateway? retentionBatchDeletionGateway = null)
     {
         if (listenPort is < 0 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
@@ -182,7 +188,9 @@ public sealed partial class ApiServer
         _planExecutionHistoryGateway = planExecutionHistoryGateway;
         _unifiedHistoryGateway = unifiedHistoryGateway;
         _retentionPreviewGateway = retentionPreviewGateway;
+        _retentionEvaluationGateway = retentionEvaluationGateway;
         _retentionDeletionGateway = retentionDeletionGateway;
+        _retentionBatchDeletionGateway = retentionBatchDeletionGateway;
         _artifactCheckGateway = artifactCheckGateway;
         _historyArtifactCheckGateway = historyArtifactCheckGateway;
         _mediaVerificationGateway = mediaVerificationGateway;
@@ -252,6 +260,7 @@ public sealed partial class ApiServer
             try { _cts.Cancel(); } catch { }
             try { _listener.Stop(); } catch { }
         }
+        try { _retentionBatchDeletionGateway?.Stop(); } catch { }
         try { _retentionDeletionGateway?.Stop(); } catch { }
     }
 
@@ -282,6 +291,8 @@ public sealed partial class ApiServer
         CloseActiveClientsAndSnapshot(out var clients);
         BeforeStopClientDrainWaitForTests?.Invoke();
         if(!WaitForTask(Task.WhenAll(clients), Remaining(timeout, startedAt)))return false;
+        var batchDrain=_retentionBatchDeletionGateway?.WaitForIdleAsync();
+        if(batchDrain is not null&&(!WaitForTask(batchDrain,Remaining(timeout,startedAt))||!batchDrain.GetAwaiter().GetResult()))return false;
         var deletionDrain=_retentionDeletionGateway?.WaitForIdleAsync();
         if(deletionDrain is null)return true;
         return WaitForTask(deletionDrain,Remaining(timeout,startedAt))&&deletionDrain.GetAwaiter().GetResult();
@@ -369,7 +380,12 @@ public sealed partial class ApiServer
                 if (RequiresAuth(method, path))
                 {
                     var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
-                    if(path==Prefix+"/host/shutdown"||IsDeletionPath(path)||method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
+                    if(IsRetentionEvaluationPath(path))
+                    {
+                        if(!ApiKeyAuth.IsEnabled)throw new ApiException(401,"UNAUTHORIZED","API key is required.");
+                        ApiKeyAuth.ValidateHeader(key);
+                    }
+                    else if(path==Prefix+"/host/shutdown"||IsBatchDeletionPath(path)||IsDeletionPath(path)||method=="GET" && (path=="/api/v1/health" || IsArtifactCheckPath(path)) || method=="POST" && IsMediaVerificationPath(path))
                     {
                         // The new diagnostic endpoint requires authentication even in an
                         // unconfigured host. Preserve the shared validator and existing codes.
@@ -387,7 +403,7 @@ public sealed partial class ApiServer
                 if (!shutdown && admission is null)
                     throw new ApiException(503, "HOST_SHUTTING_DOWN", "Host work admission is closed.");
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                var disconnect=(IsDeletionPath(path)||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
+                var disconnect=(IsRetentionEvaluationPath(path)||IsBatchDeletionPath(path)||IsDeletionPath(path)||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
                 try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
                 finally { requestCancellation.Cancel(); await disconnect; }
@@ -402,6 +418,7 @@ public sealed partial class ApiServer
             catch (ApiException ex)
             {
                 await WriteJson(stream, ex.Status, ApiResponse.Err(ex.Code, ex.Message, ex.Details, reqId));
+                if(ex is EvaluationRequestException or BatchDeletionRequestException)await FinishRejectedEvaluation(client,stream);
             }
             catch (Exception ex)
             {
@@ -505,9 +522,11 @@ public sealed partial class ApiServer
         if (requestLine.Length < 2) return null;
         var method = requestLine[0].ToUpperInvariant();
         var rawPath = requestLine[1];
+        var evaluation=IsRetentionEvaluationPath(rawPath);
         var deletion=IsDeletionPath(rawPath);
-        if(deletion)
-        {try{_=new UTF8Encoding(false,true).GetString(headerBytes,0,headerEnd);}catch(DecoderFallbackException){throw InvalidDeletion();}}
+        var batch=IsBatchDeletionPath(rawPath);
+        if(deletion||evaluation||batch)
+        {try{_=new UTF8Encoding(false,true).GetString(headerBytes,0,headerEnd);}catch(DecoderFallbackException){throw batch?InvalidBatchDeletion():evaluation?InvalidEvaluation():InvalidDeletion();}}
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var duplicateHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -533,10 +552,15 @@ public sealed partial class ApiServer
         if(deletion&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
             contentLength is <0 or >2048||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidDeletion();
 
+        if(evaluation&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
+            contentLength is <0 or >EvaluationBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidEvaluation();
+        if(batch&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
+            contentLength is <0 or >BatchDeletionBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidBatchDeletion();
+        using var evaluationReadDeadline=(evaluation||batch)?new CancellationTokenSource(TimeSpan.FromSeconds(3)):null;
         byte[] bodyBytes = Array.Empty<byte>();
         var bodyStart = headerEnd;
         var alreadyRead = headerBytes.Length - bodyStart;
-        if(deletion&&alreadyRead>contentLength)throw InvalidDeletion();
+        if((deletion||evaluation||batch)&&alreadyRead>contentLength)throw batch?InvalidBatchDeletion():evaluation?InvalidEvaluation():InvalidDeletion();
         var remaining = contentLength - alreadyRead;
         if (remaining < 0) remaining = 0;
 
@@ -548,7 +572,7 @@ public sealed partial class ApiServer
             while (remaining > 0)
             {
                 int r;
-                try { r = deletion?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)):await stream.ReadAsync(bodyBytes.AsMemory(offset, remaining)); }
+                try { r = (evaluation||batch)?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining),evaluationReadDeadline!.Token):deletion?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)):await stream.ReadAsync(bodyBytes.AsMemory(offset, remaining)); }
                 catch { break; }
                 if (r == 0) break;
                 offset += r;
@@ -556,8 +580,10 @@ public sealed partial class ApiServer
             }
         }
 
+        if((evaluation||batch)&&remaining!=0)throw batch?InvalidBatchDeletion():InvalidEvaluation();
         string body;
-        if(deletion){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw InvalidDeletion();}}
+        if(evaluation||batch){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw batch?InvalidBatchDeletion():InvalidEvaluation();}}
+        else if(deletion){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw InvalidDeletion();}}
         else body=StripBom(Encoding.UTF8.GetString(bodyBytes));
         return new HttpRequest(method, rawPath, headers, body, duplicateHeaders);
     }
@@ -615,11 +641,13 @@ public sealed partial class ApiServer
             status = 202;
             return ApiResponse.Ok(new { status = "accepted", exited = false, idle_only = true }, reqId);
         }
+        if(sub==EvaluationPath && method=="POST")return PostRetentionEvaluation(req,reqBody,reqId,cancellation);
         if((method is "POST" or "PUT" or "PATCH") && !string.IsNullOrWhiteSpace(reqBody))
         {
             try { _ = ConfigParser.ValidateArtifactRequestJson(reqBody,method=="POST"&&(sub is "/recordings" or "/recordings/quick")); }
             catch(JsonException) { } // Keep each route's original malformed-JSON error contract.
         }
+        if(sub.StartsWith(BatchDeletionPath,StringComparison.Ordinal))return RouteBatchDeletion(method,sub,req,reqBody,reqId,cancellation,ref status);
         if(sub.StartsWith(DeletionPath,StringComparison.Ordinal))return RouteDeletion(method,sub,req,reqBody,reqId,cancellation,ref status);
 
         switch (method, sub)
@@ -3806,6 +3834,22 @@ public sealed partial class ApiServer
                 requires_local_confirmation=true,single_item=true,permanent=true,no_trash=true,unattended=false,
                 query_budget_seconds=3,idempotency="durable_same_key_same_request_no_reexecution",recovery="readonly_unknown_no_permit_or_ui_recovery",
                 result_semantics="accepted_is_os_disposition_request_not_physical_deletion_or_freed_space"
+            },
+            retention_batch_deletion = new
+            {
+                supported=BatchDeletionSupported,request_endpoint="/api/v1/retention/batch-deletion-requests",query_endpoint="/api/v1/retention/batch-deletion-requests/{id}",
+                recording_ids_max=5,ordered=true,sequential=true,per_item_local_confirmation=true,stop_on_first_non_success=true,
+                atomic=false,rollback_supported=false,recycle_bin=false,headless_supported=false,batch_lifetime_seconds_max=600,
+                query_budget_seconds=3,body_bytes_max=BatchDeletionBodyLimit,json_depth_max=4,restart_execution_recovery=false,
+                success_semantics="os_disposition_request_accepted_not_physical_space_reclaimed"
+            },
+            retention_evaluations = new
+            {
+                supported=_retentionEvaluationGateway is not null,endpoint="/api/v1/retention/evaluations",method="POST",
+                read_only=true,deletion_supported=false,execution_supported=false,reference_protection_ready=false,
+                recording_ids_max=20,recording_id_length_max=200,body_bytes_max=EvaluationBodyLimit,deadline_ms=3000,
+                scope="host_data_directory_videos_ordinary_mp4",input_order_preserved=true,actual_worker_max=1,
+                ancestor_attribute_checks_max=640,file_observations_max=20,file_samples_snapshot=false
             },
             retention_preview = new
             {

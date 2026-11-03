@@ -400,6 +400,7 @@ internal static class Program
         var retentionPreviewGateway = CreateRetentionPreviewGateway(unifiedHistoryQuery, dataDir, engine, historyIdentity);
         using var deletionStopping=new CancellationTokenSource();
         var retentionDeletionGateway=CreateRetentionDeletionGateway(engine,operationalStore,ordinaryRecordingHistory,dataDir,historyIdentity(),deletionStopping.Token);
+        var retentionBatchDeletionGateway=((SqliteRetentionDeletionGateway)retentionDeletionGateway).CreateBatchGateway();
         tray.SetUnifiedHistoryGateway(unifiedHistoryGateway);
         var server = new ApiServer(
             engine,
@@ -424,7 +425,9 @@ internal static class Program
             new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
             new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),
             new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity),
-            retentionDeletionGateway);
+            retentionDeletionGateway,
+            retentionEvaluationGateway: CreateRetentionEvaluationGateway(unifiedHistoryQuery,dataDir,engine,historyIdentity),
+            retentionBatchDeletionGateway: retentionBatchDeletionGateway);
 
         Task? hostWarmup = null;
         int hostStartupComplete = 0;
@@ -433,7 +436,7 @@ internal static class Program
             ffmpegPrewarmer.HasActiveWork || hostWarmup is null || !hostWarmup.IsCompleted ? "host_warmup_pending" :
             tray.HostShutdownInteractionBusy || standingPlanSetupCoordinator?.HostShutdownBusy == true || recurringPlanSetupCoordinator?.HostShutdownBusy == true ||
             requiredOncePlanSetupCoordinator?.HostShutdownBusy == true || futureWindowCoordinator?.HostShutdownBusy == true
-                ? "interaction_in_flight" : retentionDeletionGateway.HostShutdownBusyReason ?? HostReadOnlyWorkerState.BusyReason, tray.PostAgentExit);
+                ? "interaction_in_flight" : retentionBatchDeletionGateway.HostShutdownBusyReason ?? retentionDeletionGateway.HostShutdownBusyReason ?? HostReadOnlyWorkerState.BusyReason, tray.PostAgentExit);
 
         var observationHealth=CreateObservationHealthGateway(tray,server,readiness,dataDir);
         if (observationHealth is ObservationHealthGateway ownedHealth) ownedHealth.HostAdmission = engine.HostAdmission;
@@ -562,6 +565,10 @@ internal static class Program
             throw;
         }
     }
+
+    internal static IRetentionEvaluationGateway CreateRetentionEvaluationGateway(UnifiedHistoryQueryService history,
+        string dataDir, RecordingEngine engine, Func<(string Sid, string Session)> identity)
+        => new SqliteRetentionEvaluationGateway(new RetentionEvaluationService(history,dataDir,engine),identity);
 
     internal static IRetentionPreviewGateway CreateRetentionPreviewGateway(UnifiedHistoryQueryService history,
         string dataDir, RecordingEngine engine, Func<(string Sid, string Session)> identity)

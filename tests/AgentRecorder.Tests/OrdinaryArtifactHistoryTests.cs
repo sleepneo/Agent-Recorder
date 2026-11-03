@@ -108,7 +108,14 @@ public sealed class OrdinaryArtifactHistoryTests(ITestOutputHelper output)
     [InlineData("UPDATE ordinary_recording_history SET output_size_bytes=12.5;")]
     public async Task CorruptFrozenFactsFailBeforeAllFileIo(string sql)
     {
-        using var f=new Fixture();f.Seed(anchor:true);f.Db.RawExecute("PRAGMA foreign_keys=OFF;PRAGMA ignore_check_constraints=ON;"+sql);
+        using var f=new Fixture();f.Seed(anchor:true);
+        // The v47 namespace index uses the existing ordinal path collation even
+        // on this intentionally constraint-bypassing corruption connection.
+        using(var c=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=f.Db.Store.DatabasePath,Mode=SqliteOpenMode.ReadWrite,Pooling=false}.ToString()))
+        {
+            c.Open();SqliteOutputPathCollation.Register(c);using var command=c.CreateCommand();
+            command.CommandText="PRAGMA foreign_keys=OFF;PRAGMA ignore_check_constraints=ON;"+sql;command.ExecuteNonQuery();
+        }
         var a=new Ancestors();var l=new Leaf();await Assert.ThrowsAsync<OrdinaryRecordingHistoryUnavailableException>(()=>f.Service(a,l).ReadAsync("r"));
         Assert.Empty(a.Calls);Assert.Empty(l.Calls);
     }

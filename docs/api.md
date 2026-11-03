@@ -4,11 +4,11 @@ Ordinary non-nested video requests at raw `POST /api/v1/recordings` and quick `P
 
 Artifacts must be an object containing only an optional JSON boolean bundle. Null, wrong types, unknown/duplicate fields and duplicate policies return `400 INVALID_ARGUMENT` before device/source/selection/confirmation or file work. Profile execution/configuration, Plan/Lease/future-window, screenshot-series and nested recording reject this field, even when true. `capabilities.recording_artifacts` publishes modes, default, routes and scope.
 
-False keeps the actual App generator installed but skips Bundle preparation/generation for this recording: no operation, `.bundle` or attachment extraction. Main MP4 validation, original-handle publication, terminal winner and durable history remain. Completed history atomically records `bundle.status="not_applicable"`; `media_hash` stays unknown/null because its existing generation stage did not run. Default Bundle generation and generating/ready/failed/interrupted protection remain. Schema stays V44; old media/facts are not backfilled or reinterpreted.
+False keeps the actual App generator installed but skips Bundle preparation/generation for this recording: no operation, `.bundle` or attachment extraction. Main MP4 validation, original-handle publication, terminal winner and durable history remain. Completed history atomically records `bundle.status="not_applicable"`; `media_hash` stays unknown/null because its existing generation stage did not run. Default Bundle generation and generating/ready/failed/interrupted protection remain. The MP4-only policy adds no migration; old media/facts are not backfilled or reinterpreted.
 
 A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. The policy is not deletion approval. Its main-output claim retires at a known production backend's actual settlement boundary; live or unknown work remains protected. Default Bundle outputs remain protected. Independent source/synthetic-input checks and one real 5-second silent FFmpeg selected-region run with local cancellation, approval and idempotent replay have passed. This does not establish all-backend or general retention acceptance.
 
-This reference describes v0.1.18 contracts through SQLite v44:
+This reference describes v0.1.19 contracts through SQLite v48:
 history, health, artifacts, generation digests, read-only retention preview and
 locally confirmed single deletion request plumbing. The restricted implementation
 has passed source checks. App recordings default to Bundles and remain protected;
@@ -2597,6 +2597,26 @@ An initialized empty store returns a successful empty page; a failed source is
 not replaced by a partial successful page. Existing ordinary history, per-Plan
 history, recording and authorization APIs retain their contracts.
 
+## Read-only explicit-ID retention evaluations
+
+`POST /api/v1/retention/evaluations` lets an agent summarize a supplied list of old recording IDs without paging through history or requesting approval. The host uses SQLite V48. It is not a batch deletion API.
+
+```json
+{"recording_ids":["rec_a","rec_b"],"completed_before":"2026-11-01T00:00:00Z"}
+```
+
+API key authentication is required even when the host has no key configured. Only these two fields are accepted: no query parameters, duplicate/unknown JSON fields, null/wrong types, comments or trailing commas; JSON depth is bounded to four and UTF-8 body to 16 KiB. IDs contain 1–200 characters under the existing whitespace/control/path-character rules, with 1–20 IDs, ordinal duplicate rejection and input order preserved. The historical writer's existing legal-ID limits are unchanged; a longer request ID cannot create or repair a record. Explicit UTC cutoff uses the existing preview time grammar and must not be in the future. Invalid input is rejected before business reads or file probes. No path, directory, principal, source, force, Lease, proposal or execution parameters are accepted.
+
+Scope is the current host's visible ordinary main-video history and fixed host Videos root. Ordinary records retain the existing host-database visibility; caller SID/session comes only from host composition, not the request. Plan/future IDs and invisible/missing records do not disclose foreign existence: each requested ID gets one `protected/not_found_or_not_visible` item with null status, path and byte observations. Different-case IDs remain distinct objects; path comparisons retain their existing independent policy.
+
+The `data` envelope includes `read_only=true`, `deletion_supported=false`, `reference_protection_ready=false`, `metadata_only=true`, `bundle_included=false`, evaluation start/end UTC times and the cutoff. Ordered `items` contain only recording_id/status/completed_at_utc, existing evaluation/reason_code/age_candidate, recorded_path/recorded_bytes and observed_file_bytes. Missing/invisible is the one additional non-candidate mapping; all visible entries reuse the original preview kernel and V45–V47 protections. Summaries include evaluated_count, age_candidate_count, observed_candidate_bytes, observed_candidate_file_count, unknown_candidate_file_count and unknown_file_count. Unknown observations are null and counted separately, not guaranteed zero bytes to release. Checked overflow fails the whole request. No safe_to_delete, reclaimable_bytes, proposal ID, approval/proof, operation nonce or native handle is returned. The ordinary envelope request_id remains diagnostic only.
+
+One original read-only DB connection/transaction serves at most 40 indexed candidate point projections plus the existing bounded Bundle/reference batches. No historical page walk or recursive API calls occur; date/status/page filters do not hide foreign references. Complete group validation precedes one complete runtime snapshot and sequential metadata observations, which are separate time points (`database_snapshot_then_runtime_and_sequential_file_samples_not_atomic`). At most 640 ancestor attribute calls and 20 file observations are allowed; Bundle directory matching for 20 worst-depth IDs uses at most 1300 keys, six batches and 512 parameters per batch.
+
+The operation shares ArtifactMetadataWorker's single actual worker and 3000 ms budget, including principal resolution, DB read/cleanup and file sampling. Busy, corrupt schema/results/provider, cancellation or budget exhaustion return whole-request HTTP503 `RETENTION_EVALUATION_UNAVAILABLE`, without partial candidates. File-level missing/inaccessible/changed identity keeps the existing protected reason. The API independently bounds a non-cooperating gateway to the same three-second read budget and requests cancellation; it never closes another thread's DB/native objects or returns quota early. HostReadOnlyWorkerState keeps idle exit busy until the actual worker retires. Input transport separately limits body reads to three seconds; invalid input gets a flushed error/FIN and at most 16 KiB/100 ms bounded rejection draining, not a longer evaluation deadline or unbounded body consumption.
+
+`capabilities.retention_evaluations` advertises the endpoint/method, maximum20, UTF-8 body/ID/path budgets, fixed scope, actual worker limit, sequential observations and no execution support. App and the existing read-only Headless host inject the same service; unconfigured/not-ready hosts return503, not an empty provider. The original GET preview, local single-item deletion and other recording APIs remain unchanged. Evaluating “which of these old recordings need attention” grants no present or future deletion permission and does not complete safe batch retention execution or the full reference graph.
+
 ## Retention preview
 
 `GET /api/v1/retention/preview` requires the existing `X-Agent-Recorder-Key`.
@@ -2685,6 +2705,19 @@ It returns no matching source, count, other ID, authorization proof or scope.
 Protection occurs before any file attributes or length probes; without a match,
 the remaining database protections apply before physical checks.
 
+Saved Bundle directory protection (introduced in V47)
+also uses `shared_output_path` for the lexical directory itself and separator-boundary
+descendants of saved `bundle_path` in ordinary_recording_bundles,
+ordinary_bundle_contents, ordinary_bundle_identity, ordinary_media_hash, and
+ordinary_bundle_attachment_hash. This is a recorded scope, not a physical alias or
+proof that a directory exists. No self-ID exclusion applies to directory roles.
+Matching orphan or corrupt foreign business facts still protect before file probes;
+the execution-time Guard rechecks after local approval. Up to 100 candidates use
+complete bounded ancestor keys (65 each, 6500 total), in at most 26 batches of 256
+keys/512 parameters on the original transaction. Missing/damaged evidence fails
+closed; GET does not migrate. No new DTO, route or deletion permission is added.
+
+
 After shared-output protection, a remaining eligible item is protected as
 `planned_output_path` when its exact file target is already frozen in a standing
 scope (`authorized_capture_scopes.output_directory + frozen_file_name`), recurring
@@ -2759,6 +2792,8 @@ media bindings, schema or migration receipts fail the entire page with the
 existing 503, even if an earlier item reason would protect it. Provider facts
 are validated too. No JSON, images, media contents or directories are read to
 infer or repair missing facts. Old rows remain null without backfill.
+
+The current implementation additionally checks saved Bundle attachment identities in this same bounded EXISTS batch. SQLite V45 adds only the `(volume_id,file_id)` attachment reverse index and its receipt; V1–V44 remain immutable. The attachment role has no recording-ID self exclusion, parent/status/date/session/page filter or foreign-field projection. Both preview and the independent deletion Guard transaction use it; missing/bad V45 schema fails closed. This does not expand deletion approval or claim a complete reference graph.
 
 After the existing missing-anchor and Bundle reasons, `shared_publication_identity`
 protects a candidate when another saved ordinary main-MP4 anchor, or a saved
@@ -3147,6 +3182,37 @@ The independent local window identifies the filename, copyable full path, size a
 Scope is one completed ordinary main MP4 directly under the host's fixed Videos root, with its original trusted publication anchor, successful size, explicitly not-applicable Bundle and passing existing finite-use protections. Paths/directories, batches, quota cleanup, Plan/future entries, attachments and unknown legacy files are unsupported. No identity is recollected to grant authority. `capabilities.retention_deletion` publishes both endpoints, this scope, `requires_local_confirmation=true`, `single_item=true`, `permanent=true`, `no_trash=true`, `unattended=false` and the result/recovery semantics. `retention_preview` remains separately read-only with `deletion_supported=false`, `reference_protection_ready=false` and `physical_identity_protection_ready=false`; neither capability establishes a complete reference graph or namespace freeze. This implementation and private automated UI adapters do not constitute real desktop confirmation or release-package acceptance.
 
 
+## Bounded batch deletion requests (SQLite V48)
+
+An agent can explain explicit candidates using read-only evaluation, then request ordered orchestration of **1–5 existing single-item deletion flows**. Every item still needs its own independent local confirmation. API authentication, an earlier age_candidate, a batch ID or a response is not approval. This is not one approval for a batch, an unattended retention policy, or a space-reclamation guarantee.
+
+```http
+POST /api/v1/retention/batch-deletion-requests
+X-Agent-Recorder-Key: <existing-key>
+Idempotency-Key: <one-key-for-the-original-ordered-body>
+Content-Type: application/json
+
+{"recording_ids":["rec_a","rec_b"]}
+```
+
+Exactly one recording_ids array, 1–5 ordinal-distinct IDs in the supplied order, and one existing-policy Idempotency-Key are required. IDs use the original single-deletion validator, including its existing writer/domain limits (the nominal 200-character envelope does not relax the original domain limit). UTF-8 body is bounded to4096 bytes, JSON depth4; invalid encoding, duplicate/unknown fields or headers, null/wrong types, extra bytes/Transfer-Encoding, query parameters, paths, force, Lease, source and root inputs are rejected before business dispatch. Body transport reads have a total three-second budget; existing header size bounds remain. No new approval, continue, force-release or retry endpoint exists.
+
+The existing ready interactive App and configured API key are required. The single-deletion authentication codes remain (missing/invalid key HTTP401, FORBIDDEN identifies an invalid key). Headless, absent gateway and unready/stopping hosts advertise unsupported and return503 `RETENTION_BATCH_DELETION_UNAVAILABLE`; they cannot install an approval-success provider. Supported scope remains ordinary completed original main MP4, fixed host Videos root, recorded publication identity and all existing execution-time guards. Bundle/directories/series, plan/future-window media and custom roots remain excluded.
+
+HTTP202 means a durable parent and its complete ordered item bindings exist, not local approval or disposition. GET `/api/v1/retention/batch-deletion-requests/{32-lowercase-hex-id}` accepts no body/query and never dispatches or repairs state; missing and foreign SID/session/root use the same404 `BATCH_DELETION_REQUEST_NOT_FOUND`. Corrupt evidence, unknown close or a busy/budget-exhausted query returns503. Same key/same ordered list returns the same parent; changed order/body returns409 `IDEMPOTENCY_KEY_CONFLICT`. Do not invent another key to bypass an attempt.
+
+V48 stores only parent/item orchestration relationships and a receipt; V1–V47 definitions/checksums are unchanged. The parent freezes host identity/root/incarnation, body digest, private binding digest and all random per-item child IDs/keys before any child/UI. FULL commit and positive DB retirement precede child dispatch. A second FULL reservation of exactly one position precedes calling the actual RetentionDeletionCoordinator internally; no recursive HTTP or duplicate native implementation is used. Neither private keys nor binding digests, Permit/approval material or native handles are returned.
+
+The response uses the usual envelope. data includes batch_deletion_request_id/query_url, batch_state, created_at_utc/expires_at_utc, stop_reason, batch_resources_retired (nullable actual owner evidence), non_atomic=true, per_item_local_confirmation=true, rollback_supported=false, success_semantics, disposition_accepted_count, not_requested_count and ordered items. Each item has position, recording_id, state/reason_code, the requested child's deletion_request_id when reserved, resources_retired and that original request's limited public progress/ledger/retirement result. not_requested items have no child result and do not imply a cancelled native action. accepted count reflects observed original OS disposition acceptance, including a partially completed batch; it is not bytes recovered or a guarantee that every item completed safely. Known acceptance can coexist with a non_success orchestration result after settlement uncertainty.
+
+Parent states are active/stopping, dispositions_accepted, stopped, interrupted or unknown. Item states are not_requested, requested_or_unknown, disposition_accepted or non_success; original child details distinguish approval, native progress, preparation/settlement commit and actual retirement. Persistent parent active→finished and item not_requested→dispatch_reserved→finished transitions are immutable in identity/order; database checks also reject out-of-order reservations. A reserved child ID is not proof that its creation committed.
+
+Only the exact original child's positive request/UI/Permit/DB/native/runtime retirement **and** usable committed single-request/ledger settlement may allow the next item. A committed success row alone cannot erase an after-commit provider exception. Reject/close/Esc/expiry, protection failure, busy, unavailable, native rejection or unknown stops remaining dispatch. Already accepted dispositions cannot be rolled back. One original host deletion admission covers the batch and lends to one child at a time, so another batch or single request cannot acquire a concurrent Permit; there is no waiting queue or automatic retry.
+
+Creation/status waits retain three-second read/store budgets (SQLite per-command/busy1s), original local confirmation/Permit limits remain60s each, and the batch has a10-minute maximum dispatch lifetime. The earlier of the monotonic admission-time limit and saved UTC expiry wins; a wall-clock rollback cannot extend it. Deadline/cancellation is not proof of resource retirement. An established batch is host-owned: HTTP disconnect/FIN/RST or polling never owns its UI/Permit, and does not retry or cancel it. Host stop/expiry requests cancellation; unknown or late resources retain admission and block idle exit until positively retired. Recreating a gateway/coordinator in the same process cannot hide an earlier actual flow/query slot: the existing quota strongly retains its owner and drain observes the original retirement task, or remains unavailable when that ownership cannot be proved. There is one actual status worker shared with the existing deletion query quota; cancellation cannot close another thread's DB/native objects or release its slot early.
+
+After restart, unfinished parents project interrupted/unknown read-only from the exact saved parent/item/child/approval/ledger relationships. GET and same-key POST never recover approval, re-display a window, rerun native disposition or continue remaining items. File absence, a new same-name object or a PID is not recovery evidence. The old single request and read-only evaluation contracts remain separate. `capabilities.retention_batch_deletion` states max5, ordered/sequential/per_item_local_confirmation/stop_on_first_non_success, non-atomic/no rollback/no Recycle Bin,600-second lifetime,3-second queries and no restart execution recovery. The host uses SQLite V48. Two-item rejection, per-item approval and same-key replay have passed real desktop acceptance.
+
 ## Agent-requested idle shutdown
 
 When the user asks to exit Recorder, the agent runs:
@@ -3211,3 +3277,5 @@ Set `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS` only in the host launch environment
 `recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports null effective limit/remaining; `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output and queued/generating/original Bundle host work demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
 
 This budget covers this Engine's independent ordinary raw silent windows and their unretired delivery, not all OS workers or hardware capacity. Top-level concurrency is a descriptive maximum across separate contracts; legacy nested/region rules remain two, and quick/Profile/Plan/Lease/future/audio/mixed sources gain no extra capability. Every accepted recording still needs its own local confirmation. `stress_tested=false`; no quality reduction, backend substitution, desktop fallback or automatic PiP composition. WIN1…WIN10 identify local controls only; API identity remains Recording ID.
+
+SQLite V48 includes the reference protections introduced in V46. Existing retention preview and execution-time Guard now include saved Bundle media/attachment identity tuples and the seven persisted exact media/attachment path fields. Only an exact BINARY self-owner of the same ordinary main media is excluded; same-ID attachments and matching orphan/corrupt foreign business facts remain protected. Missing or invalid schema/provider evidence fails closed; GET does not migrate. No new deletion routes or complete reference graph are implied.

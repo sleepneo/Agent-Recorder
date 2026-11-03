@@ -54,8 +54,44 @@ public sealed class UnifiedHistoryQueryService
         return new(evidence??throw new InvalidDataException("Retention relation evidence is missing."),page.NextCursor,page.PageSize,page.Filters);
     }
     internal Action<string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionReferenceCommandForTests {get;set;}
+    internal Action<SqliteConnection,SqliteTransaction>? EvaluationSnapshotForTests { get; set; }
+    // At most two original indexed point projections per ID (40 for a request),
+    // then the existing bounded batch readers. Never follows history cursors.
+    internal IReadOnlyDictionary<string,OrdinaryRetentionEvidence?> GetOrdinaryEvidenceByIds(
+        string sid,string session,IReadOnlyList<string> ids,CancellationToken cancellation)
+    {
+        if(ids.Count is <1 or >RetentionEvaluationService.MaxIds || ids.Distinct(StringComparer.Ordinal).Count()!=ids.Count ||
+            !ValidIdentity(sid)||!ValidIdentity(session)) throw new InvalidDataException("Evaluation identity or request unavailable.");
+        cancellation.ThrowIfCancellationRequested();
+        _ordinary.FlushBeforeUnifiedRead(TimeSpan.FromSeconds(1));
+        cancellation.ThrowIfCancellationRequested();
+        using var connection=_store.OpenReadOnlyConnection();connection.DefaultTimeout=1;
+        using(var policy=connection.CreateCommand()) {policy.CommandText="PRAGMA query_only=ON; PRAGMA busy_timeout=1000;";policy.ExecuteNonQuery();}
+        using var transaction=connection.BeginTransaction(IsolationLevel.Serializable,deferred:true);
+        EvaluationSnapshotForTests?.Invoke(connection,transaction);
+        SqliteOperationalStore.ValidateUnifiedHistorySchema(connection,transaction);
+        var rows=new List<OrdinaryRecordingHistorySnapshot>();var entries=new List<UnifiedHistoryEntry>();
+        foreach(var id in ids)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var selected=RetentionReferenceGuard.ReadExactCandidate(this,connection,transaction,id);
+            if(selected is {} value){rows.Add(value.Row);entries.Add(value.Entry);}
+        }
+        cancellation.ThrowIfCancellationRequested();
+        var bundles=OrdinaryRecordingBundleStorage.Read(connection,transaction,rows,BundleContentsCommandForTests,
+            BundleIdentityCommandForTests,MediaHashCommandForTests,AttachmentHashCommandForTests);
+        var targets=OrdinaryRecordingTargetStorage.Read(connection,transaction,rows,TargetCommandForTests);
+        for(var i=0;i<entries.Count;i++)entries[i]=entries[i] with {
+            Bundle=bundles[entries[i].RecordingId!],TargetKey=targets[entries[i].RecordingId!]};
+        var relations=ReadRetentionRelations(connection,transaction,entries,rows).ToDictionary(e=>e.Entry.RecordingId!,StringComparer.Ordinal);
+        cancellation.ThrowIfCancellationRequested();
+        transaction.Commit();
+        return ids.ToDictionary(id=>id,id=>relations.GetValueOrDefault(id),StringComparer.Ordinal);
+    }
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? RetentionIdentityCommandForTests { get; set; }
     internal Func<IReadOnlyList<(object CandidateId, object Flag)>, IReadOnlyList<(object CandidateId, object Flag)>>? RetentionIdentityResultsForTests { get; set; }
+    internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? RetentionNamespaceCommandForTests { get; set; }
+    internal Func<IReadOnlyList<(object CandidateId, object Flag)>, IReadOnlyList<(object CandidateId, object Flag)>>? RetentionNamespaceResultsForTests { get; set; }
     internal IReadOnlyList<OrdinaryRetentionEvidence> ReadRetentionRelations(SqliteConnection connection,SqliteTransaction transaction,
         IReadOnlyList<UnifiedHistoryEntry> entries,IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
     {
@@ -68,6 +104,9 @@ public sealed class UnifiedHistoryQueryService
         var anchors = PublicationAnchorStorage.Read(connection, transaction, rows);
         var identities = PublicationIdentityReferenceStorage.Read(connection, transaction, anchors,
             RetentionIdentityCommandForTests, RetentionIdentityResultsForTests);
+        var namespaces = BundleNamespaceReferenceStorage.Read(connection, transaction,
+            rows.ToDictionary(r => r.RecordingId, r => (string?)r.OutputPath, StringComparer.Ordinal),
+            RetentionNamespaceCommandForTests, RetentionNamespaceResultsForTests);
         if(rows.Count==0) return Array.Empty<OrdinaryRetentionEvidence>();
         using var command=connection.CreateCommand();command.Transaction=transaction;
         var parameters=rows.Select((row,i)=>"($parent"+i+")").ToArray();
@@ -89,7 +128,7 @@ public sealed class UnifiedHistoryQueryService
         var planned = ReadPlannedOutputReferences(connection, transaction, rows);
         var pending = PendingOutputUseStorage.Read(connection, transaction, rows, RetentionPendingOutputCommandForTests);
         return entries.Select((entry,i)=>new OrdinaryRetentionEvidence(entry,NestedState(rows[i],references[rows[i].RecordingId]),
-            shared[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId], PublicationIdentityReference = identities[rows[i].RecordingId], PendingOutputUse = pending[rows[i].RecordingId] }).ToArray();
+            shared[rows[i].RecordingId] || namespaces[rows[i].RecordingId] ? SharedOutputPathReferenceState.Referenced : SharedOutputPathReferenceState.None, planned[rows[i].RecordingId]) { PublicationAnchor = anchors[rows[i].RecordingId], PublicationIdentityReference = identities[rows[i].RecordingId], PendingOutputUse = pending[rows[i].RecordingId] }).ToArray();
     }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPendingOutputCommandForTests { get; set; }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPathCommandForTests { get; set; }
@@ -98,9 +137,14 @@ public sealed class UnifiedHistoryQueryService
     {
         using var command = connection.CreateCommand(); command.Transaction = transaction;
         var requested = rows.Select((row,i)=>"($id"+i+",$path"+i+")");
+        SqliteSchemaV46.Validate(connection, transaction);
         var exists = SqliteSchemaV28.Paths.Select(p => "EXISTS(SELECT 1 FROM "+p.Table+" referenced INDEXED BY "+p.Index+
             " WHERE referenced.output_path COLLATE "+SqliteOutputPathCollation.Name+"=requested.output_path"+
-            (p.Table=="ordinary_recording_history"?" AND referenced.recording_id<>requested.recording_id":"")+")");
+            (p.Table=="ordinary_recording_history"?" AND referenced.recording_id<>requested.recording_id":"")+")")
+            .Concat(SqliteSchemaV46.Indexes.Where(i => i.Name.EndsWith("_path")).Select(i =>
+                "EXISTS(SELECT 1 FROM " + i.Table + " referenced INDEXED BY " + i.Name +
+                " WHERE referenced." + i.Columns.Split(' ')[0] + " COLLATE " + SqliteOutputPathCollation.Name + "=requested.output_path" +
+                (i.Columns.Contains("recording_id") ? " AND NOT(typeof(referenced.recording_id)='text' AND referenced.recording_id COLLATE BINARY=requested.recording_id COLLATE BINARY)" : "") + ")"));
         command.CommandText = "WITH requested(recording_id,output_path) AS (VALUES "+string.Join(",",requested)+") "+
             "SELECT requested.recording_id, ("+string.Join(" OR ",exists)+") FROM requested;";
         for (var i=0;i<rows.Count;i++) { Add(command,"$id"+i,rows[i].RecordingId);Add(command,"$path"+i,rows[i].OutputPath); }

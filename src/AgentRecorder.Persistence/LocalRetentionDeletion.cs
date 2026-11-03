@@ -78,6 +78,9 @@ internal sealed partial class LocalRetentionApproval
         }
         internal Task<LocalDeletionResult> Response => _response.Task;
         internal Task<LocalDeletionResult> Retirement => _retirement.Task;
+        // Positive completion evidence for an enclosing sequential orchestrator.
+        // A committed row alone cannot erase an after-commit provider fault.
+        internal bool SettlementUsable {get;private set;}
         // A fresh observation for the host coordinator; never mutates the
         // already frozen Response or creates/recovers a disposition capability.
         internal LocalDeletionResult Current => _retirement.Task.IsCompletedSuccessfully?_retirement.Task.Result:Snapshot(null);
@@ -118,7 +121,7 @@ internal sealed partial class LocalRetentionApproval
                     try { await work.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
                     catch { _response.TrySetResult(Snapshot(r.Execution,resources,r.ExecutionRetirement)); }
                     var settled=await work.ConfigureAwait(false);
-                    lock(_session.Host._sync){_settlementCommit=settled.Commit;LedgerResourcesRetired&=settled.ResourcesRetired;_ledgerWorking=false;}
+                    lock(_session.Host._sync){_settlementCommit=settled.Commit;LedgerResourcesRetired&=settled.ResourcesRetired;SettlementUsable=settled.Usable;_ledgerWorking=false;}
                     final=Snapshot(r.Execution,resources&&LedgerResourcesRetired,r.ExecutionRetirement);
                 }
             }

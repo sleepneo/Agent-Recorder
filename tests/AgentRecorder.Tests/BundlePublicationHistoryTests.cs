@@ -221,7 +221,7 @@ public sealed class BundlePublicationHistoryTests(ITestOutputHelper output)
         var legacy = writer.Read("legacy")!; Assert.NotNull(legacy.Bundle!.ContentsEvidence); Assert.Null(legacy.Bundle.IdentityEvidence);
         using var c2 = store.OpenReadOnlyConnection(); using var count = c2.CreateCommand(); count.CommandText = "SELECT COUNT(*) FROM ordinary_bundle_identity;"; Assert.Equal(0L, count.ExecuteScalar());
         var fresh = f.Row("fresh"); var freshOp = OrdinaryRecordingBundleOperation.Create("fresh", fresh.OutputPath); writer.Register(fresh with { BundleRegistration = new(freshOp) });
-        using var raw = new SqliteConnection($"Data Source={path};Pooling=False"); raw.Open(); using var damage = raw.CreateCommand(); damage.CommandText = "PRAGMA foreign_keys=OFF;DELETE FROM ordinary_bundle_identity WHERE recording_id='fresh';"; damage.ExecuteNonQuery();
+        using var raw = new SqliteConnection($"Data Source={path};Pooling=False"); raw.Open(); SqliteOutputPathCollation.Register(raw); using var damage = raw.CreateCommand(); damage.CommandText = "PRAGMA foreign_keys=OFF;DELETE FROM ordinary_bundle_identity WHERE recording_id='fresh';"; damage.ExecuteNonQuery();
         Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(() => writer.Read("fresh")); Assert.Equal(legacy, writer.Read("legacy"));
         output.WriteLine("True V34 DB upgraded to V35 without changing V1-V34 data, DDL or receipts. Old manifest has no backfilled identity.");
     }

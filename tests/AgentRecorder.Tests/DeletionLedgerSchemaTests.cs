@@ -38,7 +38,7 @@ public sealed class DeletionLedgerSchemaTests
         // Compare all legacy tables/schema directly, excluding ONLY newly added v43 objects/receipt.
         Assert.Equal(old,LegacyBytes(f));var once=SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true);
         f.Db.Store.Initialize();new SqliteOperationalStore(f.Db.Store.DatabasePath).Initialize();Assert.Equal(once,SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true));
-        Assert.Equal(44,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(f.Bytes,File.ReadAllBytes(f.Media));
+        Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(f.Bytes,File.ReadAllBytes(f.Media));
     }
     private static string LegacyBytes(LocalRetentionDeletionFixture f)
     {
@@ -48,14 +48,14 @@ public sealed class DeletionLedgerSchemaTests
         using(var destination=new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Pooling=False"))
         {destination.Open();source.BackupDatabase(destination);}
         using(var c=new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadWrite"))
-        {c.Open();using var cmd=c.CreateCommand();cmd.CommandText="DROP TABLE ordinary_deletion_requests; DELETE FROM schema_migrations WHERE version=44; DROP TABLE ordinary_deletion_operations; DELETE FROM schema_migrations WHERE version=43;";cmd.ExecuteNonQuery();}
+        {c.Open();using var cmd=c.CreateCommand();cmd.CommandText="DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48; DROP INDEX idx_v47_ordinary_recording_bundles_namespace; DROP INDEX idx_v47_ordinary_bundle_contents_namespace; DROP INDEX idx_v47_ordinary_bundle_identity_namespace; DROP INDEX idx_v47_ordinary_media_hash_namespace; DROP INDEX idx_v47_ordinary_bundle_attachment_hash_namespace; DELETE FROM schema_migrations WHERE version=47; DROP INDEX idx_v46_ordinary_recording_bundles_path; DROP INDEX idx_v46_ordinary_bundle_contents_path; DROP INDEX idx_v46_ordinary_bundle_identity_path; DROP INDEX idx_v46_ordinary_media_hash_path; DROP INDEX idx_v46_ordinary_bundle_attachment_hash_path; DROP INDEX idx_v46_ordinary_bundle_identity_items_path; DROP INDEX idx_v46_ordinary_bundle_attachment_hash_items_path; DROP INDEX idx_v46_ordinary_media_hash_identity; DROP INDEX idx_v46_ordinary_bundle_attachment_hash_items_identity; DELETE FROM schema_migrations WHERE version=46; DROP INDEX idx_bundle_attachment_publication_identity; DELETE FROM schema_migrations WHERE version=45; DROP TABLE ordinary_deletion_requests; DELETE FROM schema_migrations WHERE version=44; DROP TABLE ordinary_deletion_operations; DELETE FROM schema_migrations WHERE version=43;";cmd.ExecuteNonQuery();}
         return SqlitePublicationIdentityReferenceTests.OldBytes(path,true);
     }
     [Fact]
     public void ChecksumCatalogAndOnlyLocalFullPolicyAgree()
     {
         Assert.Equal(SqliteSchemaV43.MigrationChecksum,SqliteSchemaV1.ComputeChecksum(SqliteSchemaV43.Definition));
-        Assert.Equal(44,SqliteSchemaCatalog.Migrations.Count);Assert.Equal(44,SqliteSchemaCatalog.Migrations.Last().Version);
+        Assert.Equal(48,SqliteSchemaCatalog.Migrations.Count);Assert.Equal(48,SqliteSchemaCatalog.Migrations.Last().Version);
         using var f=new LocalRetentionDeletionFixture();using var c=f.Db.Store.OpenConnection();using var cmd=c.CreateCommand();cmd.CommandText="PRAGMA synchronous;";Assert.Equal(1L,cmd.ExecuteScalar());
     }
     [Theory]

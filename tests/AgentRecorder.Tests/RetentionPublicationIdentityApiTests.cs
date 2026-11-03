@@ -17,6 +17,10 @@ public sealed class RetentionPublicationIdentityApiTests
     [InlineData(false)][InlineData(true)]
     public async Task PrivateRelationUsesExistingEnvelopeAndCapabilitiesWithoutMaterials(bool ordinaryOnly)
         => await Run(ordinaryOnly, null);
+    [Fact]
+    public async Task AttachmentRelationUsesAuthenticatedPreviewWithoutForeignData() => await Run(false,null,true);
+    [Theory][InlineData("missing")][InlineData("duplicate")][InlineData("flag")][InlineData("throw")]
+    public async Task BadAttachmentQueryRowsFailBeforeFilesystem(string fault) => await Run(true,fault,true);
 
     public static IEnumerable<object[]> SchemaFaults => SqlitePublicationIdentityReferenceTests.Faults();
     [Theory, MemberData(nameof(SchemaFaults))]
@@ -26,18 +30,35 @@ public sealed class RetentionPublicationIdentityApiTests
     [InlineData("missing")][InlineData("duplicate")][InlineData("foreign")][InlineData("flag")][InlineData("throw")]
     public async Task BadQueryRowsCannotLeakItemsAndDoNotProbe(string fault) => await Run(false, fault);
 
-    private static async Task Run(bool ordinaryOnly, string? fault)
+    [Theory, MemberData(nameof(RetentionBundle385Tests.Sources), MemberType=typeof(RetentionBundle385Tests))]
+    public async Task Bundle385SourceUsesAuthenticatedPreviewWithoutForeignData(string source) => await Run(false,null,bundle385Source:source);
+
+    [Theory, MemberData(nameof(RetentionBundleNamespace386Tests.Sources), MemberType=typeof(RetentionBundleNamespace386Tests))]
+    public async Task PersistedNamespaceUsesAuthenticatedPreviewWithoutForeignData(string table) => await Run(false,null,bundleNamespaceSource:table);
+    [Theory]
+    [InlineData("missing")][InlineData("duplicate")][InlineData("foreign")][InlineData("flag")][InlineData("throw")]
+    public async Task NamespaceProviderDamageReturnsSafe503(string fault) => await Run(false,fault,namespaceProvider:true);
+
+    private static async Task Run(bool ordinaryOnly, string? fault, bool attachment=false, string? bundle385Source=null,
+        string? bundleNamespaceSource=null, bool namespaceProvider=false)
     {
         using var f = new RetentionPreviewQueryTests.Fixture(); var row = f.Seed("candidate");
-        RetentionPublicationIdentityTests.ForeignOrdinary(f, row);
+        if(bundleNamespaceSource is not null)RetentionBundleNamespace386Tests.Insert(f.Db,bundleNamespaceSource,Path.GetDirectoryName(row.OutputPath)!,row.PublicationReceipt!.Anchor);
+        else if(bundle385Source is not null)RetentionBundle385Tests.Insert(f.Db,bundle385Source,row.OutputPath,row.PublicationReceipt!.Anchor);
+        else if(attachment)RetentionBundleAttachment384Tests.Insert(f,row.PublicationReceipt!.Anchor);
+        else RetentionPublicationIdentityTests.ForeignOrdinary(f, row);
         var query = new UnifiedHistoryQueryService(f.Db.Store, f.Db.Ordinary, ordinaryOnly);
-        if (fault?.Contains(';') == true) f.Db.RawExecute(fault);
-        else if (fault is not null) query.RetentionIdentityResultsForTests = rows => fault switch
+        if (fault?.Contains(';') == true) SqlitePublicationIdentityReferenceTests.ApplyFault(f.Db,fault);
+        else if (fault is not null)
         {
+            Func<IReadOnlyList<(object CandidateId,object Flag)>,IReadOnlyList<(object CandidateId,object Flag)>> bad = rows => fault switch
+            {
             "missing" => Array.Empty<(object, object)>(), "duplicate" => new[] { rows[0], rows[0] },
             "foreign" => new[] { ((object)"SECRET_FOREIGN", (object)0L) }, "flag" => new[] { (rows[0].CandidateId, (object)2L) },
             _ => throw new IOException("SECRET_PROVIDER")
-        };
+            };
+            if(namespaceProvider)query.RetentionNamespaceResultsForTests=bad;else query.RetentionIdentityResultsForTests=bad;
+        }
         var service = new RetentionPreviewQueryService(query.GetOrdinaryEvidencePage, f.Db.Root, f.Files, f.Files, () => At.AddDays(2), TestRuntimeOutputUse.None);
         var prior = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
         var audit = new RetentionSharedOutputPathTests.QuietAudit(); using var engine = new RecordingEngine(audit); var tray = new HeadlessTrayContext(audit); engine.SetTray(tray);
@@ -58,7 +79,7 @@ public sealed class RetentionPublicationIdentityApiTests
             else
             {
                 using var document = JsonDocument.Parse(text); var data = document.RootElement.GetProperty("data");
-                var item = Assert.Single(data.GetProperty("items").EnumerateArray()); Assert.Equal("shared_publication_identity", item.GetProperty("reason_code").GetString());
+                var item = Assert.Single(data.GetProperty("items").EnumerateArray()); Assert.Equal(bundle385Source?.EndsWith(":path")==true || bundleNamespaceSource is not null ? "shared_output_path" : "shared_publication_identity", item.GetProperty("reason_code").GetString());
                 Assert.Equal(JsonValueKind.Null, item.GetProperty("observed_file_bytes").ValueKind); Assert.True(data.GetProperty("read_only").GetBoolean());
                 Assert.False(data.GetProperty("deletion_supported").GetBoolean()); Assert.False(data.GetProperty("reference_protection_ready").GetBoolean());
                 Assert.Equal(1, data.GetProperty("unknown_candidate_file_count").GetInt32());

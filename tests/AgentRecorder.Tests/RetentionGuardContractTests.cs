@@ -32,7 +32,7 @@ public sealed class RetentionGuardContractTests
         Assert.Equal(1, calls); Assert.Throws<InvalidOperationException>(() => context!.RequireActive());
         Assert.All(typeof(RetentionReferenceGuard.ScopeContext).GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic), c => Assert.True(c.IsPrivate));
         Assert.Equal(before, SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath, true));
-        Assert.False(Directory.Exists(Path.GetDirectoryName(f.Row.OutputPath))); Assert.Equal(44, SqliteOperationalStore.CurrentSchemaVersion);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(f.Row.OutputPath))); Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);
         Assert.Single(adapter.Threads.Distinct()); Assert.Equal(1, adapter.Begins); Assert.Equal(1, adapter.Rollbacks);
         Assert.Equal(1, adapter.Closes); Assert.Equal(1, adapter.ConnectionDisposes); Assert.Equal(1, adapter.TransactionDisposes);
         Assert.Equal(RetentionGuardReason.Checked, await Finish(f.Execute(g))); // True retirement releases admission.
@@ -61,7 +61,7 @@ public sealed class RetentionGuardContractTests
         Assert.Contains(result, new[] { RetentionGuardReason.InvalidInput, RetentionGuardReason.CandidateRejected }); Assert.Equal(0, calls);
     }
 
-    public static IEnumerable<object[]> Receipts => Enumerable.Range(1, 44).Select(v => new object[] { v });
+    public static IEnumerable<object[]> Receipts => Enumerable.Range(1, SqliteOperationalStore.CurrentSchemaVersion).Select(v => new object[] { v });
     [Theory, MemberData(nameof(Receipts))]
     public async Task EveryMissingReceiptIsUnavailableAndNeverRepaired(int version)
     {
@@ -72,12 +72,15 @@ public sealed class RetentionGuardContractTests
         Assert.Equal(0, calls); Assert.Equal(before, SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath, true));
     }
     public static IEnumerable<object[]> Indexes => SqliteSchemaV28.Indexes.Concat(SqliteSchemaV29.Indexes).Concat(SqliteSchemaV38.Indexes).Concat(SqliteSchemaV39.Indexes)
-        .Select(i => i.Name).Concat(SqliteSchemaV42.Indexes.Select(i => i.Name)).Append(SqliteSchemaV25.IndexName).Select(i => new object[] { i });
+        .Select(i => i.Name).Concat(SqliteSchemaV42.Indexes.Select(i => i.Name)).Append(SqliteSchemaV25.IndexName).Append(SqliteSchemaV45.IndexName).Concat(SqliteSchemaV46.Indexes.Select(i => i.Name)).Concat(SqliteSchemaV47.Indexes.Select(i => i.Name)).Select(i => new object[] { i });
     [Theory, MemberData(nameof(Indexes))]
     public async Task EveryRelationshipIndexRequired(string index)
     {
-        using var f = new RetentionGuardFixture(); f.Db.RawExecute("DROP INDEX " + index + ";"); using var g = f.Guard();
-        Assert.Equal(RetentionGuardReason.Unavailable, await Finish(f.Execute(g)));
+        using var f = new RetentionGuardFixture(); f.Db.RawExecute("DROP INDEX " + index + ";");
+        var before = SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath, true);
+        using var g = f.Guard(); var calls = 0;
+        Assert.Equal(RetentionGuardReason.Unavailable, await Finish(f.Execute(g, _ => { calls++; return RetentionGuardContinuationResult.Completed; })));
+        Assert.Equal(0, calls); Assert.Equal(before, SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath, true));
     }
     [Theory]
     [InlineData("ordinary_recording_history", "output_path")][InlineData("ordinary_recording_history", "status_code")]

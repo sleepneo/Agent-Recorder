@@ -14,6 +14,7 @@ public interface IRetentionDeletionGateway
 
 public sealed class SqliteRetentionDeletionGateway(RetentionDeletionCoordinator coordinator):IRetentionDeletionGateway
 {
+    public IRetentionBatchDeletionGateway CreateBatchGateway()=>new SqliteRetentionBatchDeletionGateway(coordinator.CreateBatchCoordinator());
     public bool Supported=>coordinator.Supported;
     public string? HostShutdownBusyReason => coordinator.HostShutdownBusyReason;
     public Task<RetentionDeletionRequestResult> RequestAsync(string recordingId,string key,CancellationToken cancellation=default)=>coordinator.RequestAsync(recordingId,key,cancellation);

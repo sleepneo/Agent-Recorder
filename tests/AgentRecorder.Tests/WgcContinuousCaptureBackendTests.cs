@@ -1478,85 +1478,95 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
 
     [Fact]
     public async Task DisposeDuringStarting_ResolverBlocked_RollbacksWithoutPublishing()
-    {
-        var startBlocked = new ManualResetEventSlim(false);
-        var disposeStarting = new ManualResetEventSlim(false);
-        FakeSession? session = null;
-        int resolverCalls = 0;
-        int factoryCalls = 0;
-
-        var backend = CreateBackend(
-            options =>
-            {
-                factoryCalls++;
-                session = new FakeSession(options);
-                return session;
-            },
-            out var publisher,
-            out _,
-            () =>
-            {
-                resolverCalls++;
-                startBlocked.Set();
-                disposeStarting.Wait();
-                return Path.Combine(_tempDir, "helper.exe");
-            });
-        backend.OnDisposeStartingWaitForTests = () => disposeStarting.Set();
-
-        var cfg = CreateValidConfig();
-        var startTask = Task.Run(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
-        Assert.True(startBlocked.Wait(TimeSpan.FromSeconds(5)), "Resolver should enter.");
-
-        var disposeTask = Task.Run(() => backend.Dispose());
-        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
-        var startEx = await Assert.ThrowsAsync<ObjectDisposedException>(() => startTask);
-        Assert.NotNull(startEx);
-
-        Assert.Equal(1, resolverCalls);
-        Assert.Equal(1, factoryCalls);
-        Assert.NotNull(session);
-        Assert.True(session!.Disposed);
-        Assert.Equal(0, session.StartCallCount);
-        Assert.Equal(0, publisher.CallCount);
-        Assert.DoesNotContain("wgc-continuous", Directory.GetDirectories(_tempDir).Select(Path.GetFileName));
-    }
+        => await AssertStartingRollbackRetirement(resolverBlocked: true);
 
     [Fact]
     public async Task DisposeDuringStarting_FactoryBlocked_RollbacksAndDisposesSession()
+        => await AssertStartingRollbackRetirement(resolverBlocked: false);
+
+    private async Task AssertStartingRollbackRetirement(bool resolverBlocked)
     {
-        var factoryBlocked = new ManualResetEventSlim(false);
-        var disposeStarting = new ManualResetEventSlim(false);
+        using var entered = new ManualResetEventSlim(false);
+        using var disposeEntered = new ManualResetEventSlim(false);
+        var disposeClaimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
         FakeSession? session = null;
-        int factoryCalls = 0;
-
-        var backend = CreateBackend(
-            options =>
-            {
-                factoryCalls++;
-                factoryBlocked.Set();
-                disposeStarting.Wait();
-                session = new FakeSession(options);
-                return session;
-            },
-            out var publisher,
-            out _);
-        backend.OnDisposeStartingWaitForTests = () => disposeStarting.Set();
-
+        string? staging = null;
+        string? marker = null;
+        int resolverCalls = 0, factoryCalls = 0;
+        void BlockStart()
+        {
+            entered.Set();
+            Assert.True(release.Wait(TimeSpan.FromSeconds(5)), "Test must release blocked setup.");
+        }
+        var backend = CreateBackend(options =>
+        {
+            factoryCalls++;
+            if (!resolverBlocked) BlockStart();
+            staging = Path.GetDirectoryName(options.OutputPath)!;
+            marker = Path.Combine(staging, "owned-retirement-marker.txt");
+            File.WriteAllText(marker, "synthetic startup rollback; no capture");
+            session = new FakeSession(options, autoRetireResources: false);
+            return session;
+        }, out var publisher, out _, () =>
+        {
+            resolverCalls++;
+            if (resolverBlocked) BlockStart();
+            return Path.Combine(_tempDir, "helper.exe");
+        });
+        backend.OnDisposeStartingWaitForTests = () => { disposeEntered.Set(); disposeClaimed.TrySetResult(); };
+        Task? disposeTask = null;
         var cfg = CreateValidConfig();
         var startTask = Task.Run(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg));
-        Assert.True(factoryBlocked.Wait(TimeSpan.FromSeconds(5)), "Factory should enter.");
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)), "Selected setup stage should enter.");
+            disposeTask = Task.Run(() => backend.Dispose());
+            Assert.True(disposeEntered.Wait(TimeSpan.FromSeconds(5)), "Dispose must claim startup before release.");
+            release.Set();
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            var startEx = await Assert.ThrowsAsync<ObjectDisposedException>(() => startTask.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.NotNull(startEx);
+            Assert.Equal(1, resolverCalls);
+            Assert.Equal(1, factoryCalls);
+            Assert.NotNull(session);
+            Assert.True(session!.Disposed);
+            Assert.Equal(0, session.StartCallCount);
+            Assert.Equal(0, publisher.CallCount);
+            Assert.False(session.ResourceRetirement.IsCompleted);
+            Assert.False(backend.OutputRetirement.IsCompleted);
+            Assert.True(Directory.Exists(staging));
+            Assert.True(File.Exists(marker));
 
-        var disposeTask = Task.Run(() => backend.Dispose());
-        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
-        var startEx = await Assert.ThrowsAsync<ObjectDisposedException>(() => startTask);
-        Assert.NotNull(startEx);
-
-        Assert.Equal(1, factoryCalls);
-        Assert.NotNull(session);
-        Assert.True(session!.Disposed);
-        Assert.Equal(0, session.StartCallCount);
-        Assert.Equal(0, publisher.CallCount);
-        Assert.DoesNotContain("wgc-continuous", Directory.GetDirectories(_tempDir).Select(Path.GetFileName));
+            session.ConfirmResourceRetirementForTests();
+            await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(Directory.Exists(staging));
+            Assert.False(File.Exists(marker));
+            Assert.DoesNotContain("wgc-continuous", Directory.GetDirectories(_tempDir).Select(Path.GetFileName));
+            Assert.Equal(0, session.StartCallCount);
+            Assert.Equal(0, publisher.CallCount);
+        }
+        finally
+        {
+            // Even an early assertion failure releases setup and waits actual
+            // retirement; Dispose/Start completion is never a substitute.
+            disposeTask ??= Task.Run(() => backend.Dispose());
+            try
+            {
+                // An early assertion must not release setup before Dispose has
+                // claimed Starting (or already completed from Created).
+                try { await Task.WhenAny(disposeClaimed.Task, disposeTask).WaitAsync(TimeSpan.FromSeconds(5)); }
+                finally { release.Set(); }
+                await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+                try { await startTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (ObjectDisposedException) { }
+            }
+            finally
+            {
+                session?.ConfirmResourceRetirementForTests();
+                await backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
     }
 
     [Fact]
@@ -3500,16 +3510,19 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
         private readonly TaskCompletionSource<WgcContinuousSessionResult> _completionTcs;
 
         private readonly TaskCompletionSource _resourceRetired = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool _autoRetireResources;
         public Task ResourceRetirement => _resourceRetired.Task;
-        public FakeSession(WgcContinuousSessionOptions options, bool runCompletionContinuationsAsynchronously = true)
+        public void ConfirmResourceRetirementForTests() => _resourceRetired.TrySetResult();
+        public FakeSession(WgcContinuousSessionOptions options, bool runCompletionContinuationsAsynchronously = true, bool autoRetireResources = true)
         {
             Options = options;
+            _autoRetireResources = autoRetireResources;
             _completionTcs = new TaskCompletionSource<WgcContinuousSessionResult>(
                 runCompletionContinuationsAsynchronously
                     ? TaskCreationOptions.RunContinuationsAsynchronously
                     : TaskCreationOptions.None);
             _ = _completionTcs.Task.ContinueWith(done => {
-                if (!done.IsCompletedSuccessfully || done.Result?.ProcessExitConfirmed != false)
+                if (_autoRetireResources && (!done.IsCompletedSuccessfully || done.Result?.ProcessExitConfirmed != false))
                     _resourceRetired.TrySetResult();
             }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
@@ -3596,7 +3609,7 @@ public sealed partial class WgcContinuousCaptureBackendTests : IDisposable
                 });
             }
             // This no-process fake is sealed on Dispose, independently of callback scheduling.
-            if (!_completionTcs.Task.IsCompletedSuccessfully || _completionTcs.Task.Result?.ProcessExitConfirmed != false)
+            if (_autoRetireResources && (!_completionTcs.Task.IsCompletedSuccessfully || _completionTcs.Task.Result?.ProcessExitConfirmed != false))
                 _resourceRetired.TrySetResult();
         }
     }

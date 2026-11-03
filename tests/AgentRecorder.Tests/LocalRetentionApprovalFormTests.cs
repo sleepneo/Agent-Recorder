@@ -21,6 +21,7 @@ public sealed class LocalRetentionApprovalFormTests
             var intent=LocalRetentionIntent.ForConfirmedFacts(facts,clock);var text=new UiTextProvider(language);using var form=new LocalRetentionApprovalForm(intent,text);
             Assert.True(form.SafeDefaults);Assert.True(form.Inspectable);Assert.Equal(AutoScaleMode.Dpi,form.AutoScaleMode);Assert.False(form.ApproveButton.Enabled);
             Assert.Equal(text.Get("RetentionApproval_Approve"),form.ApproveButton.Text);Assert.Contains(path,form.ScopeText);Assert.Contains("12",form.ScopeText);
+            Assert.Contains(facts.RecordingId,form.ScopeText);Assert.Contains(text.Get("RetentionApproval_RecordingId"),form.ScopeText);
             Assert.Contains(facts.CompletedAtUtc.ToString("O"),form.ScopeText);Assert.Contains(language==UiLanguage.ZhCn?"不进入回收站":"Recycle Bin",form.WarningText);
             Assert.Contains(language==UiLanguage.ZhCn?"历史记录保留":"History is retained",form.WarningText);
             Assert.Contains(language==UiLanguage.ZhCn?"不授权录屏":"does not authorize recording",form.WarningText);

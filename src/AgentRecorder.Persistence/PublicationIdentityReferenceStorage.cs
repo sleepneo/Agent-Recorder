@@ -14,6 +14,8 @@ internal static class PublicationIdentityReferenceStorage
         Func<IReadOnlyList<(object CandidateId, object Flag)>, IReadOnlyList<(object CandidateId, object Flag)>>? transform)
     {
         SqliteSchemaV42.Validate(connection, transaction);
+        SqliteSchemaV45.Validate(connection, transaction);
+        SqliteSchemaV46.Validate(connection, transaction);
         if (anchors.Count > 100) throw new InvalidDataException("Publication reference page exceeds its bound.");
         var result = anchors.ToDictionary(a => a.Key, _ => (PublicationIdentityReferenceState?)null, StringComparer.Ordinal);
         var candidates = anchors.Where(a => a.Value is not null).ToArray();
@@ -27,6 +29,12 @@ internal static class PublicationIdentityReferenceStorage
             "EXISTS(SELECT 1 FROM future_window_publication_anchors a INDEXED BY " + SqliteSchemaV42.FutureIndex +
             " WHERE a.volume_id=requested.volume_id AND a.file_id=requested.file_id) OR " +
             "EXISTS(SELECT 1 FROM plan_media_publication_anchors a INDEXED BY " + SqliteSchemaV42.PlanIndex +
+            " WHERE a.volume_id=requested.volume_id AND a.file_id=requested.file_id) OR " +
+            "EXISTS(SELECT 1 FROM ordinary_bundle_identity_items a INDEXED BY " + SqliteSchemaV45.IndexName +
+            " WHERE a.volume_id=requested.volume_id AND a.file_id=requested.file_id) OR " +
+            "EXISTS(SELECT 1 FROM ordinary_media_hash a INDEXED BY idx_v46_ordinary_media_hash_identity" +
+            " WHERE a.volume_id=requested.volume_id AND a.file_id=requested.file_id AND NOT(typeof(a.recording_id)='text' AND a.recording_id COLLATE BINARY=requested.recording_id COLLATE BINARY)) OR " +
+            "EXISTS(SELECT 1 FROM ordinary_bundle_attachment_hash_items a INDEXED BY idx_v46_ordinary_bundle_attachment_hash_items_identity" +
             " WHERE a.volume_id=requested.volume_id AND a.file_id=requested.file_id)) FROM requested;";
         for (var i = 0; i < candidates.Length; i++)
         {

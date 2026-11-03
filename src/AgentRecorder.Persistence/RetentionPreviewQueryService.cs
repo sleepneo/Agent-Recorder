@@ -39,46 +39,61 @@ public sealed class RetentionPreviewQueryService
         try
         {
             var page = _read(sid, session, limit, completedBefore, cursor);
-            if (page.PageSize!=limit || page.Items.Count > limit || page.Filters != new UnifiedHistoryFilters("ordinary", CreatedBefore: completedBefore) ||
-                page.Items.Any(e => e.Entry.Source != "ordinary" || e.Entry.EntryKind != "ordinary_video" ||
-                    !UnifiedHistoryQueryService.ValidId(e.Entry.RecordingId) || e.Entry.EntryId!="ordinary:"+e.Entry.RecordingId ||
-                    !OrdinaryRecordingBundleStorage.ValidSnapshot(e.Entry.Bundle, e.Entry.OutputPath, e.Entry.Status) ||
-                    e.NestedReference is null || !Enum.IsDefined(e.NestedReference.Value) ||
-                    e.SharedOutputReference is null || !Enum.IsDefined(e.SharedOutputReference.Value) ||
-                    e.PlannedOutputReference is null || !Enum.IsDefined(e.PlannedOutputReference.Value) ||
-                    !Enum.IsDefined(e.PendingOutputUse) ||
-                    (e.PublicationAnchor is null ? e.PublicationIdentityReference is not null :
-                        e.PublicationIdentityReference is null || !Enum.IsDefined(e.PublicationIdentityReference.Value)) ||
-                    e.PublicationAnchor is { } anchor && (!anchor.Valid || e.Entry.Status != "completed" ||
-                        e.Entry.CompletedAtUtc is null || anchor.Length != e.Entry.OutputSizeBytes ||
-                        !string.Equals(anchor.Path, e.Entry.OutputPath, StringComparison.OrdinalIgnoreCase))) ||
-                page.Items.Select(e=>e.Entry.EntryId).Distinct(StringComparer.Ordinal).Count()!=page.Items.Count)
-                throw new InvalidDataException("Invalid ordinary evidence page.");
-            // Resolve every eligible unknown before sampling any item. Invalid
-            // non-candidates keep their earlier reason instead of failing on split.
-            if (page.Items.Any(e => e.PlannedOutputReference == PlannedOutputPathReferenceState.Indeterminate &&
-                e.NestedReference == OrdinaryNestedReferenceState.None && e.SharedOutputReference == SharedOutputPathReferenceState.None &&
-                e.Entry.Status == "completed" && e.Entry.CompletedAtUtc is { } at && at < completedBefore &&
-                e.Entry.OutputPathRecorded && e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null))
-                throw new InvalidDataException("Retention planned path matching is unavailable.");
-            if (_probe is null) throw new InvalidDataException("Retention file observation provider is unavailable.");
-            // Validate the complete DB page first, then one complete runtime
-            // answer, before sampling any item. These are separate time points.
-            var paths = page.Items.Where(e => e.Entry.Status == "completed" &&
-                e.Entry.CompletedAtUtc is { } at && at < completedBefore && e.Entry.OutputPathRecorded &&
-                e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null)
-                .Select(e => e.Entry.OutputPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var occupied = ReadRuntimeSnapshot(paths);
-            var items = page.Items.Select(e => Evaluate(e, completedBefore, occupied)).ToArray();
-            var candidates = items.Where(e => e.AgeCandidate).ToArray();
-            long bytes = 0; var samples = 0;
-            foreach (var item in candidates)
-                if (item.ObservedFileBytes is { } length) { bytes = checked(bytes + length); samples++; }
-            return new(Array.AsReadOnly(items), page.NextCursor, limit, completedBefore, items.Length,
-                candidates.Length, bytes, samples, candidates.Length - samples);
+            return EvaluatePage(page,limit,completedBefore,CancellationToken.None);
         }
         catch (UnifiedHistoryArgumentException) { throw; }
         catch (Exception e) { throw new RetentionPreviewUnavailableException(e); }
+    }
+
+    // Shared complete-set validation/runtime/metadata kernel. The GET route
+    // retains its original page and aggregation contract.
+    internal RetentionPreviewPage EvaluatePage(OrdinaryRetentionEvidencePage page,int limit,
+        DateTimeOffset completedBefore,CancellationToken cancellation)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        if (page.PageSize!=limit || page.Items.Count > limit || page.Filters != new UnifiedHistoryFilters("ordinary", CreatedBefore: completedBefore) ||
+            page.Items.Any(e => e.Entry.Source != "ordinary" || e.Entry.EntryKind != "ordinary_video" ||
+                !UnifiedHistoryQueryService.ValidId(e.Entry.RecordingId) || e.Entry.EntryId!="ordinary:"+e.Entry.RecordingId ||
+                !OrdinaryRecordingBundleStorage.ValidSnapshot(e.Entry.Bundle, e.Entry.OutputPath, e.Entry.Status) ||
+                e.NestedReference is null || !Enum.IsDefined(e.NestedReference.Value) ||
+                e.SharedOutputReference is null || !Enum.IsDefined(e.SharedOutputReference.Value) ||
+                e.PlannedOutputReference is null || !Enum.IsDefined(e.PlannedOutputReference.Value) ||
+                !Enum.IsDefined(e.PendingOutputUse) ||
+                (e.PublicationAnchor is null ? e.PublicationIdentityReference is not null :
+                    e.PublicationIdentityReference is null || !Enum.IsDefined(e.PublicationIdentityReference.Value)) ||
+                e.PublicationAnchor is { } anchor && (!anchor.Valid || e.Entry.Status != "completed" ||
+                    e.Entry.CompletedAtUtc is null || anchor.Length != e.Entry.OutputSizeBytes ||
+                    !string.Equals(anchor.Path, e.Entry.OutputPath, StringComparison.OrdinalIgnoreCase))) ||
+            page.Items.Select(e=>e.Entry.EntryId).Distinct(StringComparer.Ordinal).Count()!=page.Items.Count)
+            throw new InvalidDataException("Invalid ordinary evidence page.");
+        // Resolve every eligible unknown before sampling any item. Invalid
+        // non-candidates keep their earlier reason instead of failing on split.
+        if (page.Items.Any(e => e.PlannedOutputReference == PlannedOutputPathReferenceState.Indeterminate &&
+            e.NestedReference == OrdinaryNestedReferenceState.None && e.SharedOutputReference == SharedOutputPathReferenceState.None &&
+            e.Entry.Status == "completed" && e.Entry.CompletedAtUtc is { } at && at < completedBefore &&
+            e.Entry.OutputPathRecorded && e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null))
+            throw new InvalidDataException("Retention planned path matching is unavailable.");
+        if (_probe is null) throw new InvalidDataException("Retention file observation provider is unavailable.");
+        // Validate the complete DB page first, then one complete runtime
+        // answer, before sampling any item. These are separate time points.
+        var paths = page.Items.Where(e => e.Entry.Status == "completed" &&
+            e.Entry.CompletedAtUtc is { } at && at < completedBefore && e.Entry.OutputPathRecorded &&
+            e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null)
+            .Select(e => e.Entry.OutputPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        cancellation.ThrowIfCancellationRequested();
+        var occupied = ReadRuntimeSnapshot(paths);
+        cancellation.ThrowIfCancellationRequested();
+        var evaluated=new List<RetentionPreviewEntry>();
+        foreach(var evidence in page.Items)
+        { cancellation.ThrowIfCancellationRequested(); evaluated.Add(Evaluate(evidence,completedBefore,occupied,cancellation)); }
+        cancellation.ThrowIfCancellationRequested();
+        var items=evaluated.ToArray();
+        var candidates = items.Where(e => e.AgeCandidate).ToArray();
+        long bytes = 0; var samples = 0;
+        foreach (var item in candidates)
+            if (item.ObservedFileBytes is { } length) { bytes = checked(bytes + length); samples++; }
+        return new(Array.AsReadOnly(items), page.NextCursor, limit, completedBefore, items.Length,
+            candidates.Length, bytes, samples, candidates.Length - samples);
     }
 
     private HashSet<string> ReadRuntimeSnapshot(string[] paths)
@@ -106,7 +121,7 @@ public sealed class RetentionPreviewQueryService
         return occupied;
     }
 
-    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before, HashSet<string> occupied)
+    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before, HashSet<string> occupied, CancellationToken cancellation)
     {
         var item=evidence.Entry;
         RetentionPreviewEntry Result(string evaluation, string reason, bool age = false, string? path = null, long? observed = null)
@@ -171,6 +186,7 @@ public sealed class RetentionPreviewQueryService
         {
             foreach (var ancestor in checks!)
             {
+                cancellation.ThrowIfCancellationRequested();
                 var attributes = _files.GetAttributes(ancestor);
                 if ((attributes & FileAttributes.ReparsePoint) != 0) return Result("protected", "reparse_point", true, path);
                 if ((attributes & FileAttributes.Directory) == 0) return Result("protected", "parent_not_directory", true, path);
@@ -182,6 +198,7 @@ public sealed class RetentionPreviewQueryService
         catch (Exception) { return Result("protected", "metadata_unavailable", true, path); }
 
         FileMetadataObservation? observation;
+        cancellation.ThrowIfCancellationRequested();
         try { observation = _probe!.Observe(path); }
         catch (FileNotFoundException) { return Result("protected", "file_missing", true, path); }
         catch (DirectoryNotFoundException) { return Result("protected", "file_missing", true, path); }
@@ -264,7 +281,7 @@ public sealed class RetentionPreviewQueryService
     }
     private static bool LocalDrivePath(string path) => path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\' &&
         !path.Contains('/') && !path.Contains('\0');
-    private static bool ValidComponent(string part)
+    internal static bool ValidComponent(string part)
     {
         if (string.IsNullOrEmpty(part) || part.EndsWith('.') || part.EndsWith(' ') || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
         var stem = part.Split('.')[0].TrimEnd(' ').ToUpperInvariant();

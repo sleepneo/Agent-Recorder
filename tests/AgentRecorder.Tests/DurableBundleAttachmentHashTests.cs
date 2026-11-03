@@ -67,6 +67,21 @@ public sealed class DurableBundleAttachmentHashTests(ITestOutputHelper output)
     }
     private static string Independent(string path) { using var f=File.OpenRead(path);return Convert.ToHexString(SHA256.HashData(f)).ToLowerInvariant(); }
 
+    [Fact]
+    public async Task PersistedHashesSupplyBundle385ReferencesAfterReopen()
+    {
+        using var f=new Fixture();var update=await f.Produce();f.Accept(update);f.Reopen();
+        Assert.Equal(1,f.Scalar("SELECT count(*) FROM ordinary_media_hash WHERE volume_id IS NOT NULL;"));
+        Assert.Equal(5,f.Scalar("SELECT count(*) FROM ordinary_bundle_attachment_hash_items;"));
+        var anchors=new Dictionary<string,PublicationIdentityAnchor?>
+        { ["main_candidate"]=f.Receipt.Anchor, ["attachment_candidate"]=update.Result.IdentityEvidence!.Anchors[0] };
+        using var c=f.Store.OpenReadOnlyConnection();using var t=c.BeginTransaction();
+        var flags=PublicationIdentityReferenceStorage.Read(c,t,anchors,(connection,transaction,sql,args)=>
+        { Assert.Same(c,connection);Assert.Same(t,transaction);Assert.Contains("idx_v46_ordinary_media_hash_identity",sql);Assert.Contains("idx_v46_ordinary_bundle_attachment_hash_items_identity",sql); },null);
+        Assert.All(flags.Values,v=>Assert.Equal(PublicationIdentityReferenceState.Referenced,v));
+        output.WriteLine("Formal generator/copy/digest/write/reopen; old anchors also match. New branches are isolated separately by Task385 red tests.");
+    }
+
     private static void AssertHashes(OrdinaryRecordingBundleSnapshot bundle)
     {
         Assert.NotNull(bundle.ContentHashEvidence); Assert.Equal(5,bundle.ContentHashEvidence.Values.Count);

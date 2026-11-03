@@ -35,6 +35,7 @@ internal sealed class LocalRetentionApprovalForm : Form
             AccessibleName = text.Get("RetentionApproval_Scope"), Margin = new(0), Text =
                 text.Get("RetentionApproval_Name") + "\r\n" + Path.GetFileName(f.Anchor.Path) + "\r\n\r\n" +
                 text.Get("RetentionApproval_Path") + "\r\n" + f.Anchor.Path + "\r\n\r\n" +
+                text.Get("RetentionApproval_RecordingId") + "\r\n" + f.RecordingId + "\r\n\r\n" +
                 text.Get("RetentionApproval_Completed") + "\r\n" + f.CompletedAtUtc.ToString("O", CultureInfo.InvariantCulture) + "\r\n\r\n" +
                 text.Get("RetentionApproval_Size") + "\r\n" + f.Anchor.Length.ToString(CultureInfo.InvariantCulture) };
         _actions = new() { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = true, Margin = new(0, 12, 0, 8) };

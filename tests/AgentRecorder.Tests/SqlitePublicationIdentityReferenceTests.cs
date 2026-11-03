@@ -25,6 +25,40 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         yield return new object[] { "UPDATE schema_migrations SET name=CAST(name AS BLOB) WHERE version=42;" };
         foreach (var table in new[] { "ordinary_publication_anchors", "future_window_publication_anchors", "plan_media_publication_anchors" })
             yield return new object[] { "DROP TABLE " + table + ";" };
+        yield return new object[] { "DROP INDEX idx_bundle_attachment_publication_identity;" };
+        yield return new object[] { "DROP INDEX idx_bundle_attachment_publication_identity; CREATE INDEX idx_bundle_attachment_publication_identity ON ordinary_bundle_identity_items(file_id,volume_id);" };
+        yield return new object[] { "DELETE FROM schema_migrations WHERE version=45;" };
+        yield return new object[] { "UPDATE schema_migrations SET name='SECRET_RECEIPT' WHERE version=45;" };
+        yield return new object[] { "DROP INDEX idx_bundle_attachment_publication_identity; CREATE INDEX idx_bundle_attachment_publication_identity ON ordinary_bundle_identity_items(volume_id COLLATE NOCASE,file_id);" };
+        yield return new object[] { "DROP INDEX idx_bundle_attachment_publication_identity; CREATE INDEX idx_bundle_attachment_publication_identity ON ordinary_bundle_identity_items(volume_id,file_id) WHERE volume_id IS NOT NULL;" };
+        yield return new object[] { "UPDATE schema_migrations SET definition_checksum=definition_checksum||char(0) WHERE version=45;" };
+        yield return new object[] { "UPDATE schema_migrations SET name=CAST(name AS BLOB) WHERE version=45;" };
+        foreach(var index in SqliteSchemaV46.Indexes)
+        {
+            yield return new object[] { "DROP INDEX " + index.Name + ";" };
+            yield return new object[] { "DROP INDEX " + index.Name + "; CREATE INDEX " + index.Name + " ON " + index.Table + "(recording_id);" };
+        }
+        yield return new object[] { "DELETE FROM schema_migrations WHERE version=46;" };
+        yield return new object[] { "UPDATE schema_migrations SET name=CAST(name AS BLOB) WHERE version=46;" };
+        yield return new object[] { "UPDATE schema_migrations SET definition_checksum=definition_checksum||char(0) WHERE version=46;" };
+        yield return new object[] { "INSERT INTO schema_migrations VALUES(47,'future','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0);" };
+        foreach(var index in SqliteSchemaV47.Indexes)
+        {
+            yield return new object[] { "DROP INDEX " + index.Name + ";" };
+            yield return new object[] { "DROP INDEX " + index.Name + "; CREATE INDEX " + index.Name + " ON " + index.Table + "(bundle_path COLLATE NOCASE);" };
+        }
+        yield return new object[] { "DELETE FROM schema_migrations WHERE version=47;" };
+        yield return new object[] { "UPDATE schema_migrations SET name=CAST(name AS BLOB) WHERE version=47;" };
+        yield return new object[] { "UPDATE schema_migrations SET definition_checksum=definition_checksum||char(0) WHERE version=47;" };
+        yield return new object[] { "INSERT INTO schema_migrations VALUES(49,'future','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0);" };
+    }
+    internal static void ApplyFault(UnifiedHistoryTestDatabase db, string sql)
+    {
+        // Retain the old parameter/ID: v47 used to be future; now this case
+        // replaces its receipt with a deliberately wrong name/checksum.
+        if(sql.StartsWith("INSERT INTO schema_migrations VALUES(47,'future'"))
+            db.RawExecute("DELETE FROM schema_migrations WHERE version=47;");
+        db.RawExecute(sql);
     }
     public static IEnumerable<object[]> SchemaFaults => Faults();
 
@@ -32,12 +66,12 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
     public void BrokenSchemaFailsReadWithoutRepairAndInitializeRejectsIt(string sql)
     {
         using var f = new RetentionPreviewQueryTests.Fixture(); f.Seed("a"); f.Seed("b"); f.Db.Ordinary.Read("b");
-        f.Db.RawExecute(sql); var before = OldBytes(f.Db.Store.DatabasePath, include42: true);
+        ApplyFault(f.Db,sql); var before = OldBytes(f.Db.Store.DatabasePath, include42: true);
         Assert.Throws<RetentionPreviewUnavailableException>(() => f.Page()); RetentionRuntimeOutputTests.NoProbes(f);
         Assert.Equal(before, OldBytes(f.Db.Store.DatabasePath, include42: true));
         // Migration-history faults retain the catalog's existing exception;
         // exact schema/typed-receipt faults retain their validator exception.
-        if (sql.StartsWith("DELETE FROM schema_migrations") || sql.StartsWith("UPDATE schema_migrations") && !sql.Contains("CAST"))
+        if (sql.StartsWith("INSERT INTO schema_migrations") || sql.StartsWith("DELETE FROM schema_migrations") || sql.StartsWith("UPDATE schema_migrations") && !sql.Contains("CAST"))
             Assert.Throws<SqliteOperationalStoreException>(() => f.Db.Store.Initialize());
         else Assert.Throws<InvalidDataException>(() => f.Db.Store.Initialize());
         Assert.Equal(before, OldBytes(f.Db.Store.DatabasePath, include42: true));
@@ -60,7 +94,7 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         var once = OldBytes(f.Db.Store.DatabasePath, include42: true);
         new SqliteOperationalStore(f.Db.Store.DatabasePath).Initialize(); f.Db.Store.Initialize();
         Assert.Equal(once, OldBytes(f.Db.Store.DatabasePath, include42: true));
-        Assert.Equal(44, SqliteOperationalStore.CurrentSchemaVersion); // Current Initialize installs the separate v43/v44 additions.
+        Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion); // Current Initialize installs the separate v43/v44 additions.
         Assert.Equal(1, f.Db.Scalar("SELECT count(*) FROM future_window_publication_anchors WHERE authorization_id='null_marker' AND volume_id IS NULL AND file_id IS NULL;"));
         using var c = f.Db.Store.OpenReadOnlyConnection(); using var t = c.BeginTransaction(IsolationLevel.Serializable, deferred: true);
         SqliteSchemaV42.Validate(c, t); t.Commit();
@@ -91,7 +125,7 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         Assert.Equal("publication_identity_missing", Assert.Single(f.Page().Items).ReasonCode); RetentionRuntimeOutputTests.NoProbes(f);
     }
 
-    internal static string OldBytes(string path, bool include42 = false)
+    internal static string OldBytes(string path, bool include42 = false, int? through = null)
     {
         using var c = new SqliteConnection($"Data Source={path};Pooling=False;Mode=ReadOnly"); c.Open();
         var lines = new List<string>(); var tables = new List<string>();
@@ -101,10 +135,14 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
             using var rd = cmd.ExecuteReader();
             while (rd.Read())
             {
+                if ((!include42 || through is <48) && (rd.GetString(2) is "ordinary_deletion_batches" or "ordinary_deletion_batch_items")) continue;
                 // The v41 comparison excludes only subsequent v42/v43/v44 objects.
                 // Task360 separately compares EVERY v42 value/definition across v43.
                 if (!include42 && (rd.GetString(2)==SqliteSchemaV44.Table || rd.GetString(2)==SqliteSchemaV43.Table || SqliteSchemaV43.Objects.Any(o=>o.Name==rd.GetString(1)))) continue;
                 if (rd.GetString(0) == "table") tables.Add(rd.GetString(1));
+                if ((!include42 || through is <47) && SqliteSchemaV47.Indexes.Any(i=>i.Name==rd.GetString(1))) continue;
+                if ((!include42 || through is <46) && SqliteSchemaV46.Indexes.Any(i=>i.Name==rd.GetString(1))) continue;
+                if ((!include42 || through is <45) && rd.GetString(1)==SqliteSchemaV45.IndexName) continue;
                 if (!include42 && SqliteSchemaV42.Indexes.Any(i => i.Name == rd.GetString(1))) continue;
                 lines.Add(JsonSerializer.Serialize(Enumerable.Range(0, rd.FieldCount).Select(i => rd.GetValue(i))));
             }
@@ -112,7 +150,7 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         foreach (var table in tables)
         {
             using var cmd = c.CreateCommand(); cmd.CommandText = "SELECT rowid,* FROM \"" + table + "\"" +
-                (table == "schema_migrations" && !include42 ? " WHERE version<=41" : "") + " ORDER BY rowid;";
+                (table == "schema_migrations" && (!include42 || through.HasValue) ? " WHERE version<="+(!include42?41:through!.Value) : "") + " ORDER BY rowid;";
             using var rd = cmd.ExecuteReader();
             while (rd.Read()) lines.Add(table + ":" + JsonSerializer.Serialize(Enumerable.Range(0, rd.FieldCount)
                 .Select(i => rd.GetValue(i) is byte[] blob ? "BLOB:" + Convert.ToHexString(blob) : rd.GetValue(i).GetType().Name + ":" + rd.GetValue(i))));

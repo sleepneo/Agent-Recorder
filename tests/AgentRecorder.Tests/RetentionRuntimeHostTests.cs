@@ -65,7 +65,9 @@ public sealed class RetentionRuntimeHostTests
     {
         using var f=new RetentionPreviewQueryTests.Fixture();var row=f.Seed("a");f.Seed("b");
         using var engine=new RecordingEngine(new RetentionSharedOutputPathTests.QuietAudit());
-        for(var i=0;i<(fault=="overflow"?501:1);i++)Claim(engine,new Recording{IsOrdinaryLocalRequest=true},row.OutputPath!);
+        for(var i=0;i<(fault=="overflow"?501:1);i++)
+            if(fault=="overflow")InjectSyntheticClaimForBound(engine,new Recording{IsOrdinaryLocalRequest=true},row.OutputPath!);
+            else Claim(engine,new Recording{IsOrdinaryLocalRequest=true},row.OutputPath!);
         if(fault=="shutdown")engine.BeginHostShutdown("test_shutdown");
         IOrdinaryRuntimeOutputUseProvider? provider=engine;
         if(fault=="missing")provider=null;

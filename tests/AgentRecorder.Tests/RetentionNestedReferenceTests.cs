@@ -166,7 +166,7 @@ public sealed class RetentionNestedReferenceTests
         {using var cmd=c.CreateCommand();cmd.CommandText=sql;using var r=cmd.ExecuteReader();while(r.Read()){
             // This projection is specifically v24; retain every v24 field and
             // definition, excluding only the newly introduced v43 table DDL.
-            if(r.FieldCount==2&&r.GetValue(0) is string name&&(name==SqliteSchemaV43.Table||name==SqliteSchemaV44.Table))continue;
+            if(r.FieldCount==2&&r.GetValue(0) is string name&&(name==SqliteSchemaV43.Table||name==SqliteSchemaV44.Table||name is "ordinary_deletion_batches" or "ordinary_deletion_batch_items"))continue;
             parts.Add(string.Join("|",Enumerable.Range(0,r.FieldCount).Select(i=>r.GetValue(i).ToString())));}}
         return Encoding.UTF8.GetBytes(string.Join("\n",parts));
     }
