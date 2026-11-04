@@ -24,7 +24,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 v0.1.19 为预发布版，在独立多窗口录制、保存区域声音选择和输出保护的基础上，增加最多20条录制的只读清理评估，以及最多5项、每项独立本地确认的顺序清理。拒绝或不确定会停止余项，重启不恢复删除；不是整批原子操作或后台自动清扫。三窗口无声录制已通过180/90/30秒真实验收；QB系统声音已通过受控停播恢复及重复200秒验收；两项顺序清理已通过拒绝、逐项批准和幂等重放真实验收。这些结果不外推所有设备、五项真人规格或长期稳定性。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
 
-既有能力包括普通持久历史、统一索引查询、按需健康检查、普通/计划/未来窗口产物元数据检查、普通主视频与五附件显式内容核验、普通 WGC Bundle 生成、计划和未来窗口成片原始身份与只读保留预览。普通 raw/quick 视频可显式选择 `artifacts.bundle=false` 仅输出 MP4，默认仍生成录制说明包；固定 Videos 下符合条件的已完成仅 MP4 视频，可按录制 ID 申请独立本地删除确认。取消保留文件，同键重试返回原结果，默认 Bundle 录制仍受保护。自动清理、全盘配额、代码签名和安装器未完成。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
+既有能力包括普通持久历史、统一索引查询、按需健康检查、普通/计划/未来窗口产物元数据检查、普通主视频与五附件显式内容核验、普通 WGC Bundle 生成、计划和未来窗口成片原始身份与只读保留预览。普通 raw/quick 视频可显式选择 `artifacts.bundle=false` 仅输出 MP4，默认仍生成录制说明包；固定 Videos 下符合条件的已完成仅 MP4 视频，可按录制 ID 申请独立本地删除确认。取消保留文件，同键重试返回原结果，默认 Bundle 录制仍受保护。自动清理、全盘配额、代码签名未完成。当前用户安装器的未签名候选已通过本机安装、升级、卸载、重装及 agent 首次使用验收，尚未随已发布的 v0.1.19 提供。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
 
 升级已有安装时，请先备份数据目录。本版会将历史数据库升级到 SQLite schema v48；升级后的数据应与新版程序配套使用，不要再用旧版程序打开。
 
@@ -91,8 +91,12 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 `recording_id` 继续长轮询录制状态。这个等待只观察本地批准、准备、倒计时和开始状态，
 不会通过 HTTP 批准录制；省略 query 时仍保持原有的立即创建响应。
 
-运行数据目录：
+### 运行数据目录
 
+- 安装版仅面向 Windows x64 当前用户，程序固定在 `%LOCALAPPDATA%\Programs\AgentRecorder`。安装结束不启动、不录制、不启用自启、桌面 broker 或计划。agent 从 `HKCU\Software\AgentRecorder\Installation` 读取 `InstallLocation`、`CliPath`、`AgentInstructions`，经获准的当前用户桌面入口直接调用 CLI `ensure-running --json`；登记不授予跨账号启动能力。开始菜单仍打开原托盘 App。
+- 安装版 App、CLI ensure/shutdown/interactive-launch status、开始菜单默认同用 `%LOCALAPPDATA%\AgentRecorder`。显式数据目录优先于 `AGENT_RECORDER_DATA_DIR`，再到默认目录；坏标记或包/用户冲突在覆盖前明确失败。数据与程序目录不得重叠或经过重解析点。不迁移、合并 portable 数据或复制密钥。
+- 升级前备份数据，由 agent 通过原匹配 CLI `shutdown --json` 申请鉴权空闲退出并确认已退出。活动/未知实例、API 端口占用、未处理的本产品自启/broker 登记阻断安装、升级和卸载，silent 也不豁免，拒绝强制关闭参数。原集成需先精确核对归属，不删除未知任务。卸载只移除清单程序和本安装入口，保留视频、DB、key、配置、审计及程序根额外文件，无清空数据选项。
+- 安装失败或取消可能留下部分程序文件，不承诺升级整体事务化；只有正常 App 启动迁移 DB，不以旧二进制重开升级后的数据。未签名不代表发布者已验证，不要求关闭 SmartScreen 或杀毒。
 - portable 包中通过 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json` 启动时，默认 data-dir 是 `<package-root>\.local-data`。
 - 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
 - AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。

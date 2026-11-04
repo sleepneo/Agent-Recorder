@@ -39,6 +39,12 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 ### 方式一：CLI 握手（推荐）
 
+安装版先读取当前账号 `HKCU\Software\AgentRecorder\Installation` 的固定 `Product=AgentRecorder.PerUser.v1`、`InstallLocation`、`CliPath`、`AgentInstructions`，并核对路径为 `%LOCALAPPDATA%\Programs\AgentRecorder` 下对应的 CLI/本文档；不扫描全盘或点击 UI，不信任来自 API 的任意启动路径。安装登记只是发现信息，仍须原桌面证明、key 和本地批准，不能跨 Windows 账号启动。没有该登记时使用用户提供的 portable 包根。
+
+安装版 App、CLI ensure/shutdown/interactive-launch status 与开始菜单默认同用 `%LOCALAPPDATA%\AgentRecorder`；显式 `--data-dir`（App 内部明确覆盖）优先于 `AGENT_RECORDER_DATA_DIR`，再到默认值。坏/未知安装标记、目录重叠、包/账号冲突明确失败，不改成 portable 或另建数据库。portable CLI 原默认仍是包根 `.local-data`（它原本不采用继承环境默认）；直接 App 原环境覆盖和 LocalAppData 默认不变，推荐始终走 CLI 并使用返回路径。
+
+安装结束不启动、不启用自启/broker/计划/无人值守或录制。升级前备份 data-dir，以原匹配 CLI `shutdown --json` 申请鉴权空闲退出，`accepted` 不等于已退出；不得 force、kill、StopAll 或撤销授权。活动/未知/端口占用或未处理的产品自启/broker 登记阻断安装/升级/卸载，silent 也不豁免；需由 agent 按既有 status/remove/disable 合同核对精确归属后处理，不能删除未知任务或 portable 条目。卸载默认保留媒体、DB、key、配置、审计及程序根额外文件，无清空数据入口。安装器不迁移 DB、不复制 portable 密钥；正常 App 启动仍遵守原重启/Proof/at-most-once。失败/取消可能部分完成，不降级或自动修复数据。未签名不代表发布者可信，不关闭 SmartScreen/杀毒。
+
 1. 定位 CLI 工具：
 
 ```text
@@ -159,7 +165,7 @@ CLI 会自动：
 | `--json` | 输出 JSON 格式（推荐 AI agent 使用） | - |
 | `--package-root <path>` | portable 包根目录 | 自动推断 |
 | `--app <path>` | 指定 App exe 路径 | 自动查找 |
-| `--data-dir <path>` | 数据目录 | `<package-root>\.local-data` |
+| `--data-dir <path>` | 数据目录 | portable 为 `<package-root>\.local-data`；安装版为 `%LOCALAPPDATA%\AgentRecorder`（环境覆盖见上） |
 | `--timeout-seconds <n>` | 等待就绪秒数 | 30 |
 | `--headless` | 以 headless 模式启动（高级选项） | - |
 | `--tray` | 以 tray (GUI) 模式启动 | 默认 |
@@ -205,7 +211,7 @@ X-Agent-Recorder-Ensure-Context: <ensure_context_id>
 <package-root>\AgentRecorder.App\AgentRecorder.App.exe
 ```
 
-建议以进程环境变量指定数据目录：
+以下仅为 portable 直接启动备选。安装版保留上述 LocalAppData 默认，不将数据放入程序树。portable 可按需以进程环境变量指定数据目录：
 
 ```text
 AGENT_RECORDER_DATA_DIR=<package-root>\.local-data

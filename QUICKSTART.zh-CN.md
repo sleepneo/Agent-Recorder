@@ -4,7 +4,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 
 ## 如何使用
 
-1. 下载并解压 Windows portable zip。
+1. 使用已发布的版本时，解压 portable zip。如果你拿到了 Windows x64 当前用户安装候选，可用它安装；安装完成不会自动启动或录制。候选已通过本机安装流程和首次使用验收，已发布的 v0.1.19 不含安装器。
 2. 让本地 AI agent 阅读：
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`
@@ -154,6 +154,8 @@ agent 使用 quick `profile_region`；旧 raw `profile_ref` 仍执行完整无�
 Recorder 不负责打开视频平台或识别开播。系统声音包含该输出设备的全部声音。
 
 ## 文件位置
+
+安装版默认使用 `%LOCALAPPDATA%\AgentRecorder` 保存数据，AI agent 可自行发现并启动，用户无需运行 PowerShell。发现入口、目录覆盖及升级卸载规则见 [README 的运行数据说明](README.zh-CN.md#运行数据目录)。
 
 通过 portable 包中的 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json` 启动时，默认 data-dir 是 `<package-root>\.local-data`，文件位置为：
 

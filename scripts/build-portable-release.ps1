@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Build Agent Recorder portable release zip.
@@ -1260,70 +1260,7 @@ if ($TestProcessTree) {
     exit 0
 }
 
-function Assert-PortableZipContents {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [string[]]$ForbiddenText = @()
-    )
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
-    try {
-        $entries = @($archive.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.FullName) })
-        $expectedWgc = "AgentRecorder.WgcHelper/wgc-native-helper.exe"
-        if (@($entries | Where-Object { $_.FullName.Replace('\', '/') -eq $expectedWgc }).Count -ne 1) {
-            throw "Portable zip does not contain exactly one production WGC helper at $expectedWgc."
-        }
-
-        $unexpectedWgc = @($entries | Where-Object {
-            $normalizedName = $_.FullName.Replace('\', '/')
-            $normalizedName.StartsWith("AgentRecorder.WgcHelper/", [System.StringComparison]::OrdinalIgnoreCase) -and
-            $normalizedName -ne $expectedWgc
-        })
-        if ($unexpectedWgc.Count -gt 0) {
-            throw "Portable zip contains unexpected WGC helper artifacts: $($unexpectedWgc.FullName -join ', ')."
-        }
-
-        $forbidden = @($entries | Where-Object {
-            $normalizedName = $_.FullName.Replace('\', '/')
-            $normalizedName -match '(^|/)(doc|prompt|report|\.git|\.local-data)(/|$)' -or
-            $normalizedName -match '(^|/)api-key\.txt$' -or
-            $normalizedName -match '\.(pdb|obj|cpp|h|vcxproj|sln)$'
-        })
-        if ($forbidden.Count -gt 0) {
-            throw "Portable zip contains forbidden artifacts: $($forbidden.FullName -join ', ')."
-        }
-
-        $textPathLeaks = @()
-        foreach ($entry in $entries) {
-            $normalizedName = $entry.FullName.Replace('\', '/')
-            if ($normalizedName -notmatch '\.(md|txt|json|xml|config|ps1|cs|csproj)$') {
-                continue
-            }
-            $reader = New-Object System.IO.StreamReader($entry.Open())
-            try {
-                $text = $reader.ReadToEnd()
-            } finally {
-                $reader.Dispose()
-            }
-            foreach ($needle in $ForbiddenText) {
-                if (-not [string]::IsNullOrWhiteSpace($needle) -and
-                    $text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                    $textPathLeaks += $normalizedName
-                    break
-                }
-            }
-        }
-        if ($textPathLeaks.Count -gt 0) {
-            throw "Portable zip text contains forbidden repository paths: $($textPathLeaks -join ', ')."
-        }
-
-        return $entries.Count
-    }
-    finally {
-        $archive.Dispose()
-    }
-}
+. (Join-Path $PSScriptRoot "PortablePackageValidation.ps1")
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path

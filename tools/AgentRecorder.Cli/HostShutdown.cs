@@ -71,7 +71,8 @@ internal static partial class Program
         {
             try
             {
-                dataDir ??= ResolveDataDir(new CliOptions(), ResolvePackageRoot(new CliOptions()));
+                var options = new CliOptions { DataDir = dataDir };
+                dataDir = ResolveDataDir(options, ResolvePackageRoot(options));
                 using var http = new HttpClient(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false })
                     { Timeout = Timeout.InfiniteTimeSpan };
                 result = ShutdownCoreAsync(dataDir, timeout, http,

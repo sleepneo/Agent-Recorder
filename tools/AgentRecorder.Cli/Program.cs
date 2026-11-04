@@ -20,6 +20,21 @@ internal static partial class Program
 
     private static int Main(string[] args)
     {
+        try
+        {
+            // Includes status, shutdown and integration commands: an override cannot hide a bad marker.
+            _ = InstallationContext.IsInstalled(InstallationContext.PackageRootFromBase(AppContext.BaseDirectory));
+            return MainCore(args);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("CLI_CONTEXT_FAILED: " + ex.Message);
+            return 1;
+        }
+    }
+
+    private static int MainCore(string[] args)
+    {
         if (args.Length == 0)
         {
             PrintUsage();
@@ -27,6 +42,17 @@ internal static partial class Program
         }
 
         var command = args[0].ToLowerInvariant();
+        if (command == "installation-mutex-name" && args.Length == 1)
+        {
+            Console.WriteLine(InstallationContext.MaintenanceMutexName);
+            return 0;
+        }
+        if (command == "installation-check") return RunInstallationCheck(args);
+        if (command == "installation-package-info" && args.Length == 1)
+        {
+            Console.WriteLine("AgentRecorder.PerUser.v1/0.1.19");
+            return 0;
+        }
         if (command == "ensure-running")
         {
             var opts = ParseOpts(args, 1);
@@ -1109,6 +1135,13 @@ internal static partial class Program
 
     private static string ResolvePackageRoot(CliOptions opts)
     {
+        var ownRoot = InstallationContext.PackageRootFromBase(AppContext.BaseDirectory);
+        if (InstallationContext.IsInstalled(ownRoot))
+        {
+            if (!string.IsNullOrWhiteSpace(opts.PackageRoot) && !PathsEqual(opts.PackageRoot, ownRoot))
+                throw new InvalidDataException("INSTALL_CONTEXT_CONFLICT: --package-root");
+            return ownRoot;
+        }
         if (!string.IsNullOrWhiteSpace(opts.PackageRoot))
         {
             return Path.GetFullPath(opts.PackageRoot);
@@ -1136,16 +1169,15 @@ internal static partial class Program
 
     private static string ResolveDataDir(CliOptions opts, string packageRoot)
     {
-        if (!string.IsNullOrWhiteSpace(opts.DataDir))
-        {
-            return Path.GetFullPath(opts.DataDir);
-        }
-
-        return Path.GetFullPath(Path.Combine(packageRoot, ".local-data"));
+        return InstallationContext.ResolveCliDataRoot(packageRoot, opts.DataDir);
     }
 
     private static string ResolveServiceExe(CliOptions opts, string packageRoot)
     {
+        if (InstallationContext.IsInstalled(packageRoot) && !string.IsNullOrWhiteSpace(opts.AppPath) &&
+            !PathsEqual(opts.AppPath, Path.Combine(packageRoot, "AgentRecorder.App", "AgentRecorder.App.exe")) &&
+            !PathsEqual(opts.AppPath, Path.Combine(packageRoot, "AgentRecorder.Headless", "AgentRecorder.Headless.exe")))
+            throw new InvalidDataException("INSTALL_CONTEXT_CONFLICT: --app");
         // Explicit --app takes highest priority
         if (!string.IsNullOrWhiteSpace(opts.AppPath))
         {

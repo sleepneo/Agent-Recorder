@@ -16,6 +16,7 @@ public sealed class SingleInstanceGuard : IDisposable
     public const string MutexName = @"Local\AgentRecorder.Service.Instance";
 
     private Mutex? _mutex;
+    private SingleInstanceGuard? _installationGuard;
     private string _mutexName = MutexName;
     private bool _acquired;
     private bool _disposed;
@@ -27,7 +28,24 @@ public sealed class SingleInstanceGuard : IDisposable
     /// Try to acquire the single-instance mutex. Returns true if this is the
     /// first instance, false if another instance already holds the mutex.
     /// </summary>
-    public static SingleInstanceGuard TryAcquire() => TryAcquire(MutexName);
+    public static SingleInstanceGuard TryAcquire()
+        => TryAcquireForInstallation(MutexName,
+            InstallationContext.IsInstalled(InstallationContext.PackageRootFromBase(AppContext.BaseDirectory))
+                ? InstallationContext.MaintenanceMutexName : null);
+
+    internal static SingleInstanceGuard TryAcquireForInstallation(string serviceName, string? maintenanceName)
+    {
+        SingleInstanceGuard? installation = null;
+        if (maintenanceName != null)
+        {
+            installation = TryAcquire(maintenanceName);
+            if (!installation.IsAcquired) return installation;
+        }
+        var service = TryAcquire(serviceName);
+        if (service.IsAcquired) service._installationGuard = installation;
+        else installation?.Dispose();
+        return service;
+    }
 
     /// <summary>
     /// Try to acquire a single-instance mutex with a custom name (for testing).
@@ -110,5 +128,7 @@ public sealed class SingleInstanceGuard : IDisposable
         try { _mutex?.Dispose(); } catch { }
         _mutex = null;
         _acquired = false;
+        _installationGuard?.Dispose();
+        _installationGuard = null;
     }
 }

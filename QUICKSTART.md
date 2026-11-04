@@ -6,7 +6,7 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
-1. Download and extract the Windows portable zip.
+1. Extract the portable zip from the published release. If you have the Windows x64 per-user installer candidate, it installs without starting the app or recording. The candidate has passed local lifecycle and first-use checks but is not part of v0.1.19.
 2. Ask your local AI agent to read:
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`
@@ -187,6 +187,11 @@ single run. Grants last at most one hour; each run is at most 30 minutes.
 Recorder does not open video platforms or recognize livestreams.
 
 ## Files
+
+The installed edition uses `%LOCALAPPDATA%\AgentRecorder` for data by default.
+The agent can discover and start it without asking the user to run PowerShell.
+See [Runtime Data](README.md#runtime-data) for discovery, overrides, and
+upgrade and uninstall precautions.
 
 When started through `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
 from the portable package, the default data directory is

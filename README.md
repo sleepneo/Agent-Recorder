@@ -48,8 +48,10 @@ accept up to five recordings, with a separate local approval for every file;
 refusal or uncertainty stops the remaining items. They are not atomic and
 never resume deletion after restart. Cancellation
 preserves the file; retries with the same key return the original result.
-Default Bundle outputs remain protected. Automatic cleanup, disk quotas,
-signing and an installer remain unfinished. Inspect `/capabilities` for the running host's
+Default Bundle outputs remain protected. Automatic cleanup, disk quotas, and
+code signing remain unfinished. The unsigned per-user installer has passed
+local install, upgrade, uninstall, reinstall, and agent-driven first-use
+checks. It is not included in the published v0.1.19 release. Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 When upgrading an existing installation, back up its data directory first.
@@ -133,6 +135,35 @@ for precise control and uses the opaque `id` from `/displays` unchanged as
 `source.display_id`.
 
 ## Runtime Data
+
+The per-user installer targets Windows x64 and fixes program files at
+`%LOCALAPPDATA%\Programs\AgentRecorder`. Installation finishes without launching
+the App or enabling autostart, a desktop broker, plans or recording. The agent
+can read current-user `HKCU\Software\AgentRecorder\Installation` values
+`InstallLocation`, `CliPath`, and `AgentInstructions`, then run the discovered
+CLI's `ensure-running --json` through its authorized user-desktop execution
+channel. Registry discovery is not permission or a cross-account launcher.
+The Start menu entry opens the existing tray App.
+
+Installed App, CLI (including shutdown and interactive-launch status), and
+Start menu use `%LOCALAPPDATA%\AgentRecorder` by default. Explicit data-directory
+selection has priority over `AGENT_RECORDER_DATA_DIR`, then this default;
+installation markers are validated before overrides. Data cannot overlap the
+program tree or pass through reparse points. Portable data/keys are never copied
+or merged. A corrupt, unsupported or conflicting marker fails explicitly.
+
+Before upgrade, back up the data directory. Ask the agent to use the original
+matching CLI's authenticated, idle-only `shutdown --json` and confirm exit.
+An active or unknown instance, occupied API port, or unresolved product
+autostart/broker integration blocks upgrade/uninstall, including silent mode;
+force-close options are rejected. Integrations require explicit ownership
+review using the existing commands; the installer removes no unknown tasks.
+Uninstall removes only logged program files and owned entries. Videos, database,
+key, settings, audit and extra files placed in the program directory remain;
+there is no erase-data option. Cancellation/failure may leave a partial program
+installation: do not downgrade binaries against upgraded data. Only normal App
+startup opens/migrates the database. Unsigned means publisher identity has not
+been verified; do not disable SmartScreen or antivirus.
 
 For the portable package, `AgentRecorder.Cli.exe ensure-running` defaults the
 data directory to `<package-root>\.local-data` and passes that path to the app

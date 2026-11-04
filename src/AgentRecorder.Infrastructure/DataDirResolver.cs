@@ -20,16 +20,19 @@ public static class DataDirResolver
 
     public static string Resolve()
     {
-        if (_override != null)
-            return Path.GetFullPath(_override);
+        return ResolveForContext(InstallationContext.PackageRootFromBase(AppContext.BaseDirectory),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), _override,
+            Environment.GetEnvironmentVariable(EnvVarName));
+    }
 
-        var env = Environment.GetEnvironmentVariable(EnvVarName);
-        if (!string.IsNullOrWhiteSpace(env))
-            return Path.GetFullPath(env);
-
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AgentRecorder");
+    internal static string ResolveForContext(string packageRoot, string localRoot, string? explicitDirectory, string? environmentDirectory)
+    {
+        var installed = InstallationContext.IsInstalled(packageRoot, localRoot);
+        var data = explicitDirectory != null ? Path.GetFullPath(explicitDirectory) :
+            !string.IsNullOrWhiteSpace(environmentDirectory) ? Path.GetFullPath(environmentDirectory) :
+            Path.Combine(localRoot, "AgentRecorder");
+        if (installed) InstallationContext.RequireSeparate(packageRoot, data);
+        return data;
     }
 
     public static bool HasOverride => _override != null;
