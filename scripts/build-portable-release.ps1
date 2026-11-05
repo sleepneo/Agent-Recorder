@@ -11,7 +11,8 @@
     .local-data/release-candidates/.
 
 .PARAMETER Version
-    Version string for the zip name. Default: v0.1.19
+    ZIP label. Defaults to v<product version> from Directory.Build.props.
+    A candidate suffix may follow that version, such as -rc.1.
 
 .PARAMETER PublishMode
     "self-contained" (default) or "framework-dependent".
@@ -27,7 +28,7 @@
 #>
 
 param(
-    [string]$Version = "v0.1.19",
+    [string]$Version,
 
     [ValidateSet("self-contained", "framework-dependent")]
     [string]$PublishMode = "self-contained",
@@ -1268,7 +1269,10 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 }
 
-$ReleaseTag = "AgentRecorder-$Version-win-x64"
+. (Join-Path $PSScriptRoot 'ReleaseVersion.ps1')
+$productVersion = Get-ReleaseVersion $ProjectRoot
+$packageLabel = Get-PortableVersionLabel $productVersion $Version
+$ReleaseTag = "AgentRecorder-$packageLabel-win-x64"
 if ($PublishMode -eq "self-contained") {
     $ReleaseTag += "-self-contained"
 } else {
@@ -1284,7 +1288,8 @@ if (Test-Path $StagingDir) {
 New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 
 Write-Host "=== Agent Recorder Portable Release Builder ===" -ForegroundColor Cyan
-Write-Host "Version: $Version"
+Write-Host "Product version: $productVersion"
+Write-Host "Package label: $packageLabel"
 Write-Host "Mode: $PublishMode"
 Write-Host "Staging: $StagingDir"
 Write-Host ""
@@ -1675,6 +1680,9 @@ foreach ($publicDoc in @("api.md", "safety.md")) {
 Write-Host "[OK] Documentation added" -ForegroundColor Green
 
 Write-Host "[10/11] Creating zip archive..." -ForegroundColor Yellow
+foreach ($component in @('App','Headless','Cli')) {
+    Assert-ReleaseAssemblyVersion (Join-Path $StagingDir "AgentRecorder.$component\AgentRecorder.$component.dll") ([version]"$productVersion.0")
+}
 $zipParent = Split-Path $ZipPath -Parent
 if (-not (Test-Path $zipParent)) {
     New-Item -ItemType Directory -Path $zipParent -Force | Out-Null

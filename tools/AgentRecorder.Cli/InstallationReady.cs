@@ -21,8 +21,8 @@ internal static partial class Program
         PropertyNameCaseInsensitive = true
     };
 
-    private static InstallationSafetyResult CheckInstallationReady(string root, string data, bool firstInstall,
-        bool installedMaintenance, InstallationSafetyChecks checks)
+    private static InstallationSafetyResult CheckInstallationReady(string root, string data, string operation,
+        string? installedVersion, InstallationSafetyChecks checks)
     {
         var runtime = Path.Combine(data, "runtime");
         var path = Path.Combine(runtime, "ready.json");
@@ -45,13 +45,16 @@ internal static partial class Program
                 bytes = ReadInstallationReadyBytes(stream);
                 record = ParseInstallationReady(bytes, data, path, checks.CurrentUserSid, out legacy);
                 if (record == null) return new(false, "INSTALL_READY_INVALID");
-                if (legacy && installedMaintenance)
-                {
-                    uninstallPath = ObserveLegacyMaintenanceOwner(root, data, checks);
-                    if (uninstallPath == null) return new(false, "INSTALL_READY_LEGACY_OWNER_UNKNOWN");
-                }
             }
 
+            var firstInstall = operation == "install";
+            var olderInstallation = installedVersion != null && installedVersion != InstallationContext.ProductVersion;
+            if (installedVersion != null && !firstInstall && (legacy || olderInstallation))
+            {
+                uninstallPath = ObserveMaintenanceOwner(root, data, installedVersion, checks);
+                if (uninstallPath == null)
+                    return new(false, legacy ? "INSTALL_READY_LEGACY_OWNER_UNKNOWN" : "INSTALL_OWNER_UNKNOWN");
+            }
             if (firstInstall && !FirstInstallIsClear(root, checks))
                 return FirstInstallRefused(legacy);
             if (record != null)
@@ -81,9 +84,9 @@ internal static partial class Program
                     !bytes.AsSpan().SequenceEqual(ReadInstallationReadyBytes(stream)))
                     return new(false, "INSTALL_READY_CHANGED");
             }
-            if (legacy && installedMaintenance &&
-                !string.Equals(uninstallPath, ObserveLegacyMaintenanceOwner(root, data, checks), StringComparison.OrdinalIgnoreCase))
-                return new(false, "INSTALL_READY_LEGACY_OWNER_CHANGED");
+            if (uninstallPath != null &&
+                !string.Equals(uninstallPath, ObserveMaintenanceOwner(root, data, installedVersion!, checks), StringComparison.OrdinalIgnoreCase))
+                return new(false, legacy ? "INSTALL_READY_LEGACY_OWNER_CHANGED" : "INSTALL_OWNER_CHANGED");
             if (firstInstall && !FirstInstallIsClear(root, checks))
                 return FirstInstallRefused(legacy);
             return new(true, "INSTALL_SAFE_WHILE_LEASE_HELD");
@@ -227,22 +230,26 @@ internal static partial class Program
     private static readonly string[] UninstallRegistrationValues =
         ["InstallLocation", "Inno Setup: App Path", "UninstallString", "QuietUninstallString"];
 
-    private static string? ObserveLegacyMaintenanceOwner(string root, string data, InstallationSafetyChecks checks)
+    private static string? ObserveMaintenanceOwner(string root, string data, string installedVersion, InstallationSafetyChecks checks)
     {
         try
         {
-            if (!InstallationContext.IsInstalled(root, checks.LocalRoot)) return null;
+            if (InstallationContext.ReadInstalledVersion(root, checks.LocalRoot, allowAcceptedUpgradeSource: true) != installedVersion)
+                return null;
             string[] expected = [InstallationContext.ProductId, root,
                 Path.Combine(root, "AgentRecorder.Cli", "AgentRecorder.Cli.exe"),
                 Path.Combine(root, "AGENT-INSTRUCTIONS.zh-CN.md"), data];
+            var olderInstallation = installedVersion != InstallationContext.ProductVersion;
+            var uninstallNames = olderInstallation ? [.. UninstallRegistrationValues, "DisplayVersion"] : UninstallRegistrationValues;
             string? uninstaller = null;
             foreach (var view in new[] { InstallationRegistry64, InstallationRegistry32 })
             {
                 var product = checks.ReadInstallationRegistration(view, ProductRegistrationKey, ProductRegistrationValues);
-                var uninstall = checks.ReadInstallationRegistration(view, UninstallRegistrationKey, UninstallRegistrationValues);
+                var uninstall = checks.ReadInstallationRegistration(view, UninstallRegistrationKey, uninstallNames);
                 if (view == InstallationRegistry32 && product == null && uninstall == null) continue;
                 if (product == null || !expected.SequenceEqual(product, StringComparer.OrdinalIgnoreCase) ||
-                    uninstall is not { Length: 4 } ||
+                    uninstall?.Length != uninstallNames.Length ||
+                    (olderInstallation && uninstall[4] != installedVersion) ||
                     (!string.Equals(uninstall[0], root, StringComparison.OrdinalIgnoreCase) &&
                      !string.Equals(uninstall[0], root + "\\", StringComparison.OrdinalIgnoreCase)) ||
                     !string.Equals(uninstall[1], root, StringComparison.OrdinalIgnoreCase))

@@ -7,7 +7,9 @@ public static class InstallationContext
 {
     public const string MarkerName = "agent-recorder.install.json";
     public const string ProductId = "AgentRecorder.PerUser.v1";
-    public const string MarkerJson = "{\"format\":1,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.19\",\"mode\":\"per-user\"}";
+    private const string AcceptedUpgradeSource = "0.1.19";
+    public static string ProductVersion { get; } = typeof(InstallationContext).Assembly.GetName().Version!.ToString(3);
+    public static string MarkerJson => JsonSerializer.Serialize(new { format = 1, product = ProductId, version = ProductVersion, mode = "per-user" });
     public static string DefaultDataRoot => Path.Combine(LocalRoot, "AgentRecorder");
     private static string LocalRoot => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
     public static string ProgramRoot => ExpectedProgramRoot(LocalRoot);
@@ -26,6 +28,9 @@ public static class InstallationContext
     public static bool IsInstalled(string packageRoot) => IsInstalled(packageRoot, LocalRoot);
 
     internal static bool IsInstalled(string packageRoot, string localRoot)
+        => ReadInstalledVersion(packageRoot, localRoot) != null;
+
+    internal static string? ReadInstalledVersion(string packageRoot, string localRoot, bool allowAcceptedUpgradeSource = false)
     {
         var root = Path.GetFullPath(packageRoot);
         var marker = Path.Combine(root, MarkerName);
@@ -33,8 +38,8 @@ public static class InstallationContext
             if (Path.Exists(Path.Combine(root, component, MarkerName)))
                 throw new InvalidDataException("INSTALL_CONTEXT_CONFLICT: component installation marker.");
         try { _ = File.GetAttributes(marker); }
-        catch (FileNotFoundException) { return false; }
-        catch (DirectoryNotFoundException) { return false; }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
         RequireNonReparse(root);
         RequireNonReparse(marker);
         if (!Equal(root, ExpectedProgramRoot(localRoot)))
@@ -47,10 +52,13 @@ public static class InstallationContext
             var obj = doc.RootElement;
             if (obj.ValueKind != JsonValueKind.Object || obj.EnumerateObject().Count() != 4 ||
                 obj.GetProperty("format").GetInt32() != 1 || obj.GetProperty("product").GetString() != ProductId ||
-                obj.GetProperty("version").GetString() != "0.1.19" || obj.GetProperty("mode").GetString() != "per-user" ||
+                obj.GetProperty("mode").GetString() != "per-user" ||
                 obj.EnumerateObject().Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != 4)
                 throw new InvalidDataException("INSTALL_MARKER_INVALID");
-            return true;
+            var version = obj.GetProperty("version").GetString();
+            if (version != ProductVersion && !(allowAcceptedUpgradeSource && version == AcceptedUpgradeSource))
+                throw new InvalidDataException("INSTALL_MARKER_INVALID");
+            return version;
         }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
         {

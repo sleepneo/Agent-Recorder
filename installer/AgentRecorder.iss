@@ -2,13 +2,18 @@
 #ifndef PayloadDir
   #error PayloadDir must be supplied by build-installer.ps1
 #endif
+#ifndef ReleaseVersion
+  #error ReleaseVersion must be supplied by build-installer.ps1
+#endif
 #define ProductKey "Software\AgentRecorder\Installation"
 #define StableAppId "{49E81E5C-57DF-4F8E-93CA-23DE6F10F755}"
 
 [Setup]
 AppId={{49E81E5C-57DF-4F8E-93CA-23DE6F10F755}
 AppName=Agent Recorder
-AppVersion=0.1.19
+AppVersion={#ReleaseVersion}
+VersionInfoVersion={#ReleaseVersion}.0
+VersionInfoProductVersion={#ReleaseVersion}.0
 AppPublisher=Agent Recorder
 DefaultDirName={localappdata}\Programs\AgentRecorder
 DisableDirPage=yes
@@ -29,7 +34,7 @@ SignedUninstaller=no
 Uninstallable=yes
 UninstallDisplayIcon={app}\AgentRecorder.App\AgentRecorder.App.exe
 OutputDir={#InstallerOutput}
-OutputBaseFilename=AgentRecorder-v0.1.19-win-x64-setup-unsigned
+OutputBaseFilename=AgentRecorder-v{#ReleaseVersion}-win-x64-setup-unsigned
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

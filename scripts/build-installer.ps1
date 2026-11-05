@@ -27,7 +27,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PortablePackageValidation.ps1')
+. (Join-Path $PSScriptRoot 'ReleaseVersion.ps1')
 $project = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$productVersion = Get-ReleaseVersion $project
 $inputZip = [System.IO.Path]::GetFullPath($PortableZip)
 if (-not (Test-Path -LiteralPath $inputZip -PathType Leaf)) { throw "Portable ZIP missing: $inputZip" }
 if ((Get-FileHash -LiteralPath $inputZip -Algorithm SHA256).Hash -ine $PortableSha256) { throw 'Portable SHA256 mismatch.' }
@@ -87,9 +89,13 @@ try {
     $audioVersion = [version]$audioProject.SelectSingleNode('/Project/PropertyGroup/AssemblyVersion').InnerText
     foreach ($component in @('App','Headless','Cli','AudioHelper')) {
         $assembly=Join-Path $payload "AgentRecorder.$component\AgentRecorder.$component.dll"
-        $expectedVersion = if ($component -eq 'AudioHelper') { $audioVersion } else { [version]'0.1.19.0' }
-        $actualVersion = [Reflection.AssemblyName]::GetAssemblyName($assembly).Version
-        if ($actualVersion -ne $expectedVersion) { throw "Assembly version gate failed for ${component}: expected $expectedVersion, got $actualVersion." }
+        if ($component -eq 'AudioHelper') {
+            if ([Reflection.AssemblyName]::GetAssemblyName($assembly).Version -ne $audioVersion) {
+                throw "AudioHelper assembly version must be $audioVersion."
+            }
+        } else {
+            Assert-ReleaseAssemblyVersion $assembly ([version]"$productVersion.0")
+        }
         $executable=Join-Path $payload "AgentRecorder.$component\AgentRecorder.$component.exe"
         $bytes=[IO.File]::ReadAllBytes($executable)
         if($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A){throw "Invalid executable: $component"}
@@ -108,23 +114,30 @@ try {
     $cliDir=Join-Path $payload 'AgentRecorder.Cli'
     $cli=Join-Path $cliDir 'AgentRecorder.Cli.exe'
     $info=@(& $cli installation-package-info)
-    if ($LASTEXITCODE -ne 0 -or $info.Count -ne 1 -or $info[0] -cne 'AgentRecorder.PerUser.v1/0.1.19') { throw 'Portable predates the per-user installation contract; rebuild using the unchanged portable release entry point.' }
-    $marker='{"format":1,"product":"AgentRecorder.PerUser.v1","version":"0.1.19","mode":"per-user"}'
+    $productId = 'AgentRecorder.PerUser.v1'
+    if ($LASTEXITCODE -ne 0 -or $info.Count -ne 1 -or $info[0] -cne "$productId/$productVersion") {
+        throw "Portable CLI installation identity must be $productId/$productVersion."
+    }
+    $marker = [ordered]@{format=1; product=$productId; version=$productVersion; mode='per-user'} | ConvertTo-Json -Compress
     [IO.File]::WriteAllText((Join-Path $payload 'agent-recorder.install.json'),$marker,[Text.UTF8Encoding]::new($false))
     . (Join-Path $PSScriptRoot 'InstallerPayload.ps1')
     $includes=Write-InstallerPayloadIncludes -payload $payload -work $work
     $fileList=$includes.FileList; $guardHashes=$includes.GuardHashes
     if ((Get-FileHash -LiteralPath $CompilerPath -Algorithm SHA256).Hash -cne $compilerHash) { throw 'ISCC changed after the engine probe.' }
     $iss = Join-Path $project 'installer\AgentRecorder.iss'
-    $compileArgs = '"/DPayloadDir={0}" "/DPayloadFiles={1}" "/DGuardHashes={2}" "/DInstallerOutput={3}" "{4}"' -f $payload,$fileList,$guardHashes,$out,$iss
+    $compileArgs = '"/DPayloadDir={0}" "/DPayloadFiles={1}" "/DGuardHashes={2}" "/DInstallerOutput={3}" /DReleaseVersion={4} "{5}"' -f $payload,$fileList,$guardHashes,$out,$productVersion,$iss
     $compileLog = Join-Path $work 'compile.log'
     $compiled = Invoke-InstallerCompiler -FilePath $CompilerPath -Arguments $compileArgs `
         -WorkingDirectory $work -LogPath $compileLog -TimeoutMs 900000
     if ($compiled.TimedOut -or $compiled.ExitCode -ne 0) { throw "ISCC compile failed. Exit: $($compiled.ExitCode). Timeout: $($compiled.TimedOut). Log: $compileLog" }
-    $exe=Get-Item -LiteralPath (Join-Path $out 'AgentRecorder-v0.1.19-win-x64-setup-unsigned.exe')
+    $exe=Get-Item -LiteralPath (Join-Path $out "AgentRecorder-v$productVersion-win-x64-setup-unsigned.exe")
+    $setupVersion = [version]"$productVersion.0"
+    if ([version]$exe.VersionInfo.FileVersion -ne $setupVersion -or [version]$exe.VersionInfo.ProductVersion -ne $setupVersion) {
+        throw "Compiled Setup PE version differs from $setupVersion."
+    }
     $signature=Get-AuthenticodeSignature -LiteralPath $exe.FullName
     if ($signature.Status -ne 'NotSigned') { throw "Unexpected signature state: $($signature.Status)" }
-    [pscustomobject]@{Status='CompiledUnsigned';PortableZip=$inputZip;PortableSha256=$PortableSha256;Entries=$count;
+    [pscustomobject]@{Status='CompiledUnsigned';ProductVersion=$productVersion;PortableZip=$inputZip;PortableSha256=$PortableSha256;Entries=$count;
         Compiler=$compilerEvidence; CompilerExitCode=$compiled.ExitCode; CompilerArguments=$compileArgs;
         Installer=$exe.FullName;InstallerBytes=$exe.Length;InstallerSha256=(Get-FileHash -LiteralPath $exe.FullName).Hash;SignatureStatus=$signature.Status.ToString();Installed=$false} |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $work 'build-evidence.json') -Encoding UTF8

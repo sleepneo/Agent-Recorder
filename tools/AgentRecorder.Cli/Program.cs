@@ -50,7 +50,7 @@ internal static partial class Program
         if (command == "installation-check") return RunInstallationCheck(args);
         if (command == "installation-package-info" && args.Length == 1)
         {
-            Console.WriteLine("AgentRecorder.PerUser.v1/0.1.19");
+            Console.WriteLine($"{InstallationContext.ProductId}/{InstallationContext.ProductVersion}");
             return 0;
         }
         if (command == "ensure-running")

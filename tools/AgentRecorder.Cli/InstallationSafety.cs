@@ -64,14 +64,14 @@ internal static partial class Program
             RequireOrdinaryInstallationTree(root);
             var data = Path.Combine(checks.LocalRoot, "AgentRecorder");
             InstallationContext.RequireSeparate(root, data);
-            var installed = InstallationContext.IsInstalled(root, checks.LocalRoot);
-            if (!installed && (operation != "install" ||
+            var installedVersion = InstallationContext.ReadInstalledVersion(root, checks.LocalRoot,
+                allowAcceptedUpgradeSource: operation == "upgrade");
+            if (installedVersion == null && (operation != "install" ||
                 (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())))
                 return new(false, "INSTALL_OWNER_UNKNOWN");
             if (!checks.MutexesPresent()) return new(false, "INSTALL_LEASE_MISSING");
             if (!checks.NoHostProcesses(root)) return new(false, "INSTALL_HOST_ACTIVE_OR_UNKNOWN");
-            return CheckInstallationReady(root, data, operation == "install",
-                installed && (operation is "upgrade" or "uninstall"), checks);
+            return CheckInstallationReady(root, data, operation, installedVersion, checks);
         }
         catch { return new(false, "INSTALL_STATE_UNKNOWN"); }
     }

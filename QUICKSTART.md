@@ -6,7 +6,7 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
-1. Extract the portable zip from the published release. If you have the Windows x64 per-user installer candidate, it installs without starting the app or recording. The candidate has passed local lifecycle and first-use checks but is not part of v0.1.19.
+1. Download and extract the v0.1.20 Windows x64 portable ZIP.
 2. Ask your local AI agent to read:
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`

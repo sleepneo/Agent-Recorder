@@ -53,6 +53,8 @@ public sealed class Installation389Tests : IDisposable
     [InlineData("{\"format\":2,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.19\",\"mode\":\"per-user\"}")]
     [InlineData("{\"format\":1,\"product\":\"Other\",\"version\":\"0.1.19\",\"mode\":\"per-user\"}")]
     [InlineData("{\"format\":1,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.18\",\"mode\":\"per-user\"}")]
+    [InlineData("{\"format\":1,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.19\",\"mode\":\"per-user\"}")]
+    [InlineData("{\"format\":1,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.21\",\"mode\":\"per-user\"}")]
     [InlineData("{\"format\":1,\"product\":\"AgentRecorder.PerUser.v1\",\"version\":\"0.1.19\",\"mode\":\"per-user\",\"data_dir\":\"C:\\\\other\"}")]
     public void MalformedMarkerNeverFallsBackEvenWithOverride(string contents)
     {

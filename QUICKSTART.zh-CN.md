@@ -4,7 +4,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 
 ## 如何使用
 
-1. 使用已发布的版本时，解压 portable zip。如果你拿到了 Windows x64 当前用户安装候选，可用它安装；安装完成不会自动启动或录制。候选已通过本机安装流程和首次使用验收，已发布的 v0.1.19 不含安装器。
+1. 下载并解压 v0.1.20 Windows x64 便携 ZIP。
 2. 让本地 AI agent 阅读：
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`

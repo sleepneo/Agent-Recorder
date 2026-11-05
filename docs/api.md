@@ -8,7 +8,7 @@ False keeps the actual App generator installed but skips Bundle preparation/gene
 
 A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. The policy is not deletion approval. Its main-output claim retires at a known production backend's actual settlement boundary; live or unknown work remains protected. Default Bundle outputs remain protected. Independent source/synthetic-input checks and one real 5-second silent FFmpeg selected-region run with local cancellation, approval and idempotent replay have passed. This does not establish all-backend or general retention acceptance.
 
-This reference describes v0.1.19 contracts through SQLite v48:
+This reference describes v0.1.20 contracts through SQLite v48:
 history, health, artifacts, generation digests, read-only retention preview and
 locally confirmed single deletion request plumbing. The restricted implementation
 has passed source checks. App recordings default to Bundles and remain protected;

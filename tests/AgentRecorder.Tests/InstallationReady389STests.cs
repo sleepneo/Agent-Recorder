@@ -516,6 +516,56 @@ public sealed class InstallationReady389STests : IDisposable
         Assert.Equal("preserve", File.ReadAllText(Path.Combine(Data, "preserve.dat")));
     }
 
+    [Theory]
+    [InlineData("0.1.19", "upgrade", "absent", "INSTALL_SAFE_WHILE_LEASE_HELD")]
+    [InlineData("0.1.19", "upgrade", "historical", "INSTALL_SAFE_WHILE_LEASE_HELD")]
+    [InlineData("0.1.19", "upgrade", "wrong_owner", "INSTALL_OWNER_UNKNOWN")]
+    [InlineData("0.1.19", "upgrade", "wrong_display_version", "INSTALL_OWNER_UNKNOWN")]
+    [InlineData("0.1.19", "upgrade", "changed_marker", "INSTALL_OWNER_CHANGED")]
+    [InlineData("0.1.19", "upgrade", "changed_registration", "INSTALL_OWNER_CHANGED")]
+    [InlineData("0.1.19", "install", "absent", "INSTALL_STATE_UNKNOWN")]
+    [InlineData("0.1.19", "uninstall", "absent", "INSTALL_STATE_UNKNOWN")]
+    [InlineData("0.1.18", "upgrade", "absent", "INSTALL_STATE_UNKNOWN")]
+    [InlineData("0.1.21", "upgrade", "absent", "INSTALL_STATE_UNKNOWN")]
+    [InlineData("0.1.19-rc.1", "upgrade", "absent", "INSTALL_STATE_UNKNOWN")]
+    public void UpgradeAcceptsOnlyTheOwnedAcceptedPriorVersion(string version, string operation, string scenario, string code)
+    {
+        SetUp("upgrade");
+        SetUpOwnedInstallation();
+        var marker = Path.Combine(ProgramRoot, InstallationContext.MarkerName);
+        var previous = JsonNode.Parse(InstallationContext.MarkerJson)!.AsObject();
+        previous["version"] = version;
+        File.WriteAllText(marker, previous.ToJsonString());
+        if (scenario == "historical") File.WriteAllText(ReadyPath, LegacyReady(0x7fff_fffc));
+        var changed = false;
+        var result = CliProgram.EvaluateInstallationSafety(ProgramRoot, operation, new()
+        {
+            LocalRoot = _local, MutexesPresent = () => true, NoHostProcesses = _ => true,
+            PortAbsent = () => true, ObserveReadyPid = _ => PidState.Exited,
+            NoIntegrations = _ =>
+            {
+                changed = true;
+                if (scenario == "changed_marker") File.WriteAllText(marker, InstallationContext.MarkerJson);
+                return true;
+            },
+            ReadInstallationRegistration = (view, key, names) =>
+            {
+                var values = OwnedRegistration(view, key);
+                if (values == null) return null;
+                if (key == CliProgram.ProductRegistrationKey)
+                {
+                    if (scenario == "wrong_owner" || (changed && scenario == "changed_registration")) values[0] = "foreign";
+                    return values;
+                }
+                Assert.Equal("DisplayVersion", names[^1]);
+                return [.. values, scenario == "wrong_display_version" ? InstallationContext.ProductVersion : "0.1.19"];
+            }
+        });
+        Assert.Equal(code == "INSTALL_SAFE_WHILE_LEASE_HELD", result.Safe);
+        Assert.Equal(code, result.Code);
+        Assert.Equal("preserve", File.ReadAllText(Path.Combine(Data, "preserve.dat")));
+    }
+
     private void SetUpOwnedInstallation()
     {
         Directory.CreateDirectory(ProgramRoot);

@@ -10,7 +10,7 @@ false不卸载App生产generator，只为当前ordinary视频跳过Bundle准备/
 
 Bundle附件身份保护（V45引入）：原 `shared_publication_identity` 批量查询增加 Bundle 附件持久身份，完整二进制 tuple 命中即保护，不排除同 recording_id 的不同产物角色，不按父状态、日期、session 或页水位过滤，不返回外来字段。SQLite V45 只增附件反向索引及回执，旧迁移不变；缺坏结构失败关闭。预览命中不做文件探针，删除前 Guard 在自己的事务重新查询；不扩大本地批准或删除权限，不代表完整引用图。
 
-本文描述 v0.1.19 合同（SQLite v48），包括区域复用、独立窗口并行、历史、健康、产物及内容核验、只读保留预览和受限本机批准删除。默认 App 录制仍生成受保护 Bundle。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
+本文描述 v0.1.20 合同（SQLite v48），包括区域复用、独立窗口并行、历史、健康、产物及内容核验、只读保留预览和受限本机批准删除。默认 App 录制仍生成受保护 Bundle。调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 

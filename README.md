@@ -26,7 +26,8 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-Version v0.1.19 is a prerelease with independent window recordings, per-recording
+Version v0.1.20 is a Windows x64 portable prerelease. The per-user installer
+is not distributed in this release. The prerelease carries forward independent window recordings, per-recording
 audio when reusing a saved region, recording-specific automatic file names,
 and safer output ownership and WGC finalization. Three silent windows passed
 180/90/30-second desktop acceptance. QB system audio passed controlled
@@ -49,9 +50,9 @@ refusal or uncertainty stops the remaining items. They are not atomic and
 never resume deletion after restart. Cancellation
 preserves the file; retries with the same key return the original result.
 Default Bundle outputs remain protected. Automatic cleanup, disk quotas, and
-code signing remain unfinished. The unsigned per-user installer has passed
-local install, upgrade, uninstall, reinstall, and agent-driven first-use
-checks. It is not included in the published v0.1.19 release. Inspect `/capabilities` for the running host's
+code signing remain unfinished. The local installer candidate passed an
+in-place upgrade from v0.1.19, desktop startup, uninstall, and reinstall checks.
+Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 When upgrading an existing installation, back up its data directory first.
