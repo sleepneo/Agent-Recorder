@@ -257,6 +257,40 @@ public sealed class WindowContentDefaultTests : IDisposable
         Assert.Equal(0, f.BackendFactories + f.Backend.Starts);
     }
 
+    [Theory]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public async Task Admission409ReportsFirstUnderBudgetWindowVolume(bool quick, bool outputAlsoLow, bool invalidTemp)
+    {
+        const long required = 356L * 1024 * 1024;
+        using var f = new HttpFixture(_root);
+        var request = Request(false);
+        if (quick) ToQuick(request);
+        var provider = new FakeStorageProvider
+        {
+            Volume = path => path == _root ? "private-output-volume" : "private-wgc-volume",
+            Free = path => path == _root ? (outputAlsoLow ? required - 17 : required) : invalidTemp ? -1 : required - 23
+        };
+        RecordingPreflightChecker.StorageCapacityProvider = provider;
+
+        var response = await f.Post(request, quick);
+        Assert.Equal(400, response.Status);
+        var error = response.Body["error"]!;
+        Assert.Equal(invalidTemp ? WindowStorageSafety.UnavailableCode : WindowStorageSafety.LowSpaceCode,
+            error["code"]!.GetValue<string>());
+        var details = error["details"]!.AsObject();
+        if (invalidTemp)
+            Assert.False(details.ContainsKey("storage"));
+        else
+            OrdinaryVideoStorageSafetyTests.AssertStorageShortfall(JsonSerializer.SerializeToElement(details["storage"]),
+                required, required - (outputAlsoLow ? 17 : 23), outputAlsoLow ? "output" : "wgc_temp");
+        Assert.Equal(1, provider.Calls);
+        Assert.Empty(f.Engine._recs);
+        Assert.Equal(0, f.Tray.Confirmations);
+        Assert.Equal(0, f.BackendFactories);
+    }
+
     private static void ToQuick(JsonObject request)
     {
         request.Remove("source");
@@ -363,7 +397,7 @@ public sealed class WindowContentDefaultTests : IDisposable
             RecordingPreflightChecker.EncoderProvider = (out string? ffmpeg, out string? ffprobe) =>
             { ffmpeg = ffprobe = typeof(WindowContentDefaultTests).Assembly.Location; return true; };
             RecordingPreflightChecker.AudioHelperPathResolver = () => "private-nonexecuted-audio-helper";
-            RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+            RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
             RecordingPreflightChecker.StorageCapacityProvider = new FakeStorageProvider();
             var audit = new AuditLogger();
             Engine = new(audit, microphoneProvider: Devices, systemAudioEndpointProvider: Devices)

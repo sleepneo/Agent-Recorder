@@ -105,46 +105,9 @@ public sealed class OrdinaryBundleDurableHistoryTests(ITestOutputHelper output)
     private static async Task<JsonElement> Get(HttpClient c,string path)
     { using var response=await c.GetAsync(path);Assert.Equal(HttpStatusCode.OK,response.StatusCode);using var doc=JsonDocument.Parse(await response.Content.ReadAsStringAsync());return doc.RootElement.GetProperty("data").Clone(); }
 
-    [Theory]
-    [InlineData(false,false)] [InlineData(true,false)] [InlineData(false,true)] [InlineData(true,true)]
-    public async Task FormalCoreGeneratorWriterApisAndReopenKeepMediaAnchorIndependent(bool manual,bool failed)
-    {
-        using var f=new Fixture();var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var real=new FfmpegRecordingBundleGenerator();var gen=new Generator(async r=>{await release.Task;return failed?RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.FrameExtractFailed,"secret-stderr-api-key"):await real.GenerateAsync(r);});
-        var rec=await f.Capture(gen,manual);await gen.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var generating=f.Writer.Read(rec.Id)!;Assert.Equal("completed",generating.Status);Assert.Equal("generating",generating.Bundle!.Status);var anchors=f.Anchors();Assert.NotEmpty(anchors);Assert.Equal("1",f.Scalar("SELECT COUNT(*) FROM ordinary_publication_anchors;"));
-        release.TrySetResult();await Until(()=>f.Writer.Read(rec.Id)?.Bundle?.Status==(failed?"failed":"ready"));var settled=f.Writer.Read(rec.Id)!;
-        Assert.Equal(generating with { Bundle=null },settled with { Bundle=null });Assert.Equal(anchors,f.Anchors());Assert.Equal(1,gen.Calls);Assert.Equal(RecState.completed,rec.State);Assert.NotNull(rec.LastMeta!.PublicationReceipt);
-        Assert.Equal(failed?RecordingBundleErrorCodes.FrameExtractFailed:null,settled.Bundle!.ErrorCode);
-        if(!failed)Assert.Equal(new[]{"first_frame.png","last_frame.png","marks.json","metadata.json","thumbnail.jpg"},Directory.GetFiles(settled.Bundle.Path!).Select(Path.GetFileName).OrderBy(n=>n));
-        f.StartApi();using var client=f.Client();using var anonymous=f.Client(false);Assert.Equal(HttpStatusCode.Unauthorized,(await anonymous.GetAsync("/api/v1/recording-history")).StatusCode);
-        foreach(var path in new[]{"/api/v1/recording-history","/api/v1/recording-history/"+rec.Id,"/api/v1/history?source=ordinary"})
-        {
-            var data=await Get(client,path);var row=path.Contains("/recording-history/")?data.GetProperty("recording"):data.GetProperty("items")[0];var bundle=row.GetProperty("bundle");
-            Assert.Equal(failed?"failed":"ready",bundle.GetProperty("status").GetString());Assert.Equal(settled.Bundle.Path,bundle.GetProperty("path").GetString());Assert.Equal(5,bundle.EnumerateObject().Count());Assert.DoesNotContain("secret-stderr",bundle.ToString());Assert.DoesNotContain("operation",bundle.ToString());
-        }
-        f.Api!.Stop();f.Api=null;f.Engine!.Dispose();f.Engine=null;f.Reopen();Assert.Equal(settled.Bundle,f.Writer.Read(rec.Id)!.Bundle);Assert.Equal(anchors,f.Anchors());
-        if(!failed){Directory.Delete(settled.Bundle.Path!,true);Directory.CreateDirectory(settled.Bundle.Path!);File.WriteAllText(Path.Combine(settled.Bundle.Path!,"unrelated.txt"),"replacement");Assert.Equal("ready",f.Writer.Read(rec.Id)!.Bundle!.Status);}
-        output.WriteLine($"Formal lavfi FFmpeg -> Core -> {(failed?"fake generation fault":"actual FfmpegRecordingBundleGenerator five files")} -> writer -> SQLite -> three APIs -> reopen: media completed, Bundle {settled.Bundle.Status}, native media anchor unchanged; manual={manual}.");
-    }
 
-    [Fact]
-    public async Task FastResultWaitsBehindAtomicGeneratingAndLateMediaReplayCannotResetReady()
-    {
-        using var f=new Fixture();using var mediaRelease=new ManualResetEventSlim();using var bundleRelease=new ManualResetEventSlim();var mediaEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);var bundleEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Writer.BeforePersistForTests=s=>{if(s.Status=="completed"){mediaEntered.TrySetResult();Assert.True(mediaRelease.Wait(TimeSpan.FromSeconds(5)));}};
-        f.Writer.BeforeBundlePersistForTests=_=>{bundleEntered.TrySetResult();Assert.True(bundleRelease.Wait(TimeSpan.FromSeconds(5)));};
-        var gen=new Generator(r=>Task.FromResult(RecordingBundleGenerationResult.Ready(OrdinaryRecordingBundleOperation.DerivePath(r.MediaPath))));
-        var rec=await f.Capture(gen);
-        try
-        {
-            await mediaEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));await Until(()=>rec.BundleSnapshot.Status=="ready");Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_recording_bundles;"));Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_publication_anchors;"));Assert.True(rec.IsFinalized);
-            mediaRelease.Set();await bundleEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));Assert.Equal("completed",f.Scalar("SELECT status_code FROM ordinary_recording_history;"));Assert.Equal("generating",f.Scalar("SELECT status_code FROM ordinary_recording_bundles;"));Assert.Equal("1",f.Scalar("SELECT COUNT(*) FROM ordinary_publication_anchors;"));Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>f.Writer.Read(rec.Id));
-        }
-        finally {mediaRelease.Set();bundleRelease.Set();}
-        await Until(()=>f.Writer.Read(rec.Id)?.Bundle?.Status=="ready");var row=f.Writer.Read(rec.Id)!;
-        var replay=row with { PublicationReceipt=rec.LastMeta!.PublicationReceipt,BundleRegistration=new(rec.OrdinaryBundleOperation) };Assert.True(f.Writer.TryPublish(replay));Assert.Equal("ready",f.Writer.Read(rec.Id)!.Bundle!.Status);Assert.Equal(1,gen.Calls);
-    }
+
+
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
@@ -249,7 +212,7 @@ public sealed class OrdinaryBundleDurableHistoryTests(ITestOutputHelper output)
             {cmd.CommandText=m.Definition;cmd.ExecuteNonQuery();cmd.CommandText="INSERT INTO schema_migrations VALUES($v,$n,$c,$at);";cmd.Parameters.AddWithValue("$v",m.Version);cmd.Parameters.AddWithValue("$n",m.Name);cmd.Parameters.AddWithValue("$c",m.Checksum);cmd.Parameters.AddWithValue("$at",1000+m.Version);cmd.ExecuteNonQuery();cmd.Parameters.Clear();}
             cmd.CommandText="SELECT MAX(version) FROM schema_migrations;";Assert.Equal(30L,cmd.ExecuteScalar());
         }
-        var oldReceipts=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30);var store=new SqliteOperationalStore(path);store.Initialize();store.Initialize();Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(oldReceipts,UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30));
+        var oldReceipts=UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30);var store=new SqliteOperationalStore(path);store.Initialize();store.Initialize();Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(oldReceipts,UnifiedHistoryProfileFilterTests.RawSnapshot(path,schemaThrough:30));
         using var reader=new SqliteOrdinaryRecordingHistoryStore(store);var legacy=f.Row("legacy");reader.Register(legacy);Assert.Null(reader.Read("legacy")!.Bundle);Assert.Null(Assert.Single(reader.ReadPage(1,null).Items).Bundle);Assert.Null(Assert.Single(new UnifiedHistoryQueryService(store,reader).GetPage(UnifiedHistoryTestDatabase.Sid,UnifiedHistoryTestDatabase.Session,1,new("ordinary")).Items).Bundle);
     }
 
@@ -266,7 +229,7 @@ public sealed class OrdinaryBundleDurableHistoryTests(ITestOutputHelper output)
     public async Task BundleRegistrationAndPublicationAnchorRollbackWithMediaTerminal(string fault)
     {
         using var f=new Fixture();f.Execute(fault=="bundle_insert"?"CREATE TRIGGER fail_insert BEFORE INSERT ON ordinary_recording_bundles BEGIN SELECT RAISE(ABORT,'bundle insert fault');END;":"CREATE TRIGGER fail_insert BEFORE INSERT ON ordinary_publication_anchors BEGIN SELECT RAISE(ABORT,'anchor insert fault');END;");
-        var gen=new Generator(r=>Task.FromResult(RecordingBundleGenerationResult.Ready(OrdinaryRecordingBundleOperation.DerivePath(r.MediaPath))));var rec=await f.Capture(gen);await Until(()=>rec.BundleSnapshot.Status=="ready");Assert.Equal(RecState.completed,rec.State);Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>f.Writer.Read(rec.Id));Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_recording_bundles;"));Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_publication_anchors;"));Assert.NotEqual("completed",f.Scalar("SELECT status_code FROM ordinary_recording_history;"));
+        var gen=new Generator(r=>Task.FromResult(RecordingBundleGenerationResult.Ready(OrdinaryRecordingBundleOperation.DerivePath(r.MediaPath))));var rec=await f.Capture(gen);await Until(()=>rec.IsFinalized);Assert.Equal(RecState.completed,rec.State);Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>f.Writer.Read(rec.Id));Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_recording_bundles;"));Assert.Equal("0",f.Scalar("SELECT COUNT(*) FROM ordinary_publication_anchors;"));Assert.NotEqual("completed",f.Scalar("SELECT status_code FROM ordinary_recording_history;"));
         Assert.False(f.Writer.DrainAndDispose(TimeSpan.FromSeconds(3)));Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>f.Writer.Read(rec.Id));
     }
 
@@ -293,28 +256,7 @@ public sealed class OrdinaryBundleDurableHistoryTests(ITestOutputHelper output)
         Assert.True(f.Writer.DrainAndDispose(TimeSpan.FromSeconds(3)));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task FormalCoreRejectsUnfrozenSuccessPathAndUnstableFailureCode(bool wrongSuccessPath)
-    {
-        using var f = new Fixture();
-        var gen = new Generator(r => Task.FromResult(wrongSuccessPath
-            ? RecordingBundleGenerationResult.Ready(Path.Combine(f.Root, "unregistered.bundle"))
-            : RecordingBundleGenerationResult.Failed("private-unbounded-error", "secret-stderr")));
-        var rec = await f.Capture(gen);
-        await Until(() => f.Writer.Read(rec.Id)?.Bundle?.Status == "failed");
-        var history = f.Writer.Read(rec.Id)!;
-        Assert.Equal("completed", history.Status);
-        Assert.Equal(RecState.completed, rec.State);
-        Assert.Equal(OrdinaryRecordingBundleOperation.DerivePath(rec.OutputPath), history.Bundle!.Path);
-        Assert.Equal(RecordingBundleErrorCodes.GenerationFailed, history.Bundle.ErrorCode);
-        Assert.Equal("failed", rec.BundleSnapshot.Status);
-        Assert.Equal(1, gen.Calls);
-        Assert.NotEmpty(f.Anchors());
-        f.Reopen();
-        Assert.Equal(history.Bundle, f.Writer.Read(rec.Id)!.Bundle);
-    }
+
 
     [Fact]
     public async Task BundleQueueCapacityIsBoundedAndLostResultNeedsMatchingReplay()

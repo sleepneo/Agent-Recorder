@@ -22,6 +22,8 @@ internal static class Program
     {
         if (args.Length == 1 && args[0] == "--internal-storage-capacity-probe")
             return WindowsStorageCapacityProbe.Run();
+        if (args.Length == 1 && args[0] == WindowsAvStagingInventory.ProbeArgument)
+            return WindowsAvStagingInventory.Run();
         InteractiveLaunchRequest? launchRequest = null;
         var launchDataDir = string.Empty;
         try
@@ -184,17 +186,6 @@ internal static class Program
 
         var dataDir = DataDirResolver.Resolve();
 
-        // Cleanup failed-recording diagnostics older than 24 hours. Failure here
-        // must not block startup, and the scope is limited to <data-dir>/failed/.
-        try
-        {
-            new TempRetentionPolicy(dataDir).Cleanup();
-        }
-        catch
-        {
-            // Best-effort cleanup; do not prevent application startup.
-        }
-
         var perfTracer = new RecordingPerformanceTracer(dataDir);
 
         // Production microphone device provider: owned by the engine and shared
@@ -205,7 +196,6 @@ internal static class Program
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
 
-        var bundleGenerator = CreateRecordingBundleGenerator();
         var standingStartSafetyInterlock = new StandingLeaseStartSafetyInterlock();
         var recurringCurrentSafetyValidator = new SqliteRecurringLeaseCurrentSafetyValidator(operationalStore);
         StandingLeaseSafetyControlService? unattendedSafetyService = null;
@@ -213,7 +203,7 @@ internal static class Program
         var engine = new RecordingEngine(
             audit,
             perfTracer,
-            bundleGenerator,
+            bundleGenerator: null,
             micProvider,
             micStatusProvider,
             displayTopologyProvider: null,
@@ -230,6 +220,7 @@ internal static class Program
                 ? "future_window_start_safety_unavailable"
                 : futureWindowCoordinator.ValidateBackendStart(ticket, nowUtc));
         engine.ConfigureOrdinaryRecordingHistory(ordinaryRecordingHistory);
+        SqliteManagedVideoQuota.Configure(engine, operationalStore, dataDir);
         unattendedSafetyService = new StandingLeaseSafetyControlService(
             operationalStore,
             utcNowForTest: null,
@@ -428,6 +419,10 @@ internal static class Program
             retentionDeletionGateway,
             retentionEvaluationGateway: CreateRetentionEvaluationGateway(unifiedHistoryQuery,dataDir,engine,historyIdentity),
             retentionBatchDeletionGateway: retentionBatchDeletionGateway);
+        server.ConfigureRetentionStorage(dataDir);
+        server.ConfigureRetentionStaging(dataDir);
+        server.ConfigureRetentionUsage(operationalStore, dataDir);
+        server.ConfigureRetentionReconciliation(operationalStore, dataDir);
 
         Task? hostWarmup = null;
         int hostStartupComplete = 0;
@@ -574,7 +569,6 @@ internal static class Program
         string dataDir, RecordingEngine engine, Func<(string Sid, string Session)> identity)
         => new SqliteRetentionPreviewGateway(new RetentionPreviewQueryService(history, dataDir, engine), identity);
 
-    internal static FfmpegRecordingBundleGenerator CreateRecordingBundleGenerator() => new();
 
     internal static IRetentionDeletionGateway CreateRetentionDeletionGateway(RecordingEngine engine,SqliteOperationalStore store,
         SqliteOrdinaryRecordingHistoryStore writer,string dataDir,(string Sid,string Session) identity,CancellationToken stopping)

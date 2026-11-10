@@ -1,5 +1,7 @@
 # Agent Recorder
 
+> This guide describes v0.1.21. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
+
 Agent Recorder is an **AI agent-native local screen recording capability layer**
 for Windows. A human describes what to record, a local AI agent calls the
 localhost API, and Agent Recorder provides local selection, confirmation,
@@ -26,37 +28,33 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-Version v0.1.20 is a Windows x64 portable prerelease. The per-user installer
-is not distributed in this release. The prerelease carries forward independent window recordings, per-recording
-audio when reusing a saved region, recording-specific automatic file names,
-and safer output ownership and WGC finalization. Three silent windows passed
-180/90/30-second desktop acceptance. QB system audio passed controlled
-silence/resume and repeated 200-second acceptance on the tested setup; these
-results do not certify every device or long-running workload.
+The v0.1.21 prerelease is a Windows x64 self-contained portable package.
+It adds storage diagnostics, optional managed-video quota admission, and
+read-only reconciliation of files against recording history. A blank storage
+reserve setting keeps the default 256 MiB protection. Independent silent
+window recording has been tested with four 644×420 windows at 15 fps; this
+does not guarantee higher concurrency on other hardware.
 See [QUICKSTART](QUICKSTART.md) for practical recording requests.
 
 Existing capabilities include durable
 ordinary recording history, unified indexed history, on-demand health and
 ordinary, plan and future-window artifact metadata checks, explicit ordinary
 main-video and five-attachment content verification, read-only retention
-previews, ordinary WGC Bundle generation, and durable plan and future-window
-publication identity. Ordinary raw/quick video requests may select MP4-only
-output with `artifacts.bundle=false`; the default still includes a recording
-bundle. Eligible completed MP4-only recordings in the host's Videos directory
+previews and durable plan and future-window publication identity. All new video recordings deliver video only. Ordinary raw/quick requests may omit artifacts or use an empty object or `artifacts.bundle=false`; explicit true is rejected before recording setup. Existing Bundle history remains readable and protected. Eligible completed MP4-only recordings in the host's Videos directory
 can be submitted by ID for separate local deletion confirmation. Explicit-ID
 read-only evaluation accepts up to 20 recordings. Ordered cleanup requests
 accept up to five recordings, with a separate local approval for every file;
 refusal or uncertainty stops the remaining items. They are not atomic and
 never resume deletion after restart. Cancellation
 preserves the file; retries with the same key return the original result.
-Default Bundle outputs remain protected. Automatic cleanup, disk quotas, and
-code signing remain unfinished. The local installer candidate passed an
-in-place upgrade from v0.1.19, desktop startup, uninstall, and reinstall checks.
+Existing Bundle outputs remain protected. The optional quota checks recorded
+logical bytes and estimated output size; it is not a hard disk quota and does
+not delete files.
 Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 When upgrading an existing installation, back up its data directory first.
-This version upgrades the history database to SQLite schema v48; keep upgraded
+This version upgrades the history database to SQLite schema V51; keep upgraded
 data with the new binaries rather than reopening it with an older release.
 
 ## Recording Audio
@@ -252,9 +250,7 @@ across Windows accounts; without an appropriate execution channel, fail closed.
 - A stable rounded-capsule stop control next to each active recording; clicking
   it stops only that recording.
 - A global stop hotkey (`Ctrl+Shift+F10`) that stops all active recordings.
-- Chapter marks through the authenticated API or `Ctrl+Shift+F11` while
-  recording. The local hotkey marks eligible active Bundle recordings, shows brief
-  in-app feedback, and writes the accepted marks to each bundle's `marks.json`.
+- New recordings do not accept chapter marks. Existing historical marks remain readable.
 - Tray menu stop entry that adapts to one or multiple active recordings.
 - Chinese and English local UI with DPI-aware confirmation, selection, recording
   indicators, and stop controls.
@@ -283,7 +279,7 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   remains best-effort across Windows and DWM variants.
 - User-level autostart controls and FFmpeg prewarm support.
 - A bounded local `perf_summary` with cold/warm P50/P95 diagnostics.
-- Structured recording bundles (`<video-stem>.bundle/` with `metadata.json`, `thumbnail.jpg`, `first_frame.png`, `last_frame.png`, `marks.json`) for successful FFmpeg MP4 recordings.
+- Historical Bundle attachment identity, hash and retention protection remain supported. New videos do not generate attachment packages.
 - Microphone recording through an isolated Windows WASAPI helper, followed by
   AAC muxing, with device enumeration, continuity diagnostics, runtime recovery,
   and stable failure reporting. Bluetooth Hands-Free inputs can automatically
@@ -376,7 +372,7 @@ src/
   AgentRecorder.App            WinForms tray host, selection UI, confirmation UI
   AgentRecorder.Api            localhost HTTP API
   AgentRecorder.Core           recording state machine and contracts
-  AgentRecorder.Capture        FFmpeg/WASAPI capture, muxing, bundles, prewarm
+  AgentRecorder.Capture        FFmpeg/WASAPI capture, muxing, legacy Bundle compatibility, prewarm
   AgentRecorder.Windows        Win32 display/window helpers
   AgentRecorder.Security       safety policy checks
   AgentRecorder.Logging        audit log writer
@@ -428,6 +424,22 @@ Reuse a saved region with a new duration and audio choice, without changing the 
 
 Set `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS` only in the host launch environment. Missing means 2; strict decimal integers 1–10 are valid (10 is the software hard limit). The Engine freezes this policy at initialization; changing the environment later or sending request fields cannot alter it. Invalid/overflow/out-of-range values disable this independent capability and raw requests return `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` before confirmation or worker creation. No HTTP limit mutation exists.
 
-`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports null effective limit/remaining; `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output and queued/generating/original Bundle host work demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
+`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid count configuration reports a null count limit; either invalid budget configuration reports null remaining amounts and `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output workers demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
 
 This budget covers this Engine's independent ordinary raw silent windows and their unretired delivery, not all OS workers or hardware capacity. Top-level concurrency is a descriptive maximum across separate contracts; legacy nested/region rules remain two, and quick/Profile/Plan/Lease/future/audio/mixed sources gain no extra capability. Every accepted recording still needs its own local confirmation. `stress_tested=false`; no quality reduction, backend substitution, desktop fallback or automatic PiP composition. WIN1…WIN10 identify local controls only; API identity remains Recording ID.
+
+
+### Pixel-rate admission budget
+
+Independent ordinary raw, silent, strict WGC windows also use the startup-frozen `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND`. The default is `497664000` pixels/second, the arithmetic cost of two 3840×2160×30 windows. This is an initial software policy, not measured dual-4K/ten-window capacity or a performance guarantee. Explicit values must be positive ASCII decimal Int64 integers (maximum 9223372036854775807); empty, whitespace, signs, fractions and overflow are invalid. Invalid count or pixel configuration disables this branch and returns `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` with `details.environment_variable`; other contracts remain separate. HTTP fields, confirmation callbacks and later environment changes cannot override it.
+
+Each recording freezes the trusted capture plan's physical window surface width × height × configured FPS (15/24/30/60), including obscured/off-display surface pixels. DIP, clipped desktop rectangles and request-supplied costs are not used. Arithmetic is checked Int64. Missing/invalid plan facts or multiplication overflow return `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID` before confirmation/output creation. Existing approval-time geometry revalidation still rejects changes; no automatic scaling, frame-rate reduction, target substitution or desktop fallback occurs.
+
+Both count and pixel limits must hold; equality is allowed. Admission checks configuration, mixed contracts, count, same window, then pixel budget; invalid plan facts fail when cost is calculated. Existing request, capability and output validation still applies. Pixel excess returns `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`; details include `reason_code=independent_window_pixel_budget_exceeded`, `requested_pixels_per_second`, `reserved_pixels_per_second`, `configured_pixels_per_second` and `remaining_pixels_per_second`, without paths, HWNDs or authorization material. A final Engine-lock check atomically admits the exact Recording, frozen cost and output claim before output directory creation, confirmation or backend creation.
+
+`recording.window_surface.independent_windows.pixel_rate_budget` reports `unit=pixels_per_second`, `policy_source`, `environment_variable`, `default_pixels_per_second`, `configured_pixels_per_second`, `configuration_valid`, `reserved_pixels_per_second`, `finalizing_or_unknown_pixels_per_second` and `remaining_pixels_per_second`. Count and pixel values share one consistent snapshot. Invalid configured values and unavailable remaining amounts are null. A snapshot reserves nothing. Pending confirmation through finalizing, terminal runs without positive retirement, and incomplete initial output/history registration retain the same reservation. Rollback and retirement release only that recording's cost.
+
+Scope is the current Engine's independent windows and unretired delivery, not a machine-wide GPU/encoder/CPU/disk budget. `snapshot_is_reservation=false`, `performance_guaranteed=false`, `hardware_capacity_measured=false`, and `stress_tested=false`. Default count 2 and explicit count 1–10 remain unchanged. No additional quick/Profile/nested/audio/region/mixed-target/screenshot-series/Plan/Lease/future-window concurrency is enabled. New videos still deliver video only; legacy Bundle history remains protected.
+
+
+Database compatibility: SQLite V51 adds receipts for host-level deletion protection. Back up the database before upgrading; do not reopen it with a V50 or older binary. Published v0.1.20 remains V48.

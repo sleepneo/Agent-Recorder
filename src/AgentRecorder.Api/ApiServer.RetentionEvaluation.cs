@@ -13,7 +13,7 @@ public sealed partial class ApiServer
     private const int EvaluationBodyLimit=16*1024;
     private static bool IsRetentionEvaluationPath(string path)=>path.Split('?')[0]==Prefix+EvaluationPath;
     private sealed class EvaluationRequestException() : ApiException(400,"INVALID_ARGUMENT",
-        "Use recording_ids (1-20 distinct IDs) and an explicit UTC completed_before only; no query parameters.");
+        "Use recording_ids (1-20 distinct IDs) and an explicit UTC completed_before, and optional keep_latest_count (integer 1-1000); no query parameters.");
     private static ApiException InvalidEvaluation()=>new EvaluationRequestException();
     // Send FIN after the error, then discard only a bounded amount of unread
     // transport data. Closing with unread bytes can reset away the JSON reply.
@@ -34,14 +34,18 @@ public sealed partial class ApiServer
     }
     private string PostRetentionEvaluation(HttpRequest request,string body,string requestId,CancellationToken cancellation)
     {
-        string[] ids;DateTimeOffset before;
+        string[] ids;DateTimeOffset before;int? keep=null;
         try
         {
             if(request.Query.Count!=0||Encoding.UTF8.GetByteCount(body)>EvaluationBodyLimit)throw InvalidEvaluation();
             using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=4});
             if(json.RootElement.ValueKind!=JsonValueKind.Object)throw InvalidEvaluation();
             var fields=json.RootElement.EnumerateObject().ToArray();
-            if(fields.Length!=2||fields.Count(p=>p.Name=="recording_ids")!=1||fields.Count(p=>p.Name=="completed_before")!=1)throw InvalidEvaluation();
+            if(fields.Length is <2 or >3||fields.Any(p=>p.Name is not ("recording_ids" or "completed_before" or "keep_latest_count"))||fields.Count(p=>p.Name=="keep_latest_count")>1||fields.Count(p=>p.Name=="recording_ids")!=1||fields.Count(p=>p.Name=="completed_before")!=1)throw InvalidEvaluation();
+            if(json.RootElement.TryGetProperty("keep_latest_count",out var k)) {
+                if(k.ValueKind!=JsonValueKind.Number || k.GetRawText().Any(c=>c<'0'||c>'9') || !k.TryGetInt32(out var n) || n is <1 or >1000)throw InvalidEvaluation();
+                keep=n;
+            }
             var array=json.RootElement.GetProperty("recording_ids");var cutoff=json.RootElement.GetProperty("completed_before");
             if(array.ValueKind!=JsonValueKind.Array||array.GetArrayLength() is <1 or >20||
                 array.EnumerateArray().Any(x=>x.ValueKind!=JsonValueKind.String)||cutoff.ValueKind!=JsonValueKind.String)throw InvalidEvaluation();
@@ -49,7 +53,7 @@ public sealed partial class ApiServer
             RetentionEvaluationService.ValidateRequest(ids,before,DateTimeOffset.UtcNow);
         }
         catch(Exception e) when(e is JsonException or ArgumentException or InvalidOperationException){throw InvalidEvaluation();}
-        if(_retentionEvaluationGateway is null || _acceptingStopped!=0 || _stopped!=0 ||
+        if(_retentionEvaluationGateway is null || keep.HasValue && !_retentionEvaluationGateway.SupportsKeepLatest || _acceptingStopped!=0 || _stopped!=0 ||
             _readiness is not null && (_readiness.ReadObservation() is not {Disposed:false,PublishedReadyFile:not null} ready ||
                 _tray.HostMode!="headless"&&ready.StartupInteractiveDesktopReady!=true))
             throw new ApiException(503,"RETENTION_EVALUATION_UNAVAILABLE","Read-only retention evaluation is not ready.");
@@ -57,7 +61,7 @@ public sealed partial class ApiServer
         {
             using var budget=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             RetentionEvaluationResult? result;
-            try {result=_retentionEvaluationGateway.ReadAsync(ids,before,budget.Token)
+            try {result=(keep is {} n ? _retentionEvaluationGateway.ReadWithKeepLatestAsync(ids,before,n,budget.Token) : _retentionEvaluationGateway.ReadAsync(ids,before,budget.Token))
                 .WaitAsync(TimeSpan.FromMilliseconds(RetentionEvaluationService.DeadlineMs),budget.Token).GetAwaiter().GetResult();}
             finally {budget.Cancel();}
             if(result is not {State:"complete",Page:{} page} || page.Items.Count!=ids.Length ||
@@ -65,7 +69,7 @@ public sealed partial class ApiServer
                 page.Items.Where((item,index)=>item.RecordingId!=ids[index]).Any())
                 throw new ApiException(503,"RETENTION_EVALUATION_UNAVAILABLE","Read-only retention evaluation is unavailable.",
                     new {reason_code=result?.State is "busy" or "timeout" or "cancelled" ? result.State : "failed"});
-            return ApiResponse.Ok(new
+            var response=ApiResponse.Ok(new
             {
                 read_only=true,deletion_supported=false,reference_protection_ready=false,metadata_only=true,bundle_included=false,
                 evaluation_started_at_utc=result.StartedAtUtc,evaluation_completed_at_utc=result.CompletedAtUtc,
@@ -81,6 +85,12 @@ public sealed partial class ApiServer
                 bytes_scope="requested_age_candidates_mp4_logical_length_not_reclaimable_space",
                 observation_semantics="database_snapshot_then_runtime_and_sequential_file_samples_not_atomic"
             },requestId);
+            if(keep is {} keepCount) {
+                var node=System.Text.Json.Nodes.JsonNode.Parse(response)!;
+                node["data"]!["policy"]=System.Text.Json.JsonSerializer.SerializeToNode(new {keep_latest_count=keepCount,ordering="completed_at_utc_desc_recording_id_binary_desc",snapshot_only=true,persistent=false,execution_supported=false,constrains_later_deletion=false});
+                return node.ToJsonString();
+            }
+            return response;
         }
         catch(ApiException){throw;}
         catch(TimeoutException){throw new ApiException(503,"RETENTION_EVALUATION_UNAVAILABLE","Read-only retention evaluation timed out.",new {reason_code="timeout"});}

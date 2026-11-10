@@ -797,7 +797,7 @@ public sealed partial class RequiredOncePlanSetupCoordinatorTests
         ICaptureBackend backend,
         string backendType = "fake-required-once")
     {
-        var engine = new RecordingEngine(new NoopAuditLogger(), displayTopologyProvider: new FixedDisplayTopologyProvider(new[]
+        var engine = new RecordingEngine(new NoopAuditLogger(), bundleGenerator:new ForbiddenBundleGenerator400(), displayTopologyProvider: new FixedDisplayTopologyProvider(new[]
         {
             new DisplayTopologySnapshot("DISPLAY-1", "stable-display-fingerprint-1",
                 DisplayIdentityResolutionStatus.Resolved, new CapturePlanBounds(0, 0, 1920, 1080)),

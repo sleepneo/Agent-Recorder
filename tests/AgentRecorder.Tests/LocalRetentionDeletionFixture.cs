@@ -15,7 +15,7 @@ namespace AgentRecorder.Tests;
 
 internal sealed class LocalRetentionDeletionFixture : IDisposable
 {
-    internal readonly UnifiedHistoryTestDatabase Db = new(Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task362", Guid.NewGuid().ToString("N")));
+    internal readonly UnifiedHistoryTestDatabase Db;
     internal readonly RecordingEngine Engine;
     internal readonly OriginalFileScopeFixture Files = new();
     internal readonly LocalRetentionApprovalFixture.Ui Ui = new();
@@ -27,7 +27,7 @@ internal sealed class LocalRetentionDeletionFixture : IDisposable
     internal readonly OrdinaryRecordingHistorySnapshot Row;
     internal PublicationIdentityAnchor Anchor => Row.PublicationReceipt!.Anchor;
     internal string Videos => Path.Combine(Db.Root, "Videos");
-    internal string Media => Path.Combine(Videos, "本轮可丢弃占位.mp4");
+    internal string Media { get; }
     internal readonly byte[] Bytes = Enumerable.Range(0, 12).Select(i => (byte)i).ToArray();
     internal bool Removed, Replacement;
     internal string? PreservedOriginalPath;
@@ -35,21 +35,28 @@ internal sealed class LocalRetentionDeletionFixture : IDisposable
     private readonly bool _real;
     private readonly string? _mode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
     private readonly string? _directory = DataDirResolver.HasOverride ? DataDirResolver.Resolve() : null;
-    internal LocalRetentionDeletionFixture(bool real = false)
+    internal LocalRetentionDeletionFixture(bool real = false, string dataRootSuffix = "",
+        string? fixtureParent = null, string mediaName = "本轮可丢弃占位.mp4",
+        Action<UnifiedHistoryTestDatabase,string>? beforeMedia = null)
     {
+        var parent = fixtureParent ?? Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task362");
+        Db = new(Path.Combine(parent, Guid.NewGuid().ToString("N") + dataRootSuffix));
+        Media = Path.Combine(Videos, mediaName);
         _real = real; Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1"); DataDirResolver.SetOverride(Db.Root);
         SystemQuery.SetDisplayProvider(() => new() { new("display_1", "Synthetic", true, new(0,0,1920,1080), 1.0) });
         Engine = new(new RetentionSharedOutputPathTests.QuietAudit()); Engine.ConfigureOrdinaryRecordingHistory(Db.Ordinary);
-        Assert.StartsWith(Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot, ".local-data/temp/task362")) + Path.DirectorySeparatorChar, Path.GetFullPath(Media), StringComparison.OrdinalIgnoreCase);
-        Directory.CreateDirectory(Videos); using (var stream = new FileStream(Media, FileMode.CreateNew, FileAccess.Write)) stream.Write(Bytes);
+        Assert.Equal(Videos, Path.GetDirectoryName(Path.GetFullPath(Media)));
+        Directory.CreateDirectory(Videos); beforeMedia?.Invoke(Db,Media);
+        using (var stream = new FileStream(Media, FileMode.CreateNew, FileAccess.Write)) stream.Write(Bytes);
         var identity = real ? WindowsReadOnlyFileMetadataProbe.Instance.Observe(Media).Before!.Identity! : new ObservedFileIdentity(123,456,789);
         Row = Db.Recording("candidate", completed: true) with { OutputPath = Media, BundleRegistration = new(null), PublicationReceipt = PublicationReceipt.IssueForTests(Media, 12, identity) };
         Db.Ordinary.Register(Row); Files.Root = Videos; Files.Anchor = Anchor; Files.Api.Anchor = Anchor;
         Native = new(real ? WindowsOriginalFileHoldNative.Instance : Files.Api, real ? Anchor : null);
     }
-    internal LocalRetentionApproval Service(RetentionGuardDatabase? database = null, Func<string,bool>? existence = null, ILocalRetentionApprovalUi? ui = null, DeletionLedgerDatabase? ledgerDatabase = null,TimeProvider? clock=null)
+    internal LocalRetentionApproval Service(RetentionGuardDatabase? database = null, Func<string,bool>? existence = null, ILocalRetentionApprovalUi? ui = null, DeletionLedgerDatabase? ledgerDatabase = null,TimeProvider? clock=null,
+        RetentionHostKeepLatestProtection? hostProtection = null)
         => new(Engine, Db.Store, Db.Ordinary, Sid, Session, Videos, ui ?? Ui, clock ?? Clock, Admission, Native, Files.Admission,
-            DatabaseAdmission, ComposedAdmission, database, factsExistence: existence, ledgerDatabase:ledgerDatabase);
+            DatabaseAdmission, ComposedAdmission, database, factsExistence: existence, ledgerDatabase:ledgerDatabase, hostProtection:hostProtection);
     internal async Task<LocalRetentionApproval.Permit> Approve(LocalRetentionApproval a, LocalRetentionApproval.Session s)
     {
         await Ui.Entered.Task.WaitAsync(TimeSpan.FromSeconds(6)); Ui.Decide(LocalRetentionUiChoice.Approve); Ui.Retire.TrySetResult(true);
@@ -111,6 +118,7 @@ internal sealed class LocalRetentionDeletionFixture : IDisposable
         public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>inner.Standard(h,out v,out e);
         public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>inner.Identity(h,out v,out e);
         public uint FinalPath(SafeFileHandle h,StringBuilder b,int capacity,out int e)=>inner.FinalPath(h,b,capacity,out e);
+        public string? ReadShortLeaf(SafeFileHandle h) => inner.ReadShortLeaf(h);
         public OriginalFileCloseOutcome Close(SafeFileHandle h)=>inner.Close(h);
         public OriginalFileDispositionResult RequestDisposition(SafeFileHandle h)
         {

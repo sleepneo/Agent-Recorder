@@ -98,14 +98,16 @@ internal static class RecordingPreflightChecker
     /// Checks that can run immediately after ConfigParser.Build, before creating
     /// a confirmation. These do not depend on user interaction or elapsed time.
     /// </summary>
-    public static RecordingPreflightResult CheckBeforeConfirmation(Recording rec)
+    public static RecordingPreflightResult CheckBeforeConfirmation(Recording rec, RecordingStorageReserve? storageReserve = null)
     {
+        storageReserve ??= RecordingStorageReserve.Startup;
+        if (CheckStorageReserve(rec, storageReserve) is { } reserveFailure) return reserveFailure;
         var warnings = new List<string>();
 
         var result = CheckOutputDirectoryWritable(rec, warnings);
         if (!result.Passed) return result;
 
-        result = CheckDiskSpace(rec, warnings);
+        result = CheckDiskSpace(rec, warnings, storageReserve, beforeConfirmation: true);
         if (!result.Passed) return result;
 
         result = CheckEncoderAvailable();
@@ -126,14 +128,16 @@ internal static class RecordingPreflightChecker
     /// because the desktop state may have changed while the confirmation was
     /// pending.
     /// </summary>
-    public static RecordingPreflightResult CheckBeforeStart(Recording rec)
+    public static RecordingPreflightResult CheckBeforeStart(Recording rec, RecordingStorageReserve? storageReserve = null)
     {
+        storageReserve ??= RecordingStorageReserve.Startup;
+        if (CheckStorageReserve(rec, storageReserve) is { } reserveFailure) return reserveFailure;
         var warnings = new List<string>();
 
         var result = CheckOutputDirectoryWritable(rec, warnings);
         if (!result.Passed) return result;
 
-        result = CheckDiskSpace(rec, warnings);
+        result = CheckDiskSpace(rec, warnings, storageReserve);
         if (!result.Passed) return result;
 
         result = CheckEncoderAvailable();
@@ -211,7 +215,16 @@ internal static class RecordingPreflightChecker
         return Pass(warnings);
     }
 
-    private static RecordingPreflightResult CheckDiskSpace(Recording rec, List<string> warnings)
+    private static RecordingPreflightResult? CheckStorageReserve(Recording rec, RecordingStorageReserve reserve)
+    {
+        if (reserve.EffectiveBytes.HasValue || !RecordingStoragePolicy.RequiresSafety(rec)) return null;
+        return Fail(WindowStorageSafety.UnavailableCode,
+            $"Invalid {RecordingStorageReserve.EnvironmentVariable}. Set a decimal integer from 256 to 65536 MiB and restart Agent Recorder.",
+            "fix_storage_reserve_configuration");
+    }
+
+    private static RecordingPreflightResult CheckDiskSpace(Recording rec, List<string> warnings,
+        RecordingStorageReserve reserve, bool beforeConfirmation = false)
     {
         if (RecordingStoragePolicy.RequiresSafety(rec))
         {
@@ -219,15 +232,20 @@ internal static class RecordingPreflightChecker
             {
                 rec.Config.WritePaths ??= RecordingStoragePolicy.Freeze(rec);
                 rec.Config.WritePaths.ValidateOutputPath(rec.Config);
-                using var safety = RecordingStoragePolicy.CreateSafety(rec, StorageCapacityProvider);
-                safety.EnsureAdmission();
+                using var safety = RecordingStoragePolicy.CreateSafety(rec, StorageCapacityProvider, reserve);
+                if (beforeConfirmation && rec.IsOrdinaryLocalRequest && rec.Mode == "video" &&
+                    !rec.IsUnattendedLeaseExecution && !rec.IsRequiredOnceExecution && !rec.IsFutureWindowOneShotExecution)
+                    safety.EnsureAdmissionWithShortfall();
+                else
+                    safety.EnsureAdmission();
                 return Pass(warnings);
             }
             catch (StorageSafetyException ex)
             {
                 return Fail(ex.Code, ex.Code == WindowStorageSafety.LowSpaceCode
                     ? "Insufficient storage capacity for recording and publication."
-                    : "Storage capacity could not be verified for recording.", "check_storage_capacity");
+                    : "Storage capacity could not be verified for recording.", "check_storage_capacity")
+                    with { StorageShortfall = ex.Shortfall };
             }
             catch { return Fail(WindowStorageSafety.UnavailableCode,
                 "Storage capacity could not be verified for recording.", "check_storage_capacity"); }
@@ -504,7 +522,7 @@ internal static class RecordingPreflightChecker
         {
             return Fail(probe.ErrorCode ?? "audio_helper_probe_failed",
                 probe.ErrorMessage ?? "Audio helper probe failed.",
-                "check_audio_helper_version");
+                probe.ErrorCode == "audio_helper_protocol_error" ? "update_audio_helper" : "check_audio_helper_version");
         }
 
         if (!string.Equals(probe.ProtocolVersion, "audio-helper-v1", StringComparison.Ordinal))
@@ -518,6 +536,13 @@ internal static class RecordingPreflightChecker
         {
             return Fail("audio_helper_protocol_error",
                 $"Audio helper timestamp frequency mismatch: helper={probe.TimestampFrequency}, host={Stopwatch.Frequency}",
+                "update_audio_helper");
+        }
+
+        if (!string.Equals(probe.OwnedWavCapability, AudioHelperProbeResult.RequiredOwnedWavCapability, StringComparison.Ordinal))
+        {
+            return Fail("audio_helper_protocol_error",
+                AudioHelperProbeResult.OwnedWavRequiredMessage,
                 "update_audio_helper");
         }
 
@@ -637,13 +662,10 @@ internal static class AudioHelperProbeLauncher
 
         var stdoutDrain = Task.Run(async () =>
         {
-            try
-            {
-                string? line;
-                while ((line = await proc.StandardOutput.ReadLineAsync(token).ConfigureAwait(false)) != null)
-                    stdoutBuilder.AppendLine(line);
-            }
-            catch { }
+            var buffer = new char[1024];
+            int length;
+            while ((length = await proc.StandardOutput.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false)) != 0)
+                stdoutBuilder.Append(new string(buffer, 0, length));
         }, token);
 
         var stderrDrain = Task.Run(async () =>
@@ -712,43 +734,68 @@ internal static class AudioHelperProbeLauncher
             };
         }
 
-        var stdout = stdoutBuilder.ToString();
-        string protocolVersion = "";
-        long timestampFrequency = 0;
+        // A prefix cannot prove that the remaining output has no duplicate
+        // declarations. Only parse the complete, bounded response.
+        if (!stdoutDrain.IsCompletedSuccessfully || stdoutBuilder.IsTruncated)
+            return ProtocolError(processId, "Audio helper --version returned an incomplete response.");
 
-        foreach (var rawLine in stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        return ParseVersionResponse(stdoutBuilder.ToString(), processId);
+    }
+
+    private static AudioHelperProbeResult ParseVersionResponse(string stdout, int processId)
+    {
+        const string headerPrefix = "AgentRecorder.AudioHelper ";
+        bool headerSeen = false;
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rawLine in stdout.Split('\n'))
         {
             var line = rawLine.Trim();
-            if (line.StartsWith("Protocol:", StringComparison.OrdinalIgnoreCase))
+            if (line.Length == 0) continue;
+
+            int separator = line.IndexOf(':');
+            if (separator < 0)
             {
-                protocolVersion = line.Substring("Protocol:".Length).Trim();
+                if (headerSeen || !line.StartsWith(headerPrefix, StringComparison.Ordinal) ||
+                    line.Length == headerPrefix.Length || line[headerPrefix.Length..].Any(char.IsWhiteSpace))
+                    return ProtocolError(processId, "Audio helper --version returned an invalid product name.");
+                headerSeen = true;
+                continue;
             }
-            else if (line.StartsWith("TimestampFrequency:", StringComparison.OrdinalIgnoreCase))
-            {
-                var value = line.Substring("TimestampFrequency:".Length).Trim();
-                long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out timestampFrequency);
-            }
+
+            var key = line[..separator].Trim();
+            if (key.Equals("Protocol", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("TimestampFrequency", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("OwnedWav", StringComparison.OrdinalIgnoreCase))
+                if (!fields.TryAdd(key, line[(separator + 1)..].Trim()))
+                    return ProtocolError(processId, "Audio helper --version repeated a required field.");
         }
 
-        if (string.IsNullOrEmpty(protocolVersion))
-        {
-            return new AudioHelperProbeResult
-            {
-                Success = false,
-                ErrorCode = "audio_helper_protocol_error",
-                ErrorMessage = "Audio helper --version did not report a protocol version.",
-                ProcessId = processId
-            };
-        }
+        if (!headerSeen || !fields.TryGetValue("Protocol", out var protocolVersion) || protocolVersion.Length == 0 ||
+            !fields.TryGetValue("TimestampFrequency", out var frequency) ||
+            !long.TryParse(frequency, NumberStyles.None, CultureInfo.InvariantCulture, out var timestampFrequency) ||
+            timestampFrequency <= 0)
+            return ProtocolError(processId, "Audio helper --version did not report a valid product, protocol and timestamp frequency.");
+
+        if (!fields.TryGetValue("OwnedWav", out var ownedWavCapability) ||
+            !string.Equals(ownedWavCapability, AudioHelperProbeResult.RequiredOwnedWavCapability, StringComparison.Ordinal))
+            return ProtocolError(processId, AudioHelperProbeResult.OwnedWavRequiredMessage);
 
         return new AudioHelperProbeResult
         {
             Success = true,
             ProtocolVersion = protocolVersion,
             TimestampFrequency = timestampFrequency,
+            OwnedWavCapability = ownedWavCapability,
             ProcessId = processId
         };
     }
+
+    private static AudioHelperProbeResult ProtocolError(int processId, string message) => new()
+    {
+        ErrorCode = "audio_helper_protocol_error",
+        ErrorMessage = message,
+        ProcessId = processId
+    };
 }
 
 /// <summary>
@@ -756,11 +803,15 @@ internal static class AudioHelperProbeLauncher
 /// </summary>
 public sealed class AudioHelperProbeResult
 {
+    internal const string RequiredOwnedWavCapability = "file-id-v1";
+    internal const string OwnedWavRequiredMessage =
+        "Audio helper must report OwnedWav: " + RequiredOwnedWavCapability + ". Update the helper bundled with Agent Recorder.";
     public bool Success { get; set; }
     public string ErrorCode { get; set; } = "";
     public string ErrorMessage { get; set; } = "";
     public string ProtocolVersion { get; set; } = "";
     public long TimestampFrequency { get; set; }
+    internal string? OwnedWavCapability { get; set; }
 
     /// <summary>
     /// Process id of the probe helper process. Exposed for test verification

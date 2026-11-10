@@ -43,9 +43,9 @@ public sealed partial class OrdinaryWgcBundleTests
         Assert.Equal(System.IO.Path.Combine(directory, name), rec.OutputPath); Assert.Equal(rec.OutputPath, rec.Config.OutputPath);
         Assert.Equal(1, rec.DurationSeconds); Assert.Equal(0, rec.CountdownSeconds); Assert.False(rec.Config.AudioRequested);
         f.Generator.Release.TrySetResult(); await f.Terminal(rec, false);
-        await Until(() => rec.BundleSnapshot.Status == "ready");
-        Assert.Equal(System.IO.Path.ChangeExtension(rec.OutputPath, ".bundle"), rec.BundleSnapshot.Path);
-        Assert.Contains(rec.Id, rec.BundleSnapshot.Path!); Assert.True(System.IO.File.Exists(rec.OutputPath));
+        await Until(() => rec.BundleSnapshot.Status == "not_applicable");
+        Assert.Null(rec.BundleSnapshot.Path); Assert.Equal(0,f.Generator.Calls);
+        Assert.Contains(rec.Id,rec.OutputPath); Assert.True(System.IO.File.Exists(rec.OutputPath));
     }
 
 }

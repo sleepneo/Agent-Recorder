@@ -28,9 +28,10 @@ internal static class RecordingStoragePolicy
             : CaptureWritePaths.FreezeFfmpegVideoOnly(rec.Config, approvedOutputPath);
 
     internal static WindowStorageSafety CreateSafety(Recording rec, IStorageCapacityProvider provider,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        RecordingStorageReserve reserve, Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
-        var safety = new WindowStorageSafety(rec.Config.WritePaths!, rec.Config.DurationSeconds ?? 0, provider)
+        var safety = new WindowStorageSafety(rec.Config.WritePaths!, rec.Config.DurationSeconds ?? 0, provider,
+            reserve.EffectiveBytes ?? throw new StorageSafetyException(WindowStorageSafety.UnavailableCode))
             { Delay = delay ?? Task.Delay };
         // Admission must include the final copy even before backend.Prepare.
         if (IsOrdinaryVideoOnly(rec)) safety.ReserveFfmpegVideoOnlyPublication();

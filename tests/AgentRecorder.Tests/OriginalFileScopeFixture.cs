@@ -37,6 +37,11 @@ internal sealed class OriginalFileScopeFixture
         internal Func<Node, int, FileIdentityInformation, FileIdentityInformation>? IdentityValue;
         internal Func<Node, int, string, string>? PathValue;
         internal Func<Node, OriginalFileCloseOutcome>? CloseValue;
+        internal Func<string?>? ShortLeaf;
+        internal Func<string?>? DirectoryShortLeaf;
+        public string? ReadShortLeaf(SafeFileHandle handle) => _nodes[handle].Leaf
+            ? ShortLeaf is null ? "" : ShortLeaf()
+            : DirectoryShortLeaf is null ? "" : DirectoryShortLeaf();
         internal int? NullOpen, ClosedOpen;
         internal bool Platform = true;
         internal uint Drive = 3;

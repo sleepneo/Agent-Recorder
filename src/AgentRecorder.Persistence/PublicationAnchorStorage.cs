@@ -23,8 +23,28 @@ internal static class PublicationAnchorStorage
         command.Parameters.AddWithValue("$file", id); command.ExecuteNonQuery();
     }
     internal static bool MatchesRow(PublicationIdentityAnchor anchor, OrdinaryRecordingHistorySnapshot row) =>
-        anchor.Valid && row.Status == "completed" && row.CompletedAtUtc is not null &&
-        row.OutputSizeBytes == anchor.Length && string.Equals(row.OutputPath, anchor.Path, StringComparison.OrdinalIgnoreCase);
+        row.Status == "completed" && MatchesCompletedRow(anchor, row.OutputPath, row.OutputSizeBytes, row.CompletedAtUtc);
+
+    internal static bool MatchesCompletedRow(PublicationIdentityAnchor anchor, string path, long? bytes, DateTimeOffset? completed) =>
+        anchor.Valid && completed is not null && bytes == anchor.Length &&
+        string.Equals(path, anchor.Path, StringComparison.OrdinalIgnoreCase);
+
+    internal static PublicationIdentityAnchor ReadAnchor(SqliteDataReader reader, int first)
+    {
+        if (reader.GetValue(first) is not string path || reader.GetValue(first + 1) is not long length ||
+            reader.GetValue(first + 2) is not long version || version != PublicationIdentityAnchor.Version ||
+            reader.GetValue(first + 3) is not string source || source != PublicationIdentityAnchor.Source)
+            throw new InvalidDataException("Publication anchor format is invalid.");
+        return new(path, length, ReadIdentity(reader, first + 4));
+    }
+
+    internal static ObservedFileIdentity ReadIdentity(SqliteDataReader reader, int first)
+    {
+        if (reader.GetValue(first) is not byte[] volume || volume.Length != 8 ||
+            reader.GetValue(first + 1) is not byte[] id || id.Length != 16)
+            throw new InvalidDataException("Publication identity format is invalid.");
+        return new(BinaryPrimitives.ReadUInt64LittleEndian(volume), BinaryPrimitives.ReadUInt64LittleEndian(id), BinaryPrimitives.ReadUInt64LittleEndian(id.AsSpan(8)));
+    }
     internal static Dictionary<string, PublicationIdentityAnchor?> Read(SqliteConnection connection, SqliteTransaction transaction,
         IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
     {
@@ -40,13 +60,9 @@ internal static class PublicationAnchorStorage
         while (reader.Read())
         {
             var key = reader.GetString(0);
-            if (reader.GetValue(0) is not string || reader.GetValue(1) is not string || reader.GetValue(4) is not string ||
-                !result.ContainsKey(key) || result[key] is not null || reader.GetValue(2) is not long || reader.GetValue(3) is not long || reader.GetInt64(3) != PublicationIdentityAnchor.Version ||
-                reader.GetString(4) != PublicationIdentityAnchor.Source || reader.GetValue(5) is not byte[] volume || volume.Length != 8 ||
-                reader.GetValue(6) is not byte[] id || id.Length != 16)
+            if (reader.GetValue(0) is not string || !result.ContainsKey(key) || result[key] is not null)
                 throw new InvalidDataException("Publication anchor format is invalid.");
-            var anchor = new PublicationIdentityAnchor(reader.GetString(1), reader.GetInt64(2),
-                new(BinaryPrimitives.ReadUInt64LittleEndian(volume), BinaryPrimitives.ReadUInt64LittleEndian(id), BinaryPrimitives.ReadUInt64LittleEndian(id.AsSpan(8))));
+            var anchor = ReadAnchor(reader, 1);
             if (!MatchesRow(anchor, rows.Single(r => r.RecordingId == key))) throw new InvalidDataException("Publication anchor association is invalid.");
             result[key] = anchor;
         }

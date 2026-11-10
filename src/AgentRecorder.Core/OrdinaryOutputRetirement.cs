@@ -56,7 +56,7 @@ public sealed partial class RecordingEngine
     private void ReleaseRetiredOrdinaryOutputUnderLock(OrdinaryOutputOwner owner, ICaptureBackend? backend)
     {
         var rec = owner.Recording;
-        if (HasOrdinaryBundleOutputUseUnderLock(owner) || RetentionHostStopping || !rec.IsFinalized || _ordinaryOutputCleanup.ContainsKey(rec.Id) ||
+        if (rec.IndependentWindowAdmissionPending || HasOrdinaryBundleOutputUseUnderLock(owner) || RetentionHostStopping || !rec.IsFinalized || _ordinaryOutputCleanup.ContainsKey(rec.Id) ||
             !ReferenceEquals(rec.Backend, backend) ||
             !string.Equals(owner.RegisteredPath, rec.OutputPath, StringComparison.OrdinalIgnoreCase)) return;
         if (_ordinaryOutputs.TryGetValue(rec.Id, out var current) && ReferenceEquals(current, owner))

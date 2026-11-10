@@ -10,6 +10,7 @@ using AgentRecorder.Capture;
 using AgentRecorder.Infrastructure;
 using AgentRecorder.Windows;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace AgentRecorder.Tests;
 
@@ -47,6 +48,7 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     public bool SuppressExit { get; set; }
     public bool SuppressHandleRelease { get; set; }
     public bool ProtocolErrorRaised => _protocolErrorRaised;
+    internal Func<TimeSpan, bool>? WaitForExitForTests { get; set; }
 
     public FakeAudioCaptureWorker(
         bool raiseAudioReadyOnStart = false,
@@ -162,6 +164,8 @@ internal sealed class FakeAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     public bool WaitForExit(TimeSpan timeout)
     {
         WaitForExitCalled = true;
+        if (WaitForExitForTests is { } wait)
+            return wait(timeout);
         var deadline = DateTime.UtcNow + timeout;
         while (!HasExited && DateTime.UtcNow < deadline)
             Thread.Sleep(10);
@@ -212,6 +216,8 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public long? FirstProgressOutTimeUs { get; private set; }
     public double? ProgressAnchorDeltaMs { get; private set; }
     public int FirstFrameCount { get; private set; }
+    internal Action? BeforeStopForTests { get; set; }
+    internal Func<TimeSpan, bool>? WaitForExitForTests { get; set; }
 
     /// <summary>
     /// When true, the worker never reports that it has exited. Used to test
@@ -304,6 +310,7 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public OutputMeta Stop()
     {
         StopCalled = true;
+        BeforeStopForTests?.Invoke();
         // Manual stop must mark the worker as exited without invoking the
         // NaturalExit event, matching the production worker behavior where
         // _manualStopped suppresses the natural-exit callback.
@@ -320,6 +327,8 @@ internal sealed class FakeVideoCaptureWorker : IVideoCaptureWorker
     public bool WaitForExit(TimeSpan timeout)
     {
         WaitForExitCalled = true;
+        if (WaitForExitForTests is { } wait)
+            return wait(timeout);
         var deadline = DateTime.UtcNow + timeout;
         while (!HasExited && !SuppressExit && DateTime.UtcNow < deadline)
             Thread.Sleep(10);
@@ -476,9 +485,11 @@ public sealed class AvSplitLifecycleTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly string? _originalDataDir;
+    private readonly ITestOutputHelper _testOutput;
 
-    public AvSplitLifecycleTests()
+    public AvSplitLifecycleTests(ITestOutputHelper testOutput)
     {
+        _testOutput = testOutput;
         _tempDir = Path.Combine(Path.GetTempPath(), $"avsplit-lifecycle-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);
         _originalDataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
@@ -1521,6 +1532,747 @@ public sealed class AvSplitLifecycleTests : IDisposable
         Assert.Contains("mux-stderr", meta.StderrLog);
     }
 
+    [Theory]
+    [InlineData(true, "timeout")]
+    [InlineData(false, "timeout")]
+    [InlineData(true, "exception")]
+    [InlineData(false, "exception")]
+    [InlineData(true, "logical_exit_only")]
+    [InlineData(false, "logical_exit_only")]
+    [InlineData(true, "retired")]
+    [InlineData(false, "retired")]
+    public void Task413CancellationCleansOnlyWritersWithPositiveRetirement(bool testAudio, string outcome)
+    {
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        using var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        backend.StartVideo();
+
+        var writerPath = testAudio ? audio.OutputPath! : video.OutputPath!;
+        var peerPath = testAudio ? video.OutputPath! : audio.OutputPath!;
+        File.WriteAllText(writerPath, "writer data");
+        File.WriteAllText(peerPath, "peer data");
+
+        bool retired = outcome == "retired";
+        if (!retired)
+        {
+            Func<TimeSpan, bool> wait = outcome switch
+            {
+                "timeout" => _ => false,
+                "exception" => _ => throw new TimeoutException("synthetic wait failure"),
+                "logical_exit_only" => _ => true,
+                _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+            };
+            if (testAudio)
+            {
+                audio.SuppressExit = true;
+                audio.WaitForExitForTests = wait;
+            }
+            else
+            {
+                video.SuppressExit = true;
+                video.WaitForExitForTests = wait;
+            }
+        }
+
+        backend.Cancel();
+
+        Assert.True(audio.StopCalled && audio.WaitForExitCalled);
+        Assert.True(video.StopCalled && video.WaitForExitCalled);
+        Assert.Equal(retired, testAudio ? audio.HasExited : video.HasExited);
+        Assert.False(File.Exists(peerPath));
+        Assert.True(backend.IsOutputSettled);
+        var terminal = Assert.IsType<OutputMeta>(backend.LastMeta);
+        Assert.Same(terminal, backend.Stop());
+        Assert.Null(backend.FailedArtifactsDirectory);
+        if (retired)
+        {
+            Assert.False(File.Exists(writerPath));
+            return;
+        }
+
+        Assert.True(File.Exists(writerPath), "Cancellation removed the unretired writer's staging file.");
+        Assert.Equal("writer data", File.ReadAllText(writerPath));
+        File.AppendAllText(writerPath, " and late data");
+        audio.SuppressExit = false;
+        video.SuppressExit = false;
+        audio.EmitNaturalExit(0, "");
+        video.EmitNaturalExit(0, "");
+        Assert.True(audio.HasExited && video.HasExited);
+        backend.Cancel();
+        backend.Dispose();
+        Assert.Equal("writer data and late data", File.ReadAllText(writerPath));
+        Assert.Same(terminal, backend.LastMeta);
+        Assert.Null(backend.FailedArtifactsDirectory);
+    }
+
+    [Fact]
+    public async Task Task413CancellationLosingToAbortLeavesOwnersInputsAndTerminalAlone()
+    {
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        using var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        backend.StartVideo();
+        File.WriteAllText(video.OutputPath!, "owner video");
+        File.WriteAllText(audio.OutputPath!, "owner audio");
+
+        using var ownerEntered = new ManualResetEventSlim();
+        using var releaseOwner = new ManualResetEventSlim();
+        var barrierTimeout = TimeSpan.FromSeconds(10);
+        video.BeforeStopForTests = () =>
+        {
+            ownerEntered.Set();
+            if (!releaseOwner.Wait(barrierTimeout))
+                throw new TimeoutException("convergence owner was not released");
+        };
+        var captureEnded = 0;
+        var terminalCount = 0;
+        backend.CaptureEnded += _ => Interlocked.Increment(ref captureEnded);
+        backend.OnNaturalExit((_, _) => Interlocked.Increment(ref terminalCount));
+        var owner = Task.Run(() => backend.Abort(CaptureAbortReason.StorageSpaceLow));
+        OutputMeta terminal;
+        try
+        {
+            Assert.True(ownerEntered.Wait(barrierTimeout));
+            backend.Cancel();
+            Assert.True(audio.StopCalled && audio.WaitForExitCalled);
+            Assert.True(File.Exists(video.OutputPath), "Losing cancellation removed the owner's video.");
+            Assert.True(File.Exists(audio.OutputPath), "Losing cancellation removed the owner's audio.");
+            Assert.Equal("owner video", File.ReadAllText(video.OutputPath!));
+            Assert.Equal("owner audio", File.ReadAllText(audio.OutputPath!));
+            Assert.Null(backend.FailedArtifactsDirectory);
+            Assert.Null(backend.LastMeta);
+            Assert.False(backend.IsOutputSettled);
+            Assert.Equal(0, Volatile.Read(ref captureEnded));
+            Assert.Equal(0, Volatile.Read(ref terminalCount));
+        }
+        finally
+        {
+            releaseOwner.Set();
+            terminal = await owner.WaitAsync(barrierTimeout);
+        }
+
+        Assert.Same(terminal, backend.LastMeta);
+        Assert.Same(terminal, backend.Stop());
+        Assert.True(backend.IsOutputSettled);
+        Assert.Equal(1, captureEnded);
+        Assert.Equal(1, terminalCount);
+        Assert.Equal("storage_space_low", terminal.StopReason);
+    }
+
+    [Theory]
+    [InlineData(true, "abort")]
+    [InlineData(false, "abort")]
+    [InlineData(true, "cancel")]
+    [InlineData(false, "cancel")]
+    [InlineData(true, "stop")]
+    [InlineData(false, "stop")]
+    public void Task415ForeignReplacementCannotBeDisposedOrMuxed(bool replaceAudio, string operation)
+    {
+        var video = new FakeVideoCaptureWorker();
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var runner = new FakeExternalProcessRunner();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video), runner, new TempRetentionPolicy(_tempDir));
+        var cfg = CreateConfig();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        backend.StartVideo();
+        File.Copy(CreateValidVideo(), video.OutputPath!, overwrite: true);
+        File.Copy(CreateValidAudio(3), audio.OutputPath!, overwrite: true);
+        var target = replaceAudio ? audio.OutputPath! : video.OutputPath!;
+        var peer = replaceAudio ? video.OutputPath! : audio.OutputPath!;
+        var peerIdentity = Task415Identity(peer);
+        var displaced = Path.Combine(Path.GetDirectoryName(target)!, "displaced");
+        var original = Task415Identity(target);
+        File.Move(target, displaced);
+        File.Copy(displaced, target);
+        var replacement = Task415Identity(target);
+        var bytes = File.ReadAllBytes(target);
+        Assert.NotEqual(original, replacement);
+
+        if (operation == "cancel") backend.Cancel();
+        var result = operation == "abort" ? backend.Abort(CaptureAbortReason.StorageSpaceLow) : backend.Stop();
+
+        Assert.False(result.OutputFileExists);
+        Assert.Null(result.PublicationReceipt);
+        Assert.False(File.Exists(cfg.OutputPath));
+        Assert.Equal(0, runner.RunCallCount);
+        Assert.Equal(original, Task415Identity(displaced));
+        Assert.Equal(replacement, Task415Identity(target));
+        Assert.Equal(bytes, File.ReadAllBytes(target));
+        Assert.Equal(bytes, File.ReadAllBytes(displaced));
+        Assert.False(File.Exists(peer));
+        if (operation == "cancel")
+            Assert.Null(backend.FailedArtifactsDirectory);
+        else
+        {
+            Assert.NotNull(backend.FailedArtifactsDirectory);
+            Assert.Equal(peerIdentity, Task415Identity(Path.Combine(backend.FailedArtifactsDirectory, replaceAudio ? "video.mp4" : "audio.wav")));
+            Assert.False(File.Exists(Path.Combine(backend.FailedArtifactsDirectory, replaceAudio ? "audio.wav" : "video.mp4")));
+            if (operation == "stop") Assert.Equal("av_staging_input_unverified", result.StopReason);
+        }
+        backend.Cancel();
+        Assert.Equal(replacement, Task415Identity(target));
+    }
+
+    [Theory]
+    [InlineData("directory")]
+    [InlineData("file")]
+    [InlineData("leaf_directory")]
+    public void Task415ExclusiveCreationRefusesOccupiedNamespace(string occupied)
+    {
+        var video = new FakeVideoCaptureWorker();
+        using var backend = new AvSplitCaptureBackend(new FakeAvWorkerFactory { VideoWorker = video },
+            new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        string? foreign = null;
+        void Occupy(string path)
+        {
+            if (occupied == "file") foreign = path;
+            else
+            {
+                Directory.CreateDirectory(path);
+                foreign = Path.Combine(path, "foreign.txt");
+            }
+            File.WriteAllText(foreign, "foreign");
+        }
+        if (occupied == "directory")
+        {
+            backend.BeforeStagingDirectoryCreateForTests = Occupy;
+            Assert.Throws<IOException>(() => CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig(false)));
+        }
+        else
+        {
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig(false));
+            backend.BeforeStagingInputCreateForTests = Occupy;
+            Assert.Throws<IOException>(() => backend.StartVideo());
+        }
+        backend.Cancel();
+        Assert.Null(video.OutputPath);
+        Assert.Equal("foreign", File.ReadAllText(foreign!));
+    }
+
+    [Fact]
+    public void Task415OwnedDirectoryAndAncestorCannotBeRenamedDuringCapture()
+    {
+        var video = new FakeVideoCaptureWorker();
+        using var backend = new AvSplitCaptureBackend(new FakeAvWorkerFactory { VideoWorker = video },
+            new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig(false));
+        backend.StartVideo();
+        File.WriteAllText(video.OutputPath!, "owned");
+        var stage = Path.GetDirectoryName(video.OutputPath)!;
+        var parent = Path.GetDirectoryName(stage)!;
+        Assert.ThrowsAny<IOException>(() => Directory.Move(stage, stage + "-renamed"));
+        Assert.ThrowsAny<IOException>(() => Directory.Move(parent, parent + "-renamed"));
+        backend.Cancel();
+        Assert.False(Directory.Exists(stage));
+        Assert.True(Directory.Exists(parent));
+    }
+
+    [Fact]
+    public void Task415UnretiredWriterKeepsItsNamespaceEvenWithAnAbsentLeaf()
+    {
+        var video = new FakeVideoCaptureWorker { SuppressExit = true, WaitForExitForTests = _ => false };
+        using var backend = new AvSplitCaptureBackend(new FakeAvWorkerFactory { VideoWorker = video },
+            new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig(false));
+        backend.StartVideo();
+        var path = video.OutputPath!;
+        File.Move(path, Path.Combine(_tempDir, "displaced-video.mp4"));
+        backend.Cancel();
+        Assert.True(Directory.Exists(Path.GetDirectoryName(path)));
+        File.WriteAllText(path, "late data");
+        video.SuppressExit = false;
+        video.EmitNaturalExit(0, "");
+        backend.Cancel();
+        Assert.Equal("late data", File.ReadAllText(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Task415WgcPublisherHandsOffOriginalWithoutReplacingTarget(bool occupyAtCommit)
+    {
+        InstallWindowSurfaceTarget();
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig();
+            var fixture = CreateValidVideo();
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio: null, videoFixture: fixture);
+            using var backend = new AvSplitCaptureBackend(stack, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+            var path = backend.TempVideoPath!;
+            Assert.False(File.Exists(path));
+            AgentRecorder.Infrastructure.ObservedFileIdentity? originalCopy = null;
+            stack.Publisher.Native.OriginalCopyCreatedForTests = copy =>
+            {
+                Assert.True(WindowsFileMetadataApi.Instance.Identity(copy.SafeFileHandle, out var identity, out _));
+                originalCopy = new(identity.VolumeSerialNumber, identity.IdLow, identity.IdHigh);
+            };
+            if (occupyAtCommit)
+                stack.Publisher.Native.BeforeOriginalCommitForTests = () => File.WriteAllText(path, "occupied");
+            else
+            {
+                backend.BeforeStagingUseForTests = () => Assert.Equal(originalCopy, Task415Identity(path));
+                backend.FinalOutputPublisher = new StagingToFinalPublisher
+                {
+                    BeforeOriginalCommitForTests = () => Assert.ThrowsAny<IOException>(() => File.Move(path, path + ".renamed"))
+                };
+            }
+            var result = backend.Stop();
+
+            Assert.NotNull(originalCopy);
+            if (occupyAtCommit)
+            {
+                Assert.False(result.OutputFileExists);
+                Assert.Null(result.PublicationReceipt);
+                Assert.Equal("occupied", File.ReadAllText(path));
+                Assert.False(File.Exists(cfg.OutputPath));
+                Assert.False(File.Exists(Path.Combine(backend.FailedArtifactsDirectory!, "video.mp4")));
+            }
+            else
+            {
+                Assert.True(result.OutputFileExists, result.StderrLog);
+                Assert.NotNull(result.PublicationReceipt);
+                Assert.False(File.Exists(path));
+                Assert.Equal(Task415Sha256(fixture), Task415Sha256(cfg.OutputPath));
+                _testOutput.WriteLine($"WGC synthetic source and published MP4 SHA-256 {Task415Sha256(cfg.OutputPath)}");
+            }
+        }
+        finally { SystemQuery.SetWindowProvider(null); }
+    }
+
+    [Fact]
+    public void Task415DirectShowWriterUsesOriginalFileWithSyntheticInput()
+    {
+        var fixture = CreateValidAudio(4);
+        using var audio = new AudioCaptureWorker();
+        var video = new FakeVideoCaptureWorker();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video),
+            new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        ObservedFileIdentity? original = null;
+        backend.BeforeStagingInputCreateForTests = path =>
+        {
+            if (!path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) return;
+            audio.TestArgumentsOverride = new List<string> { "-y", "-re", "-i", fixture, "-c:a", "copy", "-progress", "pipe:1", path };
+        };
+        backend.AudioReady += () => original = Task415Identity(audio.OutputPath!);
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        backend.StartVideo();
+        File.WriteAllText(video.OutputPath!, "owned video");
+        Assert.True(SpinWait.SpinUntil(() => original is not null, TimeSpan.FromSeconds(5)));
+        var terminal = backend.Abort(CaptureAbortReason.StorageSpaceLow);
+        Assert.Equal("storage_space_low", terminal.StopReason);
+        Assert.NotNull(backend.FailedArtifactsDirectory);
+        var diagnostic = Path.Combine(backend.FailedArtifactsDirectory, "audio.wav");
+        Assert.Equal(original, Task415Identity(diagnostic));
+        Assert.False(File.Exists(audio.OutputPath));
+        _testOutput.WriteLine($"DirectShow synthetic input WAV SHA-256 {Task415Sha256(fixture)}, original diagnostic WAV SHA-256 {Task415Sha256(diagnostic)}");
+    }
+
+    [Fact]
+    public async Task Task415WasapiHelperWithoutOriginalHandoffCannotPublishOrMoveItsAudio()
+    {
+        using var helper = new FakeAudioHelperDeployment(_tempDir);
+        using var audio = new WasapiAudioCaptureWorker
+        {
+            HelperExePathOverride = helper.ExecutablePath,
+            EndpointIdOverride = "fake-mic",
+            SkipMicrophoneStatusMonitor = true,
+            ConfigureProcessForTests = info => info.Environment["AGENT_RECORDER_FAKE_AV_PCM"] = "missing"
+        };
+        var video = new FakeVideoCaptureWorker();
+        var runner = new FakeExternalProcessRunner();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video), runner, new TempRetentionPolicy(_tempDir));
+        var cfg = CreateConfig();
+        var fixture = CreateValidVideo();
+        var videoStarted = new TaskCompletionSource<ObservedFileIdentity>(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.AudioReady += () =>
+        {
+            try
+            {
+                backend.StartVideo();
+                File.Copy(fixture, video.OutputPath!, overwrite: true);
+                videoStarted.TrySetResult(Task415Identity(video.OutputPath!));
+            }
+            catch (Exception ex) { videoStarted.TrySetException(ex); }
+        };
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        var videoIdentity = await videoStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = backend.Stop();
+
+        Assert.True(audio.HasExited);
+        Assert.True(File.Exists(audio.OutputPath));
+        Assert.Equal("audio_helper_protocol_error", result.AudioHelperErrorCode);
+        Assert.Equal(0, runner.RunCallCount);
+        Assert.False(File.Exists(cfg.OutputPath));
+        Assert.Null(result.PublicationReceipt);
+        Assert.NotNull(backend.FailedArtifactsDirectory);
+        Assert.Equal(videoIdentity, Task415Identity(Path.Combine(backend.FailedArtifactsDirectory, "video.mp4")));
+        Assert.False(File.Exists(Path.Combine(backend.FailedArtifactsDirectory, "audio.wav")));
+        backend.Cancel();
+        Assert.True(File.Exists(audio.OutputPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Task415RWasapiChildPublishesAudibleOwnedAv(bool loopback)
+    {
+        using var helper = new FakeAudioHelperDeployment(_tempDir);
+        using var audio = new WasapiAudioCaptureWorker
+        {
+            HelperExePathOverride = helper.ExecutablePath,
+            EndpointIdOverride = "synthetic-endpoint",
+            SkipMicrophoneStatusMonitor = true,
+            ConfigureProcessForTests = info =>
+            {
+                info.Environment["AGENT_RECORDER_FAKE_AV_PCM"] = "1";
+                info.Environment["AGENT_RECORDER_FAKE_SOURCE_KIND"] = loopback ? "system-loopback" : "microphone";
+            }
+        };
+        var video = new FakeVideoCaptureWorker();
+        var fixture = CreateValidVideo();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video),
+            new ExternalProcessRunner(), new TempRetentionPolicy(_tempDir)) { ApplyContinuityCheck = false };
+        var cfg = loopback ? CreateSystemLoopbackConfig() : CreateConfig();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.AudioReady += () => ready.TrySetResult();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(6));
+        backend.StartVideo();
+        File.Copy(fixture, video.OutputPath!, overwrite: true);
+        var audioIdentity = Task415Identity(audio.OutputPath!);
+
+        var result = backend.Stop();
+
+        Assert.True(audio.HasExited);
+        Assert.Contains(audio.GetTerminalSummary()!.State, new[] { AudioHelperSessionState.Success, AudioHelperSessionState.Stopped });
+        Assert.True(result.OutputFileExists, string.Join("\n", result.Warnings ?? Array.Empty<string>()) + "\n" + result.StderrLog);
+        Assert.NotNull(result.PublicationReceipt);
+        var observed = FfmpegCaptureBackend.Probe(cfg.OutputPath);
+        Assert.True(observed.HasAudioStream);
+        Assert.True(observed.Width > 0 && observed.Height > 0);
+        Assert.InRange(observed.DurationSeconds, 1.8, 2.3);
+        var decoded = Path.Combine(_tempDir, "decoded.pcm");
+        RunFfmpeg($"-y -i \"{cfg.OutputPath}\" -map 0:a:0 -f s16le \"{decoded}\"");
+        var pcm = File.ReadAllBytes(decoded);
+        Assert.True(pcm.Length > 16000);
+        Assert.True(Enumerable.Range(0, pcm.Length / 2).Any(i => Math.Abs((int)BitConverter.ToInt16(pcm, i * 2)) > 1000));
+        Assert.False(File.Exists(audio.OutputPath));
+        Assert.False(File.Exists(video.OutputPath));
+        _testOutput.WriteLine($"source={result.AudioSourceKind}, original WAV={audioIdentity}, MP4 SHA-256={Task415Sha256(cfg.OutputPath)}");
+    }
+
+    [Theory]
+    [InlineData("mismatch")]
+    [InlineData("write-fail")]
+    [InlineData("hang")]
+    [InlineData("replace")]
+    [InlineData("abort")]
+    [InlineData("cancel")]
+    [InlineData("legacy")]
+    public async Task Task415RWasapiChildFailureAndRetirementKeepPerSideOwnership(string mode)
+    {
+        using var helper = new FakeAudioHelperDeployment(_tempDir);
+        using var audio = new WasapiAudioCaptureWorker
+        {
+            HelperExePathOverride = helper.ExecutablePath,
+            EndpointIdOverride = "synthetic-endpoint",
+            SkipMicrophoneStatusMonitor = true,
+            ConfigureProcessForTests = info => info.Environment["AGENT_RECORDER_FAKE_AV_PCM"] = mode
+        };
+        var video = new FakeVideoCaptureWorker();
+        var runner = new FakeExternalProcessRunner();
+        var fixture = CreateValidVideo();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video), runner,
+            new TempRetentionPolicy(_tempDir)) { ApplyContinuityCheck = false };
+        var cfg = CreateConfig();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.AudioReady += () => ready.TrySetResult();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        var wavPath = audio.OutputPath!;
+        var original = Task415Identity(wavPath);
+        if (mode == "legacy")
+        {
+            Assert.True(audio.WaitForExit(TimeSpan.FromSeconds(5)));
+            var rejected = backend.Stop();
+            Assert.False(ready.Task.IsCompleted);
+            Assert.Contains("Unknown argument: --owned-wav", audio.GetStderrLog());
+            Assert.Equal(0, new FileInfo(wavPath).Length);
+            Assert.Equal(original, Task415Identity(wavPath));
+            Assert.False(File.Exists(cfg.OutputPath));
+            Assert.Null(rejected.PublicationReceipt);
+            return;
+        }
+
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(6));
+        backend.StartVideo();
+        File.Copy(fixture, video.OutputPath!, overwrite: true);
+        var originalVideo = Task415Identity(video.OutputPath!);
+        var displaced = wavPath + ".displaced";
+        var foreign = new byte[] { 4, 1, 5, 1 };
+        if (mode == "replace")
+            backend.BeforeStagingUseForTests = () =>
+            {
+                File.Move(wavPath, displaced);
+                File.WriteAllBytes(wavPath, foreign);
+            };
+        if (mode == "hang")
+        {
+            Assert.False(audio.WaitForExit(TimeSpan.FromMilliseconds(20)));
+            Assert.Equal(original, Task415Identity(wavPath));
+        }
+        if (mode == "cancel")
+        {
+            // Wait for full host retirement, which is stricter than the
+            // physical writer fact used by ordinary finalization.
+            audio.Stop();
+            Assert.True(SpinWait.SpinUntil(() => audio.HostResourcesRetired, TimeSpan.FromSeconds(3)));
+            backend.Cancel();
+        }
+        var result = mode == "abort" ? backend.Abort(CaptureAbortReason.StorageSpaceLow) : backend.Stop();
+        Assert.True(audio.HasExited);
+        Assert.False(result.OutputFileExists);
+        Assert.Null(result.PublicationReceipt);
+        Assert.False(File.Exists(cfg.OutputPath));
+        Assert.Equal(0, runner.RunCallCount);
+        Assert.False(File.Exists(video.OutputPath));
+        if (mode == "cancel")
+        {
+            Assert.Null(backend.FailedArtifactsDirectory);
+            Assert.False(File.Exists(wavPath));
+            return;
+        }
+
+        Assert.NotNull(backend.FailedArtifactsDirectory);
+        var diagnosticAudio = Path.Combine(backend.FailedArtifactsDirectory, "audio.wav");
+        Assert.Equal(originalVideo, Task415Identity(Path.Combine(backend.FailedArtifactsDirectory, "video.mp4")));
+        if (mode is "abort" or "write-fail")
+        {
+            Assert.False(File.Exists(wavPath));
+            Assert.Equal(original, Task415Identity(diagnosticAudio));
+            if (mode == "write-fail") Assert.Equal("audio_write_failure", result.AudioHelperErrorCode);
+        }
+        else
+        {
+            Assert.False(File.Exists(diagnosticAudio));
+            if (mode == "replace")
+            {
+                Assert.Equal(foreign, File.ReadAllBytes(wavPath));
+                Assert.Equal(original, Task415Identity(displaced));
+            }
+            else Assert.Equal(original, Task415Identity(wavPath));
+        }
+        backend.Cancel();
+        Assert.Same(result, backend.Stop());
+    }
+
+    private static ObservedFileIdentity Task415Identity(string path)
+    {
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        Assert.True(WindowsFileMetadataApi.Instance.Identity(file.SafeFileHandle, out var identity, out _));
+        return new(identity.VolumeSerialNumber, identity.IdLow, identity.IdHigh);
+    }
+
+    private static string Task415Sha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Task414WgcNaturalCallbackCleansOnlyWhenWriterRetired(bool writerRetired)
+    {
+        InstallWindowSurfaceTarget();
+        var retirement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var cfg = CreateWindowSurfaceConfig();
+            if (writerRetired) retirement.SetResult();
+            var stack = new WindowSurfaceAvWorkerFactory(_tempDir, audio: null, videoFixture: CreateValidVideo(),
+                writerRetirement: retirement.Task);
+            using var backend = new AvSplitCaptureBackend(stack, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+            var terminal = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool? hostRetiredInCallback = null;
+            backend.OnNaturalExit((_, meta) =>
+            {
+                hostRetiredInCallback = stack.VideoWorker!.HostResourcesRetired;
+                terminal.TrySetResult(meta);
+            });
+            CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+            backend.StartVideo();
+            stack.Session!.CompleteNaturalVideo();
+            var result = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.True(result.OutputFileExists);
+            Assert.False(hostRetiredInCallback);
+            Assert.Equal(!writerRetired, File.Exists(backend.TempVideoPath));
+            retirement.TrySetResult();
+            Assert.Same(result, backend.Stop());
+            backend.Cancel();
+            Assert.Equal(!writerRetired, File.Exists(backend.TempVideoPath));
+        }
+        finally
+        {
+            retirement.TrySetResult();
+            SystemQuery.SetWindowProvider(null);
+        }
+    }
+
+    [Fact]
+    public async Task Task414FfmpegNaturalCallbackCleansAfterProcessExitBeforeWatcherRetires()
+    {
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true,
+            holdFileOpen: true, holdFileOpenCopyFrom: CreateValidAudio(3));
+        using var video = new VideoCaptureWorker();
+        var fixture = CreateValidVideo();
+        using var backend = new AvSplitCaptureBackend(new FixedVideoWorkerFactory(audio, video),
+            new ExternalProcessRunner(), new TempRetentionPolicy(_tempDir))
+        {
+            ApplyContinuityCheck = false
+        };
+        var terminal = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool? hostRetiredInCallback = null;
+        backend.OnNaturalExit((_, meta) =>
+        {
+            hostRetiredInCallback = video.HostResourcesRetired;
+            terminal.TrySetResult(meta);
+        });
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        video.TestArgumentsOverride = new List<string> { "-y", "-i", fixture, "-c", "copy", backend.TempVideoPath! };
+        backend.StartVideo();
+
+        var result = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(result.OutputFileExists, result.StderrLog);
+        Assert.False(hostRetiredInCallback);
+        Assert.False(File.Exists(backend.TempVideoPath));
+        Assert.False(File.Exists(backend.TempAudioPath));
+        Assert.Same(result, backend.Stop());
+    }
+
+    private sealed class FixedVideoWorkerFactory(IAudioCaptureWorker audio, IVideoCaptureWorker video) : IAvWorkerFactory
+    {
+        public IAudioCaptureWorker CreateAudioWorker() => audio;
+        public IVideoCaptureWorker CreateVideoWorker() => video;
+    }
+
+    [Fact]
+    public async Task Task414AudioDrivenCloseoutPreservesVideoAfterFailedWait()
+    {
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        audio.SetTerminalSummary(new AudioHelperSessionSummary
+        {
+            State = AudioHelperSessionState.Failed,
+            ErrorCode = "audio_endpoint_inactive"
+        });
+        var video = new FakeVideoCaptureWorker { WaitForExitForTests = _ => false };
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        using var backend = new AvSplitCaptureBackend(factory, new FakeExternalProcessRunner(), new TempRetentionPolicy(_tempDir));
+        var terminal = new TaskCompletionSource<OutputMeta>(TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.OnNaturalExit((_, meta) => terminal.TrySetResult(meta));
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, CreateConfig());
+        backend.StartVideo();
+        File.WriteAllText(video.OutputPath!, "video data");
+        File.WriteAllText(audio.OutputPath!, "audio data");
+
+        audio.EmitNaturalExit(1, "synthetic audio failure");
+        var result = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(video.HasExited && video.WaitForExitCalled);
+        Assert.Equal("audio_endpoint_inactive", result.AudioHelperErrorCode);
+        Assert.Equal("video data", File.ReadAllText(video.OutputPath!));
+        Assert.NotNull(backend.FailedArtifactsDirectory);
+        Assert.False(File.Exists(Path.Combine(backend.FailedArtifactsDirectory, "video.mp4")));
+        Assert.Equal("audio data", File.ReadAllText(Path.Combine(backend.FailedArtifactsDirectory, "audio.wav")));
+        Assert.Same(result, backend.Stop());
+    }
+
+    [Theory]
+    [InlineData(true, "timeout")]
+    [InlineData(false, "timeout")]
+    [InlineData(true, "exception")]
+    [InlineData(false, "exception")]
+    [InlineData(true, "logical_exit_only")]
+    [InlineData(false, "logical_exit_only")]
+    public void Task414AbortRetainsStagingWithoutWriterExitEvidence(bool testAudio, string outcome)
+    {
+        var audio = new FakeAudioCaptureWorker(raiseAudioReadyOnStart: true);
+        var video = new FakeVideoCaptureWorker();
+        var factory = new FakeAvWorkerFactory { AudioWorker = audio, VideoWorker = video };
+        var runner = new FakeExternalProcessRunner();
+        using var backend = new AvSplitCaptureBackend(factory, runner, new TempRetentionPolicy(_tempDir));
+        var cfg = CreateConfig();
+        CaptureAuthorizationTestHelper.StartWithSyntheticConsumedProof(backend, cfg);
+        backend.StartVideo();
+        var writerPath = testAudio ? audio.OutputPath! : video.OutputPath!;
+        var peerPath = testAudio ? video.OutputPath! : audio.OutputPath!;
+        File.WriteAllText(writerPath, "writer data");
+        File.WriteAllText(peerPath, "peer data");
+        Func<TimeSpan, bool> wait = outcome switch
+        {
+            "timeout" => _ => false,
+            "exception" => _ => throw new TimeoutException("synthetic wait failure"),
+            "logical_exit_only" => _ => true,
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome))
+        };
+        if (testAudio)
+        {
+            audio.SuppressExit = true;
+            audio.WaitForExitForTests = wait;
+        }
+        else
+        {
+            video.SuppressExit = true;
+            video.WaitForExitForTests = wait;
+        }
+        int callbacks = 0;
+        OutputMeta? notified = null;
+        backend.OnNaturalExit((_, meta) => { callbacks++; notified = meta; });
+
+        var terminal = backend.Abort(CaptureAbortReason.StorageSpaceLow);
+
+        Assert.True(testAudio ? audio.WaitForExitCalled : video.WaitForExitCalled);
+        Assert.False(testAudio ? audio.HasExited : video.HasExited);
+        Assert.False(terminal.OutputFileExists);
+        Assert.Equal(0, runner.RunCallCount);
+        Assert.True(File.Exists(writerPath), "Finalization moved the unretired writer's staging file.");
+        Assert.Equal("writer data", File.ReadAllText(writerPath));
+        var failed = Path.Combine(_tempDir, "failed", Path.GetFileNameWithoutExtension(cfg.OutputPath));
+        Assert.False(File.Exists(Path.Combine(failed, testAudio ? "audio.wav" : "video.mp4")));
+        if (outcome == "exception")
+        {
+            Assert.Contains("finalize_exception: synthetic wait failure", terminal.Warnings!);
+            Assert.Equal("peer data", File.ReadAllText(peerPath));
+        }
+        else
+        {
+            Assert.Equal("storage_space_low", terminal.StopReason);
+            if (outcome == "timeout")
+                Assert.Contains(testAudio ? "audio_worker_exit_timeout" : "video_worker_exit_timeout", terminal.Warnings!);
+            Assert.Equal(failed, backend.FailedArtifactsDirectory);
+            Assert.False(File.Exists(peerPath));
+            Assert.Equal("peer data", File.ReadAllText(Path.Combine(failed, testAudio ? "video.mp4" : "audio.wav")));
+        }
+
+        File.AppendAllText(writerPath, " and late data");
+        audio.SuppressExit = false;
+        video.SuppressExit = false;
+        audio.EmitNaturalExit(0, "");
+        video.EmitNaturalExit(0, "");
+        backend.Cancel();
+        Assert.Equal("writer data and late data", File.ReadAllText(writerPath));
+        Assert.Same(terminal, backend.Stop());
+        Assert.Same(terminal, notified);
+        Assert.Equal(1, callbacks);
+    }
+
     [Fact]
     public void TempFiles_CleanupOnSuccessAndFailure()
     {
@@ -1732,17 +2484,20 @@ public sealed class AvSplitLifecycleTests : IDisposable
         private readonly string _tempRoot;
         private readonly string? _videoFixture;
         private readonly bool _failStart;
+        private readonly Task? _writerRetirement;
 
         public WindowSurfaceAvWorkerFactory(
             string tempRoot,
             FakeAudioCaptureWorker? audio,
             string? videoFixture,
-            bool failStart = false)
+            bool failStart = false,
+            Task? writerRetirement = null)
         {
             _tempRoot = tempRoot;
             AudioWorker = audio;
             _videoFixture = videoFixture;
             _failStart = failStart;
+            _writerRetirement = writerRetirement;
         }
 
         public FakeAudioCaptureWorker? AudioWorker { get; }
@@ -1761,7 +2516,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         public IVideoCaptureWorker CreateVideoWorker(CaptureConfig config, CaptureAuthorizationProof authorizationProof)
         {
             var wgcBackend = new WgcContinuousCaptureBackend(
-                options => Session = new FakeWgcSession(options, _videoFixture, _failStart),
+                options => Session = new FakeWgcSession(options, _videoFixture, _failStart, _writerRetirement),
                 Publisher,
                 FfmpegCaptureBackend.Probe,
                 () => "fake-wgc-helper.exe",
@@ -1783,11 +2538,12 @@ public sealed class AvSplitLifecycleTests : IDisposable
         private int _stopCallCount;
         private int _disposeCallCount;
 
-        public FakeWgcSession(WgcContinuousSessionOptions options, string? videoFixture, bool failStart)
+        public FakeWgcSession(WgcContinuousSessionOptions options, string? videoFixture, bool failStart, Task? writerRetirement)
         {
             Options = options;
             _videoFixture = videoFixture;
             _failStart = failStart;
+            ResourceRetirement = writerRetirement is null ? CompletionTask : Task.WhenAll(CompletionTask, writerRetirement);
         }
 
         public WgcContinuousSessionOptions Options { get; }
@@ -1795,7 +2551,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
         public int DisposeCallCount => Volatile.Read(ref _disposeCallCount);
         public Task<WgcContinuousSessionResult> CompletionTask => _completion.Task;
         // This transport creates no native worker; its completion seals all simulated resource work.
-        public Task ResourceRetirement => CompletionTask;
+        public Task ResourceRetirement { get; }
         public event Action<FirstFrameObservation>? FirstFrameObserved;
 
         public Task StartAsync(CancellationToken cancellationToken = default)
@@ -1814,6 +2570,8 @@ public sealed class AvSplitLifecycleTests : IDisposable
                 CompleteVideo(WgcContinuousManagedSessionState.Stopped, stopRequestedByCaller: true);
             return Task.FromResult(true);
         }
+
+        public void CompleteNaturalVideo() => CompleteVideo(WgcContinuousManagedSessionState.Success, stopRequestedByCaller: false);
 
         public void CompleteNaturalFailure()
         {
@@ -1891,6 +2649,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
 
     private sealed class TrackingWgcPublisher : IStagingToFinalPublisher
     {
+        internal StagingToFinalPublisher Native { get; } = new();
         public int CallCount { get; private set; }
         public string? LastFinalPath { get; private set; }
         public byte[]? LastPublishedBytes { get; private set; }
@@ -1902,7 +2661,7 @@ public sealed class AvSplitLifecycleTests : IDisposable
             IFileCommitGate? commitGate = null)
         {
             CallCount++;
-            var result = await StagingToFinalPublisher.Instance.PublishAsync(
+            var result = await Native.PublishAsync(
                 stagingPath, finalPath, cancellationToken, commitGate).ConfigureAwait(false);
             if (result.Success)
             {

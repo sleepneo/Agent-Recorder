@@ -7,6 +7,10 @@ namespace AgentRecorder.Persistence;
 /// is sampled only after lexical scope and bounded ancestor checks.</summary>
 public sealed class RetentionPreviewQueryService
 {
+    private readonly UnifiedHistoryQueryService? _history;
+    public bool SupportsKeepLatest => _history is not null;
+    internal Func<CancellationToken,Task> DeadlineForTests {get;set;}=t=>Task.Delay(3000,t);
+    internal Action? WorkerExitedForTests {get;set;}
     public const int MaxPathLength = 1024;
     public const int MaxPathComponents = 32;
     public const int MaxAttributeChecksPerEntry = MaxPathComponents;
@@ -16,22 +20,42 @@ public sealed class RetentionPreviewQueryService
     private readonly Func<DateTimeOffset> _now;
     private readonly string _videosRoot;
     private readonly IOrdinaryRuntimeOutputUseProvider? _runtimeOutputs;
+    private readonly Func<IReadOnlyDictionary<string,IReadOnlyList<string>>, CancellationToken, Dictionary<string,UnifiedHistoryQueryService.AliasReference>>? _shortNameReferences;
     internal string VideosRootForTests => _videosRoot;
 
     public RetentionPreviewQueryService(UnifiedHistoryQueryService history, string hostDataDirectory,
         IOrdinaryRuntimeOutputUseProvider? runtimeOutputs)
         : this(history.GetOrdinaryEvidencePage, hostDataDirectory, ReadOnlyPathMetadata.Instance,
-            WindowsReadOnlyFileMetadataProbe.Instance, () => DateTimeOffset.UtcNow, runtimeOutputs) { }
+            WindowsReadOnlyFileMetadataProbe.Instance, () => DateTimeOffset.UtcNow, runtimeOutputs,
+            history.ReadShortNameReferences) { _history=history; }
 
     internal RetentionPreviewQueryService(Func<string, string, int, DateTimeOffset, string?, OrdinaryRetentionEvidencePage> read,
         string hostDataDirectory, IReadOnlyPathMetadata files, IReadOnlyFileMetadataProbe? probe, Func<DateTimeOffset> now,
-        IOrdinaryRuntimeOutputUseProvider? runtimeOutputs)
+        IOrdinaryRuntimeOutputUseProvider? runtimeOutputs,
+        Func<IReadOnlyDictionary<string,IReadOnlyList<string>>, CancellationToken, Dictionary<string,UnifiedHistoryQueryService.AliasReference>>? shortNameReferences = null)
     {
         _read = read; _files = files; _probe = probe; _now = now; _runtimeOutputs = runtimeOutputs;
+        _shortNameReferences = shortNameReferences;
         // Fixed once by host composition; never consult output-settings or HTTP.
         _videosRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(hostDataDirectory, "Videos")));
     }
 
+    internal RetentionPreviewQueryService(UnifiedHistoryQueryService history,string dataDirectory,
+        IReadOnlyPathMetadata files,IReadOnlyFileMetadataProbe probe,IOrdinaryRuntimeOutputUseProvider runtime)
+        :this(history.GetOrdinaryEvidencePage,dataDirectory,files,probe,()=>DateTimeOffset.UtcNow,runtime,history.ReadShortNameReferences) {_history=history;}
+    public Task<RetentionEvaluationResult?> ReadWithKeepLatestAsync(int limit,DateTimeOffset before,string? cursor,int count,
+        Func<(string Sid,string Session)> identity,CancellationToken cancellation=default)
+    {
+        if(limit is <1 or >100 || count is <1 or >1000 || before.Offset!=TimeSpan.Zero || before>_now())throw new UnifiedHistoryArgumentException();
+        var started=DateTimeOffset.UtcNow;
+        RetentionEvaluationResult State(string state)=>new(state,started,DateTimeOffset.UtcNow,null);
+        return ArtifactMetadataWorker.ReadAsync(token=> {
+            token.ThrowIfCancellationRequested();var owner=identity();token.ThrowIfCancellationRequested();
+            var snapshot=(_history??throw new InvalidDataException("Latest preview provider unavailable.")).GetOrdinaryPreviewSnapshot(owner.Sid,owner.Session,limit,before,cursor,count,token);
+            var page=EvaluatePage(snapshot.Page,limit,before,token,snapshot.Latest);
+            token.ThrowIfCancellationRequested();return new RetentionEvaluationResult("complete",started,DateTimeOffset.UtcNow,page);
+        },State,DeadlineForTests,WorkerExitedForTests,cancellation);
+    }
     public RetentionPreviewPage GetPage(string sid, string session, int limit, DateTimeOffset completedBefore, string? cursor = null)
     {
         if (limit is < 1 or > 100 || completedBefore.Offset != TimeSpan.Zero || completedBefore > _now())
@@ -48,7 +72,7 @@ public sealed class RetentionPreviewQueryService
     // Shared complete-set validation/runtime/metadata kernel. The GET route
     // retains its original page and aggregation contract.
     internal RetentionPreviewPage EvaluatePage(OrdinaryRetentionEvidencePage page,int limit,
-        DateTimeOffset completedBefore,CancellationToken cancellation)
+        DateTimeOffset completedBefore,CancellationToken cancellation,IReadOnlySet<string>? keepLatest=null)
     {
         cancellation.ThrowIfCancellationRequested();
         if (page.PageSize!=limit || page.Items.Count > limit || page.Filters != new UnifiedHistoryFilters("ordinary", CreatedBefore: completedBefore) ||
@@ -66,9 +90,12 @@ public sealed class RetentionPreviewQueryService
                     !string.Equals(anchor.Path, e.Entry.OutputPath, StringComparison.OrdinalIgnoreCase))) ||
             page.Items.Select(e=>e.Entry.EntryId).Distinct(StringComparer.Ordinal).Count()!=page.Items.Count)
             throw new InvalidDataException("Invalid ordinary evidence page.");
+        if(keepLatest is not null && page.Items.Any(e=>keepLatest.Contains(e.Entry.RecordingId!) &&
+            (e.PlannedOutputReference==PlannedOutputPathReferenceState.Indeterminate || e.PendingOutputUse==PendingOutputUseState.Unknown)))
+            throw new InvalidDataException("Unknown retained evidence.");
         // Resolve every eligible unknown before sampling any item. Invalid
         // non-candidates keep their earlier reason instead of failing on split.
-        if (page.Items.Any(e => e.PlannedOutputReference == PlannedOutputPathReferenceState.Indeterminate &&
+        if (page.Items.Any(e => !(keepLatest?.Contains(e.Entry.RecordingId!)??false) && e.PlannedOutputReference == PlannedOutputPathReferenceState.Indeterminate &&
             e.NestedReference == OrdinaryNestedReferenceState.None && e.SharedOutputReference == SharedOutputPathReferenceState.None &&
             e.Entry.Status == "completed" && e.Entry.CompletedAtUtc is { } at && at < completedBefore &&
             e.Entry.OutputPathRecorded && e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null))
@@ -76,7 +103,7 @@ public sealed class RetentionPreviewQueryService
         if (_probe is null) throw new InvalidDataException("Retention file observation provider is unavailable.");
         // Validate the complete DB page first, then one complete runtime
         // answer, before sampling any item. These are separate time points.
-        var paths = page.Items.Where(e => e.Entry.Status == "completed" &&
+        var paths = page.Items.Where(e => !(keepLatest?.Contains(e.Entry.RecordingId!)??false) && e.Entry.Status == "completed" &&
             e.Entry.CompletedAtUtc is { } at && at < completedBefore && e.Entry.OutputPathRecorded &&
             e.Entry.OutputPath is { } path && ValidateScopedPath(path, out _) is null)
             .Select(e => e.Entry.OutputPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -84,8 +111,27 @@ public sealed class RetentionPreviewQueryService
         var occupied = ReadRuntimeSnapshot(paths);
         cancellation.ThrowIfCancellationRequested();
         var evaluated=new List<RetentionPreviewEntry>();
+        var aliases = new Dictionary<string,IReadOnlyList<string>>(StringComparer.Ordinal);
         foreach(var evidence in page.Items)
-        { cancellation.ThrowIfCancellationRequested(); evaluated.Add(Evaluate(evidence,completedBefore,occupied,cancellation)); }
+        { cancellation.ThrowIfCancellationRequested(); evaluated.Add(Evaluate(evidence,completedBefore,occupied,cancellation,aliases,keepLatest)); }
+        if (aliases.Count != 0)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var references = _shortNameReferences?.Invoke(aliases, cancellation);
+            for (var i = 0; i < evaluated.Count; i++)
+            {
+                var entry = evaluated[i];
+                if (!aliases.ContainsKey(entry.RecordingId!)) continue;
+                if (references is null || !references.TryGetValue(entry.RecordingId!, out var reference))
+                    evaluated[i] = entry with { Evaluation = "protected", ReasonCode = "metadata_unavailable", ObservedFileBytes = null };
+                else if (reference.Shared)
+                    evaluated[i] = entry with { Evaluation = "protected", ReasonCode = "shared_output_path", ObservedFileBytes = null };
+                else if (reference.Planned)
+                    evaluated[i] = entry with { Evaluation = "protected", ReasonCode = "planned_output_path", ObservedFileBytes = null };
+                else if (reference.Pending != PendingOutputUseState.None)
+                    evaluated[i] = entry with { Evaluation = "protected", ReasonCode = reference.Pending == PendingOutputUseState.SetupExact ? "setup_output_path" : "pending_output_use_unknown", ObservedFileBytes = null };
+            }
+        }
         cancellation.ThrowIfCancellationRequested();
         var items=evaluated.ToArray();
         var candidates = items.Where(e => e.AgeCandidate).ToArray();
@@ -121,7 +167,8 @@ public sealed class RetentionPreviewQueryService
         return occupied;
     }
 
-    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before, HashSet<string> occupied, CancellationToken cancellation)
+    private RetentionPreviewEntry Evaluate(OrdinaryRetentionEvidence evidence, DateTimeOffset before, HashSet<string> occupied,
+        CancellationToken cancellation, Dictionary<string,IReadOnlyList<string>> aliases,IReadOnlySet<string>? keepLatest=null)
     {
         var item=evidence.Entry;
         RetentionPreviewEntry Result(string evaluation, string reason, bool age = false, string? path = null, long? observed = null)
@@ -130,6 +177,14 @@ public sealed class RetentionPreviewQueryService
         if (item.Status != "completed") return Result("protected", "not_completed");
         if (item.CompletedAtUtc is null) return Result("protected", "completion_time_unknown");
         if (!item.OutputPathRecorded || item.OutputPath is null) return Result("protected", "output_evidence_missing");
+        if (keepLatest?.Contains(item.RecordingId!)==true)
+        {
+            var age=item.CompletedAtUtc < before && ValidateScopedPath(item.OutputPath,out _) is null;
+            if(evidence.NestedReference==OrdinaryNestedReferenceState.Invalid) return Result("protected","nested_reference_invalid",age,age?item.OutputPath:null);
+            if(evidence.PlannedOutputReference==PlannedOutputPathReferenceState.Indeterminate || evidence.PendingOutputUse==PendingOutputUseState.Unknown)
+                throw new InvalidDataException("Unknown retained evidence.");
+            return Result("protected","within_keep_latest",age,age?item.OutputPath:null);
+        }
         if (item.CompletedAtUtc >= before) return Result("skipped", "completion_not_before_cutoff");
         var path = item.OutputPath;
         var reason = ValidateScopedPath(path, out var checks);
@@ -198,8 +253,9 @@ public sealed class RetentionPreviewQueryService
         catch (Exception) { return Result("protected", "metadata_unavailable", true, path); }
 
         FileMetadataObservation? observation;
+        var directChild = string.Equals(Path.GetDirectoryName(path), _videosRoot, StringComparison.OrdinalIgnoreCase);
         cancellation.ThrowIfCancellationRequested();
-        try { observation = _probe!.Observe(path); }
+        try { observation = directChild ? _probe!.ObserveRetention(path) : _probe!.Observe(path); }
         catch (FileNotFoundException) { return Result("protected", "file_missing", true, path); }
         catch (DirectoryNotFoundException) { return Result("protected", "file_missing", true, path); }
         catch (UnauthorizedAccessException) { return Result("protected", "file_inaccessible", true, path); }
@@ -212,6 +268,12 @@ public sealed class RetentionPreviewQueryService
         if (observedReason is not null) return Result("protected", observedReason, true, path);
         if (observation.After!.Identity != evidence.PublicationAnchor.Identity)
             return Result("protected", "publication_identity_mismatch", true, path);
+        if (directChild && length == item.OutputSizeBytes)
+        {
+            if (!WindowsShortFileName.TryGetAliasPaths(path, observation.ShortLeaf, observation.DataRootShortLeaf, out var paths))
+                return Result("protected", "metadata_unavailable", true, path);
+            if (paths.Count != 0) aliases.Add(item.RecordingId!, paths);
+        }
         return Result(length == item.OutputSizeBytes ? "age_candidate" : "protected",
             length == item.OutputSizeBytes ? "age_rule_match" : "file_length_changed", true, path, length);
     }

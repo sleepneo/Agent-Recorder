@@ -76,7 +76,11 @@ public sealed partial class FfmpegCaptureBackend : ICaptureBackend, IFirstFrameO
             if (_videoOnlyRun is { } previous &&
                 (!previous.Completion.Task.IsCompleted || Volatile.Read(ref previous.OutputSettled) == 0))
                 throw new InvalidOperationException("The video run is still active.");
-        _hostStart.Start(attempt => StartCore(cfg, attempt), ReadStartedHostRetirement);
+        _hostStart.Start(attempt =>
+        {
+            try { StartCore(cfg, attempt); }
+            catch { _videoOnlyRun?.ReleaseStaging(); throw; }
+        }, ReadStartedHostRetirement);
     }
 
     private void StartCore(CaptureConfig cfg, WorkerStartBoundary.Attempt attempt)

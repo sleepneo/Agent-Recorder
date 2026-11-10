@@ -9,7 +9,8 @@ public sealed partial class RecordingEngine
     private long _nextIndependentWindowNumber;
     public IndependentWindowPolicy IndependentWindowPolicy { get; } = global::AgentRecorder.Core.IndependentWindowPolicy.ReadEnvironment();
     // Mutated only under the Engine lock. Exact Recording instances, not history rows.
-    private readonly Dictionary<string, Recording> _independentWindowReservations = new();
+    private sealed record IndependentWindowReservation(Recording Recording, long PixelsPerSecond);
+    private readonly Dictionary<string, IndependentWindowReservation> _independentWindowReservations = new();
 
     public IndependentWindowBudgetSnapshot GetIndependentWindowBudget()
     {
@@ -19,9 +20,10 @@ public sealed partial class RecordingEngine
             // registrations and Task completion facts are read here. No worker locks.
             lock (_ordinaryOutputLock)
             {
-                foreach (var rec in _independentWindowReservations.Values.ToArray())
+                foreach (var reservation in _independentWindowReservations.Values.ToArray())
                 {
-                    if (!rec.IsFinalized || _ordinaryOutputCleanup.ContainsKey(rec.Id) ||
+                    var rec = reservation.Recording;
+                    if (rec.IndependentWindowAdmissionPending || !rec.IsFinalized || _ordinaryOutputCleanup.ContainsKey(rec.Id) ||
                         _ordinaryBundleOutputUses.Any(use => ReferenceEquals(use.Recording, rec))) continue;
                     var retired = rec.Backend is WgcContinuousCaptureBackend wgc
                         ? wgc.OutputRetirement.IsCompletedSuccessfully
@@ -31,9 +33,19 @@ public sealed partial class RecordingEngine
                 }
             }
             int reserved = _independentWindowReservations.Count;
-            int finishing = _independentWindowReservations.Values.Count(r => r.IsFinalized ||
-                r.State is RecState.stopping or RecState.finalizing or RecState.completed or RecState.failed or RecState.cancelled);
-            return new(reserved, finishing, IndependentWindowPolicy.ConfiguredLimit is { } limit ? Math.Max(0,limit-reserved) : null);
+            int finishing = 0;
+            long pixels = 0, finishingPixels = 0;
+            foreach (var reservation in _independentWindowReservations.Values)
+            {
+                pixels = checked(pixels + reservation.PixelsPerSecond);
+                var rec = reservation.Recording;
+                if (rec.IsFinalized || rec.State is RecState.stopping or RecState.finalizing or RecState.completed or RecState.failed or RecState.cancelled)
+                { finishing++; finishingPixels = checked(finishingPixels + reservation.PixelsPerSecond); }
+            }
+            return new(reserved, finishing,
+                IndependentWindowPolicy.Valid ? checked(IndependentWindowPolicy.ConfiguredLimit!.Value - reserved) : null,
+                pixels, finishingPixels,
+                IndependentWindowPolicy.Valid ? checked(IndependentWindowPolicy.ConfiguredPixelsPerSecond!.Value - pixels) : null);
         }
     }
 
@@ -61,11 +73,12 @@ public sealed partial class RecordingEngine
 
     // Both ordinary admission phases hold the existing engine lock. No provider,
     // backend/worker lock, filesystem operation or wait is performed here.
-    private void ValidateIndependentWindowAdmission(nint? target, IReadOnlyList<Recording> active)
+    private void ValidateIndependentWindowAdmission(nint? target, IReadOnlyList<Recording> active, long? requestedPixelsPerSecond = null)
     {
         if (!IndependentWindowPolicy.Valid)
-            throw new ApiException(503, "INDEPENDENT_WINDOW_CONFIGURATION_INVALID", "Independent window startup limit must be an integer from 1 through 10.",
-                new { reason_code = "invalid_host_configuration", environment_variable = global::AgentRecorder.Core.IndependentWindowPolicy.EnvironmentVariable });
+            throw new ApiException(503, "INDEPENDENT_WINDOW_CONFIGURATION_INVALID",
+                "Independent window startup configuration is invalid. Count must be 1 through 10; pixels per second must be a positive decimal Int64 integer.",
+                new { reason_code = "invalid_host_configuration", environment_variable = IndependentWindowPolicy.InvalidEnvironmentVariable });
         if (active.Any(r => r.WindowIdentity is null || !r.Config.RequireWindowSurface ||
             r.Mode != "video" || r.Config.AudioRequested || r.NestedRole is not null))
             throw new ApiException(409, "RECORDING_ALREADY_RUNNING", "Independent windows cannot mix with other recording contracts.");
@@ -76,5 +89,40 @@ public sealed partial class RecordingEngine
                     reserved = budget.Reserved, finalizing_or_unknown = budget.FinalizingOrUnknown, remaining = budget.Remaining });
         if (target is { } hwnd && active.Any(r => r.Config.WindowHandle == hwnd))
             throw new ApiException(409, "WINDOW_TARGET_IN_USE", "This fixed window is already used by an active recording.");
+        if (requestedPixelsPerSecond is { } cost &&
+            !IndependentWindowPixelRateFits(budget.ReservedPixelsPerSecond, cost, IndependentWindowPolicy.ConfiguredPixelsPerSecond!.Value))
+            throw new ApiException(409, "INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED",
+                "The requested physical window pixel rate exceeds the remaining independent window admission budget.",
+                new { reason_code = "independent_window_pixel_budget_exceeded", requested_pixels_per_second = cost,
+                    reserved_pixels_per_second = budget.ReservedPixelsPerSecond,
+                    configured_pixels_per_second = IndependentWindowPolicy.ConfiguredPixelsPerSecond.Value,
+                    remaining_pixels_per_second = budget.RemainingPixelsPerSecond });
+    }
+
+    internal static bool IndependentWindowPixelRateFits(long reserved, long requested, long configured)
+    {
+        if (reserved < 0 || requested <= 0 || configured <= 0) return false;
+        try { return checked(reserved + requested) <= configured; }
+        catch (OverflowException) { return false; }
+    }
+
+    internal static long CalculateIndependentWindowPixelRate(CapturePlan? plan, int fps)
+    {
+        if (plan is not { IsWindowSurface: true, SourceKind: "window", TargetWindowSurfaceBounds: { Width: > 0, Height: > 0 } surface } ||
+            fps is not (15 or 24 or 30 or 60))
+            throw InvalidIndependentWindowPlan();
+        try { return checked((long)surface.Width * surface.Height * fps); }
+        catch (OverflowException) { throw InvalidIndependentWindowPlan(); }
+    }
+
+    private static ApiException InvalidIndependentWindowPlan() => new(400, "INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID",
+        "A reliable positive physical window surface and supported configured frame rate are required; pixel cost cannot be unknown or overflow Int64.",
+        new { reason_code = "independent_window_capture_plan_invalid" });
+
+    private void SettleIndependentWindowAdmission(Recording rec)
+    {
+        lock (_lock)
+            if (_independentWindowReservations.TryGetValue(rec.Id, out var reservation) && ReferenceEquals(reservation.Recording, rec))
+                rec.IndependentWindowAdmissionPending = false;
     }
 }

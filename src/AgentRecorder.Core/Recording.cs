@@ -18,12 +18,14 @@ public sealed class Recording
 
     internal Recording(bool generateBundle) : this("rec_" + Guid.NewGuid().ToString("N")[..12], generateBundle) { }
 
-    internal Recording(string id, bool generateBundle = true)
+    internal Recording(string id, bool generateBundle = false)
     {
         if (string.IsNullOrWhiteSpace(id))
             throw new ArgumentException("Recording identity is required.", nameof(id));
         Id = id;
-        GenerateBundle = generateBundle;
+        // All new execution paths, including authorized plans, deliver video only.
+        // Keep the constructor signature for existing internal callers.
+        GenerateBundle = false;
     }
 
     // Frozen at creation, independent of mutable capture/output configuration.
@@ -334,18 +336,23 @@ public sealed class Recording
     }
 
     internal Action<Recording>? OrdinaryHistoryPublication { get; set; }
+    internal ManagedVideoQuota.Admission? ManagedQuotaAdmission { get; set; }
+    internal ManagedVideoQuotaRejection? ManagedQuotaFailure { get; set; }
 
     public string? NestedRole { get; set; }
     internal WindowRecordingIdentity? WindowIdentity { get; set; }
+    // Initial output materialization/history registration occurs outside Engine's
+    // lock. Even a concurrent terminal transition cannot retire that work early.
+    internal volatile bool IndependentWindowAdmissionPending;
     public string? NestedSessionId { get; set; }
     public string? ParentRecordingId { get; set; }
     public bool IsNestedParent { get; set; }
 
     /// <summary>
-    /// Current bundle snapshot exposed to the API. Starts as pending and is
-    /// atomically replaced as the bundle moves through generating/ready/failed.
+    /// Compatibility snapshot exposed to the API. New recordings do not generate
+    /// attachments and start as not_applicable; historical snapshots are read separately.
     /// </summary>
-    public RecordingBundleSnapshot BundleSnapshot { get; set; } = RecordingBundleSnapshot.Pending();
+    public RecordingBundleSnapshot BundleSnapshot { get; set; } = RecordingBundleSnapshot.NotApplicable();
 
     /// <summary>
     /// Ensures bundle generation is started at most once, even if

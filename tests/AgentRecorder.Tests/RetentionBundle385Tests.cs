@@ -119,8 +119,8 @@ public sealed class RetentionBundle385Tests(ITestOutputHelper output)
                     PublicationIdentityReferenceStorage.Read(c,t,new Dictionary<string,PublicationIdentityAnchor?> { [row.RecordingId] = row.PublicationReceipt.Anchor },null,null)[row.RecordingId]);
             else
             {
-                var method = typeof(UnifiedHistoryQueryService).GetMethod("ReadSharedOutputReferences",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
-                var flags = (Dictionary<string,bool>)method.Invoke(f.Db.Query,new object[] {c,t,new[] {row}})!;
+                var flags = f.Db.Query.ReadSharedOutputReferences(c,t,
+                    new Dictionary<string,string>(StringComparer.Ordinal) { [row.RecordingId] = row.OutputPath });
                 Assert.Equal(!selfMain,flags[row.RecordingId]);
             }
         }
@@ -156,13 +156,13 @@ public sealed class RetentionBundle385Tests(ITestOutputHelper output)
     public void V45UpgradePreservesAllOldTypedDataAndObjects()
     {
         using var f=new RetentionPreviewQueryTests.Fixture();f.Seed("candidate");
-        f.Db.RawExecute("DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48; DROP INDEX idx_v47_ordinary_recording_bundles_namespace; DROP INDEX idx_v47_ordinary_bundle_contents_namespace; DROP INDEX idx_v47_ordinary_bundle_identity_namespace; DROP INDEX idx_v47_ordinary_media_hash_namespace; DROP INDEX idx_v47_ordinary_bundle_attachment_hash_namespace; DELETE FROM schema_migrations WHERE version=47; "+string.Join(";",SqliteSchemaV46.Indexes.Select(i=>"DROP INDEX "+i.Name))+"; DELETE FROM schema_migrations WHERE version=46;");
+        f.Db.RawExecute("DROP TABLE ordinary_deletion_host_rejections; DELETE FROM schema_migrations WHERE version=51; DROP TABLE ordinary_deletion_batch_policy_children; DROP TABLE ordinary_deletion_batch_policies; DELETE FROM schema_migrations WHERE version=50; DROP TABLE ordinary_deletion_operation_policies; DROP TABLE ordinary_deletion_request_policies; DELETE FROM schema_migrations WHERE version=49; DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48; DROP INDEX idx_v47_ordinary_recording_bundles_namespace; DROP INDEX idx_v47_ordinary_bundle_contents_namespace; DROP INDEX idx_v47_ordinary_bundle_identity_namespace; DROP INDEX idx_v47_ordinary_media_hash_namespace; DROP INDEX idx_v47_ordinary_bundle_attachment_hash_namespace; DELETE FROM schema_migrations WHERE version=47; "+string.Join(";",SqliteSchemaV46.Indexes.Select(i=>"DROP INDEX "+i.Name))+"; DELETE FROM schema_migrations WHERE version=46;");
         var before=SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true,45);
         Assert.Throws<RetentionPreviewUnavailableException>(()=>f.Page());RetentionRuntimeOutputTests.NoProbes(f);
         f.Db.Store.Initialize();Assert.Equal(before,SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true,45));
         var once=SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true);f.Db.Store.Initialize();
         Assert.Equal(once,SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true));
-        Assert.Equal(48,f.Db.Scalar("SELECT max(version) FROM schema_migrations;"));
+        Assert.Equal(51,f.Db.Scalar("SELECT max(version) FROM schema_migrations;"));
     }
 
     [Theory, MemberData(nameof(Sources))]

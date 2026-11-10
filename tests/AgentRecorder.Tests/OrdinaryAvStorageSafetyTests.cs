@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -113,7 +113,8 @@ public sealed class OrdinaryAvStorageSafetyTests
         private bool _topologyChanged, _authChanged;
         internal Fixture(bool ready = true, string? wav = null, string? video = null, int frameDelay = 0)
             : this(ready, wav, video, frameDelay, null) { }
-        internal Fixture(bool ready, string? wav, string? video, int frameDelay, FixtureFaults? faults)
+        internal Fixture(bool ready, string? wav, string? video, int frameDelay, FixtureFaults? faults,
+            RecordingStorageReserve? reserve = null)
         {
             _faults = faults;
             _environment = new[] { "AGENT_RECORDER_TEST_MODE", "AGENT_RECORDER_DATA_DIR", CaptureBackendSelector.DisplayBackendEnvVar,
@@ -146,7 +147,9 @@ public sealed class OrdinaryAvStorageSafetyTests
             Store = new(Path.Combine(Root, "history.db")); Store.Initialize(); History = new(Store);
             Own("history", History.Dispose, History);
             Audit = new(Path.Combine(Root,"audit.jsonl"));
-            Engine = new(Audit, microphoneProvider: new Devices(), systemAudioEndpointProvider: new Devices(), bundleGenerator: new FfmpegRecordingBundleGenerator()) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
+            Engine = new(Audit, tracer: null, bundleGenerator: new ForbiddenBundleGenerator400(),
+                microphoneProvider: new Devices(), microphoneStatusProvider: null, displayTopologyProvider: null,
+                systemAudioEndpointProvider: new Devices(), storageReserve: reserve) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
             Own("engine", Engine.Dispose, Engine);
             Engine.ConfigureOrdinaryRecordingHistory(History); Engine.SetTray(Tray);
             Engine.BackendFactory = cfg => (Backend, cfg.SourceKind == "region" ? "ffmpeg-region-av-split" : "ffmpeg-av-split");
@@ -292,7 +295,7 @@ public sealed class OrdinaryAvStorageSafetyTests
         public int ExitCode => inner.ExitCode; public bool HasExited => inner.HasExited;
         public long? FirstProgressFrame => inner.FirstProgressFrame; public long? FirstProgressOutTimeUs => inner.FirstProgressOutTimeUs; public double? ProgressAnchorDeltaMs => inner.ProgressAnchorDeltaMs;
         public long LaunchAnchorTicks => inner.LaunchAnchorTicks; public long FirstFrameAnchorTicks => inner.FirstFrameAnchorTicks;
-        public void Start(CaptureConfig cfg, string path) { if (fixture is not null) File.Copy(fixture,path); inner.Start(cfg,path); }
+        public void Start(CaptureConfig cfg, string path) { if (fixture is not null) File.Copy(fixture, path, overwrite: true); inner.Start(cfg,path); }
         public OutputMeta Stop() => inner.Stop(); public bool WaitForExit(TimeSpan timeout) => inner.WaitForExit(timeout);
         public string GetStderrLog() => inner.GetStderrLog(); public void Dispose() => inner.Dispose();
     }
@@ -321,6 +324,126 @@ public sealed class OrdinaryAvStorageSafetyTests
         Assert.False(response.IsSuccessStatusCode,text);Assert.Contains(unknown ? WindowStorageSafety.UnavailableCode : WindowStorageSafety.LowSpaceCode,text);
         Assert.Empty(f.Tray.Confirmations);Assert.Null(f.Audio.OutputPath);Assert.Null(f.Video.OutputPath);
     }
+
+    [Theory]
+    [InlineData("merged")]
+    [InlineData("separate")]
+    [InlineData("same_path")]
+    [InlineData("equal")]
+    public async Task Admission409ReportsOnlyTheUnderBudgetAvVolume(string layout)
+    {
+        const long mib = 1024L * 1024;
+        const long merged = 736 * mib + 4096;
+        const long tempOnly = 496 * mib + 4096;
+        using var f = new Fixture();
+        var temp = Path.Combine(f.Root, "temp");
+        var output = layout == "same_path" ? temp : f.Root;
+        var request = f.Request();
+        request["output"]!["directory"] = output;
+        request["audio"] = AudioRequest("system_audio");
+        request.Remove("duration_seconds");
+        request["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 60 };
+        f.Capacity.Query = (paths, _) => Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(path =>
+        {
+            var isTemp = path == temp;
+            if (layout == "separate")
+                return new StorageVolumeSample(path, isTemp ? "private-temp-volume" : "private-output-volume",
+                    isTemp ? tempOnly - 9 : 496 * mib);
+            var free = layout == "equal" || !isTemp ? merged : merged - 7;
+            return new StorageVolumeSample(path, isTemp ? "PRIVATE-SHARED-VOLUME" : "private-shared-volume", free);
+        }).ToArray());
+
+        using var response = await f.Post("/api/v1/recordings?creation_wait_ms=0", request);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(layout == "same_path" ? new[] { temp } : new[] { output, temp }, Assert.Single(f.Capacity.Requests));
+        Assert.False(f.Factory.AudioTransferred);
+        Assert.False(f.Factory.VideoTransferred);
+        if (layout == "equal")
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(RecState.pending_confirmation, Assert.Single(f.Engine._recs.Values).State);
+            Assert.Single(f.Tray.Confirmations);
+            return;
+        }
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = body.RootElement.GetProperty("error");
+        Assert.Equal(WindowStorageSafety.LowSpaceCode, error.GetProperty("code").GetString());
+        var details = error.GetProperty("details");
+        Assert.Equal("before_confirmation", details.GetProperty("stage").GetString());
+        Assert.Equal("check_storage_capacity", details.GetProperty("suggested_action").GetString());
+        var storage = details.GetProperty("storage");
+        if (layout == "separate")
+            OrdinaryVideoStorageSafetyTests.AssertStorageShortfall(storage, tempOnly, tempOnly - 9, "av_temp");
+        else
+            OrdinaryVideoStorageSafetyTests.AssertStorageShortfall(storage, merged, merged - 7, "output", "av_temp");
+        Assert.Empty(f.Engine._recs);
+        Assert.Empty(f.Tray.Confirmations);
+    }
+    [Theory]
+    [InlineData(true, -1)]
+    [InlineData(true, 0)]
+    [InlineData(false, -1)]
+    [InlineData(false, 0)]
+    public async Task Task416AvAdmissionUsesOneConfiguredReservePerVolume(bool sameVolume, int delta)
+    {
+        const long mib = 1024L * 1024;
+        const long reserve = 2048 * mib;
+        const long outputBudget = reserve + 240 * mib;
+        const long tempBudget = reserve + 240 * mib + 4096;
+        var required = sameVolume ? outputBudget + tempBudget - reserve : tempBudget;
+        using var f = new Fixture(true, null, null, 0, null, RecordingStorageReserve.Parse("2048"));
+        var temp = Path.Combine(f.Root, "temp");
+        f.Capacity.Query = (paths, _) => Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(path =>
+            path == temp ? new StorageVolumeSample(path, sameVolume ? "OUTPUT" : "av", required + delta)
+                : new StorageVolumeSample(path, "output", sameVolume ? required : outputBudget)).ToArray());
+        var request = f.Request();
+        request["audio"] = AudioRequest("system_audio");
+        request.Remove("duration_seconds");
+        request["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = 60 };
+        using var response = await f.Post("/api/v1/recordings?creation_wait_ms=0", request);
+        if (delta < 0)
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var error = document.RootElement.GetProperty("error");
+            Assert.Equal(WindowStorageSafety.LowSpaceCode, error.GetProperty("code").GetString());
+            OrdinaryVideoStorageSafetyTests.AssertStorageShortfall(error.GetProperty("details").GetProperty("storage"),
+                required, required + delta, sameVolume ? new[] { "output", "av_temp" } : new[] { "av_temp" });
+            Assert.Empty(f.Tray.Confirmations);
+        }
+        else
+        {
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+            Assert.Single(f.Tray.Confirmations);
+        }
+        Assert.Equal(new[] { f.Root, temp }, Assert.Single(f.Capacity.Requests));
+        Assert.False(f.Factory.AudioTransferred);
+        Assert.False(f.Factory.VideoTransferred);
+    }
+
+    [Fact]
+    public async Task Task416AvMonitorStopsBothWorkersBelowConfiguredReserve()
+    {
+        using var f = new Fixture(true, null, null, 0, null, RecordingStorageReserve.Parse("2048"));
+        using var response = await f.Create("raw", "display");
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        f.Tray.Approve();
+        await Until(() => f.Single.State == RecState.recording);
+        await f.Clock.WaitForDelay();
+        f.Capacity.Free = 2L * 1024 * 1024 * 1024;
+        f.Clock.Tick();
+        await f.Clock.WaitForDelay();
+        Assert.Equal(RecState.recording, f.Single.State);
+        f.Capacity.Free--;
+        f.Clock.Tick();
+        await Until(() => f.Single.IsFinalized && f.History.Read(f.Single.Id)?.Status == "failed");
+        Assert.True(f.Audio.StopCalled);
+        Assert.True(f.Video.StopCalled);
+        Assert.False(File.Exists(f.Single.OutputPath));
+        f.TerminalOnce(f.Single, WindowStorageSafety.LowSpaceCode);
+    }
+
     [Theory]
     [InlineData("system_audio",false)] [InlineData("microphone",true)]
     public async Task ApprovalRechecksActualAvTempAndChangedOutput(string audio,bool unavailable)
@@ -406,13 +529,13 @@ public sealed class OrdinaryAvStorageSafetyTests
         // Use actual source/copy bytes while simulating an exact free-space boundary.
         publisher.BeforeOriginalFlushForTests=_=> { Assert.Equal(0,guard.RemainingPublicationCopyBytes);f.Capacity.Free=WindowStorageSafety.LowWaterBytes-(fail ? 1 : 0); };
         if(natural)f.Video.EmitNaturalExit(0,"");else f.Engine.Stop(rec.Id,"user_requested");
-        await Until(()=>rec.IsFinalized);if(!fail)await Until(()=>f.History.Read(rec.Id)?.Bundle?.Status == "ready");
+        await Until(()=>rec.IsFinalized);if(!fail)await Until(()=>f.History.Read(rec.Id)?.Bundle?.Status == "not_applicable");
         Assert.True(f.Audio.StopCalled);Assert.True(f.Audio.HasExited);Assert.True(f.Video.HasExited);
         if(fail) { f.TerminalOnce(rec,WindowStorageSafety.LowSpaceCode);Assert.Equal(oldBytes,File.ReadAllBytes(rec.OutputPath));Assert.Equal(oldIdentity,WindowsReadOnlyFileMetadataProbe.Instance.Observe(rec.OutputPath).Before!.Identity); }
         else {
             Assert.Equal(RecState.completed,rec.State);Assert.True(guard.Committed);Assert.Equal(1,f.AnchorCount(rec.Id));
             var meta=new FfmpegOutputProber().Probe(rec.OutputPath);Assert.True(meta.HasAudioStream);Assert.Equal("h264",meta.Codec);Assert.Equal("aac",meta.AudioCodec);Assert.True(meta.DurationSeconds>0);
-            Assert.Equal("ready",f.History.Read(rec.Id)!.Bundle!.Status);Assert.True(rec.LastMeta!.AudioPreRollMs>0);
+            Assert.Equal("not_applicable",f.History.Read(rec.Id)!.Bundle!.Status);Assert.Null(f.History.Read(rec.Id)!.MediaHash);Assert.Equal(0,rec.BundleGenerationStarted);Assert.True(rec.LastMeta!.AudioPreRollMs>0);
             Assert.False(guard.TryAbort(WindowStorageSafety.LowSpaceCode));Assert.Equal("completed",f.History.Read(rec.Id)!.Status);
         }
         AvMuxOwnershipTests.AssertNoOwnedMux(rec.OutputPath);
@@ -429,7 +552,7 @@ public sealed class OrdinaryAvStorageSafetyTests
     public async Task QueuedOldCallbackAndDirectoryApprovalHaveOneLayoutWinner(bool failureClaimsFirst)
     {
         using var f=new Fixture();await f.Accepted();var rec=f.Single;var oldPath=rec.OutputPath;
-        using var old=RecordingStoragePolicy.CreateSafety(rec,f.Capacity);old.EnsureAdmission();rec.Config.StorageSafety=old;
+        using var old=RecordingStoragePolicy.CreateSafety(rec,f.Capacity,f.Engine.StorageReserve);old.EnsureAdmission();rec.Config.StorageSafety=old;
         var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var done=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);using var release=new ManualResetEventSlim();
         var handle=typeof(RecordingEngine).GetMethod("HandleStorageFailure",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
@@ -589,7 +712,10 @@ public sealed class OrdinaryAvStorageSafetyTests
             Assert.Equal(Path.GetFileName(parent.OutputPath),Path.GetFileName(child.OutputPath));Assert.NotEqual(parent.OutputPath,child.OutputPath);
             Assert.NotEqual(owned[0].Backend.TempVideoPath,owned[1].Backend.TempVideoPath);Assert.NotEqual(owned[0].Backend.TempAudioPath,owned[1].Backend.TempAudioPath);
             Assert.Equal(parent.Id+"_video.mp4",Path.GetFileName(owned[0].Backend.TempVideoPath));Assert.Equal(child.Id+"_audio.wav",Path.GetFileName(owned[1].Backend.TempAudioPath));
-            Assert.Equal(Path.GetDirectoryName(owned[0].Backend.TempVideoPath),Path.GetDirectoryName(owned[1].Backend.TempVideoPath));
+            var parentStage = Path.GetDirectoryName(owned[0].Backend.TempVideoPath);
+            var childStage = Path.GetDirectoryName(owned[1].Backend.TempVideoPath);
+            Assert.NotEqual(parentStage, childStage);
+            Assert.Equal(Path.GetDirectoryName(parentStage), Path.GetDirectoryName(childStage));
             var first=true;f.Capacity.Query=(paths,_)=> { var free=first ? 0 : 100L<<30;first=false;return Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(p=>new StorageVolumeSample(p,"approved-volume",free)).ToArray()); };
             clock.Tick();await Until(()=>child.IsFinalized);f.TerminalOnce(child,WindowStorageSafety.LowSpaceCode);
             Assert.Equal(parentVideo,File.ReadAllBytes(owned[0].Backend.TempVideoPath!));Assert.Equal(parentAudio,File.ReadAllBytes(owned[0].Backend.TempAudioPath!));

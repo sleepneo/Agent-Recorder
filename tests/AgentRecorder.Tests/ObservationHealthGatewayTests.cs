@@ -60,7 +60,7 @@ public sealed class ObservationHealthGatewayTests : IDisposable
                 Assert.Equal(FfmpegLocator.FfmpegPath,sample.Ffmpeg.Path);Assert.Equal(FfmpegLocator.FfprobePath,sample.Ffprobe.Path);
                 Assert.Equal(HealthState.Available,sample.Ffmpeg.State);Assert.Equal(HealthState.Available,sample.Ffprobe.State);
                 Assert.Equal(HealthState.Unavailable,sample.Desktop.State);Assert.Equal(HealthState.Available,State(sample,"startup_desktop"));
-                Assert.Equal(HealthState.Idle,State(sample,"chapter"));Assert.Equal(HealthState.NotChecked,State(sample,"wgc"));
+                AssertDisabledChapter(sample);Assert.Equal(HealthState.NotChecked,State(sample,"wgc"));
                 Assert.All(beforeFiles,pair=>Assert.Equal(pair.Value,File.ReadAllBytes(pair.Key)));Assert.Empty(engine._recs);
                 Assert.Empty(Directory.GetFiles(other,"*",SearchOption.AllDirectories));
                 var ownerError=Task.Run(()=>Record.Exception(()=>gateway.CaptureOwner())).GetAwaiter().GetResult();Assert.IsType<InvalidOperationException>(ownerError);
@@ -76,19 +76,59 @@ public sealed class ObservationHealthGatewayTests : IDisposable
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
-    public void ActualChapterRegistrationFailureDiffersFromIdleAndStopFailure(bool registered)
+    public void ActualChapterRemainsDisabledAtIdleAndWhileRecordingRegardlessOfStopRegistration(bool registered)
     {
         ObservationHealthWindowTests.Sta(()=>
         {
             var audit=new AuditFake();var engine=new RecordingEngine(audit);
-            using var tray=new TrayContext(engine,audit,FakeGlobalStopHotkeyFactory.Create(registered),indicatorPresenter:new NoIndicator(),chapterMarksHotkeyFactory:FakeGlobalStopHotkeyFactory.Create(registered));
+            var chapterFactoryCalls = 0;
+            var chapterFactory = FakeGlobalStopHotkeyFactory.Create(registered);
+            using var tray = new TrayContext(engine, audit, FakeGlobalStopHotkeyFactory.Create(registered),
+                indicatorPresenter: new NoIndicator(), chapterMarksHotkeyFactory: onPressed =>
+                {
+                    chapterFactoryCalls++;
+                    return chapterFactory(onPressed);
+                });
             ((NotifyIcon)typeof(TrayContext).GetField("_icon",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(tray)!).Visible=false;
-            var idle=tray.CaptureHealthHotkeys();Assert.False(idle.Chapter.Expected);Assert.False(idle.Chapter.Registered);
-            tray.SetRecording(Presentation("fixture"));var active=tray.CaptureHealthHotkeys();Assert.True(active.Chapter.Expected);Assert.Equal(registered,active.Chapter.Registered);
-            var owner=Owner() with {Stop=active.Stop,Chapter=active.Chapter};var sample=ObservationHealthSnapshot.Partial(owner,HealthProbeState.NotChecked);
-            Assert.Equal(registered?HealthState.Available:HealthState.Unavailable,State(sample,"chapter"));Assert.Equal(registered?HealthState.Available:HealthState.Unavailable,State(sample,"stop"));
+            void CheckHotkeys()
+            {
+                var hotkeys = tray.CaptureHealthHotkeys();
+                var owner = Owner() with { Stop = hotkeys.Stop, Chapter = hotkeys.Chapter };
+                var sample = ObservationHealthSnapshot.Partial(owner, HealthProbeState.NotChecked);
+                AssertDisabledChapter(sample);
+                Assert.Equal(registered ? HealthState.Available : HealthState.Unavailable, State(sample, "stop"));
+                Assert.Equal(registered ? "registered" : "registration_failed", ObservationHealthResponse.From(sample).Hotkeys.Stop.ReasonCode);
+                Assert.Equal(0, chapterFactoryCalls);
+            }
+
+            Assert.Empty(tray.GetObservationSnapshot());
+            CheckHotkeys();
+            var recording = Presentation("fixture");
+            tray.SetRecording(recording);
+            Assert.Equal(recording, Assert.Single(tray.GetObservationSnapshot()).Presentation);
+            CheckHotkeys();
+            tray.SetIdle(recording with { State = RecordingUiState.Idle });
+            Assert.Empty(tray.GetObservationSnapshot());
+            CheckHotkeys();
             Assert.Empty(engine._recs);
         });
+    }
+
+    private static void AssertDisabledChapter(ObservationHealthSnapshot sample)
+    {
+        Assert.Equal(new HealthHotkey(false, false, null, "disabled", false, 0), sample.Owner.Chapter);
+        Assert.Equal(new HealthHotkeyDto(false, false, null, "disabled", "unsupported", "unsupported", sample.Owner.SampledAt, "owner_snapshot"),
+            ObservationHealthResponse.From(sample).Hotkeys.Chapter);
+
+        var zh = new UiTextProvider(UiLanguage.ZhCn);
+        var en = new UiTextProvider(UiLanguage.EnUs);
+        var chinese = ObservationHealthFormatting.Rows(sample, zh).Single(row => row.Id == "chapter");
+        var english = ObservationHealthFormatting.Rows(sample, en).Single(row => row.Id == "chapter");
+        var time = sample.Owner.SampledAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(HealthState.Unsupported, chinese.State);
+        Assert.Equal(HealthState.Unsupported, english.State);
+        Assert.Equal($"此热键已停用。\r\n采样时间: {time}", chinese.Details);
+        Assert.Equal($"This hotkey is disabled.\r\nSample time: {time}", english.Details);
     }
 
     [Theory]

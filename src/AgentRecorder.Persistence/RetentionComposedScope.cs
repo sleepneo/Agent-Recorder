@@ -76,9 +76,11 @@ internal sealed class RetentionComposedScope : IDisposable
         internal DateTimeOffset Cutoff => _session.Cutoff;
         internal DateTimeOffset CompletedAtUtc => _database.CompletedAtUtc;
         internal bool OwnsBorrow(OriginalFileBorrowContext borrow) => ReferenceEquals(_borrow, borrow);
+        internal string? CheckPolicy(RetentionHostKeepLatestProtection host, RetentionDeletionPolicy? policy)
+        { RequireActive(); var reason = _database.CheckPolicy(host, policy); RequireActive(); return reason; }
         internal void ValidateDeletion(DeletionLedger.Prepared proof) { RequireActive(); _database.ValidateDeletion(proof); RequireActive(); }
         internal void SubmitDisposition(OriginalFileBorrowContext.DispositionAuthorization authorization)
-        { RequireActive(); authorization.Submit(_borrow); }
+        { RequireActive(); authorization.Submit(_borrow, _database.HasShortNameReference); }
         internal void RequireActive()
         {
             if (Volatile.Read(ref _active) == 0 || Environment.CurrentManagedThreadId != _thread || _database.RecordingId != _session.Id)

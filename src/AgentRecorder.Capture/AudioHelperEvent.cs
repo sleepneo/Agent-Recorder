@@ -30,6 +30,8 @@ public sealed class AudioHelperEvent
     public long? BytesWritten { get; set; }
     public string? CaptureMethod { get; set; }
     public string? CaptureEngine { get; set; }
+    internal string? OwnedWavIdentity { get; set; }
+    internal bool OwnedWavIdentityDuplicate { get; set; }
     public string? CaptureStrategy { get; set; }
     public string? PairEvidence { get; set; }
     public string? AutoHfpPairStatus { get; set; }

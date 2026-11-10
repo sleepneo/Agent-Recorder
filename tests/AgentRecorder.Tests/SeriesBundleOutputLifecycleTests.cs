@@ -37,85 +37,7 @@ public sealed partial class OrdinaryWgcBundleTests
     }
     private static bool SeriesBundleInUse(Fixture f, string path) => Read(f.Engine, path)!.Paths.Single().InUse;
 
-    [Theory]
-    [InlineData("queued", false, "case")]
-    [InlineData("queued", true, "slashes")]
-    [InlineData("generating", false, "slashes")]
-    [InlineData("generating", true, "exact")]
-    [InlineData("ready", false, "exact")]
-    [InlineData("ready", true, "case")]
-    [InlineData("failed", false, "case")]
-    [InlineData("failed", true, "slashes")]
-    public async Task SeriesBundleActualApiAndLocalMovesRespectEveryLiveBundlePhase(string phase, bool local, string spelling)
-    {
-        var audit = new BundleUseAudit();
-        using var tail = new ManualResetEventSlim();
-        var atTail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var f = SeriesBundleFixture(audit); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        if (phase is "ready" or "failed") audit.Before = evt =>
-        {
-            if (evt != "recording.bundle_" + phase) return;
-            atTail.TrySetResult(); if (!tail.Wait(TimeSpan.FromSeconds(30))) throw new TimeoutException("owned Bundle tail gate");
-        };
-        if (phase == "failed") f.Generator.Fault = _ => Task.FromResult(
-            RecordingBundleGenerationResult.Failed(RecordingBundleErrorCodes.GenerationFailed, "owned_fault"));
-        Func<Task>? queued = null;
-        if (phase == "queued") f.Engine.BundleGenerationDispatcherForTests = work => { queued = work; return Task.CompletedTask; };
-        var video = f.Create("display"); await f.Approve(video); await f.Terminal(video, false);
-        var directory = Path.ChangeExtension(video.OutputPath, ".bundle");
-        var child = Path.Combine(directory, "denied");
-        if (spelling == "case") child = child.ToUpperInvariant();
-        if (spelling == "slashes") child = child.Replace('\\', '/');
-        Task? host = null;
-        try
-        {
-            if (phase != "queued")
-            {
-                await f.Generator.Started.Task.WaitAsync(TimeSpan.FromSeconds(5)); host = HostTask(f);
-                if (phase is "ready" or "failed")
-                { f.Generator.Release.TrySetResult(); await atTail.Task.WaitAsync(TimeSpan.FromSeconds(5)); Assert.False(host.IsCompleted); }
-            }
-            var videoHash = ScreenshotSeriesArtifacts.Sha256File(video.OutputPath);
-            Assert.True(SeriesBundleInUse(f, Path.Combine(directory, "any.png")));
-            Assert.False(SeriesBundleInUse(f, Path.Combine(directory + "-neighbor", "any.png")));
-            var beforeConfirmations = f.Engine._confs.Count;
-            f.StartApi(); using var client = f.Client();
-            using var response = await client.PostAsync("/api/v1/recordings?creation_wait_ms=0", new StringContent(
-                SeriesBundleRequest(f, local ? Path.Combine(f.Root, "old") : child).ToJsonString(), Encoding.UTF8, "application/json"));
-            if (local)
-            {
-                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-                var series = f.Engine._recs.Values.Single(r => r.IsScreenshotSeries);
-                var old = series.OutputPath;
-                Assert.True(SeriesBundleInUse(f, Path.Combine(old, "frame.png")));
-                f.Tray.Confirm!(ConfirmationDecision.Approve(child));
-                Assert.Equal(RecState.rejected, series.State); Assert.Equal("OUTPUT_PATH_IN_USE", series.StopReason);
-                Assert.Null(series.AuthorizationProof);
-                Assert.False(SeriesBundleInUse(f, Path.Combine(old, "frame.png")));
-            }
-            else
-            {
-                Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-                Assert.Contains("OUTPUT_PATH_IN_USE", await response.Content.ReadAsStringAsync());
-                Assert.Equal(beforeConfirmations, f.Engine._confs.Count); Assert.Single(f.Engine._recs);
-            }
-            Assert.False(Directory.Exists(child)); Assert.Equal(0, runner.Calls);
-            Assert.Equal(0, f.Engine.ActiveScreenshotSeriesOperationCountForTests); Assert.Equal(1, f.FactoryCalls);
-            Assert.Equal(videoHash, ScreenshotSeriesArtifacts.Sha256File(video.OutputPath));
-            SaveSeriesBundleEvidence($"phase-{phase}-{local}-{spelling}", new { phase, local, spelling, frameCalls = runner.Calls,
-                childCreated = Directory.Exists(child), mainIntact = true, bundle = video.BundleSnapshot.Status });
-        }
-        finally
-        {
-            tail.Set(); f.Generator.Release.TrySetResult();
-            if (queued is not null) await queued();
-            if (host is not null) await host.WaitAsync(TimeSpan.FromSeconds(10));
-        }
-        await Until(() => BundleUseCount(f) == 0);
-        Assert.Equal(phase == "failed" ? "failed" : "ready", video.BundleSnapshot.Status);
-        Assert.Equal(RecState.completed, video.State);
-    }
+
 
     [Theory]
     [InlineData("completed")]
@@ -157,7 +79,7 @@ public sealed partial class OrdinaryWgcBundleTests
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var video = f.Engine._recs.Values.Single(r => r.Mode == "video");
             await f.Approve(video); await f.Terminal(video, false);
-            await Until(() => video.BundleSnapshot.Status == "failed");
+            await Until(() => video.BundleSnapshot.Status == "not_applicable");
             Assert.Equal(0, f.Generator.Calls); Assert.Equal(RecState.completed, video.State);
             Assert.True(File.Exists(video.OutputPath));
             Assert.True(SeriesBundleInUse(f, Path.Combine(series.OutputPath, "late.png")));

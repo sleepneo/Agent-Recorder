@@ -1,5 +1,7 @@
 # Agent Recorder 中文说明
 
+> 本文适用于 v0.1.21。新录制仅交付视频；使用旧包时以实际运行实例的 capabilities 为准。
+
 Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人类用户用自然语言说明要录制什么，本地 AI agent 调用 localhost API，Agent Recorder 负责本地选区、确认、录制、输出和审计。
 
 核心流程：
@@ -22,11 +24,11 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 ## 人类用户如何使用
 
-v0.1.20 是 Windows x64 便携预发布版，本次不分发安装器。延续上一版，在独立多窗口录制、保存区域声音选择和输出保护的基础上，提供最多20条录制的只读清理评估，以及最多5项、每项独立本地确认的顺序清理。拒绝或不确定会停止余项，重启不恢复删除；不是整批原子操作或后台自动清扫。三窗口无声录制已通过180/90/30秒真实验收；QB系统声音已通过受控停播恢复及重复200秒验收；两项顺序清理已通过拒绝、逐项批准和幂等重放真实验收。这些结果不外推所有设备、五项真人规格或长期稳定性。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
+v0.1.21 是 Windows x64 自包含便携预发布版，新增存储诊断、可选的受管成片登记配额和只读核对。磁盘保底配置为空时仍使用默认 256 MiB。登记配额不是磁盘硬限额，也不会自动删除文件。独立窗口已实测四路 644×420、15 fps、无声录制，不外推更高并发或其他硬件。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
 
-既有能力包括普通持久历史、统一索引查询、按需健康检查、普通/计划/未来窗口产物元数据检查、普通主视频与五附件显式内容核验、普通 WGC Bundle 生成、计划和未来窗口成片原始身份与只读保留预览。普通 raw/quick 视频可显式选择 `artifacts.bundle=false` 仅输出 MP4，默认仍生成录制说明包；固定 Videos 下符合条件的已完成仅 MP4 视频，可按录制 ID 申请独立本地删除确认。取消保留文件，同键重试返回原结果，默认 Bundle 录制仍受保护。自动清理、全盘配额、代码签名未完成。安装器本地候选已通过从 v0.1.19 原地升级、桌面启动、卸载和重装检查。运行能力以 `/capabilities` 为准，精确字段见 API 手册。
+所有新视频仅交付视频，普通 raw/quick 请求省略 artifacts 即可，空对象或 bundle=false 兼容，显式 true 在录制准备前拒绝。声音选项与截图序列不变。已有 Bundle 的历史读取、五附件核验和删除保护继续兼容，不改写旧数据。成功视频仍需主文件锚点与真实资源退休；未知保持保护。运行能力以 /capabilities 为准。
 
-升级已有安装时，请先备份数据目录。本版会将历史数据库升级到 SQLite schema v48；升级后的数据应与新版程序配套使用，不要再用旧版程序打开。
+升级时请先备份数据目录。本版会将历史数据库升级到 SQLite V51；升级后的数据不要再用旧版程序打开。
 
 1. 解压 Windows portable zip。
 2. 把以下文档交给本地 AI agent：
@@ -150,7 +152,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | 录制前检查 | 已实现 | 确认前和启动前检查目录、空间、编码器、区域及目标可用性 |
 | 录制中提示 | 已实现 | 录制区域显示克制呼吸的红色边框和计时标签，支持 outer/inner；系统关闭动画时自动降级为静态显示 |
 | 本地停止控制 | 已实现 | 每条录制有独立圆角胶囊停止控件；全局热键 `Ctrl+Shift+F10` 停止全部；托盘菜单动态显示停止入口 |
-| 章节标记 | 已实现 | 具备Bundle资格的活动录制可通过鉴权 API 或 `Ctrl+Shift+F11` 接受待交付标记；仅MP4拒绝，嵌套录制仅标记合格 outer/inner，并在各自 bundle 的 `marks.json` 中保留首帧时间轴位置 |
+| 章节标记 | 新录制停用 | 旧历史标记保留，新录制不接收标记或注册章节热键 |
 | 自有 UI 隔离 | 已实现 | 默认 FFmpeg 路径已通过真实桌面验收；普通控件尽力排除，安全的 inner 控件可由 outer 记录 |
 | 双语与高 DPI | 已实现 | 本地选区、确认、REC、停止控件支持中文/英文，并适配 100%-200% DPI；选区显示四角强调和实时 `W×H @ display` 标签 |
 | 阻止 HTTP 自批准 | 已实现 | `/confirmations/{id}/approve` 返回 405 |
@@ -160,7 +162,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 | Agent 交互桌面冷启动 | 已实现；依赖宿主授权执行面 | 在已验证的当前用户桌面直接启动/复用。调用前由 agent 检查宿主的用户桌面授权执行入口；Recorder 不跨账户派发。仅同用户隔离桌面的高级故障恢复可显式设置当前用户任务 |
 | FFmpeg 预热 | 已实现 | 服务就绪后后台预热 FFmpeg/FFprobe |
 | 性能摘要 | 已实现 | `/capabilities.perf_summary` 提供本地 cold/warm 分组 P50/P95 诊断统计 |
-| 结构化录制产物 | 已实现 | 成功 FFmpeg MP4 录制后自动生成 `<video-stem>.bundle/`，含 `metadata.json`、`thumbnail.jpg`、`first_frame.png`、`last_frame.png`、`marks.json` |
+| 视频交付 | 当前源码 | 新视频仅交付视频位置和必要属性；旧 Bundle 继续兼容读取、核验与保护 |
 | 麦克风录制 | 已实现 | 默认通过隔离的 Windows WASAPI helper 捕获麦克风，最终合流为 AAC 音轨；具备连续性诊断、运行期恢复和稳定错误码。蓝牙 Hands-Free 输入可自动配对对应渲染端点并保持 HFP 双工链路，AirPods Pro 与 Focal Bathys 已通过真实产品路径验收；不同设备和驱动仍可能存在兼容性差异。FFmpeg dshow 仅作为显式诊断回退 |
 | 系统声音 | 已实现 | 隔离 WASAPI loopback、音视频分离采集、AAC 合流、确认 UI、倒计时和连续性诊断已接通；本地确认时批准的端点在本次录制中保持固定，切换 Windows 默认输出不会暗中改录其他设备，切回批准端点时采用有界同端点恢复。公开能力契约通过 `/capabilities`、`/permissions` 和 `/audio/devices.output_devices` 报告实时状态与 render endpoint |
 | 通用 WGC 连续录制 | 实验性实现 | 符合条件的 1–60 秒无音频 display/window/region 路径默认关闭，具备非捕获探测、可信首帧证据、目标生命周期检查、稳定显示器身份和 GPU 区域裁剪；与上面的公开严格固定窗口路径分开，不应混用能力声明或回退语义 |
@@ -214,7 +216,7 @@ src/
   AgentRecorder.App            WinForms 托盘程序、本地选区和确认 UI
   AgentRecorder.Api            本地 HTTP API
   AgentRecorder.Core           录制状态机与核心契约
-  AgentRecorder.Capture        FFmpeg/WASAPI 捕获、合流、bundle 与预热
+  AgentRecorder.Capture        FFmpeg/WASAPI 捕获、合流、旧 Bundle 兼容与预热
   AgentRecorder.Windows        Win32 显示器/窗口枚举
   AgentRecorder.Security       安全策略与自批准拦截
   AgentRecorder.Logging        审计日志
@@ -275,6 +277,22 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 
 宿主启动环境可选 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS`：缺省2，严格十进制整数1–10合法，软件硬上限10。Engine初始化时读取并冻结；运行中修改环境或请求字段不改变实例，不提供HTTP改限额接口。非法、溢出或越界使该独立能力不可用，raw请求在新增确认/worker前返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，不截断或按成功默认值忽略。无需修改本机持久环境。
 
-能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效配置的有效上限及余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出、Bundle排队/生成/原host收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
+能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效路数配置的路数上限为null；任一预算配置无效时余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
 
 预算只覆盖本Engine普通raw无声独立窗口及其未退休交付，不是全机worker、GPU/编码器/磁盘容量保证。顶层并发值只是各合同描述性上界；旧nested/区域仍最多两路，quick/Profile/截图序列/Plan/Lease/未来窗口/声音和混合目标不扩展。每条仍需独立本地确认。stress_tested=false，不自动降画质、换后端/目标或回退桌面区域，也不自动合成画中画。WIN1…WIN10/窗口1…窗口10只供显示，API仍按Recording ID启停。
+
+
+### 总像素率准入预算
+
+独立普通 raw、无声、严格 WGC 窗口还受 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND` 限制。Engine 启动冻结此配置，缺省 `497664000` 像素/秒，即两个 3840×2160×30 的算术值；这是初始软件政策，不是双4K或十路硬件验收、性能保证。显式值只接受 ASCII 十进制正 Int64（最大 9223372036854775807）；空值、空白、符号、分数或溢出均无效。任一预算配置无效时该分支 available=false，返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，details.environment_variable 指明配置项；其他合同不因此停用。HTTP 字段、确认回调或运行中改环境均不能改预算。
+
+每路冻结成本为可信捕获计划的物理窗口表面宽×高×实际配置 FPS（15/24/30/60），包括被遮挡或超出显示器可见范围的表面，不取 DIP、裁剪矩形或请求自报成本。所有乘法、汇总、剩余量为 checked Int64；缺失/非法计划或成本溢出返回 `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID`。不缩放、降帧、换目标或回退桌面；确认等待时几何变化仍按原计划重验失败。
+
+路数与像素率必须同时满足，等于上限允许。可信计划解析后的检查及最终锁内原子注册都检查像素率；超限不新建确认、输出 claim、录制或后端。准入检查内部错误顺序为：无效配置、混合合同、路数满、同窗、像素率满；计划事实非法在计算成本时提前拒绝。原有请求解析/能力/输出检查仍有效。新超限返回 `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`，details 包含 `reason_code=independent_window_pixel_budget_exceeded` 及 `requested_pixels_per_second`、`reserved_pixels_per_second`、`configured_pixels_per_second`、`remaining_pixels_per_second`，不包含路径、HWND或授权材料。
+
+`recording.window_surface.independent_windows.pixel_rate_budget` 增补 `unit=pixels_per_second`、`policy_source`、`environment_variable`、`default_pixels_per_second`、`configured_pixels_per_second`、`configuration_valid`、`reserved_pixels_per_second`、`finalizing_or_unknown_pixels_per_second`、`remaining_pixels_per_second`。路数与像素字段来自同一锁内快照；无效配置对应配置值为 null，任一配置无效时剩余量为 null。快照不预留名额。预留绑定确切 Recording 和冻结成本，待确认、准备、倒计时、录制、停止/收尾及未肯定退休终态均占用；初始目录/历史登记未完成也不早退。拒绝、超时、登记失败和肯定退休只退回自身份额。
+
+作用域仅为当前 Engine 的独立窗口及未退休交付，不是全机 GPU/编码器/CPU/磁盘预算。`snapshot_is_reservation=false`、`performance_guaranteed=false`、`hardware_capacity_measured=false`，`stress_tested=false` 保持不变。默认路数2、显式路数1–10不变；quick/Profile/nested、音频、区域分层、混合目标、截图序列、计划/Lease/未来窗口不扩展。新视频仍仅交付视频，不生成 Bundle 或章节资料；旧 Bundle 历史保护不变。
+
+
+v0.1.21 使用 SQLite V51，新增宿主保护拒绝回执。升级前备份数据库，升级后不要再用 V50 或更早的程序打开。已发布 v0.1.20 仍为 V48。

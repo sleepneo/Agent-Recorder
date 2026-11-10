@@ -8,4 +8,8 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="..\..\tools\AgentRecorder.AudioHelper\OwnedWavTarget.cs" Link="OwnedWavTarget.cs" />
+  </ItemGroup>
+
 </Project>

@@ -6,7 +6,8 @@ namespace AgentRecorder.Capture;
 
 internal sealed record PublicationHandleObservation(HandleMetadataSnapshot Snapshot, string Path)
 {
-    internal static PublicationHandleObservation? Read(IWindowsFileMetadataApi api, SafeFileHandle handle, string requested)
+    internal static PublicationHandleObservation? Read(IWindowsFileMetadataApi api, SafeFileHandle handle, string requested,
+        bool allowEmpty = false)
     {
         try
         {
@@ -23,7 +24,7 @@ internal sealed record PublicationHandleObservation(HandleMetadataSnapshot Snaps
                 !string.Equals(path, requested, StringComparison.OrdinalIgnoreCase) ||
                 !WindowsReadOnlyFileMetadataProbe.ValidAttributes(basic.Attributes) ||
                 (basic.Attributes & (uint)(FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0 ||
-                standard.EndOfFile <= 0 || standard.AllocationSize < 0 || standard.NumberOfLinks != 1 ||
+                standard.EndOfFile < (allowEmpty ? 0 : 1) || standard.AllocationSize < 0 || standard.NumberOfLinks != 1 ||
                 standard.DeletePending != 0 || standard.Directory != 0 || basic.LastWriteTime <= 0 ||
                 basic.LastWriteTime > 2650467743999999999L || identity.VolumeSerialNumber == 0 ||
                 (identity.IdLow == 0 && identity.IdHigh == 0)) return null;

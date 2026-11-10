@@ -415,7 +415,7 @@ internal sealed class CaptureSession : IDisposable
                 _writer = null;
                 try { writer.Dispose(); } catch { }
                 try { partialStream?.Dispose(); } catch { }
-                try { if (File.Exists(_paths.PartialPath)) File.Delete(_paths.PartialPath); } catch { }
+                CleanupPartial();
 
                 _waveFormat = null;
 
@@ -445,7 +445,7 @@ internal sealed class CaptureSession : IDisposable
                 _writer = null;
                 try { writer.Dispose(); } catch { }
                 try { partialStream?.Dispose(); } catch { }
-                try { if (File.Exists(_paths.PartialPath)) File.Delete(_paths.PartialPath); } catch { }
+                CleanupPartial();
 
                 _waveFormat = null;
 
@@ -2048,16 +2048,26 @@ internal sealed class CaptureSession : IDisposable
 
         try
         {
-            if (File.Exists(_paths.CanonicalPath))
+            string? ownedIdentity = null;
+            if (_paths.OwnedWav is { } ownedWav)
             {
-                EmitFailEvent("audio_output_conflict", "Output file appeared after capture", _paths.PartialPath);
-                CleanupPartial();
-                return;
+                ownedIdentity = ownedWav.Evidence(requireData: true);
+                if (ownedIdentity is null)
+                    throw new IOException("The completed WAV no longer matches its reserved object.");
+            }
+            else
+            {
+                if (File.Exists(_paths.CanonicalPath))
+                {
+                    EmitFailEvent("audio_output_conflict", "Output file appeared after capture", _paths.PartialPath);
+                    CleanupPartial();
+                    return;
+                }
+                File.Move(_paths.PartialPath, _paths.CanonicalPath);
             }
 
-            File.Move(_paths.PartialPath, _paths.CanonicalPath);
-
             var info = BuildTerminalEventInfo(bytesWritten, stopTimestamp);
+            info.OwnedWavIdentity = ownedIdentity;
             EmitLoopbackDiagnostics(failed: false);
             if (userRequested)
                 _events.Stopped(info);
@@ -2108,6 +2118,7 @@ internal sealed class CaptureSession : IDisposable
             Channels = format.Channels,
             BitsPerSample = format.BitsPerSample,
             FirstSampleAnchorTicks = anchorTicks,
+            OwnedWavIdentity = _paths.OwnedWav?.Evidence(),
             TimestampFrequency = Stopwatch.Frequency,
             BytesWritten = bytesWritten,
             AudioSourceKind = AudioSourceKindNames.ToCliValue(_options.SourceKind),
@@ -2228,6 +2239,7 @@ internal sealed class CaptureSession : IDisposable
             CaptureEngine = "wasapi-direct",
             CaptureStrategy = IsSystemLoopback ? "wasapi-loopback" : "",
             ErrorCode = errorCode,
+            OwnedWavIdentity = _paths.OwnedWav?.Evidence(),
             Reason = reason,
             Hresult = hresult ?? "",
             PartialOutputPath = partialPath,
@@ -2397,6 +2409,8 @@ internal sealed class CaptureSession : IDisposable
 
     private void CleanupPartial()
     {
+        // The split host owns the WAV and alone may dispose it after exit.
+        if (_paths.OwnedWav is not null) return;
         try { if (File.Exists(_paths.PartialPath)) File.Delete(_paths.PartialPath); }
         catch { /* best effort */ }
     }

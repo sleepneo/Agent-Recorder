@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using AgentRecorder.Infrastructure;
@@ -31,8 +32,13 @@ internal sealed record CaptureWritePaths(string OutputDirectory, string? AvTempD
 
     internal void ValidateOutputPath(CaptureConfig config)
     {
-        var expected = config.StorageIntermediatePublication ? AvTempDirectory : OutputDirectory;
-        if (expected is null || !string.Equals(expected,
+        if (config.StorageIntermediatePublication)
+        {
+            if (config.AvIntermediateStaging?.MatchesVideo(config.OutputPath, AvTempDirectory) != true)
+                throw new StorageSafetyException(WindowStorageSafety.UnavailableCode);
+            return;
+        }
+        if (!string.Equals(OutputDirectory,
                 Path.GetDirectoryName(Path.GetFullPath(config.OutputPath)), StringComparison.OrdinalIgnoreCase))
             throw new StorageSafetyException(WindowStorageSafety.UnavailableCode);
     }
@@ -59,16 +65,28 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
                 ? "AgentRecorder.Headless.exe" : "AgentRecorder.App.exe");
 
     public Task<IReadOnlyList<StorageVolumeSample>> QueryAsync(
-        IReadOnlyList<string> paths, CancellationToken token)
+        IReadOnlyList<string> paths, CancellationToken token) => StartQuery("--internal-storage-capacity-probe",
+            () => JsonSerializer.Serialize(paths), ReadSamples, 32768, token);
+
+    internal Task<IReadOnlyList<StorageVolumeSample>> QuerySingleVolumeAsync(string path, CancellationToken token)
+        => StartQuery<IReadOnlyList<StorageVolumeSample>>("--internal-storage-capacity-probe",
+            () => JsonSerializer.Serialize(new[] { path }), ReadSingleSample, 32768, token);
+
+    internal Task<AvStagingInventoryObservation> QueryAvStagingAsync(string path, CancellationToken token)
+        => StartQuery(WindowsAvStagingInventory.ProbeArgument, () => JsonSerializer.Serialize(path),
+            WindowsAvStagingInventory.ReadResponse, 4096, token);
+
+    private Task<T> StartQuery<T>(string argument, Func<string> request, Func<string, T> parse,
+        int responseLimit, CancellationToken token) where T : class
     {
         var evidence = new QueryEvidence(this);
-        var query = QueryOwnedAsync(paths, token, evidence);
+        var query = QueryOwnedAsync(argument, request, parse, responseLimit, token, evidence);
         evidence.Query = query;
         return query;
     }
 
-    private async Task<IReadOnlyList<StorageVolumeSample>> QueryOwnedAsync(
-        IReadOnlyList<string> paths, CancellationToken token, QueryEvidence evidence)
+    private async Task<T> QueryOwnedAsync<T>(string argument, Func<string> request, Func<string, T> parse,
+        int responseLimit, CancellationToken token, QueryEvidence evidence) where T : class
     {
         var process = new Process
         {
@@ -77,14 +95,14 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
                 UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true,
                 RedirectStandardError = false,
-                Arguments = "--internal-storage-capacity-probe"
+                Arguments = argument
             }
         };
         var lifetime = new StorageProbeLifetime(process);
         LastProbe = lifetime;
         CancellationTokenRegistration registration = default;
         Exception? primary = null;
-        IReadOnlyList<StorageVolumeSample>? samples = null;
+        T? sample = null;
         void KillExact()
         {
             try
@@ -100,20 +118,22 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
         try
         {
             HooksForTests?.BeforeStart?.Invoke(process.StartInfo);
-            if (!process.Start()) throw new IOException("storage_probe_start_failed");
+            StartProbe(process, evidence);
             lifetime.Started = true;
             // Cache the original native handle before cancellation can run. All
             // termination and exit observation use this instance, never a PID lookup.
-            _ = process.SafeHandle;
+            HooksForTests?.BeforeCaptureHandle?.Invoke(process);
+            var handle = process.SafeHandle;
+            if (handle.IsInvalid || handle.IsClosed) throw new IOException("storage_probe_handle_unavailable");
+            evidence.Launch = ProbeLaunch.HandleBound;
             lifetime.ProcessId = LastProbeProcessId = process.Id;
             lifetime.StartTime = process.StartTime;
             HooksForTests?.Started?.Invoke(process);
             registration = token.Register(KillExact);
             if (HooksForTests?.BeforeRead is { } beforeRead) await beforeRead().ConfigureAwait(false);
-            await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(paths).AsMemory(), token).ConfigureAwait(false);
+            await process.StandardInput.WriteLineAsync(request().AsMemory(), token).ConfigureAwait(false);
             process.StandardInput.Close();
-            // Input and response are bounded (at most three directory samples).
-            var buffer = new char[32768];
+            var buffer = new char[responseLimit];
             int count = 0;
             while (count < buffer.Length)
             {
@@ -124,8 +144,7 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
             if (count == buffer.Length) throw new IOException("storage_probe_response_too_large");
             await process.WaitForExitAsync(token).ConfigureAwait(false);
             if (process.ExitCode != 0) throw new IOException("storage_capacity_unavailable");
-            samples = JsonSerializer.Deserialize<StorageVolumeSample[]>(new string(buffer, 0, count))
-                ?? throw new IOException("storage_capacity_unavailable");
+            sample = parse(new string(buffer, 0, count));
         }
         catch (Exception error) { primary = error; }
         finally
@@ -187,7 +206,50 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
         if (primary is OperationCanceledException cancellation)
             throw new RetiredQueryCancellation(evidence, lifetime, cancellation);
         if (primary is not null) throw new RetiredQueryFailure(evidence, lifetime, primary);
-        return samples!;
+        return sample!;
+    }
+
+    private void StartProbe(Process process, QueryEvidence evidence)
+    {
+        const int errorFileNotFound = 2;
+        var startInfo = process.StartInfo;
+        var directWindowsLaunch = OperatingSystem.IsWindows() && !startInfo.UseShellExecute &&
+            startInfo.UserName.Length == 0 && startInfo.StandardInputEncoding is null &&
+            startInfo.StandardOutputEncoding is null && startInfo.StandardErrorEncoding is null;
+        try
+        {
+            if (HooksForTests?.ReturnFalseOnStart != true && process.Start()) return;
+        }
+        catch (Win32Exception error) when (directWindowsLaunch && error.NativeErrorCode == errorFileNotFound)
+        {
+            // For the direct Windows launch, this specific launch error is
+            // reported before a child is created. Keep the catch around Start
+            // only: hooks and post-launch operations cannot issue this fact.
+            evidence.Launch = ProbeLaunch.ConfirmedNotStarted;
+            throw;
+        }
+
+        // Windows can report a successful native launch without a valid process handle.
+        // Keep the launch unknown when Process.Start returns false.
+        throw new IOException("storage_probe_start_failed");
+    }
+
+    private static IReadOnlyList<StorageVolumeSample> ReadSamples(string response) =>
+        JsonSerializer.Deserialize<StorageVolumeSample[]>(response) ?? throw new IOException("storage_capacity_unavailable");
+
+    private static StorageVolumeSample[] ReadSingleSample(string response)
+    {
+        using var document = JsonDocument.Parse(response);
+        if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() != 1)
+            throw new IOException("storage_capacity_unavailable");
+        var sample = document.RootElement[0];
+        if (sample.ValueKind != JsonValueKind.Object || sample.EnumerateObject().Count() != 3 ||
+            !sample.TryGetProperty(nameof(StorageVolumeSample.Path), out var path) || path.ValueKind != JsonValueKind.String ||
+            !sample.TryGetProperty(nameof(StorageVolumeSample.VolumeIdentity), out var volume) || volume.ValueKind != JsonValueKind.String ||
+            !sample.TryGetProperty(nameof(StorageVolumeSample.AvailableBytes), out var available) ||
+            available.ValueKind != JsonValueKind.Number || !available.TryGetInt64(out var bytes))
+            throw new IOException("storage_capacity_unavailable");
+        return new[] { new StorageVolumeSample(path.GetString()!, volume.GetString()!, bytes) };
     }
 
     // Only this sealed provider can issue the evidence, after its exact process,
@@ -197,8 +259,11 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
     private sealed class QueryEvidence(ProcessStorageCapacityProvider owner)
     {
         internal ProcessStorageCapacityProvider Owner { get; } = owner;
-        internal Task<IReadOnlyList<StorageVolumeSample>>? Query { get; set; }
+        internal Task? Query { get; set; }
+        internal ProbeLaunch Launch { get; set; }
     }
+
+    private enum ProbeLaunch { Unknown, ConfirmedNotStarted, HandleBound }
 
     private interface IRetiredQueryFailure
     {
@@ -224,17 +289,20 @@ internal sealed class ProcessStorageCapacityProvider : IStorageCapacityProvider
         public StorageProbeLifetime Lifetime { get; } = lifetime;
     }
 
-    internal bool HasCleanRetirementEvidence(Exception error, Task<IReadOnlyList<StorageVolumeSample>>? query)
+    internal bool HasCleanRetirementEvidence(Exception error, Task? query,
+        bool allowConfirmedNoStart = false)
         => error is IRetiredQueryFailure failure && ReferenceEquals(failure.Evidence.Owner, this) &&
            ReferenceEquals(failure.Evidence.Query, query) &&
            (query is { IsFaulted: true } && query.Exception!.InnerExceptions.Any(e => ReferenceEquals(e, error)) ||
             query is { IsCanceled: true } && error is RetiredQueryCancellation) &&
            failure.Lifetime.RetirementCompletion.IsCompletedSuccessfully &&
-           failure.Lifetime.Started && failure.Lifetime.ExitCompletion.IsCompletedSuccessfully &&
-           failure.Lifetime.CleanupFailure is null;
+           failure.Lifetime.CleanupFailure is null &&
+           (failure.Evidence.Launch == ProbeLaunch.HandleBound && failure.Lifetime.Started &&
+            failure.Lifetime.ExitCompletion.IsCompletedSuccessfully ||
+            allowConfirmedNoStart && failure.Evidence.Launch == ProbeLaunch.ConfirmedNotStarted);
 }
 
-// Internal observations refer to a single started instance. Completion signals
+// Internal observations refer to a single launch attempt. Completion signals
 // are facts; CleanupFailure separately prevents a failed cleanup being called success.
 internal sealed class StorageProbeLifetime(Process process)
 {
@@ -256,6 +324,8 @@ internal sealed class StorageProbeLifetime(Process process)
 internal sealed class StorageProbeHooks
 {
     internal Action<ProcessStartInfo>? BeforeStart { get; init; }
+    internal bool ReturnFalseOnStart { get; init; }
+    internal Action<Process>? BeforeCaptureHandle { get; init; }
     internal Action<Process>? Started { get; init; }
     internal Func<Task>? BeforeRead { get; init; }
     internal Func<Task>? BeforeCleanup { get; init; }
@@ -265,9 +335,15 @@ internal sealed class StorageProbeHooks
     internal Func<Task>? BeforeDispose { get; init; }
 }
 
-internal sealed class StorageSafetyException(string code) : IOException(code)
+internal sealed record StorageAdmissionShortfall(long RequiredBytes, long AvailableBytes, IReadOnlyList<string> Uses)
+{
+    public long ShortfallBytes => RequiredBytes - AvailableBytes;
+}
+
+internal sealed class StorageSafetyException(string code, StorageAdmissionShortfall? shortfall = null) : IOException(code)
 {
     internal string Code { get; } = code;
+    internal StorageAdmissionShortfall? Shortfall { get; } = shortfall;
 }
 
 /// <summary>One finite monitor and one publish/abort arbiter per strict window run.</summary>
@@ -276,10 +352,12 @@ internal sealed class WindowStorageSafety : IDisposable
     internal const long LowWaterBytes = 256L * 1024 * 1024;
     internal const string LowSpaceCode = "storage_space_low";
     internal const string UnavailableCode = "storage_capacity_unavailable";
+    internal static readonly TimeSpan DefaultQueryTimeout = TimeSpan.FromSeconds(2);
     private readonly object _gate = new();
     private readonly CaptureWritePaths _paths;
     private readonly IStorageCapacityProvider _provider;
     private readonly int _durationSeconds;
+    private readonly long _reserveBytes;
     private readonly CancellationTokenSource _cts = new();
     private readonly CancellationTokenSource _abortCts = new();
     private readonly CancellationToken _abortToken;
@@ -294,6 +372,8 @@ internal sealed class WindowStorageSafety : IDisposable
     internal Action? AfterPhysicalCopyWriteForTests { get; set; }
     internal long RemainingPublicationCopyBytes { get { lock (_gate) return _publicationCopyBytes; } }
     private bool _committed;
+    private int _finalPublicationAttempted;
+    internal bool FinalPublicationAttempted => Volatile.Read(ref _finalPublicationAttempted) != 0;
     private bool _disposed;
     private string? _failure;
     private Task? _monitor;
@@ -303,7 +383,7 @@ internal sealed class WindowStorageSafety : IDisposable
     private readonly List<Exception> _retirementErrors = new();
     private readonly List<Exception> _queryErrors = new();
     internal Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
-    internal TimeSpan QueryTimeout { get; init; } = TimeSpan.FromSeconds(2);
+    internal TimeSpan QueryTimeout { get; init; } = DefaultQueryTimeout;
     internal Action? BeforeFailureClaimForTests { get; set; }
     internal Task MonitorCompletion => _monitor ?? Task.CompletedTask;
     internal Task ProbeRetirementCompletion { get { lock (_gate) return _retired.Task; } }
@@ -314,11 +394,13 @@ internal sealed class WindowStorageSafety : IDisposable
     internal CancellationToken AbortToken => _abortToken;
     internal CaptureWritePaths Paths => _paths;
 
-    internal WindowStorageSafety(CaptureWritePaths paths, int durationSeconds, IStorageCapacityProvider provider)
+    internal WindowStorageSafety(CaptureWritePaths paths, int durationSeconds, IStorageCapacityProvider provider,
+        long reserveBytes = LowWaterBytes)
     {
         _paths = paths;
         _durationSeconds = durationSeconds;
         _provider = provider;
+        _reserveBytes = reserveBytes;
         _abortToken = _abortCts.Token;
     }
 
@@ -455,7 +537,7 @@ internal sealed class WindowStorageSafety : IDisposable
         foreach (var pair in components)
         {
             var volume = samples.Single(s => string.Equals(s.Path, pair.Key, StringComparison.OrdinalIgnoreCase)).VolumeIdentity;
-            if (!budgets.ContainsKey(volume)) budgets[volume] = LowWaterBytes;
+            if (!budgets.ContainsKey(volume)) budgets[volume] = _reserveBytes;
             budgets[volume] = checked(budgets[volume] + pair.Value);
         }
         return budgets;
@@ -464,29 +546,37 @@ internal sealed class WindowStorageSafety : IDisposable
     private static void AddComponent(Dictionary<string, long> values, string path, long bytes)
         => values[path] = checked(values.GetValueOrDefault(path) + bytes);
 
-    internal async Task<string?> CheckAsync(bool admission, CancellationToken token = default)
+    private readonly record struct CapacityCheck(string? Code, StorageAdmissionShortfall? Shortfall = null);
+
+    internal async Task<string?> CheckAsync(bool admission, CancellationToken token = default) =>
+        (await CheckCapacityAsync(admission, includeShortfall: false, token).ConfigureAwait(false)).Code;
+
+    private async Task<CapacityCheck> CheckCapacityAsync(bool admission, bool includeShortfall, CancellationToken token = default)
     {
         lock (_gate)
         {
-            if (_disposed || _committed) return null;
-            if (_failure is not null) return _failure;
+            if (_disposed || _committed) return default;
+            if (_failure is not null) return new(_failure);
         }
-        var candidate = await ProbeAsync(admission, token).ConfigureAwait(false);
+        var candidate = await ProbeAsync(admission, includeShortfall, token).ConfigureAwait(false);
         // Every outcome, including invalid samples, exceptions and timeouts,
         // is advisory until checked against the same terminal arbiter.
         lock (_gate)
-            return _committed || _disposed ? null : _failure ?? candidate;
+        {
+            if (_committed || _disposed) return default;
+            return _failure is not null ? new(_failure) : candidate;
+        }
     }
 
-    private async Task<string?> ProbeAsync(bool admission, CancellationToken token)
+    private async Task<CapacityCheck> ProbeAsync(bool admission, bool includeShortfall, CancellationToken token)
     {
         bool samplingHeld = false;
         CancellationTokenSource timeout;
         Task<IReadOnlyList<StorageVolumeSample>>? query = null;
         lock (_gate)
         {
-            if (_disposed || _committed) return null;
-            if (_retirementErrors.Count != 0) return UnavailableCode;
+            if (_disposed || _committed) return default;
+            if (_retirementErrors.Count != 0) return new(UnavailableCode);
             timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _cts.Token);
             AddRetirementOwner();
         }
@@ -503,14 +593,14 @@ internal sealed class WindowStorageSafety : IDisposable
             if (samples.Count != paths.Length || samples.Any(s => s is null ||
                 s.AvailableBytes < 0 || string.IsNullOrWhiteSpace(s.VolumeIdentity)) ||
                 paths.Any(p => samples.Count(s => string.Equals(s.Path, p, StringComparison.OrdinalIgnoreCase)) != 1))
-                return UnavailableCode;
+                return new(UnavailableCode);
             lock (_gate)
             {
-                if (_disposed || _committed) return null;
-                if (_failure is not null) return _failure;
+                if (_disposed || _committed) return default;
+                if (_failure is not null) return new(_failure);
                 if (_pathVolumes is not null && samples.Any(s =>
                     !string.Equals(_pathVolumes[s.Path], s.VolumeIdentity, StringComparison.OrdinalIgnoreCase)))
-                    return UnavailableCode;
+                    return new(UnavailableCode);
                 _pathVolumes ??= samples.ToDictionary(s => s.Path, s => s.VolumeIdentity, StringComparer.OrdinalIgnoreCase);
             }
             var budgets = admission ? AdmissionBudgets(samples) : null;
@@ -518,24 +608,38 @@ internal sealed class WindowStorageSafety : IDisposable
             {
                 // Account-specific free space: take the conservative sample
                 // if several paths on one volume were observed during a query.
-                long minimum = budgets?[volume.Key] ?? LowWaterBytes;
+                long minimum = budgets?[volume.Key] ?? _reserveBytes;
                 if (!admission && TracksCopy && volume.Any(s =>
                     string.Equals(s.Path, _paths.OutputDirectory, StringComparison.OrdinalIgnoreCase)))
                     minimum = checked(minimum + _publicationCopyBytes);
-                if (volume.Min(s => s.AvailableBytes) < minimum)
-                    return LowSpaceCode;
+                var available = volume.Min(s => s.AvailableBytes);
+                if (available < minimum)
+                {
+                    var shortfall = includeShortfall ? DescribeShortfall(volume, minimum, available) : null;
+                    return new(LowSpaceCode, timeout.IsCancellationRequested ? null : shortfall);
+                }
             }
-            return null;
+            return default;
         }
         catch (OperationCanceledException error)
         {
             // The outer deadline says nothing about the query's physical owner.
             // RetireProbeAsync observes the actual task, including late faults.
             if (samplingHeld && query is null) RecordProbeFailure(error, query);
-            return token.IsCancellationRequested || _cts.IsCancellationRequested ? null : UnavailableCode;
+            return token.IsCancellationRequested || _cts.IsCancellationRequested ? default : new(UnavailableCode);
         }
-        catch (Exception error) { RecordProbeFailure(error, query); return UnavailableCode; }
+        catch (Exception error) { RecordProbeFailure(error, query); return new(UnavailableCode); }
         finally { _ = RetireProbeAsync(query, timeout, samplingHeld); }
+    }
+
+    private StorageAdmissionShortfall DescribeShortfall(IEnumerable<StorageVolumeSample> volume, long required, long available)
+    {
+        bool HasPath(string? path) => volume.Any(sample => string.Equals(sample.Path, path, StringComparison.OrdinalIgnoreCase));
+        var uses = new List<string>(3);
+        if (HasPath(_paths.OutputDirectory)) uses.Add("output");
+        if (HasPath(_paths.AvTempDirectory)) uses.Add("av_temp");
+        if (HasPath(_paths.WgcTempRoot)) uses.Add("wgc_temp");
+        return new(required, available, uses);
     }
 
     private static TaskCompletionSource CompletedRetirement()
@@ -582,10 +686,11 @@ internal sealed class WindowStorageSafety : IDisposable
     }
 
     internal void EnsureAdmission() => EnsureCapacity(admission: true);
+    internal void EnsureAdmissionWithShortfall() => EnsureCapacity(admission: true, includeShortfall: true);
 
     internal void EnsureRuntimeCapacity() => EnsureCapacity(admission: false);
 
-    private void EnsureCapacity(bool admission)
+    private void EnsureCapacity(bool admission, bool includeShortfall = false)
     {
         lock (_gate)
         {
@@ -593,11 +698,12 @@ internal sealed class WindowStorageSafety : IDisposable
             if (_failure is not null) throw new StorageSafetyException(_failure);
             if (_disposed) throw new OperationCanceledException();
         }
-        var code = CheckAsync(admission).GetAwaiter().GetResult();
-        if (code is not null)
+        var candidate = CheckCapacityAsync(admission, includeShortfall).GetAwaiter().GetResult();
+        StorageAdmissionShortfall? shortfall = null;
+        if (candidate.Code is { } code)
         {
             BeforeFailureClaimForTests?.Invoke();
-            TryAbort(code);
+            if (TryAbort(code)) shortfall = candidate.Shortfall;
         }
         // A commit or Dispose can win after CheckAsync calculated the result
         // but before TryAbort claimed it. Throw only the arbiter's failure,
@@ -605,7 +711,8 @@ internal sealed class WindowStorageSafety : IDisposable
         lock (_gate)
         {
             if (_committed) return;
-            if (_failure is not null) throw new StorageSafetyException(_failure);
+            if (_failure is not null)
+                throw new StorageSafetyException(_failure, _retirementErrors.Count == 0 ? shortfall : null);
             if (_disposed) throw new OperationCanceledException();
         }
     }
@@ -661,6 +768,9 @@ internal sealed class WindowStorageSafety : IDisposable
         lock (_gate)
         {
             if (_disposed || _committed || _failure is not null) return false;
+            // A rename callback can throw after changing the destination. The
+            // quota owner treats any such attempt as unknown without a receipt.
+            if (finalPublication) Volatile.Write(ref _finalPublicationAttempted, 1);
             move();
             if (finalPublication) _committed = true;
         }

@@ -1,12 +1,14 @@
 # Quick Start - Agent Recorder
 
+> This guide describes v0.1.21. New video requests deliver video only; no extra instruction is needed. Explicit artifacts.bundle=true is rejected. Legacy Bundle history remains protected. Screenshot-series images and their manifest are unchanged.
+
 Agent Recorder is an **AI agent-native local screen recording capability layer**.
 The normal path is: human speaks, local AI agent calls the quick API, Agent
 Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
-1. Download and extract the v0.1.20 Windows x64 portable ZIP.
+1. Extract the v0.1.21 Windows x64 portable ZIP. When reusing data from an earlier version, back it up before first launch; the database upgrades to SQLite V51.
 2. Ask your local AI agent to read:
    - `AGENT-INSTRUCTIONS.zh-CN.md`
    - `AGENT-API-REFERENCE.zh-CN.md`
@@ -347,3 +349,16 @@ The tray App host supports this exit operation. Other hosts, including Headless,
 ## Saved Regions
 
 Ask your agent to reuse a saved region with this recording's duration and either system audio or microphone. The agent uses quick `target.type=profile_region` with the exact Profile ref; it does not modify the saved configuration. Each call still requires local confirmation. Omitted audio means silence and countdown defaults to 3 seconds; supported default-device resolution avoids requiring a device name every time. Raw `profile_ref` retains its full silent-configuration semantics. See the [API contract](docs/api.md#quick-recording-from-a-saved-region-profile_region).
+
+
+### Pixel-rate admission budget
+
+Independent ordinary raw, silent, strict WGC windows also use the startup-frozen `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND`. The default is `497664000` pixels/second, the arithmetic cost of two 3840×2160×30 windows. This is an initial software policy, not measured dual-4K/ten-window capacity or a performance guarantee. Explicit values must be positive ASCII decimal Int64 integers (maximum 9223372036854775807); empty, whitespace, signs, fractions and overflow are invalid. Invalid count or pixel configuration disables this branch and returns `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` with `details.environment_variable`; other contracts remain separate. HTTP fields, confirmation callbacks and later environment changes cannot override it.
+
+Each recording freezes the trusted capture plan's physical window surface width × height × configured FPS (15/24/30/60), including obscured/off-display surface pixels. DIP, clipped desktop rectangles and request-supplied costs are not used. Arithmetic is checked Int64. Missing/invalid plan facts or multiplication overflow return `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID` before confirmation/output creation. Existing approval-time geometry revalidation still rejects changes; no automatic scaling, frame-rate reduction, target substitution or desktop fallback occurs.
+
+Both count and pixel limits must hold; equality is allowed. Admission checks configuration, mixed contracts, count, same window, then pixel budget; invalid plan facts fail when cost is calculated. Existing request, capability and output validation still applies. Pixel excess returns `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`; details include `reason_code=independent_window_pixel_budget_exceeded`, `requested_pixels_per_second`, `reserved_pixels_per_second`, `configured_pixels_per_second` and `remaining_pixels_per_second`, without paths, HWNDs or authorization material. A final Engine-lock check atomically admits the exact Recording, frozen cost and output claim before output directory creation, confirmation or backend creation.
+
+`recording.window_surface.independent_windows.pixel_rate_budget` reports `unit=pixels_per_second`, `policy_source`, `environment_variable`, `default_pixels_per_second`, `configured_pixels_per_second`, `configuration_valid`, `reserved_pixels_per_second`, `finalizing_or_unknown_pixels_per_second` and `remaining_pixels_per_second`. Count and pixel values share one consistent snapshot. Invalid configured values and unavailable remaining amounts are null. A snapshot reserves nothing. Pending confirmation through finalizing, terminal runs without positive retirement, and incomplete initial output/history registration retain the same reservation. Rollback and retirement release only that recording's cost.
+
+Scope is the current Engine's independent windows and unretired delivery, not a machine-wide GPU/encoder/CPU/disk budget. `snapshot_is_reservation=false`, `performance_guaranteed=false`, `hardware_capacity_measured=false`, and `stress_tested=false`. Default count 2 and explicit count 1–10 remain unchanged. No additional quick/Profile/nested/audio/region/mixed-target/screenshot-series/Plan/Lease/future-window concurrency is enabled. New videos still deliver video only; legacy Bundle history remains protected.

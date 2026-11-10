@@ -45,6 +45,8 @@ param(
 
     [switch]$TestProcessIdentitySafety,
 
+    [string]$TestPackagedAudioHelperDirectory,
+
     [switch]$SimulateTaskkillFailure,
 
     [switch]$SimulateJobOwnershipFailure,
@@ -725,6 +727,74 @@ function Invoke-BoundedProcess {
             $launched.Dispose()
         }
     }
+}
+
+function Assert-PackagedAudioHelper {
+    param([Parameter(Mandatory = $true)][string]$PublishDirectory)
+
+    # Verify the executable that will actually be packaged. Do not consult a
+    # resolver override or repository build output.
+    $audioHelperExe = Join-Path (Resolve-Path -LiteralPath $PublishDirectory).Path "AgentRecorder.AudioHelper.exe"
+    $audioHelperInfo = Get-Item -LiteralPath $audioHelperExe -Force
+    if (($audioHelperInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $audioHelperInfo.PSIsContainer) {
+        throw "Published AudioHelper must be a regular non-reparse-point executable: $audioHelperExe"
+    }
+    $savedAudioHelperOverride = [Environment]::GetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", "Process")
+    try {
+        [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $null, "Process")
+        Write-Host "[8/11] Running bounded packaged AudioHelper --version capability check..." -ForegroundColor Yellow
+        $result = Invoke-BoundedProcess -FileName $audioHelperExe -Arguments @("--version") `
+            -TimeoutMs 10000 -DisplayName "packaged AudioHelper --version smoke"
+    } finally {
+        [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $savedAudioHelperOverride, "Process")
+    }
+
+    $contractError = "Packaged AudioHelper --version failed or returned an incompatible capability contract."
+    if ($result.ExitCode -ne 0) {
+        throw "$contractError ExitCode=$($result.ExitCode); Error=$($result.StandardError)"
+    }
+    if ($result.StandardOutput.Length -gt 4096) {
+        throw "$contractError Response exceeded the supported length."
+    }
+
+    $fields = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $headerSeen = $false
+    foreach ($rawLine in ($result.StandardOutput -split "`n")) {
+        $line = $rawLine.Trim()
+        if ($line.Length -eq 0) { continue }
+
+        $separator = $line.IndexOf(':')
+        if ($separator -lt 0) {
+            if ($headerSeen -or $line -cnotmatch '\AAgentRecorder\.AudioHelper [^\s:]+\z') {
+                throw "$contractError Invalid product name."
+            }
+            $headerSeen = $true
+            continue
+        }
+
+        $key = $line.Substring(0, $separator).Trim()
+        if ($key -notin @('Protocol', 'TimestampFrequency', 'OwnedWav')) { continue }
+        if ($fields.ContainsKey($key)) {
+            throw "$contractError Repeated field: $key."
+        }
+        $fields.Add($key, $line.Substring($separator + 1).Trim())
+    }
+
+    $frequency = 0L
+    if (-not $headerSeen -or $fields['Protocol'] -cne 'audio-helper-v1' -or
+        $fields['OwnedWav'] -cne 'file-id-v1' -or
+        -not [long]::TryParse($fields['TimestampFrequency'], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$frequency) -or
+        $frequency -ne [Diagnostics.Stopwatch]::Frequency) {
+        throw "$contractError Expected AgentRecorder.AudioHelper, audio-helper-v1, host timestamp frequency and OwnedWav: file-id-v1."
+    }
+    Write-Host $result.StandardOutput.TrimEnd()
+    Write-Host "[OK] Packaged AudioHelper version and OwnedWav capability verified: $audioHelperExe" -ForegroundColor Green
+}
+
+if ($TestPackagedAudioHelperDirectory) {
+    Assert-PackagedAudioHelper -PublishDirectory $TestPackagedAudioHelperDirectory
+    exit 0
 }
 
 function Invoke-DotNetPublishWithRetry {
@@ -1588,33 +1658,7 @@ if ($helperMissing) {
     exit 1
 }
 
-# Verify the executable that will actually be packaged. Do not consult the
-# resolver environment override or a repository build output for this check.
-$audioHelperExe = Join-Path $audioHelperPublishDir "AgentRecorder.AudioHelper.exe"
-$audioHelperInfo = Get-Item -LiteralPath $audioHelperExe -Force
-if (($audioHelperInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $audioHelperInfo.PSIsContainer) {
-    throw "Published AudioHelper must be a regular non-reparse-point executable: $audioHelperExe"
-}
-$savedAudioHelperOverride = [Environment]::GetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", "Process")
-try {
-    [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $null, "Process")
-    Write-Host "[8/11] Running bounded packaged AudioHelper --version protocol check..." -ForegroundColor Yellow
-    $audioVersionResult = Invoke-BoundedProcess `
-        -FileName $audioHelperExe `
-        -Arguments @("--version") `
-        -TimeoutMs 10000 `
-        -DisplayName "packaged AudioHelper --version smoke"
-} finally {
-    [Environment]::SetEnvironmentVariable("AGENT_RECORDER_AUDIO_HELPER_EXE", $savedAudioHelperOverride, "Process")
-}
-$audioVersionLines = @($audioVersionResult.StandardOutput -split "`r?`n" | Where-Object { $_ -ne "" })
-if ($audioVersionResult.ExitCode -ne 0 -or
-    $audioVersionLines.Count -ne 3 -or
-    $audioVersionLines[0] -notmatch '^AgentRecorder\.AudioHelper ' -or
-    $audioVersionLines[1] -cne 'Protocol: audio-helper-v1' -or
-    $audioVersionLines[2] -cne 'TimestampFrequency: 10000000') {
-    throw "Packaged AudioHelper --version failed or returned an incompatible protocol/timestamp contract. ExitCode=$($audioVersionResult.ExitCode); Output=$($audioVersionResult.StandardOutput); Error=$($audioVersionResult.StandardError)"
-}
+Assert-PackagedAudioHelper -PublishDirectory $audioHelperPublishDir
 
 # Exercise the synthetic portable-layout tests as a packaging gate. These tests
 # disable the development fallback and never inspect tools/bin for a helper.

@@ -111,7 +111,16 @@ public sealed class ObservationHealthApiTests : IDisposable
             var gateway=AgentRecorder.App.Program.CreateObservationHealthGateway(tray,server,readiness,_root,probes);tray.SetObservationHealthGateway(gateway);server.SetObservationHealthGateway(gateway);server.Start();readiness.MarkReady();using var client=Client();var before=Files();
             var first=Get(client);Pump(()=>first.IsCompleted);var data=first.GetAwaiter().GetResult().Data;
             Assert.Equal("complete",data.GetProperty("sample_status").GetString());Assert.NotEqual(ownerThread,probeThread);
-            Assert.Equal("idle",data.GetProperty("hotkeys").GetProperty("chapter").GetProperty("state").GetString());Assert.Equal("available",data.GetProperty("desktop").GetProperty("startup").GetProperty("state").GetString());Assert.Equal("unavailable",data.GetProperty("desktop").GetProperty("current").GetProperty("state").GetString());
+            var chapter=data.GetProperty("hotkeys").GetProperty("chapter");
+            Assert.False(chapter.GetProperty("supported").GetBoolean());
+            Assert.False(chapter.GetProperty("registered").GetBoolean());
+            Assert.Equal(JsonValueKind.Null,chapter.GetProperty("gesture").ValueKind);
+            Assert.Equal("disabled",chapter.GetProperty("policy").GetString());
+            Assert.Equal("unsupported",chapter.GetProperty("state").GetString());
+            Assert.Equal("unsupported",chapter.GetProperty("reason_code").GetString());
+            Assert.Equal(data.GetProperty("sampled_at").GetDateTimeOffset(),chapter.GetProperty("sampled_at").GetDateTimeOffset());
+            Assert.Equal("owner_snapshot",chapter.GetProperty("evidence_type").GetString());
+            Assert.Equal("available",data.GetProperty("desktop").GetProperty("startup").GetProperty("state").GetString());Assert.Equal("unavailable",data.GetProperty("desktop").GetProperty("current").GetProperty("state").GetString());
             using(var window=tray.GetObservationCenter()){Assert.False(window.Visible);window.Close();}
             var second=Get(client);Pump(()=>second.IsCompleted);Assert.Equal("complete",second.GetAwaiter().GetResult().Data.GetProperty("sample_status").GetString());
             using var reopened=tray.GetObservationCenter();Assert.False(reopened.Visible);

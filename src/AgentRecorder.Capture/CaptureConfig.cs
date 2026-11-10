@@ -50,6 +50,7 @@ public sealed class CaptureConfig
     internal CaptureWritePaths? WritePaths;
     internal WindowStorageSafety? StorageSafety;
     internal bool StorageIntermediatePublication;
+    internal AvSplitStaging? AvIntermediateStaging;
     public bool Microphone;
     public string? MicDevice;
     public string? MicDeviceName;

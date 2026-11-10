@@ -221,6 +221,9 @@ internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
         CancellationToken cancellationToken = default,
         IFileCommitGate? commitGate = null)
     {
+        if (commitGate is AvIntermediateCommitGate && _fileSystem is not PhysicalFileSystemOperations)
+            return Fail("av_staging_video_handoff_unavailable");
+
         long stagingSize;
         try
         {
@@ -265,7 +268,12 @@ internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
         {
             BeforeOriginalCommitForTests?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
-            if (originalCopy is not null) _publicationFiles.Rename(originalCopy.SafeFileHandle, finalPath);
+            if (commitGate is AvIntermediateCommitGate intermediate)
+            {
+                if (originalCopy is null) throw new IOException("av_staging_video_handoff_unavailable");
+                intermediate.Staging.CommitVideo(originalCopy.SafeFileHandle, tmpPath, finalPath);
+            }
+            else if (originalCopy is not null) _publicationFiles.Rename(originalCopy.SafeFileHandle, finalPath);
             else _fileSystem.MoveFile(tmpPath, finalPath); // unanchored legacy simulation only
         }
         try
@@ -412,4 +420,18 @@ internal sealed class StagingToFinalPublisher : IStagingToFinalPublisher
             FailureCategory = category
         };
     }
+}
+
+// Opt-in for the split WGC intermediate only. Keep the original commit gate
+// and physical-copy accounting while transferring the publisher's own file.
+internal sealed class AvIntermediateCommitGate(AvSplitStaging staging, IFileCommitGate inner)
+    : IFileCommitGate, IPublicationCopyCapacityGate
+{
+    internal AvSplitStaging Staging { get; } = staging;
+    public bool IsClosed => inner.IsClosed;
+    public void Close() => inner.Close();
+    public bool TryCommit(Action move) => inner.TryCommit(move);
+    public Task<IPublicationCopyReservation?> BeginCopyAsync(long bytes, CancellationToken token) =>
+        inner is IPublicationCopyCapacityGate capacity
+            ? capacity.BeginCopyAsync(bytes, token) : Task.FromResult<IPublicationCopyReservation?>(null);
 }

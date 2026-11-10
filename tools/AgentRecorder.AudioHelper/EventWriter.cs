@@ -42,6 +42,7 @@ internal sealed class EventWriter
             WriteLine("BytesWritten", info.BytesWritten);
             WriteLine("CaptureMethod", info.CaptureMethod);
             WriteLine("CaptureEngine", info.CaptureEngine);
+            if (info.OwnedWavIdentity is { } identity) WriteLine("OwnedWavIdentity", identity);
             WriteHfpMetadata(info);
             EndBlock();
         }
@@ -147,6 +148,7 @@ internal sealed class EventWriter
     /// </summary>
     private void WriteTerminalMetrics(AudioHelperEventInfo info)
     {
+        if (info.OwnedWavIdentity is { } identity) WriteLine("OwnedWavIdentity", identity);
         WriteLine("ContinuityStatus", string.IsNullOrEmpty(info.ContinuityStatus) ? "continuous" : info.ContinuityStatus);
         WriteLine("RecoveryCount", info.RecoveryCount);
         WriteLine("RecoveryAttempts", info.RecoveryAttempts);
@@ -230,6 +232,7 @@ internal sealed class AudioHelperEventInfo
     public long FirstSampleAnchorTicks { get; set; }
     public long TimestampFrequency { get; set; }
     public long BytesWritten { get; set; }
+    internal string? OwnedWavIdentity { get; set; }
     public long ElapsedMs { get; set; }
     public long WallElapsedMs { get; set; }
     public long EstimatedGapMs { get; set; }

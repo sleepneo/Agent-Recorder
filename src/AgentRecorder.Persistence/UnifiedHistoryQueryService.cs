@@ -59,6 +59,12 @@ public sealed class UnifiedHistoryQueryService
     // then the existing bounded batch readers. Never follows history cursors.
     internal IReadOnlyDictionary<string,OrdinaryRetentionEvidence?> GetOrdinaryEvidenceByIds(
         string sid,string session,IReadOnlyList<string> ids,CancellationToken cancellation)
+        => GetOrdinaryEvaluationSnapshot(sid,session,ids,cancellation,null).Facts;
+
+    internal sealed record EvaluationEvidence(IReadOnlyDictionary<string,OrdinaryRetentionEvidence?> Facts, IReadOnlySet<string>? KeepLatest);
+    internal Action? LatestReadForTests { get; set; }
+    internal EvaluationEvidence GetOrdinaryEvaluationSnapshot(string sid,string session,IReadOnlyList<string> ids,
+        CancellationToken cancellation,int? keepLatest)
     {
         if(ids.Count is <1 or >RetentionEvaluationService.MaxIds || ids.Distinct(StringComparer.Ordinal).Count()!=ids.Count ||
             !ValidIdentity(sid)||!ValidIdentity(session)) throw new InvalidDataException("Evaluation identity or request unavailable.");
@@ -70,6 +76,12 @@ public sealed class UnifiedHistoryQueryService
         using var transaction=connection.BeginTransaction(IsolationLevel.Serializable,deferred:true);
         EvaluationSnapshotForTests?.Invoke(connection,transaction);
         SqliteOperationalStore.ValidateUnifiedHistorySchema(connection,transaction);
+        IReadOnlySet<string>? latest=null;
+        if(keepLatest is {} n)
+        {
+            latest=ReadKeepLatestSet(connection,transaction,n,cancellation);
+
+        }
         var rows=new List<OrdinaryRecordingHistorySnapshot>();var entries=new List<UnifiedHistoryEntry>();
         foreach(var id in ids)
         {
@@ -86,7 +98,46 @@ public sealed class UnifiedHistoryQueryService
         var relations=ReadRetentionRelations(connection,transaction,entries,rows).ToDictionary(e=>e.Entry.RecordingId!,StringComparer.Ordinal);
         cancellation.ThrowIfCancellationRequested();
         transaction.Commit();
-        return ids.ToDictionary(id=>id,id=>relations.GetValueOrDefault(id),StringComparer.Ordinal);
+        return new(ids.ToDictionary(id=>id,id=>relations.GetValueOrDefault(id),StringComparer.Ordinal),latest);
+    }
+    internal IReadOnlySet<string> ReadKeepLatestSet(SqliteConnection connection,SqliteTransaction transaction,int n,CancellationToken cancellation)
+        => ReadKeepLatestOrder(connection, transaction, n, cancellation).ToHashSet(StringComparer.Ordinal);
+
+    internal int ReadKeepLatestRank(SqliteConnection connection, SqliteTransaction transaction, int n, string id, CancellationToken cancellation)
+    {
+        var index = ReadKeepLatestOrder(connection, transaction, n, cancellation).IndexOf(id);
+        return index < 0 ? int.MaxValue : index + 1;
+    }
+
+    private List<string> ReadKeepLatestOrder(SqliteConnection connection,SqliteTransaction transaction,int n,CancellationToken cancellation)
+    {
+            if(n is <1 or >1000) throw new InvalidDataException("Invalid keep count.");
+            cancellation.ThrowIfCancellationRequested();
+            using var check=connection.CreateCommand();check.Transaction=transaction;
+            check.CommandText="SELECT EXISTS(SELECT 1 FROM ordinary_recording_history WHERE status_code='completed' AND (typeof(recording_id)!='text' OR instr(recording_id,char(0))!=0 OR length(recording_id)=0 OR length(recording_id)>200 OR completed_at_utc IS NULL OR typeof(completed_at_utc)!='integer' OR completed_at_utc<0 OR completed_at_utc>3155378975999999999 OR typeof(created_at_utc)!='integer' OR completed_at_utc<created_at_utc OR (started_at_utc IS NOT NULL AND (typeof(started_at_utc)!='integer' OR completed_at_utc<started_at_utc))));";
+            if(Convert.ToInt64(check.ExecuteScalar())!=0)throw new InvalidDataException("Invalid latest ordering facts.");
+            using var select=connection.CreateCommand();select.Transaction=transaction;
+            select.CommandText="SELECT recording_id FROM ordinary_recording_history WHERE status_code='completed' ORDER BY completed_at_utc DESC,recording_id COLLATE BINARY DESC LIMIT $n;";
+            select.Parameters.AddWithValue("$n",n);
+            var set=new HashSet<string>(StringComparer.Ordinal);
+            var ordered = new List<string>(n);
+            using(var reader=select.ExecuteReader())while(reader.Read())
+            { cancellation.ThrowIfCancellationRequested();var id=reader.GetString(0);if(!ValidId(id)||!set.Add(id))throw new InvalidDataException("Invalid latest ID.");ordered.Add(id); }
+        cancellation.ThrowIfCancellationRequested();
+        LatestReadForTests?.Invoke();return ordered;
+    }
+    internal (OrdinaryRetentionEvidencePage Page,IReadOnlySet<string> Latest) GetOrdinaryPreviewSnapshot(
+        string sid,string session,int limit,DateTimeOffset before,string? cursor,int count,CancellationToken token)
+    {
+        OrdinaryRetentionEvidencePage? evidence=null;IReadOnlySet<string>? latest=null;
+        var page=GetPageCore(sid,session,limit,new("ordinary",CreatedBefore:before),cursor,false,
+            (c,t,entries,rows)=> {
+                latest=ReadKeepLatestSet(c,t,count,token);
+                evidence=new(ReadRetentionRelations(c,t,entries,rows),null,limit,new("ordinary",CreatedBefore:before));
+            },count);
+        token.ThrowIfCancellationRequested();
+        return ((evidence??throw new InvalidDataException("Missing preview evidence.")) with {NextCursor=page.NextCursor},
+            latest??throw new InvalidDataException("Missing latest evidence."));
     }
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? RetentionIdentityCommandForTests { get; set; }
     internal Func<IReadOnlyList<(object CandidateId, object Flag)>, IReadOnlyList<(object CandidateId, object Flag)>>? RetentionIdentityResultsForTests { get; set; }
@@ -124,7 +175,8 @@ public sealed class UnifiedHistoryQueryService
                 if(flag is not (0 or 1) || !references.TryAdd(reader.GetString(0),flag==1)) throw new InvalidDataException("Invalid retention relation result.");
             }
         if(references.Count!=rows.Count) throw new InvalidDataException("Missing retention relation result.");
-        var shared = ReadSharedOutputReferences(connection, transaction, rows);
+        var shared = ReadSharedOutputReferences(connection, transaction,
+            rows.ToDictionary(row => row.RecordingId, row => row.OutputPath, StringComparer.Ordinal));
         var planned = ReadPlannedOutputReferences(connection, transaction, rows);
         var pending = PendingOutputUseStorage.Read(connection, transaction, rows, RetentionPendingOutputCommandForTests);
         return entries.Select((entry,i)=>new OrdinaryRetentionEvidence(entry,NestedState(rows[i],references[rows[i].RecordingId]),
@@ -132,11 +184,49 @@ public sealed class UnifiedHistoryQueryService
     }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPendingOutputCommandForTests { get; set; }
     internal Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? RetentionPathCommandForTests { get; set; }
-    private Dictionary<string,bool> ReadSharedOutputReferences(SqliteConnection connection,SqliteTransaction transaction,
-        IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
+    internal sealed record AliasReference(bool Shared, bool Planned, PendingOutputUseState Pending = PendingOutputUseState.None);
+    internal Dictionary<string,AliasReference> ReadShortNameReferences(IReadOnlyDictionary<string,IReadOnlyList<string>> paths, CancellationToken cancellation)
     {
+        if (paths.Count is < 1 or > 100 || paths.Values.Any(p => p.Count is < 1 or > 3))
+            throw new InvalidDataException("Invalid alias reference request.");
+        _ordinary.FlushBeforeUnifiedRead(TimeSpan.FromSeconds(1));
+        cancellation.ThrowIfCancellationRequested();
+        using var connection = _store.OpenReadOnlyConnection();
+        connection.DefaultTimeout = 1;
+        using var transaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: true);
+        SqliteOperationalStore.ValidateRetentionOutputPathSchema(connection, transaction);
+        SqliteOperationalStore.ValidateRetentionPlannedOutputSchema(connection, transaction);
+        SqliteOperationalStore.ValidateRetentionPendingOutputSchema(connection, transaction);
+        SqliteOperationalStore.ValidateRetentionRequiredOnceSetupOutputSchema(connection, transaction);
+        var pending = PendingOutputUseStorage.ReadExactAliases(connection, transaction, paths, RetentionPendingOutputCommandForTests);
+        var references = paths.ToDictionary(p => p.Key, _ => new AliasReference(false, false), StringComparer.Ordinal);
+        for (var ordinal = 0; ordinal < 3; ordinal++)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var requested = paths.Where(p => p.Value.Count > ordinal)
+                .ToDictionary(p => p.Key, p => p.Value[ordinal], StringComparer.Ordinal);
+            if (requested.Count == 0) continue;
+            var shared = ReadSharedOutputReferences(connection, transaction, requested);
+            var planned = ReadPlannedOutputReferences(connection, transaction, requested, userFileNamesOnly: true);
+            foreach (var id in requested.Keys)
+            {
+                if (planned[id] == PlannedOutputPathReferenceState.Indeterminate)
+                    throw new InvalidDataException("Alias planned path matching is unavailable.");
+                references[id] = new(references[id].Shared || shared[id],
+                    references[id].Planned || planned[id] == PlannedOutputPathReferenceState.Referenced, pending[id]);
+            }
+        }
+        cancellation.ThrowIfCancellationRequested();
+        transaction.Commit();
+        return references;
+    }
+
+    internal Dictionary<string,bool> ReadSharedOutputReferences(SqliteConnection connection,SqliteTransaction transaction,
+        IReadOnlyDictionary<string,string> paths)
+    {
+        if (paths.Count is < 1 or > 100) throw new InvalidDataException("Invalid path reference request.");
         using var command = connection.CreateCommand(); command.Transaction = transaction;
-        var requested = rows.Select((row,i)=>"($id"+i+",$path"+i+")");
+        var requested = paths.Select((_,i)=>"($id"+i+",$path"+i+")");
         SqliteSchemaV46.Validate(connection, transaction);
         var exists = SqliteSchemaV28.Paths.Select(p => "EXISTS(SELECT 1 FROM "+p.Table+" referenced INDEXED BY "+p.Index+
             " WHERE referenced.output_path COLLATE "+SqliteOutputPathCollation.Name+"=requested.output_path"+
@@ -147,7 +237,8 @@ public sealed class UnifiedHistoryQueryService
                 (i.Columns.Contains("recording_id") ? " AND NOT(typeof(referenced.recording_id)='text' AND referenced.recording_id COLLATE BINARY=requested.recording_id COLLATE BINARY)" : "") + ")"));
         command.CommandText = "WITH requested(recording_id,output_path) AS (VALUES "+string.Join(",",requested)+") "+
             "SELECT requested.recording_id, ("+string.Join(" OR ",exists)+") FROM requested;";
-        for (var i=0;i<rows.Count;i++) { Add(command,"$id"+i,rows[i].RecordingId);Add(command,"$path"+i,rows[i].OutputPath); }
+        var i = 0;
+        foreach (var pair in paths) { Add(command,"$id"+i,pair.Key);Add(command,"$path"+i,pair.Value);i++; }
         RetentionPathCommandForTests?.Invoke(connection,transaction,command.CommandText,command.Parameters.Cast<SqliteParameter>()
             .Select(p=>new KeyValuePair<string,object>(p.ParameterName,p.Value!)).ToArray());
         var result = new Dictionary<string,bool>(StringComparer.Ordinal);
@@ -156,7 +247,8 @@ public sealed class UnifiedHistoryQueryService
             var value = reader.GetInt64(1);
             if (value is not (0 or 1) || !result.TryAdd(reader.GetString(0),value==1)) throw new InvalidDataException("Invalid path reference result.");
         }
-        if (result.Count != rows.Count) throw new InvalidDataException("Missing path reference result.");
+        if (result.Count != paths.Count || result.Keys.Any(id => !paths.ContainsKey(id)))
+            throw new InvalidDataException("Missing path reference result.");
         return result;
     }
     internal Action<SqliteConnection, SqliteTransaction, string, IReadOnlyList<KeyValuePair<string, object>>>? RetentionPlannedPathCommandForTests { get; set; }
@@ -172,29 +264,39 @@ public sealed class UnifiedHistoryQueryService
     }
     private Dictionary<string, PlannedOutputPathReferenceState> ReadPlannedOutputReferences(SqliteConnection connection, SqliteTransaction transaction,
         IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows)
+        => ReadPlannedOutputReferences(connection, transaction,
+            rows.ToDictionary(row => row.RecordingId, row => row.OutputPath, StringComparer.Ordinal));
+
+    internal Dictionary<string, PlannedOutputPathReferenceState> ReadPlannedOutputReferences(SqliteConnection connection, SqliteTransaction transaction,
+        IReadOnlyDictionary<string,string> paths, bool userFileNamesOnly = false)
     {
+        if (paths.Count is < 1 or > 100) throw new InvalidDataException("Invalid planned path request.");
+        var rows = paths.ToArray();
         using var command = connection.CreateCommand(); command.Transaction = transaction;
-        var targets = rows.Select(row => SplitFrozenTarget(row.OutputPath)).ToArray();
+        var targets = rows.Select(row => SplitFrozenTarget(row.Value)).ToArray();
         var requested = rows.Select((row,i) => "($id"+i+",$path"+i+",$dir"+i+",$tail"+i+",$name"+i+")");
-        var exists = SqliteSchemaV29.Paths.Select(p => "EXISTS(SELECT 1 FROM "+p.Table+" frozen INDEXED BY "+p.Index+
+        var sources = SqliteSchemaV29.Paths.Where(p => !userFileNamesOnly ||
+            p.Table is "authorized_capture_scopes" or "required_once_authorized_specs");
+        var exists = sources.Select(p => "EXISTS(SELECT 1 FROM "+p.Table+" frozen INDEXED BY "+p.Index+
             (p.Columns.Length == 1 ? " WHERE frozen.frozen_output_file_path COLLATE "+SqliteOutputPathCollation.Name+"=requested.output_path" :
             " WHERE frozen.output_directory COLLATE "+SqliteOutputPathCollation.Name+" IN (requested.directory,requested.directory_tail) AND frozen."+p.Columns[1]+
             " COLLATE "+SqliteOutputPathCollation.Name+"=requested.file_name")+")");
         command.CommandText = "WITH requested(recording_id,output_path,directory,directory_tail,file_name) AS (VALUES "+string.Join(",",requested)+") "+
             "SELECT requested.recording_id, ("+string.Join(" OR ",exists)+") FROM requested;";
-        for (var i=0; i<rows.Count; i++)
-        { Add(command,"$id"+i,rows[i].RecordingId); Add(command,"$path"+i,rows[i].OutputPath); Add(command,"$dir"+i,(object?)targets[i].WithoutTail??DBNull.Value);
+        for (var i=0; i<rows.Length; i++)
+        { Add(command,"$id"+i,rows[i].Key); Add(command,"$path"+i,rows[i].Value); Add(command,"$dir"+i,(object?)targets[i].WithoutTail??DBNull.Value);
           Add(command,"$tail"+i,(object?)targets[i].WithTail??DBNull.Value); Add(command,"$name"+i,(object?)targets[i].Name??DBNull.Value); }
         RetentionPlannedPathCommandForTests?.Invoke(connection,transaction,command.CommandText,command.Parameters.Cast<SqliteParameter>()
             .Select(p=>new KeyValuePair<string,object>(p.ParameterName,p.Value!)).ToArray());
         var flags = new Dictionary<string, bool>(StringComparer.Ordinal);
         using (var reader = command.ExecuteReader()) while (reader.Read())
         {
-            var flag = reader.GetInt64(1);
+            if (reader.GetValue(0) is not string id || reader.GetValue(1) is not long flag ||
+                !paths.ContainsKey(id)) throw new InvalidDataException("Invalid planned path result type.");
             if (flag is not (0 or 1) || !flags.TryAdd(reader.GetString(0),flag==1)) throw new InvalidDataException("Invalid planned path reference result.");
         }
-        if (flags.Count != rows.Count) throw new InvalidDataException("Missing planned path reference result.");
-        return rows.Select((row,i)=>(row.RecordingId, State: flags[row.RecordingId] ? PlannedOutputPathReferenceState.Referenced :
+        if (flags.Count != rows.Length) throw new InvalidDataException("Missing planned path reference result.");
+        return rows.Select((row,i)=>(RecordingId: row.Key, State: flags[row.Key] ? PlannedOutputPathReferenceState.Referenced :
             targets[i].Name is null ? PlannedOutputPathReferenceState.Indeterminate : PlannedOutputPathReferenceState.None))
             .ToDictionary(p=>p.RecordingId,p=>p.State,StringComparer.Ordinal);
     }
@@ -217,7 +319,7 @@ public sealed class UnifiedHistoryQueryService
 
     private UnifiedHistoryPage GetPageCore(string sid, string session, int limit, UnifiedHistoryFilters filters,
         string? cursor, bool probeOrdinaryFiles,
-        Action<SqliteConnection,SqliteTransaction,IReadOnlyList<UnifiedHistoryEntry>,IReadOnlyList<OrdinaryRecordingHistorySnapshot>>? retention=null)
+        Action<SqliteConnection,SqliteTransaction,IReadOnlyList<UnifiedHistoryEntry>,IReadOnlyList<OrdinaryRecordingHistorySnapshot>>? retention=null,int? keepLatest=null)
     {
         ValidateArguments(limit, filters);
         if (_ordinaryOnly && filters.Source is "plan" or "future_window") throw new UnifiedHistoryArgumentException();
@@ -226,7 +328,7 @@ public sealed class UnifiedHistoryQueryService
         // Cursor parsing errors are deliberately outside the persistence catch.
         var state = cursor is null ? null : Decode(cursor);
         var identity = Digest(_store.DatabasePath + "\0" + sid + "\0" + session + "\0" + (_ordinaryOnly ? "ordinary" : "all"));
-        if (state is not null && (state.Version != CursorVersion || state.Identity != identity || state.Filters != filters ||
+        if (state is not null && (state.Version != CursorVersion || state.KeepLatestCount != keepLatest || state.Identity != identity || state.Filters != filters ||
             state.OrdinaryWatermark < 0 || state.PlanWatermark < 0 || state.FutureWatermark < 0 ||
             state.LastTicks < 0 || state.LastTicks > DateTime.MaxValue.Ticks ||
             state.LastSource is not ("ordinary" or "plan" or "future_window") || !ValidId(state.LastId)))
@@ -234,17 +336,18 @@ public sealed class UnifiedHistoryQueryService
         try
         {
             // No writer locks or SQLite read transaction are held while waiting.
-            _ordinary.FlushBeforeUnifiedRead();
+            if(keepLatest.HasValue)_ordinary.FlushBeforeUnifiedRead(TimeSpan.FromSeconds(1));else _ordinary.FlushBeforeUnifiedRead();
             using var connection = _store.OpenReadOnlyConnection();
+            if(keepLatest.HasValue)connection.DefaultTimeout=1;
             using (var readOnly = connection.CreateCommand())
-            { readOnly.CommandText = "PRAGMA query_only=ON;"; readOnly.ExecuteNonQuery(); }
+            { readOnly.CommandText = keepLatest.HasValue?"PRAGMA query_only=ON; PRAGMA busy_timeout=1000;":"PRAGMA query_only=ON;"; readOnly.ExecuteNonQuery(); }
             using var transaction = connection.BeginTransaction(IsolationLevel.Serializable, deferred: true);
             SqliteOperationalStore.ValidateUnifiedHistorySchema(connection, transaction);
             state ??= new(CursorVersion, identity, filters,
                 Max(connection, transaction, "ordinary_recording_history", "history_sequence"),
                 _ordinaryOnly ? 0 : Max(connection, transaction, "plan_occurrences", "rowid"),
                 _ordinaryOnly ? 0 : Max(connection, transaction, "future_window_authorizations", "rowid"),
-                null, null, null);
+                null, null, null) {KeepLatestCount=keepLatest};
             SnapshotEstablishedForTests?.Invoke();
             var candidates = new List<Key>();
             foreach (var source in SupportedSources.Where(s => filters.Source == "all" || filters.Source == s))
@@ -505,7 +608,11 @@ public sealed class UnifiedHistoryQueryService
             throw new UnifiedHistoryArgumentException();
     }
     private sealed record Cursor(int Version, string Identity, UnifiedHistoryFilters Filters,
-        long OrdinaryWatermark, long PlanWatermark, long FutureWatermark, long? LastTicks, string? LastSource, string? LastId);
+        long OrdinaryWatermark, long PlanWatermark, long FutureWatermark, long? LastTicks, string? LastSource, string? LastId)
+    {
+        [System.Text.Json.Serialization.JsonIgnore(Condition=System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        public int? KeepLatestCount {get;init;}
+    }
     private static string Digest(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static string Encode(Cursor state)
     {

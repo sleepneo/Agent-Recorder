@@ -96,8 +96,17 @@ internal sealed class RetentionReferenceGuard : IDisposable
         private ScopeContext(Session session) { _session = session; _thread = Environment.CurrentManagedThreadId; }
         internal string RecordingId => _session.Id;
         internal DateTimeOffset CompletedAtUtc => _session.CompletedAt!.Value;
+        internal string? CheckPolicy(RetentionHostKeepLatestProtection host, RetentionDeletionPolicy? policy)
+        { RequireActive(); var reason = _session.CheckPolicy(host, policy); RequireActive(); return reason; }
         internal void ValidateDeletion(DeletionLedger.Prepared proof)
         { RequireActive(); _session.ValidateDeletion(proof); RequireActive(); }
+        internal bool HasShortNameReference(IReadOnlyList<string> paths)
+        {
+            RequireActive();
+            var referenced = _session.HasShortNameReference(paths);
+            RequireActive();
+            return referenced;
+        }
         internal void RequireActive()
         {
             if (Volatile.Read(ref _active) == 0 || _thread != Environment.CurrentManagedThreadId || _session.Stopped() is not null)
@@ -122,8 +131,35 @@ internal sealed class RetentionReferenceGuard : IDisposable
     internal sealed class Session : IDisposable
     {
         internal DateTimeOffset? CompletedAt;
+        internal string? CheckPolicy(RetentionHostKeepLatestProtection host, RetentionDeletionPolicy? policy)
+        {
+            CheckStop();
+            var reason = host.Check(policy, _host._history, _connection!, _transaction!, Id, CompletedAt!.Value, _cancel);
+            CheckStop();
+            return reason;
+        }
         internal void ValidateDeletion(DeletionLedger.Prepared proof)
         { CheckStop(); DeletionLedger.ValidatePrepared(_connection!, _transaction!, proof); CheckStop(); }
+        internal bool HasShortNameReference(IReadOnlyList<string> paths)
+        {
+            CheckStop();
+            if (paths.Count == 0) return false;
+            var pending = PendingOutputUseStorage.ReadExactAliases(_connection!, _transaction!,
+                new Dictionary<string,IReadOnlyList<string>>(StringComparer.Ordinal) { [Id] = paths }, null)[Id];
+            var referenced = pending != PendingOutputUseState.None;
+            foreach (var path in paths)
+            {
+                CheckStop();
+                var requested = new Dictionary<string,string>(StringComparer.Ordinal) { [Id] = path };
+                var planned = _host._history.ReadPlannedOutputReferences(_connection!, _transaction!, requested, userFileNamesOnly: true)[Id];
+                if (planned == PlannedOutputPathReferenceState.Indeterminate)
+                    throw new InvalidDataException("Alias planned path matching is unavailable.");
+                referenced |= _host._history.ReadSharedOutputReferences(_connection!, _transaction!, requested)[Id] ||
+                    planned == PlannedOutputPathReferenceState.Referenced;
+            }
+            CheckStop();
+            return referenced;
+        }
         private readonly RetentionReferenceGuard _host;
         internal string Id { get; }
         private readonly PublicationIdentityAnchor _anchor;
@@ -289,7 +325,7 @@ internal sealed class RetentionReferenceGuard : IDisposable
         while (reader.Read()) if (reader.GetValue(0) is not long flag || flag != 1) throw new InvalidDataException("Invalid guard association.");
     }
 
-    private static RetentionGuardReason Classify(OrdinaryRetentionEvidence relation, OrdinaryRecordingBundleSnapshot? bundle, PublicationIdentityAnchor anchor)
+    internal static RetentionGuardReason Classify(OrdinaryRetentionEvidence relation, OrdinaryRecordingBundleSnapshot? bundle, PublicationIdentityAnchor anchor)
     {
         if (relation.PublicationAnchor is not { } saved || saved != anchor) return RetentionGuardReason.CandidateRejected;
         if (bundle?.Status != "not_applicable") return RetentionGuardReason.BundleProtected;

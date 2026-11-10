@@ -115,7 +115,7 @@ public sealed partial class OrdinaryAvOutputOwnershipTests
                 new(0,0,1920,1080), 1.0, Display.Fingerprint, DisplayIdentityResolutionStatus.Resolved) });
             Store = new(Path.Combine(Root, "history.db")); Store.Initialize(); History = new(Store);
             Audit = new(Path.Combine(Root,"audit.jsonl"));
-            Engine = new(Audit, microphoneProvider: new Devices(), systemAudioEndpointProvider: new Devices(), bundleGenerator: new FfmpegRecordingBundleGenerator()) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
+            Engine = new(Audit, microphoneProvider: new Devices(), systemAudioEndpointProvider: new Devices(), bundleGenerator: new ForbiddenBundleGenerator400()) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
             Engine.ConfigureOrdinaryRecordingHistory(historyFactory?.Invoke(History) ?? History); Engine.SetTray(Tray);
             Engine.BackendFactory = cfg => (Backend, cfg.SourceKind == "region" ? "ffmpeg-region-av-split" : "ffmpeg-av-split");
             ApiKeyAuth.InitializeForTesting(Root);
@@ -207,7 +207,7 @@ public sealed partial class OrdinaryAvOutputOwnershipTests
         public int ExitCode => inner.ExitCode; public bool HasExited => inner.HasExited;
         public long? FirstProgressFrame => inner.FirstProgressFrame; public long? FirstProgressOutTimeUs => inner.FirstProgressOutTimeUs; public double? ProgressAnchorDeltaMs => inner.ProgressAnchorDeltaMs;
         public long LaunchAnchorTicks => inner.LaunchAnchorTicks; public long FirstFrameAnchorTicks => inner.FirstFrameAnchorTicks;
-        public void Start(CaptureConfig cfg, string path) { if (fixture is not null) File.Copy(fixture,path); inner.Start(cfg,path); }
+        public void Start(CaptureConfig cfg, string path) { if (fixture is not null) File.Copy(fixture, path, overwrite: true); inner.Start(cfg,path); }
         public OutputMeta Stop() => inner.Stop(); public bool WaitForExit(TimeSpan timeout) => inner.WaitForExit(timeout);
         public string GetStderrLog() => inner.GetStderrLog(); public void Dispose() => inner.Dispose();
     }
@@ -297,7 +297,7 @@ public sealed partial class OrdinaryAvOutputOwnershipTests
         public string? OutputPath=>inner.OutputPath;
         public long? FirstProgressOutTimeUs=>inner.FirstProgressOutTimeUs;public double? ProgressAnchorDeltaMs=>inner.ProgressAnchorDeltaMs;
         public long LaunchAnchorTicks=>inner.LaunchAnchorTicks;public long FirstFrameAnchorTicks=>inner.FirstFrameAnchorTicks;
-        public void Start(CaptureConfig cfg,string path) { Interlocked.Increment(ref pair.Starts);if(pair.VideoFixture is not null)File.Copy(pair.VideoFixture,path);inner.Start(cfg,path); }
+        public void Start(CaptureConfig cfg,string path) { Interlocked.Increment(ref pair.Starts);if(pair.VideoFixture is not null)File.Copy(pair.VideoFixture, path, overwrite: true);inner.Start(cfg,path); }
         public OutputMeta Stop() { pair.BeforeVideoStop?.Invoke();return inner.Stop(); } public bool WaitForExit(TimeSpan timeout)=>inner.WaitForExit(timeout);
         public string GetStderrLog()=>inner.GetStderrLog();public void Dispose()=>inner.Dispose();
     }
@@ -358,6 +358,59 @@ public sealed partial class OrdinaryAvOutputOwnershipTests
         Assert.Equal(bytes,File.ReadAllBytes(parent.OutputPath));Assert.False(File.Exists(Path.Combine(f.Root,"same-1.mp4")));
         Assert.Equal("OUTPUT_PATH_IN_USE",f.History.Read(child.Id)!.ReasonCode);Assert.Equal(0,f.AnchorCount(child.Id));
         Assert.False(p.Workers[0].Audio.StopCalled);Assert.False(p.Workers[0].Video.StopCalled);
+    }
+
+    [Fact]
+    public async Task Task411SameBasenameInDifferentOutputDirectoriesRetainsSeparateRunDiagnostics()
+    {
+        using var pair = new Pair();
+        var f = pair.F;
+        var outer = await pair.Accept(pair.Request(Path.Combine(f.Root, "outer"), "same.mp4", "outer"));
+        f.Tray.Approve();
+        await Until(() => outer.State == RecState.recording);
+        var inner = await pair.Accept(pair.Request(Path.Combine(f.Root, "inner"), "same.mp4", "inner", outer));
+        f.Tray.Approve();
+        await Until(() => inner.State == RecState.recording);
+        Assert.NotEqual(outer.OutputPath, inner.OutputPath);
+        Assert.Equal(Path.GetFileName(outer.OutputPath), Path.GetFileName(inner.OutputPath));
+        Assert.Equal(2, pair.Workers.Count);
+        var recordings = new[] { outer, inner };
+        for (var i = 0; i < recordings.Length; i++)
+        {
+            var recording = recordings[i];
+            var backend = pair.Workers[i].Backend;
+            Assert.Null(backend.FailedArtifactsDirectory);
+            Assert.Equal(recording.Id + "_video.mp4", Path.GetFileName(backend.TempVideoPath));
+            Assert.Equal(recording.Id + "_audio.wav", Path.GetFileName(backend.TempAudioPath));
+            File.WriteAllText(backend.TempVideoPath!, recording.Id + " video");
+            File.WriteAllText(backend.TempAudioPath!, recording.Id + " audio");
+        }
+
+        // Fail the nested child first so outer teardown cannot retire it instead.
+        foreach (var i in new[] { 1, 0 })
+        {
+            var recording = recordings[i];
+            var backend = pair.Workers[i].Backend;
+            Assert.True(recording.Config.StorageSafety!.TryAbort(WindowStorageSafety.LowSpaceCode));
+            await Until(() => recording.IsFinalized && backend.IsOutputSettled &&
+                f.History.Read(recording.Id)?.Status == "failed");
+            Assert.Equal(RecState.failed, recording.State);
+            Assert.Equal(WindowStorageSafety.LowSpaceCode, recording.StopReason);
+            Assert.Equal(WindowStorageSafety.LowSpaceCode, f.History.Read(recording.Id)!.ReasonCode);
+            Assert.False(File.Exists(recording.OutputPath));
+            Assert.True(pair.Workers[i].Audio.StopCalled);
+            Assert.True(pair.Workers[i].Video.StopCalled);
+        }
+        foreach (var (recording, worker) in recordings.Zip(pair.Workers))
+        {
+            var directory = Path.Combine(f.Root, "failed", recording.Id);
+            Assert.Equal(directory, worker.Backend.FailedArtifactsDirectory);
+            Assert.Equal(recording.Id + " video", File.ReadAllText(Path.Combine(directory, "video.mp4")));
+            Assert.Equal(recording.Id + " audio", File.ReadAllText(Path.Combine(directory, "audio.wav")));
+            using var diagnostics = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "diagnostics.json")));
+            Assert.Equal(recording.Id, diagnostics.RootElement.GetProperty("recording_id").GetString());
+        }
+        Assert.False(Directory.Exists(Path.Combine(f.Root, "failed", "same")));
     }
 
     [Fact]
@@ -471,10 +524,10 @@ public sealed partial class OrdinaryAvOutputOwnershipTests
             using var denied=await f.Post("/api/v1/recordings?creation_wait_ms=0",p.Request(f.Root,"same.mp4","outer"));Assert.Equal(HttpStatusCode.Conflict,denied.StatusCode);Assert.Equal(2,p.Starts);
         } finally { runner.Release.TrySetResult();await ending.WaitAsync(TimeSpan.FromSeconds(20)); }
         Assert.Equal(RecState.completed,old.State);Assert.True(p.Workers[0].Backend.IsOutputSettled);Assert.NotNull(old.LastMeta!.PublicationReceipt);
-        // Reading alone cannot perform the business-path retirement even after
-        // physical settling; the next admission still owns that responsibility.
-        Assert.True(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
-        await Until(()=>f.History.Read(old.Id)?.Bundle?.Status=="ready");Assert.Equal(1,f.AnchorCount(old.Id));await AvMuxOwnershipTests.VerifyBlue440(old.OutputPath);
+        // Video-only finalization already retired this positively settled owner.
+        // The read observes that business-path result; it does not retire workers.
+        Assert.False(RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath)!.Paths.Single().InUse);
+        await Until(()=>f.History.Read(old.Id)?.Bundle?.Status=="not_applicable");Assert.Equal(1,f.AnchorCount(old.Id));await AvMuxOwnershipTests.VerifyBlue440(old.OutputPath);
         var nextRequest=p.Request(f.Root,"same.mp4","outer");nextRequest["output"]!["conflict_policy"]="rename";
         var next=await p.Accept(nextRequest);Assert.Equal(RecState.pending_confirmation,next.State);Assert.NotEqual(old.OutputPath,next.OutputPath);
         var uses=RuntimeOutputTestEngine.Read(f.Engine,old.OutputPath,next.OutputPath)!.Paths;

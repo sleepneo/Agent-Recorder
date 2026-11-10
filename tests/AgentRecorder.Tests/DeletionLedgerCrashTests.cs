@@ -117,6 +117,7 @@ sealed class Native(string media):IOriginalFileHoldNative
  public bool Basic(SafeFileHandle h,out FileBasicInformation v,out int e)=>n.Basic(h,out v,out e);
  public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>n.Standard(h,out v,out e);
  public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>n.Identity(h,out v,out e);
+ public string? ReadShortLeaf(SafeFileHandle h) => n.ReadShortLeaf(h);
  public uint FinalPath(SafeFileHandle h,StringBuilder b,int c,out int e)=>n.FinalPath(h,b,c,out e);
  public OriginalFileCloseOutcome Close(SafeFileHandle h)=>n.Close(h);
  public OriginalFileDispositionResult RequestDisposition(SafeFileHandle h)

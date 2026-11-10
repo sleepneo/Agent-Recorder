@@ -51,6 +51,15 @@ internal sealed class OwnedBundleDirectory : IDisposable
     {
         // A bounded, explicitly created alias of our original copy. Its entry has
         // never been opened, so NTFS can atomically rename the complete directory.
+        var status = SetOriginalName(original, basename, 11); // FileLinkInformation
+        if (status < 0) throw new IOException("bundle_original_link_failed:" + status.ToString("x8"));
+    }
+
+    internal int RenameOriginalHere(SafeFileHandle original, string basename)
+        => SetOriginalName(original, basename, 10); // FileRenameInformation
+
+    private int SetOriginalName(SafeFileHandle original, string basename, int informationClass)
+    {
         var name = Encoding.Unicode.GetBytes(basename);
         var size = Math.Max(Marshal.SizeOf<WindowsPublicationFileOperations.RenameHeader>(), WindowsPublicationFileOperations.NameOffset + name.Length + 2);
         var buffer = Marshal.AllocHGlobal(size);
@@ -60,12 +69,11 @@ internal sealed class OwnedBundleDirectory : IDisposable
             Marshal.WriteIntPtr(buffer, Marshal.OffsetOf<WindowsPublicationFileOperations.RenameHeader>(nameof(WindowsPublicationFileOperations.RenameHeader.RootDirectory)).ToInt32(), Handle.DangerousGetHandle());
             Marshal.WriteInt32(buffer, WindowsPublicationFileOperations.NameLengthOffset, name.Length);
             Marshal.Copy(name, 0, IntPtr.Add(buffer, WindowsPublicationFileOperations.NameOffset), name.Length);
-            var result = NtSetInformationFile(original, out _, buffer, (uint)size, 11); // FileLinkInformation
-            if (result < 0) throw new IOException("bundle_original_link_failed:" + result.ToString("x8"));
+            return NtSetInformationFile(original, out _, buffer, (uint)size, informationClass);
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
-    private static bool IsDirectoryAt(SafeFileHandle handle, string path)
+    internal static bool IsDirectoryAt(SafeFileHandle handle, string path)
     {
         var api = WindowsFileMetadataApi.Instance;
         if (handle.IsInvalid || handle.IsClosed || !api.Basic(handle, out var basic, out _) ||

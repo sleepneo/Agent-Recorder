@@ -92,10 +92,10 @@ public sealed partial class OrdinaryWgcBundleTests
         if (ending == "closed") { Assert.Equal("window_closed", inner.StopReason); Assert.Equal(RecState.failed, inner.State); Assert.False(System.IO.File.Exists(inner.OutputPath)); }
         else
         {
-            Assert.Equal(RecState.completed, inner.State); await Until(() => inner.BundleSnapshot.Status == "ready");
-            Assert.NotEqual(outer.BundleSnapshot.Path, inner.BundleSnapshot.Path);
+            Assert.Equal(RecState.completed, inner.State); await Until(() => inner.BundleSnapshot.Status == "not_applicable");
+            Assert.NotEqual(outer.OutputPath,inner.OutputPath);Assert.Null(outer.BundleSnapshot.Path);Assert.Null(inner.BundleSnapshot.Path);
         }
-        if (ending != "parent-closed") await Until(() => outer.BundleSnapshot.Status == "ready");
+        if (ending != "parent-closed") await Until(() => outer.BundleSnapshot.Status == "not_applicable");
         Assert.Equal(outer.OrdinaryTargetKey, f.Writer.Read(outer.Id)!.TargetKey);
         Assert.Equal(inner.OrdinaryTargetKey, f.Writer.Read(inner.Id)!.TargetKey);
         Assert.Equal("outer", f.Writer.Read(outer.Id)!.NestedRole); Assert.Equal(outer.Id, f.Writer.Read(inner.Id)!.ParentRecordingId);

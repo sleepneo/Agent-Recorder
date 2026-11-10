@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using AgentRecorder.Infrastructure;
+using Microsoft.Win32.SafeHandles;
 
 namespace AgentRecorder.Capture;
 
@@ -20,7 +20,7 @@ public sealed class TempRetentionResult
     public string? AudioSourcePath { get; init; }
     public string? AudioTargetPath { get; init; }
 
-    /// <summary>Directory the failed-recording artifacts were moved into.</summary>
+    /// <summary>Verified diagnostic directory acquired for this attempt, if any.</summary>
     public string? FailedDirectoryPath { get; init; }
     public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
 }
@@ -33,6 +33,8 @@ public sealed class TempRetentionResult
 public sealed class TempRetentionPolicy
 {
     private readonly string _dataDir;
+    internal Action<string, string>? BeforeDiagnosticRenameForTests { get; init; }
+    internal Func<ulong, ulong>? DiagnosticTargetVolumeForTests { get; init; }
 
     public TempRetentionPolicy() : this(DataDirResolver.Resolve()) { }
 
@@ -56,21 +58,73 @@ public sealed class TempRetentionPolicy
     /// accurately reports each move so callers do not claim a file was
     /// preserved when it is still locked in the temp directory.
     /// </summary>
-    public TempRetentionResult OnFailure(string recordingId, string? tempVideo, string? tempAudio)
-    {
-        var failedDir = Path.Combine(_dataDir, "failed", recordingId);
-        Directory.CreateDirectory(failedDir);
+    public TempRetentionResult OnFailure(string recordingId, string? tempVideo, string? tempAudio) =>
+        OnFailure(recordingId, tempVideo, tempAudio, null);
 
+    internal TempRetentionResult OnFailure(string recordingId, string? tempVideo, string? tempAudio,
+        Func<IReadOnlyList<string>, string>? diagnostics, ObservedFileIdentity? expectedVideoIdentity = null,
+        ObservedFileIdentity? expectedAudioIdentity = null, Action? verifySourceDirectory = null)
+    {
         var errors = new List<string>();
-        var videoMoved = MoveForDiagnostics(failedDir, tempVideo, "video.mp4", errors, out var videoTarget);
-        var audioMoved = MoveForDiagnostics(failedDir, tempAudio, "audio.wav", errors, out var audioTarget);
+        string? failedDir = null, videoTarget = null, audioTarget = null;
+        try
+        {
+            var api = WindowsFileMetadataApi.Instance;
+            var dataDir = Path.TrimEndingDirectorySeparator(_dataDir);
+            if (!api.Supported || !WindowsReadOnlyFileMetadataProbe.IsCanonicalLocalPath(dataDir) ||
+                api.DriveType(dataDir[..3]) is not (2 or 3 or 6) || !IsDirectoryName(recordingId))
+                throw new IOException("retention_directory_invalid");
+
+            using var chain = new DirectoryChain();
+            var current = dataDir[..3];
+            chain.Hold(current);
+            foreach (var component in dataDir[3..].Split('\\'))
+            {
+                current = Path.Combine(current, component);
+                chain.Hold(current);
+            }
+            var failedRoot = Path.Combine(dataDir, "failed");
+            chain.Verify();
+            Directory.CreateDirectory(failedRoot);
+            chain.Hold(failedRoot);
+            chain.Verify();
+            // Use the original NT FILE_CREATE handle. An occupied leaf is never opened.
+            using var directory = OwnedBundleDirectory.Create(Path.Combine(failedRoot, recordingId));
+
+            void VerifyDirectory()
+            {
+                chain.Verify();
+                if (!OwnedBundleDirectory.IsDirectoryAt(directory.Handle, directory.Path))
+                    throw new IOException("retention_directory_changed");
+                verifySourceDirectory?.Invoke();
+            }
+
+            videoTarget = MoveForDiagnostics(directory, tempVideo, "video.mp4", errors, VerifyDirectory, expectedVideoIdentity);
+            audioTarget = MoveForDiagnostics(directory, tempAudio, "audio.wav", errors, VerifyDirectory, expectedAudioIdentity);
+            if (diagnostics is not null)
+            {
+                try
+                {
+                    var json = diagnostics(errors);
+                    VerifyDirectory();
+                    using var file = new FileStream(Path.Combine(directory.Path, "diagnostics.json"),
+                        FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    using var writer = new StreamWriter(file);
+                    writer.Write(json);
+                }
+                catch (Exception) { errors.Add("retention_diagnostics_not_written"); }
+            }
+            VerifyDirectory();
+            failedDir = directory.Path;
+        }
+        catch (Exception) { errors.Add("retention_directory_unavailable"); }
 
         return new TempRetentionResult
         {
-            VideoMoved = videoMoved,
+            VideoMoved = videoTarget is not null,
             VideoSourcePath = tempVideo,
             VideoTargetPath = videoTarget,
-            AudioMoved = audioMoved,
+            AudioMoved = audioTarget is not null,
             AudioSourcePath = tempAudio,
             AudioTargetPath = audioTarget,
             FailedDirectoryPath = failedDir,
@@ -78,82 +132,56 @@ public sealed class TempRetentionPolicy
         };
     }
 
-    /// <summary>
-    /// Deletes failed-recording directories and orphaned temp media files older
-    /// than <paramref name="maxAge"/>. Defaults to 24 hours. Does not block on
-    /// individual deletion failures and never deletes outside &lt;data-dir&gt;.
-    /// </summary>
-    public int Cleanup(TimeSpan? maxAge = null)
+    private static bool IsDirectoryName(string value)
     {
-        return CleanupFailed(maxAge) + CleanupTempOrphans(maxAge);
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 255 || value.Trim() != value ||
+            value.EndsWith('.') || value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return false;
+        var stem = value.Split('.', 2)[0].TrimEnd(' ').ToUpperInvariant();
+        return stem is not ("CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$") &&
+            !(stem.Length == 4 && (stem[..3] is "COM" or "LPT") && "123456789¹²³".Contains(stem[3]));
     }
 
-    /// <summary>
-    /// Deletes failed-recording directories older than <paramref name="maxAge"/>.
-    /// </summary>
-    public int CleanupFailed(TimeSpan? maxAge = null)
+    internal sealed class DirectoryChain : IDisposable
     {
-        var age = maxAge ?? TimeSpan.FromHours(24);
-        var failedDir = Path.Combine(_dataDir, "failed");
-        if (!Directory.Exists(failedDir))
-            return 0;
+        private readonly List<(string Path, SafeFileHandle Handle)> _directories = new();
 
-        int deleted = 0;
-        var now = DateTime.UtcNow;
-        foreach (var dir in Directory.GetDirectories(failedDir))
+        internal void Hold(string path, bool createIfMissing = false)
         {
+            var api = WindowsFileMetadataApi.Instance;
+            SafeFileHandle Open(out int error) => api.Open(@"\\?\" + path,
+                OriginalFileScopeResources.Access, OriginalFileScopeResources.Sharing,
+                WindowsReadOnlyFileMetadataProbe.OpenExisting, OriginalFileScopeResources.Flags, out error);
+            var handle = Open(out var error);
+            if (createIfMissing && handle.IsInvalid && error == 2)
+            {
+                handle.Dispose();
+                // The caller holds the already-verified parent. Reopen the
+                // new component without traversing a competing reparse leaf.
+                Directory.CreateDirectory(path);
+                handle = Open(out _);
+            }
             try
             {
-                var lastWrite = Directory.GetLastWriteTimeUtc(dir);
-                if (now - lastWrite > age)
-                {
-                    Directory.Delete(dir, recursive: true);
-                    deleted++;
-                }
+                if (!OwnedBundleDirectory.IsDirectoryAt(handle, path))
+                    throw new IOException("retention_directory_unavailable");
+                _directories.Add((path, handle));
             }
-            catch { }
+            catch { handle.Dispose(); throw; }
         }
-        return deleted;
-    }
 
-    /// <summary>
-    /// Deletes orphaned temporary media files in &lt;data-dir&gt;/temp that match the
-    /// application's naming pattern and are older than <paramref name="maxAge"/>.
-    /// Only touches files owned by this application: *_video.mp4 and *_audio.wav.
-    /// </summary>
-    public int CleanupTempOrphans(TimeSpan? maxAge = null)
-    {
-        var age = maxAge ?? TimeSpan.FromHours(24);
-        var tempDir = Path.Combine(_dataDir, "temp");
-        if (!Directory.Exists(tempDir))
-            return 0;
-
-        int deleted = 0;
-        var now = DateTime.UtcNow;
-        foreach (var file in Directory.GetFiles(tempDir))
+        internal void Verify()
         {
-            try
-            {
-                var name = Path.GetFileName(file);
-                if (!IsOwnedTempMediaFile(name))
-                    continue;
-
-                var lastWrite = File.GetLastWriteTimeUtc(file);
-                if (now - lastWrite > age)
-                {
-                    File.Delete(file);
-                    deleted++;
-                }
-            }
-            catch { }
+            foreach (var (path, handle) in _directories)
+                if (!OwnedBundleDirectory.IsDirectoryAt(handle, path))
+                    throw new IOException("retention_directory_changed");
         }
-        return deleted;
-    }
 
-    private static bool IsOwnedTempMediaFile(string fileName)
-    {
-        return (fileName.EndsWith("_video.mp4", StringComparison.OrdinalIgnoreCase) && !fileName.StartsWith(".", StringComparison.Ordinal))
-            || (fileName.EndsWith("_audio.wav", StringComparison.OrdinalIgnoreCase) && !fileName.StartsWith(".", StringComparison.Ordinal));
+        public void Dispose()
+        {
+            for (var i = _directories.Count - 1; i >= 0; i--)
+                _directories[i].Handle.Dispose();
+        }
     }
 
     private static void TryDelete(string? path)
@@ -166,26 +194,56 @@ public sealed class TempRetentionPolicy
         catch { }
     }
 
-    private static bool MoveForDiagnostics(string failedDir, string? sourcePath, string targetName, List<string> errors, out string? targetPath)
+    private string? MoveForDiagnostics(OwnedBundleDirectory directory, string? sourcePath, string targetName,
+        List<string> errors, Action verifyDirectory, ObservedFileIdentity? expectedIdentity)
     {
-        targetPath = null;
-        if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath))
-            return false;
+        if (string.IsNullOrEmpty(sourcePath))
+            return null;
 
-        targetPath = Path.Combine(failedDir, targetName);
+        const uint deleteAccess = 0x10000;
+        const int notSameDevice = unchecked((int)0xC00000D4);
+        var targetPath = Path.Combine(directory.Path, targetName);
         try
         {
-            if (File.Exists(targetPath)) File.Delete(targetPath);
-            File.Move(sourcePath, targetPath);
-            return true;
+            var api = WindowsFileMetadataApi.Instance;
+            if (!WindowsReadOnlyFileMetadataProbe.IsCanonicalLocalPath(sourcePath) ||
+                api.DriveType(sourcePath[..3]) is not (2 or 3 or 6))
+                throw new IOException("retention_source_unavailable");
+
+            // DELETE permits our handle's rename. Withhold WRITE and DELETE sharing
+            // so a different opener cannot modify or replace the observed source.
+            using var source = api.Open(@"\\?\" + sourcePath, deleteAccess | WindowsReadOnlyFileMetadataProbe.ReadAttributes,
+                WindowsReadOnlyFileMetadataProbe.ShareRead, WindowsReadOnlyFileMetadataProbe.OpenExisting,
+                WindowsReadOnlyFileMetadataProbe.OpenFlags, out var error);
+            if (source.IsInvalid && error is 2 or 3) return null;
+            var observed = PublicationHandleObservation.Read(api, source, sourcePath, allowEmpty: true);
+            if (observed?.Snapshot.Identity is not { } identity || (expectedIdentity is not null && identity != expectedIdentity))
+                throw new IOException("retention_source_unavailable");
+
+            BeforeDiagnosticRenameForTests?.Invoke(sourcePath, targetPath);
+            verifyDirectory();
+            if (PublicationHandleObservation.Read(api, source, sourcePath, allowEmpty: true) != observed ||
+                !api.Identity(directory.Handle, out var targetIdentity, out _) || targetIdentity.VolumeSerialNumber == 0 ||
+                (targetIdentity.IdLow == 0 && targetIdentity.IdHigh == 0))
+                throw new IOException("retention_binding_unavailable");
+
+            var targetVolume = DiagnosticTargetVolumeForTests?.Invoke(targetIdentity.VolumeSerialNumber) ?? targetIdentity.VolumeSerialNumber;
+            var status = identity.VolumeSerialNumber == targetVolume
+                ? directory.RenameOriginalHere(source, targetName) : notSameDevice;
+            if (status == notSameDevice)
+            {
+                errors.Add($"retention_move_failed:{targetName}:cross_volume");
+                return null;
+            }
+            if (status != 0)
+                throw new IOException("retention_handle_rename_failed:" + status.ToString("x8"));
+            return targetPath;
         }
         catch (Exception ex)
         {
-            errors.Add($"retention_move_failed:{targetName}:{ex.Message}");
-            // Best-effort: leave the source in place so it can be cleaned later
-            // by the orphan temp cleanup. Do not claim success.
-            targetPath = null;
-            return false;
+            errors.Add($"retention_move_failed:{targetName}:{ex.GetType().Name}");
+            // Leave the source in place and report that the move did not complete.
+            return null;
         }
     }
 }

@@ -1,10 +1,10 @@
 # Agent Recorder：AI Agent 操作指令
 
-用户明确说“只要视频，不需要说明包”时，在普通非nested视频raw/quick请求中传 `"artifacts":{"bundle":false}`；省略或true仍交付默认完整Bundle。先读取当前 `/capabilities.recording_artifacts`，不得把该字段用于Profile、Plan/Lease/未来窗口、截图序列或nested。确认摘要会显示实际冻结政策，本地改目录不改变它。
+> 本文适用于 v0.1.21。新视频默认只交付视频，无需用户补充“仅 MP4/不要资料包”。不要请求 bundle=true 或 ZIP 附件；先读取运行实例的 capabilities。
 
-仅MP4仍须原本机录制确认和正式发布，历史的media_hash可为null。符合原锚点/成功大小、固定Videos范围及现有限定用途保护时才可按recording_id申请独立删除；false不是批准、路径绕过或忽略已有Bundle。默认Bundle录制及已有Bundle继续保护。删除202后查询原请求，等待真正本机确认，不以聊天“同意”代替，不自动换key重试unknown。本工作区产物政策源码/合成输入正式链及一次5秒无声FFmpeg选区的本地取消/批准删除与重放已独立验收，不代表全部后端或完整保留执行。
+先读取实例 capabilities。普通 raw/quick 省略 artifacts 即可，{} 和 bundle=false 保持兼容；显式 true 提前返回 UNSUPPORTED_FEATURE。其他模式仍不得添加原本不允许的 artifacts。新视频不生成缩略图、首末帧、metadata.json 或 marks.json。截图序列及其必要清单保持独立功能。
 
-本文档面向本地 AI agent。AI agent 应启动或复用 Agent Recorder，并优先调用 quick API 完成常见录屏流程。
+成功必须依据真实 completed 与有效视频输出位置、必要属性报告；准备、录制、finalizing、资源肯定退休保持区别。失败报告稳定原因码与说明。历史 Bundle 的查询、核验、标记与删除保护继续保留；仅视频不是删除许可，活资源或未知继续保护。新录制不支持章节标记，不调用 marks API 或提示标记已添加。
 
 ## 产品定位
 
@@ -470,25 +470,9 @@ X-Agent-Recorder-Key: <api-key>
 
 终态响应会包含 `stop_reason`：`duration_reached`（自然达到计划时长）、`floating_button`/`tray_menu`/`global_hotkey`（本地控件停止）、`user_requested`（API 停止）等。用户主动停止且输出有效时，状态仍为 `completed`，不会仅因实际时长短于计划时长而判为 `failed`；但文件过小、零时长、FFmpeg 非零退出等真实产物错误仍会失败。
 
-### 添加章节标记
+### 旧章节标记
 
-当用户明确要求给一条具备Bundle交付资格的活动录制添加具名时间注释时，AI agent 可对精确目标录制调用：
-
-```http
-POST /api/v1/recordings/{recording_id}/marks
-Content-Type: application/json
-X-Agent-Recorder-Key: <api-key>
-
-{
-  "label": "重要决定"
-}
-```
-
-- 只在目标状态为 `recording` 时调用；成功响应已经包含服务端接受的 `t_ms`，无需额外查询。
-- 不要设置 `source: "hotkey"`；远程调用省略 `source` 即可，服务端会记为 `agent`。
-- 用户也可以按 `Ctrl+Shift+F11` 本地标记当前所有具备Bundle交付资格的活动录制。嵌套录制时，该热键只标记具备资格的 outer 和 inner；API 调用则只标记路径中的指定 `recording_id`。
-- API 返回 `delivery={artifact:"bundle/marks.json",status:"pending"}` 后，只能告知已接受、等待Bundle交付，不得说已持久交付或写入MP4；`409 RECORDING_NOT_ACTIVE` 表示录制尚未开始或已经进入停止/保存阶段，不应把它误报为成功。
-- 启用 Bundle 时，成功录制的标记写入对应 `marks.json`，不写入 MP4 章节或画面。`artifacts.bundle=false`、缺生成器或不支持的后端返回409 `MARK_DELIVERY_UNAVAILABLE`，reason分别为bundle_disabled、bundle_generator_unavailable、backend_not_supported；不会自动开启Bundle或创建侧车。最终Bundle可能失败，按既有状态报告，MP4保留。返回时间是服务接收调用时的位置，不是人类发出自然语言时的位置；不推荐将实时“标记这里”作为公开体验用例。
+新视频不再接收章节标记；marks API 返回 409 UNSUPPORTED_FEATURE，章节热键不注册。旧历史标记与附件兼容读取，不改写旧文件。
 
 ### 上下文快照（减少往返）
 
@@ -729,6 +713,14 @@ raw 可显式传同名严格要求，quick 不传该 raw 字段。固定窗口�
 启动容量估计不是预留，运行低水位固定 256 MiB。没有面向 Agent 的关闭监控、
 更换监控盘或阈值开关；失败授权不可自动复用，后续新录制仍遵循本地批准流程。
 
+普通本地视频在 `before_confirmation` 返回 `storage_space_low` 时，若
+`error.details.storage` 存在，用 `uses` 和 `shortfall_bytes` 向用户说明首先发现
+不足的卷承担成片输出（`output`）、音视频暂存（`av_temp`）或 WGC 暂存（`wgc_temp`）
+中的哪些用途，以及差多少字节。可询问是否缩短时长，涉及 `output` 时也可请用户选择
+合适的输出位置。仅暂存不足时，改成片目录无法解决该项短缺。详情缺失或容量未知时，
+只报告已知错误。数字是本次预算比较的瞬时结果。保留用户选择及本地确认流程，勿据此
+自动清理、改目录或重试。
+
 ### 配置每条录制的开始前倒计时
 
 raw `POST /api/v1/recordings` 和 quick `POST /api/v1/recordings/quick` 使用同一个顶层
@@ -836,7 +828,7 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 “20秒麦克风”改用 `audio.microphone` 和真实麦克风ID。声音种类不明先询问，不猜测。
 省略倒计时固定为本次普通默认3秒；不沿用旧配置的时长、声音、倒计时或目录。
 仍须本地逐次预览批准，可在确认窗改目录；不能自动重选、换屏或批准。
-只支持普通video、非nested和默认Bundle，拒绝artifacts、series、raw source/profile_ref/stop_condition混入。
+只支持普通video、非nested和仅视频交付，拒绝artifacts、series、raw source/profile_ref/stop_condition混入。
 来源以原ref及 `profile_reuse_mode:region_only` 返回，Profile本身不会被修改。
 旧raw单独profile_ref仍为完整无声配置执行，计划/Lease不支持本目标。
 完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。
@@ -846,6 +838,84 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 
 宿主启动环境可选 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS`：缺省2，严格十进制整数1–10合法，软件硬上限10。Engine初始化时读取并冻结；运行中修改环境或请求字段不改变实例，不提供HTTP改限额接口。非法、溢出或越界使该独立能力不可用，raw请求在新增确认/worker前返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，不截断或按成功默认值忽略。无需修改本机持久环境。
 
-能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效配置的有效上限及余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出、Bundle排队/生成/原host收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
+能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效路数配置的路数上限为null；任一预算配置无效时余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
 
 预算只覆盖本Engine普通raw无声独立窗口及其未退休交付，不是全机worker、GPU/编码器/磁盘容量保证。顶层并发值只是各合同描述性上界；旧nested/区域仍最多两路，quick/Profile/截图序列/Plan/Lease/未来窗口/声音和混合目标不扩展。每条仍需独立本地确认。stress_tested=false，不自动降画质、换后端/目标或回退桌面区域，也不自动合成画中画。WIN1…WIN10/窗口1…窗口10只供显示，API仍按Recording ID启停。
+
+
+### 总像素率准入预算
+
+独立普通 raw、无声、严格 WGC 窗口还受 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND` 限制。Engine 启动冻结此配置，缺省 `497664000` 像素/秒，即两个 3840×2160×30 的算术值；这是初始软件政策，不是双4K或十路硬件验收、性能保证。显式值只接受 ASCII 十进制正 Int64（最大 9223372036854775807）；空值、空白、符号、分数或溢出均无效。任一预算配置无效时该分支 available=false，返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，details.environment_variable 指明配置项；其他合同不因此停用。HTTP 字段、确认回调或运行中改环境均不能改预算。
+
+每路冻结成本为可信捕获计划的物理窗口表面宽×高×实际配置 FPS（15/24/30/60），包括被遮挡或超出显示器可见范围的表面，不取 DIP、裁剪矩形或请求自报成本。所有乘法、汇总、剩余量为 checked Int64；缺失/非法计划或成本溢出返回 `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID`。不缩放、降帧、换目标或回退桌面；确认等待时几何变化仍按原计划重验失败。
+
+路数与像素率必须同时满足，等于上限允许。可信计划解析后的检查及最终锁内原子注册都检查像素率；超限不新建确认、输出 claim、录制或后端。准入检查内部错误顺序为：无效配置、混合合同、路数满、同窗、像素率满；计划事实非法在计算成本时提前拒绝。原有请求解析/能力/输出检查仍有效。新超限返回 `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`，details 包含 `reason_code=independent_window_pixel_budget_exceeded` 及 `requested_pixels_per_second`、`reserved_pixels_per_second`、`configured_pixels_per_second`、`remaining_pixels_per_second`，不包含路径、HWND或授权材料。
+
+`recording.window_surface.independent_windows.pixel_rate_budget` 增补 `unit=pixels_per_second`、`policy_source`、`environment_variable`、`default_pixels_per_second`、`configured_pixels_per_second`、`configuration_valid`、`reserved_pixels_per_second`、`finalizing_or_unknown_pixels_per_second`、`remaining_pixels_per_second`。路数与像素字段来自同一锁内快照；无效配置对应配置值为 null，任一配置无效时剩余量为 null。快照不预留名额。预留绑定确切 Recording 和冻结成本，待确认、准备、倒计时、录制、停止/收尾及未肯定退休终态均占用；初始目录/历史登记未完成也不早退。拒绝、超时、登记失败和肯定退休只退回自身份额。
+
+作用域仅为当前 Engine 的独立窗口及未退休交付，不是全机 GPU/编码器/CPU/磁盘预算。`snapshot_is_reservation=false`、`performance_guaranteed=false`、`hardware_capacity_measured=false`，`stress_tested=false` 保持不变。默认路数2、显式路数1–10不变；quick/Profile/nested、音频、区域分层、混合目标、截图序列、计划/Lease/未来窗口不扩展。新视频仍仅交付视频，不生成 Bundle 或章节资料；旧 Bundle 历史保护不变。
+
+
+### 保留最近 N 段的只读评估
+
+`POST /api/v1/retention/evaluations` 可选 `keep_latest_count`，必须为 JSON 整数1–1000。省略时保留原响应/语义；null、小数、字符串、重复或未知字段等400，业务读取前拒绝。例：
+
+```json
+{"recording_ids":["rec_example_a","rec_example_b"],"completed_before":"2026-11-01T00:00:00Z","keep_latest_count":20}
+```
+
+最近集合按既有调用者/SID/session可见范围、当前宿主数据库中的 ordinary_video completed可信完成UTC排序：完成时间降序，再按精确BINARY Recording ID降序。不先用completed_before过滤，不局限请求列表；旧Bundle和外部保存目录的可见ordinary完成视频也计入。计划/未来窗口/截图序列不参与，集合的其他ID、路径及数量不返回。普通历史沿用原宿主数据根可见性，不新增跨principal查询或逐条所有权制度。
+
+最新集合与明确ID事实来自同一只读SQLite事务。排序事实损坏、provider缺失/不支持、预算超时/忙均不可返回伪完整候选。仍共享一个实际ArtifactMetadataWorker及3000ms总预算；取消后实际工作未退休仍占槽。
+
+命中返回protected/within_keep_latest，不做该项文件/哈希/别名原生探测；先保留完整DB证据校验和基本缺失/损坏原因。未命中复用原保护内核。AgeCandidate仍只是时间及词法范围候选，命中保留可仍为true；保留项不提供观察字节，原汇总不会把它称为可回收空间。safe_to_delete从未成立。
+
+仅带新字段的响应增加policy：keep_latest_count、ordering=completed_at_utc_desc_recording_id_binary_desc、snapshot_only=true、persistent=false、execution_supported=false、constrains_later_deletion=false。capabilities.retention_evaluations增加keep_latest_supported/count_max=1000及范围。此为非持久规则观察，不保存策略、不发Permit、不批准或删除文件，**不会自动约束后续删除API**；后续仍需逐项本地批准及执行前复查。
+
+
+### 分页预览保留最近 N 段
+
+自然语言示例：“评估11月1日前的录制，同时保留最近20段，逐页告诉我保护原因。”Agent可调用 `GET /api/v1/retention/preview?completed_before=2026-11-01T00:00:00Z&limit=20&keep_latest_count=20`，沿next_cursor翻页并保持N和截止线一致。省略新字段维持原预览和旧cursor；严格十进制1–1000，空/空白/符号/小数/溢出、重复或未知参数400，limit仍1–100。
+
+规则、最近集合和原因优先级复用明确ID评估：集合包括本页之外/截止线之外的可见ordinary完成视频；旧Bundle和外部目录可计入，不取得删除资格。保护项保留在评估页内，命中protected/within_keep_latest且不原生采样；非命中仍执行原保护。AgeCandidate/逻辑字节含义不变，不能当作安全可删清单或可回收空间。
+
+每页的成员/持久引用与最近集合在同一SQLite只读事务内读取。cursor沿原编码/校验绑定N及原principal/宿主根、截止线、筛选和成员水位；更改、增加或移除规则不能复用。跨HTTP页不共享事务：水位限制新增成员，但每页按当时数据库重新计算最近N，完成状态/保护理由可变化。policy声明snapshot_scope=page_local、cross_page_snapshot=false、persistent=false、execution_supported=false、constrains_later_deletion=false，不返回未经请求的最新集合。
+
+新路径共享ArtifactMetadataWorker单实际槽、3000ms预算（含身份、DB/关闭和后续观察），取消或超时后实际工作未退休仍占槽；未支持/未就绪503，不用旧同步provider兜底。capabilities.retention_preview提供keep_latest_supported、keep_latest_count_max=1000、keep_latest_snapshot=page_local、keep_latest_deadline_ms=3000、keep_latest_actual_worker_max=1和非执行声明，查询能力不查历史。
+
+本次只是只读、非持久观察，不批准/删除、不保存永久保留设置，也不会自动约束后续删除API；删除仍逐项本地批准及执行前复查。
+
+
+### 本次删除显式绑定保留规则（SQLite V49）
+
+原单项 `POST /api/v1/retention/deletion-requests` 可选固定形状的policy：
+
+```json
+{"recording_id":"rec_example","policy":{"completed_before":"2026-11-01T00:00:00Z","keep_latest_count":20}}
+```
+
+两字段必须齐全，明确UTC截止线不得在未来，N为严格JSON整数1–1000；null、错型、小数/指数、溢出、重复/未知字段均400。仍需一份Idempotency-Key和每项独立本地批准。省略policy保持旧请求哈希及旧语义；同键不同ID/规则/有无规则409，同键同规范化规则只查询原结果，不再弹窗或执行。JSON空白/字段顺序不参与摘要，时间按UTC ticks归一（Z与+00:00同一瞬间相同）；字段内时间空白仍拒绝，键沿原Trim规则。
+
+规则只限制这一次请求：以当前宿主ordinary可信完成历史按完成UTC/BINARY ID降序保留最近N，非文件mtime；文件缺失不扫描补位，不保证磁盘存在N份完整视频。确认前先检查时间/集合和原资格；命中保留或时间不符会持久完成为未执行，reason_code=within_keep_latest或completion_not_before_cutoff，无UI/Permit/native动作。异步创建仍返回202，读取同一请求ID观察终态。
+
+批准后在原执行期BEGIN IMMEDIATE事务和原文件作用域内重验规则、身份、引用/用途，然后才允许一次性消费/OS disposition。等待确认时事实变化可阻止删除，不替换目标、重试或放宽N。确认窗显示单个永久删除目标、仅本次cutoff/N、不可回收站撤销及预览不是批准。未知/超时/资源关闭未证实仍保持原保守结果和占用。
+
+响应policy包含当时UTC截止线/N及规范化digest，摘要不是批准。批次接口支持显式绑定同一格式的 policy。无 policy 的请求沿用原执行流程。只读规则本身仍不约束后续删除，需要本次请求显式绑定才生效；不是永久设置或后台清扫。
+
+V49 引入单项请求和操作的 policy 辅助表，不改旧表或旧迁移定义。旧行无policy为null，无默认N；新行缺失/损坏规则不能降级旧请求。重启仅查询历史，绝不恢复本地批准或续执行。升级前沿原机制备份；V48旧程序不得重开升级库。已发布v0.1.20仍为原V48，不代表已发布新功能。
+
+### 本次有序清理逐项应用规则（SQLite V50）
+
+用户要求按同一规则逐项请求时，先查 `capabilities.retention_batch_deletion.policy_supported`。用 `POST /api/v1/retention/batch-deletion-requests` 提交 1–5 个有序 ID 和可选的 `policy`。policy 两字段与单项相同，使用明确 UTC 截止线和 JSON 整数 N。每项独立本地确认，规则在确认前及批准后的执行事务内重验。
+
+首项或中途命中最近 N 条、时间不符、拒绝、过期或状态不明时，按原批次停止，剩余项保持 `not_requested`。查看 `stop_reason` 和每项的原请求结果。只有处置已接受且退休与结算得到肯定证明时才继续下一项。同键重放用于查询原批次，重排或改规则返回 409。规则仅约束本次批次，最近 N 条按完成历史计算，其中可能包含文件已缺失的记录。
+
+V50 持久保存父规则与子请求关联。升级前备份，V49 及更早程序会拒绝 V50 库。已发布 v0.1.20 使用 V48。
+
+如果运行中的宿主在 `capabilities.retention_deletion.host_keep_latest` 报告启用跨请求保护，即使本次请求没有 `policy`，最近录制也可能以 `within_host_keep_latest` 被拒绝。不要尝试通过降低请求内的保留数量绕过；报告原原因。配置无效时按 `suggested_action` 提示本地管理员修正并重启，不由 agent 擅自改动。V51 记录这类拒绝结果，同键重放不重新执行。
+
+### 回答受管视频卷还剩多少空间
+
+先查 `capabilities.retention_storage.supported`，再用鉴权的 `GET /api/v1/retention/storage` 直接查询，无参数和请求体。向用户说明 `available_bytes` 是当前宿主受管视频根所在卷、在 `sampled_at_utc` 观测时的可用空间。可同时换算 GiB，保留原字节数。0 可报告为空间为零。遇 503 报告当前无法采样，不能将它显示为 0。
+
+此查询只用于回答卷空间。可回收字节、媒体占用、配额余额和录制预算各有自己的口径。录制仍沿用原准入检查，清理仍按原本地批准流程。

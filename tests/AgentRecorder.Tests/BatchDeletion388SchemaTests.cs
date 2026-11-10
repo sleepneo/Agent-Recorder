@@ -13,9 +13,9 @@ public sealed class BatchDeletion388SchemaTests
     public void IncrementalV48PreservesV1Through47AndBusinessRowsOnRepeatedInitialization()
     {
         using var f=new BatchDeletion388Fixture();
-        f.F.Db.RawExecute("DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48;");
+        f.F.Db.RawExecute("DROP TABLE ordinary_deletion_host_rejections; DELETE FROM schema_migrations WHERE version=51; DROP TABLE ordinary_deletion_batch_policy_children; DROP TABLE ordinary_deletion_batch_policies; DELETE FROM schema_migrations WHERE version=50; DROP TABLE ordinary_deletion_operation_policies; DROP TABLE ordinary_deletion_request_policies; DELETE FROM schema_migrations WHERE version=49; DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48;");
         var before=SqlitePublicationIdentityReferenceTests.OldBytes(f.F.Db.Store.DatabasePath,true,47);f.F.Db.Store.Initialize();f.F.Db.Store.Initialize();
-        Assert.Equal(before,SqlitePublicationIdentityReferenceTests.OldBytes(f.F.Db.Store.DatabasePath,true,47));Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);
+        Assert.Equal(before,SqlitePublicationIdentityReferenceTests.OldBytes(f.F.Db.Store.DatabasePath,true,47));Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion);
         Assert.Equal(SqliteSchemaV48.Checksum,SqliteSchemaV1.ComputeChecksum(SqliteSchemaV48.Definition));Assert.Equal(1,f.Scalar("SELECT count(*) FROM schema_migrations WHERE version=48;"));f.PreserveBytes();
     }
     [Theory][InlineData("DROP TABLE ordinary_deletion_batch_items;")][InlineData("DROP INDEX idx_deletion_batch_key;")][InlineData("DROP TRIGGER deletion_batch_transition;")][InlineData("DELETE FROM schema_migrations WHERE version=48;")][InlineData("UPDATE schema_migrations SET definition_checksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE version=48;")]

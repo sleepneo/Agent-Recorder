@@ -217,9 +217,21 @@ public sealed class WindowStorageSafetyTests
         cfg.OutputPath = @"E:\elsewhere\final.mp4";
         Assert.Equal(WindowStorageSafety.UnavailableCode,
             Assert.Throws<StorageSafetyException>(() => Paths.ValidateOutputPath(cfg)).Code);
+
+        using var temp = new TempDirectory();
+        var frozen = Paths with { AvTempDirectory = Path.Combine(temp.Path, "av") };
         cfg.StorageIntermediatePublication = true;
-        cfg.OutputPath = @"D:\data\temp\video.mp4";
-        Paths.ValidateOutputPath(cfg);
+        cfg.OutputPath = Path.Combine(frozen.AvTempDirectory, "video.mp4");
+        Assert.Throws<StorageSafetyException>(() => frozen.ValidateOutputPath(cfg));
+        using var staging = new AvSplitStaging(frozen.AvTempDirectory, Guid.NewGuid().ToString("N"), "test_run", null);
+        cfg.AvIntermediateStaging = staging;
+        cfg.OutputPath = staging.Video.Path;
+        frozen.ValidateOutputPath(cfg);
+        cfg.OutputPath = Path.Combine(staging.DirectoryPath, "unowned.mp4");
+        Assert.Throws<StorageSafetyException>(() => frozen.ValidateOutputPath(cfg));
+        cfg.OutputPath = staging.Video.Path;
+        Assert.Throws<StorageSafetyException>(() =>
+            (frozen with { AvTempDirectory = Path.Combine(temp.Path, "other") }).ValidateOutputPath(cfg));
     }
 
     [Fact]

@@ -78,6 +78,8 @@ public static class AudioHelperEventStreamParser
                 evt.DuplicateField = true;
                 if (key == "AudioSourceKind")
                     evt.AudioSourceKindDuplicate = true;
+                if (key == "OwnedWavIdentity")
+                    evt.OwnedWavIdentityDuplicate = true;
                 continue;
             }
 
@@ -152,6 +154,9 @@ public static class AudioHelperEventStreamParser
                     break;
                 case "CaptureEngine":
                     evt.CaptureEngine = value;
+                    break;
+                case "OwnedWavIdentity":
+                    evt.OwnedWavIdentity = value;
                     break;
                 case "CaptureStrategy":
                     evt.CaptureStrategy = value;

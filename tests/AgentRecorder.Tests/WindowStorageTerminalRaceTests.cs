@@ -70,6 +70,35 @@ public sealed class WindowStorageTerminalRaceTests
     }
 
     [Theory]
+    [InlineData("same_code")]
+    [InlineData("unavailable")]
+    [InlineData("dispose")]
+    [InlineData("commit")]
+    public void Admission409LosingCandidateCannotAttachItsShortfall(string winner)
+    {
+        var provider = new FakeStorageProvider { Free = _ => 0 };
+        using var guard = new WindowStorageSafety(Paths, 60, provider);
+        var winnerCode = winner == "same_code" ? WindowStorageSafety.LowSpaceCode : WindowStorageSafety.UnavailableCode;
+        guard.BeforeFailureClaimForTests = () =>
+        {
+            if (winner == "commit") Assert.True(guard.TryCommit(() => { }, true));
+            else if (winner == "dispose") guard.Dispose();
+            else Assert.True(guard.TryAbort(winnerCode));
+        };
+
+        var error = Record.Exception(guard.EnsureAdmissionWithShortfall);
+        if (winner == "commit") Assert.Null(error);
+        else if (winner == "dispose") Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else
+        {
+            var failure = Assert.IsType<StorageSafetyException>(error);
+            Assert.Equal(winnerCode, failure.Code);
+            Assert.Null(failure.Shortfall);
+        }
+        Assert.Equal(1, provider.Calls);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void TimeoutCandidateCannotOverrideCommitOrBecomeCapacityFailureAfterDispose(bool dispose)

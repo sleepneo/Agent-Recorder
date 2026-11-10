@@ -74,3 +74,10 @@ public interface IOrdinaryRecordingHistoryDrainable : IDisposable
 {
     bool DrainAndDispose(TimeSpan timeout);
 }
+
+// The callback attests to this exact snapshot after the writer has committed
+// and retired its transaction. Queue acceptance alone cannot release quota.
+internal interface IOrdinaryRecordingHistoryCommitObserver
+{
+    void PublishWithCommitObserver(OrdinaryRecordingHistorySnapshot snapshot, Action committed);
+}

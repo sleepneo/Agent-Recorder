@@ -18,57 +18,7 @@ public sealed partial class OrdinaryWgcBundleTests
             return ((IDictionary)typeof(RecordingEngine).GetField("_ordinarySeriesOutputUses", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Engine)!)[rec.Id]!;
     }
 
-    [Theory]
-    [InlineData("bundle")]
-    [InlineData("file")]
-    public async Task SeriesBundleFailedLocalMoveKeepsExactOldUseUntilOwnedRejectionTailEnds(string failure)
-    {
-        var audit = new BundleUseAudit(); using var release = new ManualResetEventSlim();
-        var tail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var f = SeriesBundleFixture(audit); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        Func<Task>? queued = null;
-        f.Engine.BundleGenerationDispatcherForTests = work => { queued = work; return Task.CompletedTask; };
-        var video = f.Create("display"); await f.Approve(video); await f.Terminal(video, false);
-        var bundle = Path.ChangeExtension(video.OutputPath, ".bundle");
-        var file = Path.Combine(f.Root, "not-directory"); File.WriteAllText(file, "owned static bytes");
-        var series = CreateSeriesBundle(f, Path.Combine(f.Root, "old"));
-        var old = series.OutputPath; var use = SeriesBundleUse(f, series); var callback = f.Tray.Confirm!;
-        audit.Before = evt =>
-        {
-            if (evt != "confirmation.output_directory_rejected") return;
-            tail.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(30))) throw new TimeoutException("owned rejection tail");
-        };
-        var denied = failure == "bundle" ? Path.Combine(bundle, "denied") : Path.Combine(file, "denied");
-        var approval = Task.Run(() => callback(ConfirmationDecision.Approve(denied)));
-        try
-        {
-            await tail.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.True(series.IsFinalized); Assert.Equal(RecState.rejected, series.State); Assert.Null(series.AuthorizationProof);
-            Assert.Equal(failure == "bundle" ? "OUTPUT_PATH_IN_USE" : "directory_override_failed", series.StopReason);
-            Assert.Same(use, SeriesBundleUse(f, series));
-            Assert.True(SeriesBundleInUse(f, Path.Combine(old, "held.png")));
-            f.StartApi(); using var client = f.Client();
-            using var response = await client.PostAsync("/api/v1/recordings?creation_wait_ms=0", new StringContent(
-                SeriesBundleRequest(f, Path.GetDirectoryName(old)!).ToJsonString(), Encoding.UTF8, "application/json"));
-            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode); // admission must not prune from rejected state
-            Assert.True(SeriesBundleInUse(f, Path.Combine(old, "held.png")));
-            Assert.Equal(0, runner.Calls); Assert.False(Directory.Exists(denied));
-            Assert.Equal("owned static bytes", File.ReadAllText(file)); Assert.False(Directory.Exists(bundle));
-        }
-        finally
-        {
-            release.Set(); await approval.WaitAsync(TimeSpan.FromSeconds(5));
-            f.Generator.Release.TrySetResult(); await queued!();
-        }
-        Assert.False(SeriesBundleInUse(f, Path.Combine(old, "held.png")));
-        var next = CreateSeriesBundle(f, Path.GetDirectoryName(old)!);
-        callback(ConfirmationDecision.Reject());
-        Assert.True(SeriesBundleInUse(f, Path.Combine(next.OutputPath, "new.png")));
-        f.Tray.Confirm!(ConfirmationDecision.Reject());
-        Assert.False(SeriesBundleInUse(f, Path.Combine(next.OutputPath, "new.png")));
-        Assert.Equal("ready", video.BundleSnapshot.Status);
-    }
+
 
     [Theory]
     [InlineData("reject")]
@@ -235,61 +185,8 @@ public sealed partial class OrdinaryWgcBundleTests
         Assert.Equal(RecState.pending_confirmation, series.State); // GET never retires the use
         f.Tray.Confirm!(ConfirmationDecision.Reject());
     }
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task SeriesBundleExactReservedRootRejectsRawAndLocalWithoutCreatingIt(bool local)
-    {
-        using var f = SeriesBundleFixture(); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        Func<Task>? queued = null;
-        f.Engine.BundleGenerationDispatcherForTests = work => { queued = work; return Task.CompletedTask; };
-        var video = f.Create("display"); await f.Approve(video); await f.Terminal(video, false);
-        var target = Path.ChangeExtension(video.OutputPath, ".bundle");
-        try
-        {
-            f.StartApi(); using var client = f.Client();
-            using var response = await client.PostAsync("/api/v1/recordings?creation_wait_ms=0", new StringContent(
-                SeriesBundleRequest(f, local ? Path.Combine(f.Root, "old") : Path.GetDirectoryName(target)!, Path.GetFileName(target)).ToJsonString(), Encoding.UTF8, "application/json"));
-            if (local)
-            {
-                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-                var series = f.Engine._recs.Values.Single(r => r.IsScreenshotSeries);
-                f.Tray.Confirm!(ConfirmationDecision.Approve(Path.GetDirectoryName(target)!));
-                Assert.Equal(RecState.rejected, series.State); Assert.Null(series.AuthorizationProof);
-                Assert.Equal("OUTPUT_PATH_IN_USE", series.StopReason);
-            }
-            else Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-            Assert.False(Directory.Exists(target)); Assert.Equal(0, runner.Calls);
-        }
-        finally { f.Generator.Release.TrySetResult(); await queued!(); }
-        Assert.Equal("ready", video.BundleSnapshot.Status);
-    }
 
-    [Fact]
-    public async Task SeriesBundleNeighborDirectoryStillPublishesSyntheticFramesWhileBundleQueued()
-    {
-        using var f = SeriesBundleFixture(); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        Func<Task>? queued = null;
-        f.Engine.BundleGenerationDispatcherForTests = work => { queued = work; return Task.CompletedTask; };
-        var video = f.Create("display"); await f.Approve(video); await f.Terminal(video, false);
-        var target = Path.ChangeExtension(video.OutputPath, ".bundle");
-        try
-        {
-            f.StartApi(); using var client = f.Client();
-            using var response = await client.PostAsync("/api/v1/recordings?creation_wait_ms=0", new StringContent(
-                SeriesBundleRequest(f, (target + "-neighbor").ToUpperInvariant().Replace('\\', '/')).ToJsonString(), Encoding.UTF8, "application/json"));
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var series = f.Engine._recs.Values.Single(r => r.IsScreenshotSeries);
-            f.Tray.Confirm!(ConfirmationDecision.Approve());
-            await Until(() => series.IsFinalized && !SeriesBundleInUse(f, Path.Combine(series.OutputPath, "held.png")));
-            Assert.Equal(RecState.completed, series.State); Assert.Equal(1, runner.Calls);
-            Assert.Single(Directory.EnumerateFiles(series.ScreenshotSeries!.FinalDirectory!, "*.png"));
-            Assert.False(Directory.Exists(target)); Assert.Equal(0, f.Generator.Calls);
-        }
-        finally { f.Generator.Release.TrySetResult(); await queued!(); }
-        Assert.Equal("ready", video.BundleSnapshot.Status); Assert.True(File.Exists(video.OutputPath));
-    }
+
+
 
 }

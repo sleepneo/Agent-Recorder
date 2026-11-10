@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AgentRecorder.AudioHelper;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -34,6 +35,11 @@ internal static class Program
         {
             // Synthetic capacity protocol only; no device/runtime initialization.
             var paths = JsonSerializer.Deserialize<string[]>(Console.ReadLine()!)!;
+            if (Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_STORAGE_REPLY") is { } reply)
+            {
+                Console.Write(reply);
+                return 0;
+            }
             Console.Write(JsonSerializer.Serialize(paths.Select(path => new
                 { Path = path, VolumeIdentity = "fake-storage-volume", AvailableBytes = 1L << 40 })));
             return 0;
@@ -51,6 +57,7 @@ internal static class Program
         string? outputPath = null;
         string? stopSignalPath = null;
         string? recordingId = null;
+        string? ownedWavIdentity = null;
         string? failCode = null;
         string? failReason = null;
         bool noTerminal = false;
@@ -89,6 +96,8 @@ internal static class Program
                 stopSignalPath = args[++i];
             else if (string.Equals(arg, "--recording-id", StringComparison.OrdinalIgnoreCase))
                 recordingId = args[++i];
+            else if (string.Equals(arg, "--owned-wav", StringComparison.OrdinalIgnoreCase))
+                ownedWavIdentity = args[++i];
             else if (string.Equals(arg, "--allowed-root", StringComparison.OrdinalIgnoreCase))
                 _ = args[++i];
             else if (string.Equals(arg, "--emit-fail", StringComparison.OrdinalIgnoreCase))
@@ -161,11 +170,7 @@ internal static class Program
 
         if (version)
         {
-            Console.Out.WriteLine("Protocol: audio-helper-v1");
-            Console.Out.WriteLine($"TimestampFrequency: {Stopwatch.Frequency}");
-            Console.Out.WriteLine();
-            Console.Out.Flush();
-            return 0;
+            return WriteVersion();
         }
 
         if (exitEarlyCode.HasValue)
@@ -186,6 +191,35 @@ internal static class Program
         {
             EmitDuplicateSourceFail(recordingId);
             return 1;
+        }
+
+        if (Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_AV_PCM") is { } ownedMode)
+        {
+            if (ownedMode == "legacy")
+            {
+                Console.Error.WriteLine("Unknown argument: --owned-wav");
+                return 1;
+            }
+            var anchor = Stopwatch.GetTimestamp() - Stopwatch.Frequency / 2;
+            using var owned = ownedWavIdentity is null ? null : new OwnedWavTarget(outputPath, ownedWavIdentity);
+            long bytes;
+            using (var output = owned?.OpenForWrite() ?? new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                bytes = WriteWav(output, SampleRate * 4, sine: true);
+            EmitStarted(recordingId, anchor, bytes, null, false, sourceKind, owned?.Evidence());
+            if (!SpinWait.SpinUntil(() => File.Exists(stopSignalPath), TimeSpan.FromSeconds(15)))
+                return 1;
+            if (ownedMode == "hang")
+                Thread.Sleep(Timeout.Infinite);
+            var evidence = owned?.Evidence(requireData: true);
+            if (ownedMode == "write-fail")
+            {
+                EmitFail("audio_write_failure", "synthetic write failure", recordingId, sourceKind, evidence);
+                return 1;
+            }
+            if (ownedMode == "mismatch") evidence = new string('f', 48);
+            if (ownedMode == "missing") evidence = null;
+            EmitOk(recordingId, bytes, sourceKind: sourceKind, ownedIdentity: evidence);
+            return 0;
         }
 
         if (missingResultBlock)
@@ -316,14 +350,40 @@ internal static class Program
         return 0;
     }
 
+    private static int WriteVersion()
+    {
+        var response = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE");
+        Console.Out.WriteLine(response == "wrong_name" ? "OtherProduct 0.1.10" : "AgentRecorder.AudioHelper 0.1.10-test");
+        if (response == "reordered")
+        {
+            Console.Out.WriteLine("Build: synthetic");
+            Console.Out.WriteLine("OwnedWav: file-id-v1");
+        }
+        Console.Out.WriteLine("Protocol: audio-helper-v1");
+        Console.Out.WriteLine($"TimestampFrequency: {Stopwatch.Frequency + (response == "wrong_frequency" ? 1 : 0)}");
+        if (response is not ("legacy" or "reordered" or "prefix"))
+            Console.Out.WriteLine(response == "wrong" ? "OwnedWav: file-id-v2" : "OwnedWav: file-id-v1");
+        if (response == "prefix") Console.Out.WriteLine("OwnedWavExtra: file-id-v1");
+        if (response == "duplicate") Console.Out.WriteLine("ownedwav: file-id-v1");
+        if (response == "conflict") Console.Out.WriteLine("OwnedWav: file-id-v2");
+        if (response == "duplicate_protocol") Console.Out.WriteLine("Protocol: audio-helper-v1");
+        if (response == "oversized") Console.Out.WriteLine("Build: " + new string('x', 4096));
+        Console.Out.Flush();
+        return response == "nonzero" ? 1 : 0;
+    }
+
     private static long WriteMinimalWav(string path)
     {
-        int sampleCount = SampleRate / 10;
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        return WriteWav(stream, SampleRate / 10);
+    }
+
+    private static long WriteWav(Stream stream, int sampleCount, bool sine = false)
+    {
         int dataBytes = sampleCount * Channels * BytesPerSample;
         int totalBytes = 44 + dataBytes;
 
-        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
         writer.Write(Encoding.ASCII.GetBytes("RIFF"));
         writer.Write(totalBytes - 8);
         writer.Write(Encoding.ASCII.GetBytes("WAVE"));
@@ -338,12 +398,13 @@ internal static class Program
         writer.Write(Encoding.ASCII.GetBytes("data"));
         writer.Write(dataBytes);
         for (int i = 0; i < sampleCount * Channels; i++)
-            writer.Write((short)0);
+            writer.Write(sine ? (short)(12000 * Math.Sin(i * 2 * Math.PI * 440 / SampleRate)) : (short)0);
         writer.Flush();
         return totalBytes;
     }
 
-    private static void EmitStarted(string recordingId, long anchorTicks, long bytesWritten, string? missingField, bool badFrequency, string? sourceKind = null)
+    private static void EmitStarted(string recordingId, long anchorTicks, long bytesWritten, string? missingField, bool badFrequency,
+        string? sourceKind = null, string? ownedIdentity = null)
     {
         WriteLine("RESULT", "STARTED");
         WriteLine("Stage", "AudioCapturing");
@@ -366,6 +427,8 @@ internal static class Program
             WriteLine("CaptureMethod", sourceKind == "system-loopback" ? "WASAPI_SHARED_LOOPBACK" : "FAKE_WASAPI_CAPTURE");
         if (sourceKind == "system-loopback")
             WriteLine("CaptureEngine", "wasapi-direct");
+        if (ownedIdentity is not null)
+            WriteLine("OwnedWavIdentity", ownedIdentity);
         EndBlock();
     }
 
@@ -413,7 +476,8 @@ internal static class Program
         EndBlock();
     }
 
-    private static void EmitOk(string recordingId, long bytesWritten, long maxEstimatedGapMs = 0, string? sourceKind = null)
+    private static void EmitOk(string recordingId, long bytesWritten, long maxEstimatedGapMs = 0,
+        string? sourceKind = null, string? ownedIdentity = null)
     {
         long durationMs = (long)(bytesWritten / (double)(SampleRate * Channels * BytesPerSample) * 1000.0);
         WriteLine("RESULT", "OK");
@@ -424,16 +488,23 @@ internal static class Program
         WriteLine("BytesWritten", bytesWritten);
         WriteLine("EstimatedGapMs", 0);
         WriteLine("MaxEstimatedGapMs", maxEstimatedGapMs);
+        if (ownedIdentity is not null)
+            WriteLine("OwnedWavIdentity", ownedIdentity);
         EndBlock();
     }
 
-    private static void EmitFail(string code, string reason, string recordingId)
+    private static void EmitFail(string code, string reason, string recordingId,
+        string? sourceKind = null, string? ownedIdentity = null)
     {
         WriteLine("RESULT", "FAIL");
         WriteLine("ErrorCode", code);
         WriteLine("Reason", reason);
         WriteLine("RecordingId", recordingId);
         WriteLine("BytesWritten", 0);
+        if (sourceKind is not null)
+            WriteLine("AudioSourceKind", sourceKind);
+        if (ownedIdentity is not null)
+            WriteLine("OwnedWavIdentity", ownedIdentity);
         EndBlock();
     }
 

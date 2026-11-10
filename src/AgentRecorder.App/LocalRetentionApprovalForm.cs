@@ -37,7 +37,7 @@ internal sealed class LocalRetentionApprovalForm : Form
                 text.Get("RetentionApproval_Path") + "\r\n" + f.Anchor.Path + "\r\n\r\n" +
                 text.Get("RetentionApproval_RecordingId") + "\r\n" + f.RecordingId + "\r\n\r\n" +
                 text.Get("RetentionApproval_Completed") + "\r\n" + f.CompletedAtUtc.ToString("O", CultureInfo.InvariantCulture) + "\r\n\r\n" +
-                text.Get("RetentionApproval_Size") + "\r\n" + f.Anchor.Length.ToString(CultureInfo.InvariantCulture) };
+                text.Get("RetentionApproval_Size") + "\r\n" + f.Anchor.Length.ToString(CultureInfo.InvariantCulture) + (f.Policy is null?"":"\r\n\r\n"+text.Get("RetentionApproval_Policy")+"\r\n"+f.Policy.CompletedBefore.ToString("O",CultureInfo.InvariantCulture)+"\r\n"+text.Get("RetentionApproval_KeepLatest")+" "+f.Policy.KeepLatestCount.ToString(CultureInfo.InvariantCulture)) };
         _actions = new() { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = true, Margin = new(0, 12, 0, 8) };
         _approve = new() { Text = text.Get("RetentionApproval_Approve"), AutoSize = true, Enabled = false, Margin = new(8, 0, 0, 0) };
         _cancel = new() { Text = text.Get("RetentionApproval_Cancel"), AutoSize = true };

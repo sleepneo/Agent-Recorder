@@ -167,12 +167,12 @@ public sealed class RetentionBundleNamespace386Tests(ITestOutputHelper output)
     public void V46UpgradePreservesOldTypedRowsAndOnlyAddsFiveIndexesAndReceipt()
     {
         using var f=new RetentionPreviewQueryTests.Fixture();f.Seed("candidate");
-        f.Db.RawExecute("DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48; "+string.Join(";",SqliteSchemaV47.Indexes.Select(i=>"DROP INDEX "+i.Name))+"; DELETE FROM schema_migrations WHERE version=47;");
+        f.Db.RawExecute("DROP TABLE ordinary_deletion_host_rejections; DELETE FROM schema_migrations WHERE version=51; DROP TABLE ordinary_deletion_batch_policy_children; DROP TABLE ordinary_deletion_batch_policies; DELETE FROM schema_migrations WHERE version=50; DROP TABLE ordinary_deletion_operation_policies; DROP TABLE ordinary_deletion_request_policies; DELETE FROM schema_migrations WHERE version=49; DROP TABLE ordinary_deletion_batch_items; DROP TABLE ordinary_deletion_batches; DELETE FROM schema_migrations WHERE version=48; "+string.Join(";",SqliteSchemaV47.Indexes.Select(i=>"DROP INDEX "+i.Name))+"; DELETE FROM schema_migrations WHERE version=47;");
         var before=SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true,46);
         Assert.Throws<RetentionPreviewUnavailableException>(()=>f.Page());RetentionRuntimeOutputTests.NoProbes(f);
         f.Db.Store.Initialize();Assert.Equal(before,SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true,46));
         var once=SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true);f.Db.Store.Initialize();
         Assert.Equal(once,SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath,true));
-        Assert.Equal(48,f.Db.Scalar("SELECT max(version) FROM schema_migrations;"));Assert.Equal(5,SqliteSchemaV47.Indexes.Length);
+        Assert.Equal(51,f.Db.Scalar("SELECT max(version) FROM schema_migrations;"));Assert.Equal(5,SqliteSchemaV47.Indexes.Length);
     }
 }

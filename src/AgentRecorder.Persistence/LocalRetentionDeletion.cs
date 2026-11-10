@@ -10,6 +10,7 @@ internal sealed record LocalDeletionResult(string? ApprovalId, string AttemptId,
     DeletionLedgerCommit Preparation = DeletionLedgerCommit.NotCommitted, DeletionLedgerCommit Settlement = DeletionLedgerCommit.NotCommitted,
     bool? LedgerResourcesRetired = null)
 {
+    internal string? PolicyReason {get;init;}
     // TRUE means an accepted disposition request, never proof of physical
     // deletion/free space. NULL is essential for a call still in flight.
     internal bool? FileActionPerformed => Progress switch
@@ -54,6 +55,7 @@ internal sealed partial class LocalRetentionApproval
         private LocalDeletionProgress _progress;
         private LocalDeletionReason _reason;
         private int? _error;
+        private string? _policyReason;
         private readonly long _started;
         internal long Started => _started;
         private readonly DeletionLedgerBinding? _binding;
@@ -73,7 +75,8 @@ internal sealed partial class LocalRetentionApproval
             {
                 _started=session.Host._clock.GetTimestamp();var facts=session.Facts!;
                 _binding=new(_attemptId,permit!.ApprovalId,session.Host._sid,session.Host._binding,DeletionLedger.HostId,
-                    facts.RecordingId,session.Host._root,facts.Anchor,facts.CompletedAtUtc,facts.Cutoff,Semantics,session.Host._clock.GetUtcNow().ToUniversalTime());
+                    facts.RecordingId,session.Host._root,facts.Anchor,facts.CompletedAtUtc,facts.Cutoff,Semantics,session.Host._clock.GetUtcNow().ToUniversalTime())
+                    { Policy=facts.Policy, PolicyBatchId=session.PolicyBatchId };
             }
         }
         internal Task<LocalDeletionResult> Response => _response.Task;
@@ -97,7 +100,7 @@ internal sealed partial class LocalRetentionApproval
                 return new(_permit!.ApprovalId, _attemptId,
                     _progress == LocalDeletionProgress.InFlight ? LocalDeletionProgress.Indeterminate : _progress,
                     _reason == LocalDeletionReason.None && _progress == LocalDeletionProgress.NotAttempted ? LocalDeletionReason.ScopeRejected : _reason,
-                    _error, _session.Current.ApprovalConsumed, retired, execution, retirement,_preparationCommit,_settlementCommit,_ledgerWorking?null:LedgerResourcesRetired);
+                    _error, _session.Current.ApprovalConsumed, retired, execution, retirement,_preparationCommit,_settlementCommit,_ledgerWorking?null:LedgerResourcesRetired) {PolicyReason=_policyReason};
         }
         internal void Attach(RetentionComposedScope.Session execution) => _ = Freeze(execution);
         private async Task Freeze(RetentionComposedScope.Session execution)
@@ -151,7 +154,14 @@ internal sealed partial class LocalRetentionApproval
         internal void ValidatePrepared(RetentionComposedScope.ScopeContext scope)
         {
             if(_prepared is null||!ReferenceEquals(_prepared.Attempt,this)||_prepared.Binding!=_binding)throw new InvalidOperationException();
-            scope.ValidateDeletion(_prepared);_checkedScope=scope;
+            scope.ValidateDeletion(_prepared);
+            var reason = scope.CheckPolicy(_session!.Host.HostProtection, _binding!.Policy);
+            if (reason is not null)
+            {
+                lock (_session.Host._sync) _policyReason = reason;
+                throw new RetentionPolicyProtectedException(reason);
+            }
+            _checkedScope=scope;
         }
         internal RetentionComposedContinuationResult Invoke(RetentionComposedScope.ScopeContext scope)
         {

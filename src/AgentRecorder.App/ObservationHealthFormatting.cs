@@ -44,9 +44,14 @@ internal static class ObservationHealthFormatting
         {
             var state=ObservationHealthFacts.HotkeyState(hotkey);
             var policy=ObservationHealthFacts.HotkeyPolicy(hotkey);
+            if (policy == "disabled")
+            {
+                Add(id, name, state, $"{T("HotkeyDisabled")}\r\n{T("Time")}: {Time(owner.SampledAt)}");
+                return;
+            }
             var gesture=hotkey.Gesture==expectedGesture?hotkey.Gesture:T("Unknown");
             Add(id,name,state,$"{gesture}\r\n{T("Policy")}: {policy}\r\n{T(hotkey.Registered?"Registered":"Unregistered")}"+
-                (hotkey.Expected && !hotkey.Registered?$"\r\n{T("Reason")}: registration_failed — {T("registration_failed")} (Win32: {hotkey.ErrorCode})":"")+
+                (state == HealthState.Unavailable?$"\r\n{T("Reason")}: registration_failed — {T("registration_failed")} (Win32: {hotkey.ErrorCode})":"")+
                 $"\r\n{T("Time")}: {Time(owner.SampledAt)}");
         }
         Hotkey("stop","Stop",owner.Stop,"Ctrl+Shift+F10"); Hotkey("chapter","Chapter",owner.Chapter,"Ctrl+Shift+F11");

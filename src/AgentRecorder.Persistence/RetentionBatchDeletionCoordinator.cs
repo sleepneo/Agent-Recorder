@@ -7,7 +7,11 @@ public sealed record RetentionBatchDeletionItemResult(int Position,string Record
 public sealed record RetentionBatchDeletionRequestResult(string BatchDeletionRequestId,string BatchState,string QueryUrl,
     DateTimeOffset CreatedAtUtc,DateTimeOffset ExpiresAtUtc,string? StopReason,bool? BatchResourcesRetired,bool NonAtomic,bool PerItemLocalConfirmation,
     bool RollbackSupported,string SuccessSemantics,int DispositionAcceptedCount,int NotRequestedCount,
-    IReadOnlyList<RetentionBatchDeletionItemResult> Items,string SuggestedAction);
+    IReadOnlyList<RetentionBatchDeletionItemResult> Items,string SuggestedAction)
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public RetentionDeletionPolicy? Policy { get; init; }
+}
 
 /// <summary>At most five original single-item flows. The parent is not a Permit.</summary>
 public sealed class RetentionBatchDeletionCoordinator:IDisposable
@@ -42,9 +46,14 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
     }
     public static void ValidateIds(IReadOnlyList<string> ids)
     {if(ids is null||ids.Count is <1 or >5||ids.Any(id=>!RetentionDeletionCoordinator.ValidRecordingId(id))||ids.Distinct(StringComparer.Ordinal).Count()!=ids.Count)throw new ArgumentException("Supply 1-5 distinct ordinary recording IDs.");}
-    public async Task<RetentionBatchDeletionRequestResult> RequestAsync(IReadOnlyList<string> ids,string key,CancellationToken cancellation=default)
+    public Task<RetentionBatchDeletionRequestResult> RequestAsync(IReadOnlyList<string> ids, string key,
+        CancellationToken cancellation = default) => RequestAsync(ids, key, cancellation, null);
+
+    public async Task<RetentionBatchDeletionRequestResult> RequestAsync(IReadOnlyList<string> ids, string key,
+        CancellationToken cancellation, RetentionDeletionPolicy? policy)
     {
-        var frozen=ids?.ToArray()!;ValidateIds(frozen);key=RetentionDeletionCoordinator.NormalizeKey(key);var digest=BatchDeletionStore.RequestDigest(frozen);var keyHash=RetentionDeletionCoordinator.Digest(key);
+        if (policy?.CompletedBefore > _clock.GetUtcNow()) throw new ArgumentException("Future cutoff.");
+        var frozen=ids?.ToArray()!;ValidateIds(frozen);key=RetentionDeletionCoordinator.NormalizeKey(key);var digest=BatchDeletionStore.RequestDigest(frozen,policy);var keyHash=RetentionDeletionCoordinator.Digest(key);
         if(!Supported)throw new DeletionRequestUnavailableException("host_stopping");Flight? f;
         lock(_gate)
         {
@@ -53,7 +62,7 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
             if(f is not null&&f.Digest!=digest)throw new DeletionRequestConflictException();
             if(f is null&&_active is null)
             {
-                var candidate=new Flight(this,keyHash,digest,frozen,_clock.GetTimestamp(),_stop.Token);
+                var candidate=new Flight(this,keyHash,digest,frozen,policy,_clock.GetTimestamp(),_stop.Token);
                 if(_child.Admission.Acquire(candidate)){_active=f=candidate;candidate.Work=Task.Run(()=>Run(candidate));}
                 else candidate.Cancel.Dispose();
             }
@@ -111,7 +120,7 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
             // A replay gets its original row and never a new child, UI or Permit.
             var old=UseLookup(f,_store.Run("lookup",false,f.Cancel.Token,(c,t)=>_store.Read(c,t,f.Key,true),f.Started));
             if(old is not null){if(old.Digest!=f.Digest)throw new DeletionRequestConflictException();f.Created.TrySetResult(Project(old));return;}
-            f.Row=Use(f,_store.Run("create",true,f.Cancel.Token,(c,t)=>_store.Create(c,t,f.Id,f.Key,f.Ids),f.Started),true);
+            f.Row=Use(f,_store.Run("create",true,f.Cancel.Token,(c,t)=>_store.Create(c,t,f.Id,f.Key,f.Ids,f.Policy),f.Started),true);
             f.Created.TrySetResult(Project(f.Row));
             if(f.Row.Id!=f.Id)return;
             // A backwards wall-clock jump cannot extend the ten-minute lifetime.
@@ -128,12 +137,14 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
                 f.Row=Use(f,_store.Run("reserve",true,f.Cancel.Token,(c,t)=>_store.Reserve(c,t,f.Row,n)),true);
                 CheckpointForTests?.Invoke("reserved",n);
                 var item=f.Row.Items[n];
-                f.Child=_child.StartBatchChild(item.RecordingId,item.ChildKey,item.ChildId,f,f.Cancel.Token);
+                f.Child = _child.StartBatchChild(item.RecordingId, item.ChildKey, item.ChildId, f, f.Cancel.Token,
+                    f.Row.Policy, f.Row.Policy is null ? null : f.Row.Id);
                 var createdOk=true;
                 try
                 {
                     var created=await f.Child.Created.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-                    if(created.DeletionRequestId!=item.ChildId||created.RecordingId!=item.RecordingId)createdOk=false;
+                    if(created.DeletionRequestId!=item.ChildId||created.RecordingId!=item.RecordingId||
+                        created.Policy!=f.Row.Policy)createdOk=false;
                 }
                 catch{createdOk=false;}
                 // Public completion and timeout do not grant this next step.
@@ -144,7 +155,12 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
                 var facts=Use(f,_store.Run("observe",false,CancellationToken.None,(c,t)=>_store.Read(c,t,f.Row.Id,false)),false);
                 var child=facts.Items[n].Child;
                 var accepted=createdOk&&completion.CompletedSuccessfully&&BatchDeletionStore.Accepted(child);
-                reason=accepted?"all_dispositions_accepted":f.Expired?"batch_lifetime_expired":f.Cancel.IsCancellationRequested?"host_stopping":completion.LocalDecisionState=="busy"?"child_busy":"child_non_success_or_unknown";
+                var policyStop = BatchDeletionStore.ChildStopReason(child);
+                if (facts.Policy is null && !RetentionHostKeepLatestProtection.IsHostReason(policyStop)) policyStop = null;
+                reason = accepted ? "all_dispositions_accepted" :
+                    f.Expired ? "batch_lifetime_expired" :
+                    f.Cancel.IsCancellationRequested ? "host_stopping" :
+                    policyStop ?? (completion.LocalDecisionState == "busy" ? "child_busy" : "child_non_success_or_unknown");
                 f.Row=Use(f,_store.Run("itemfinish",true,CancellationToken.None,(c,t)=>_store.FinishItem(c,t,f.Row,n,accepted,accepted?"disposition_accepted":reason,true)),true);
                 CheckpointForTests?.Invoke("item_committed",n);
                 if(!accepted)break;
@@ -180,7 +196,8 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
                 i.Phase=="not_requested"?null:i.ChildId,i.Retired,i.Child is null?null:_child.Project(i.Child))).ToArray();
             return new(row.Id,state,"/api/v1/retention/batch-deletion-requests/"+row.Id,new(row.Created,TimeSpan.Zero),new(row.Expires,TimeSpan.Zero),reason,retired,true,true,false,
                 "os_disposition_request_accepted_not_physical_space_reclaimed",items.Count(i=>i.Request?.DispositionProgress=="accepted"),items.Count(i=>i.State=="not_requested"),Array.AsReadOnly(items),
-                state=="active"?"wait_for_each_local_confirmation_then_query":"inspect_partial_results_do_not_resume_or_retry_unknown");
+                state=="active"?"wait_for_each_local_confirmation_then_query":
+                reason==RetentionHostKeepLatestProtection.InvalidConfigurationReason?"fix_host_keep_latest_configuration_and_restart":"inspect_partial_results_do_not_resume_or_retry_unknown") { Policy = row.Policy };
         }
     }
     public void Dispose()=>_stop.Cancel();
@@ -192,11 +209,13 @@ public sealed class RetentionBatchDeletionCoordinator:IDisposable
         var b=q is not null?await q.Done.Task.ConfigureAwait(false):Volatile.Read(ref _queries.Busy)==0||_child.OwnsQuery&&await _child.WaitForIdleAsync().ConfigureAwait(false);
         return a&&b;
     }
-    private sealed class Flight(RetentionBatchDeletionCoordinator owner,string key,string digest,string[] ids,long started,CancellationToken stop)
+    private sealed class Flight(RetentionBatchDeletionCoordinator owner,string key,string digest,string[] ids,
+        RetentionDeletionPolicy? policy,long started,CancellationToken stop)
     {
         private readonly RetentionBatchDeletionCoordinator _owner=owner; // Root unknown DB/native ownership across gateway recreation.
         internal readonly string Id=Guid.NewGuid().ToString("N"),Key=key,Digest=digest;
         internal readonly long Started=started;
+        internal readonly RetentionDeletionPolicy? Policy = policy;
         internal readonly string[] Ids=ids;internal readonly CancellationTokenSource Cancel=CancellationTokenSource.CreateLinkedTokenSource(stop);
         internal readonly TaskCompletionSource<RetentionBatchDeletionRequestResult> Created=new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<bool> Done=new(TaskCreationOptions.RunContinuationsAsynchronously);

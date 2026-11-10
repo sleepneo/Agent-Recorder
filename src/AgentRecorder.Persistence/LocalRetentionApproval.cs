@@ -58,6 +58,7 @@ internal sealed partial class LocalRetentionApproval : IDisposable
     private readonly CancellationTokenRegistration _hostRegistration;
     private Session? _active;
     private bool _stopped;
+    internal RetentionHostKeepLatestProtection HostProtection { get; }
 
     internal LocalRetentionApproval(RecordingEngine engine, SqliteOperationalStore store, SqliteOrdinaryRecordingHistoryStore writer,
         string sid, string binding, string frozenVideosRoot, ILocalRetentionApprovalUi ui,
@@ -65,11 +66,13 @@ internal sealed partial class LocalRetentionApproval : IDisposable
         IOriginalFileHoldNative? native = null, OriginalFileHoldAdmission? nativeAdmission = null,
         RetentionGuardAdmission? databaseAdmission = null, RetentionComposedAdmission? composedAdmission = null,
         RetentionGuardDatabase? database = null, CancellationToken hostStopping = default,
-        Func<string, bool>? factsExistence = null, DeletionLedgerDatabase? ledgerDatabase = null)
+        Func<string, bool>? factsExistence = null, DeletionLedgerDatabase? ledgerDatabase = null,
+        RetentionHostKeepLatestProtection? hostProtection = null)
     {
         _engine = engine; _store = store; _writer = writer; _sid = sid; _binding = binding; _root = frozenVideosRoot;
         _clock = clock ?? TimeProvider.System; _ui = ui; _admission = admission ?? LocalRetentionAdmission.Host;
-        _reader = new(store, writer, sid, binding, frozenVideosRoot, _clock, factsExistence);
+        HostProtection = hostProtection ?? RetentionHostKeepLatestProtection.Startup;
+        _reader = new(store, writer, sid, binding, frozenVideosRoot, _clock, factsExistence, HostProtection);
         _ledger = new(store, sid, binding, frozenVideosRoot, _clock, ledgerDatabase);
         _composition = new(engine, store, writer, sid, binding, frozenVideosRoot, native, nativeAdmission, databaseAdmission, composedAdmission, database, _clock);
         _hostRegistration = hostStopping.Register(Dispose);
@@ -79,9 +82,10 @@ internal sealed partial class LocalRetentionApproval : IDisposable
         var now = clock.GetUtcNow(); var elapsed = clock.GetElapsedTime(started);
         return now >= utc && now < utc.AddSeconds(60) && elapsed >= TimeSpan.Zero && elapsed < TimeSpan.FromSeconds(60);
     }
-    internal Session Request(string recordingId, CancellationToken cancellation = default)
+    internal Session Request(string recordingId, CancellationToken cancellation = default,RetentionDeletionPolicy? policy=null,
+        string? policyBatchId=null)
     {
-        var session = new Session(this, recordingId, cancellation);
+        var session = new Session(this, recordingId, cancellation,policy,policyBatchId);
         lock (_sync)
         {
             if (_stopped || _engine.RetentionHostStopping) session.Reject(LocalRetentionState.Cancelled);
@@ -176,6 +180,9 @@ internal sealed partial class LocalRetentionApproval : IDisposable
     {
         internal LocalRetentionApproval Host { get; }
         internal string Id { get; }
+        internal RetentionDeletionPolicy? Policy {get;}
+        internal string? PolicyBatchId { get; }
+        internal string? PolicyReason {get;private set;}
         internal LocalRetentionFacts? Facts { get; private set; }
         internal LocalRetentionIntent? Intent { get; private set; }
         internal Permit? ApprovedPermit { get; private set; }
@@ -206,7 +213,15 @@ internal sealed partial class LocalRetentionApproval : IDisposable
             get { lock (Host._sync) { if (State == LocalRetentionState.Approved && ApprovedPermit?.Valid(Host._clock) == false) MarkExpired();
                 return new(State, State == LocalRetentionState.Approved ? ApprovedPermit : null, ApprovalConsumed: _consumed); } }
         }
-        internal Session(LocalRetentionApproval host, string id, CancellationToken cancellation) { Host = host; Id = id; _cancel = cancellation; }
+        internal Session(LocalRetentionApproval host, string id, CancellationToken cancellation,RetentionDeletionPolicy? policy=null,
+            string? policyBatchId=null)
+        {
+            Host = host;
+            Id = id;
+            _cancel = cancellation;
+            Policy = policy;
+            PolicyBatchId = policyBatchId;
+        }
         internal void Reject(LocalRetentionState state) { State = state; _response.TrySetResult(new(state)); _retirement.TrySetResult(true); }
         internal void Start()
         {
@@ -251,7 +266,7 @@ internal sealed partial class LocalRetentionApproval : IDisposable
             try
             {
                 OperationStop.Token.ThrowIfCancellationRequested();
-                _query = Task.Run(() => Host._reader.Read(Id, OperationStop.Token));
+                _query = Task.Run(() => Host._reader.Read(Id, OperationStop.Token,Policy));
                 Facts = await _query.WaitAsync(TimeSpan.FromSeconds(3), OperationStop.Token).ConfigureAwait(false);
                 if (Facts is null || Stopping || Host._engine.RetentionHostStopping) { _response.TrySetResult(new(LocalRetentionState.Unavailable)); return; }
                 Intent = LocalRetentionIntent.ForConfirmedFacts(Facts, Host._clock); Arm();
@@ -276,6 +291,7 @@ internal sealed partial class LocalRetentionApproval : IDisposable
                 }
                 await _finish.Task.ConfigureAwait(false);
             }
+            catch(RetentionPolicyProtectedException e) {PolicyReason=e.Reason;State=LocalRetentionState.Unavailable;_response.TrySetResult(new(State));}
             catch (OperationCanceledException) { _response.TrySetResult(new(State == LocalRetentionState.Expired ? State : LocalRetentionState.Cancelled)); }
             catch { _response.TrySetResult(new(LocalRetentionState.Unavailable)); }
             finally

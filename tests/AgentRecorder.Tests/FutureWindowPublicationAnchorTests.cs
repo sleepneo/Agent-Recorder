@@ -173,7 +173,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
                 Set(CaptureBackendSelector.WgcEnvVar, "wgc-continuous"); DataDirResolver.SetOverride(Root);
                 RecordingPreflightChecker.StorageCapacityProvider = new Capacity();
                 RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(Root, "audio-helper.exe");
-                RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+                RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
                 File.WriteAllText(Path.Combine(Root, "audio-helper.exe"), "synthetic-not-executed");
                 File.WriteAllText(Path.Combine(Root, "wgc-helper.exe"), "synthetic-not-executed");
                 SystemQuery.SetDisplayProvider(() => new() { new("display_1", "Synthetic", true, new(0, 0, 64, 64), 1) });
@@ -185,7 +185,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
                 Future = new(Store); Query = new(Store, Writer);
                 Execute("UPDATE unattended_safety_state SET unattended_mode_code='enabled';");
                 audit = new AuditLogger(Path.Combine(Root, "audit.jsonl"));
-                Engine = new(new RetentionSharedOutputPathTests.QuietAudit(), null, null, null, null, null, new Devices(),
+                Engine = new(new RetentionSharedOutputPathTests.QuietAudit(), null, new ForbiddenBundleGenerator400(), null, null, null, new Devices(),
                     futureWindowStartSafetyInterlock: new StandingLeaseStartSafetyInterlock(),
                     futureWindowStartSafetyValidator: (ticket, now) => Future.ValidateAtBackendStart(ticket, now))
                     { CountdownSteps = 0, DisableDeadlineWatchdogForTests = true };
@@ -373,7 +373,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
         var start = f.Claim(pending, alreadyApproved: true); var rec = await f.Start(start, audio);
         Assert.Null(f.Engine.ReadFutureWindowPublication(start));
         var tracking = f.Coordinator.TrackRunForTests(start); f.Process!.Finish.TrySetResult();
-        await Until(() => rec.IsFinalized); Assert.Equal(RecState.completed, rec.State);
+        await Until(() => rec.IsFinalized); Assert.Equal(RecState.completed, rec.State);Assert.False(rec.GenerateBundle);Assert.Equal(0,rec.BundleGenerationStarted);Assert.Equal("not_applicable",rec.BundleSnapshot.Status);
         var receipt = rec.LastMeta!.PublicationReceipt; Assert.NotNull(receipt);
         var media = f.Engine.ReadFutureWindowPublication(start)!; Assert.Same(receipt, media.Receipt);
         Assert.Null(f.Engine.ReadFutureWindowPublication(new(start.Authorization, start.Process, start.RunId,
@@ -586,7 +586,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
         using var connection = legacy.OpenReadOnlyConnection(); using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable, deferred: true);
         Assert.Null(FutureWindowPublicationStorage.Read(connection, transaction, new[] { repo.Get("old", f.Sid, f.Session)! })["old"]);
         Assert.Equal(1L, SqliteSchemaV40.Validate(connection, transaction)); transaction.Commit();
-        Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
+        Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion); Assert.NotNull(start);
     }
 
     [Fact]

@@ -32,7 +32,7 @@ public sealed class RetentionGuardContractTests
         Assert.Equal(1, calls); Assert.Throws<InvalidOperationException>(() => context!.RequireActive());
         Assert.All(typeof(RetentionReferenceGuard.ScopeContext).GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic), c => Assert.True(c.IsPrivate));
         Assert.Equal(before, SqlitePublicationIdentityReferenceTests.OldBytes(f.Db.Store.DatabasePath, true));
-        Assert.False(Directory.Exists(Path.GetDirectoryName(f.Row.OutputPath))); Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(f.Row.OutputPath))); Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion);
         Assert.Single(adapter.Threads.Distinct()); Assert.Equal(1, adapter.Begins); Assert.Equal(1, adapter.Rollbacks);
         Assert.Equal(1, adapter.Closes); Assert.Equal(1, adapter.ConnectionDisposes); Assert.Equal(1, adapter.TransactionDisposes);
         Assert.Equal(RetentionGuardReason.Checked, await Finish(f.Execute(g))); // True retirement releases admission.

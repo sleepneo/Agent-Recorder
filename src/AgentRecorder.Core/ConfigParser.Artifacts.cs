@@ -18,7 +18,7 @@ public static partial class ConfigParser
         static bool Contains(JsonElement e)=>e.ValueKind==JsonValueKind.Object
             ?e.EnumerateObject().Any(p=>p.Name=="artifacts"||Contains(p.Value))
             :e.ValueKind==JsonValueKind.Array&&e.EnumerateArray().Any(Contains);
-        if(!Contains(root))return true;
+        if(!Contains(root))return false;
         if(!ordinary||root.ValueKind!=JsonValueKind.Object)throw InvalidArtifacts();
         var fields=root.EnumerateObject().ToArray();var policies=fields.Where(p=>p.Name=="artifacts").ToArray();
         if(policies.Length!=1||fields.Any(p=>p.Name!="artifacts"&&Contains(p.Value))||
@@ -27,7 +27,9 @@ public static partial class ConfigParser
         var policy=policies[0].Value;if(policy.ValueKind!=JsonValueKind.Object)throw InvalidArtifacts();
         var options=policy.EnumerateObject().ToArray();
         if(options.Length>1||options.Any(p=>p.Name!="bundle"||p.Value.ValueKind is not(JsonValueKind.True or JsonValueKind.False)))throw InvalidArtifacts();
-        return options.Length==0||options[0].Value.GetBoolean();
+        if(options.Length!=0 && options[0].Value.GetBoolean())
+            throw new ApiException(400,"UNSUPPORTED_FEATURE","New recordings deliver video only. Bundle generation is no longer supported.",new{field="artifacts.bundle",reason="bundle_generation_disabled"});
+        return false;
     }
     public static bool NormalizeArtifactBundle(JsonNode cfg)
     {

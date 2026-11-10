@@ -8,7 +8,12 @@ public sealed class DeletionRequestUnavailableException(string reason="unavailab
 { public string Reason {get;}=reason; }
 public sealed class DeletionRequestConflictException():Exception("The idempotency key belongs to a different deletion request.");
 internal sealed record DeletionRequestRow(string Id,string Sid,string Session,string Root,string Host,string KeyHash,string RequestHash,
-    string RecordingId,long Created,string Phase,string LocalState,string? ApprovalId,bool? RootRetired,bool? LedgerRetired,string? Preparation,string? Settlement,long Updated);
+    string RecordingId,long Created,string Phase,string LocalState,string? ApprovalId,bool? RootRetired,bool? LedgerRetired,string? Preparation,string? Settlement,long Updated)
+{
+    internal RetentionDeletionPolicy? Policy {get;init;}
+    internal string? PolicyReason {get;init;}
+    internal string? PolicyBatchId { get; init; }
+}
 internal sealed record DeletionRequestFacts(DeletionRequestRow Row,DeletionLedgerEntry? Ledger);
 internal sealed record DeletionRequestCreation(DeletionRequestRow Row,bool Created);
 internal sealed record DeletionRequestIo<T>(T? Value,DeletionLedgerCommit Commit,bool Retired,bool Usable,Exception? Error) where T:class;
@@ -55,30 +60,35 @@ internal sealed class DeletionRequestStore(SqliteOperationalStore store,string s
         }
         return new(value,commit,retired,usable&&error is null&&retired,error);
     }
-    internal DeletionRequestCreation Create(SqliteConnection c,SqliteTransaction t,string id,string recordingId,string keyHash,string requestHash)
+    internal DeletionRequestCreation Create(SqliteConnection c,SqliteTransaction t,string id,string recordingId,string keyHash,string requestHash,
+        RetentionDeletionPolicy? policy=null, string? policyBatchId=null)
     {
         var old=Read(c,t,keyHash,true);
         if(old is not null){if(old.RequestHash!=requestHash)throw new DeletionRequestConflictException();return new(old,false);}
         var now=clock.GetUtcNow().UtcTicks;
-        var row=new DeletionRequestRow(id,sid,session,root,DeletionLedger.HostId,keyHash,requestHash,recordingId,now,"awaiting_confirmation","pending",null,null,null,null,null,now);
+        var row=new DeletionRequestRow(id,sid,session,root,DeletionLedger.HostId,keyHash,requestHash,recordingId,now,"awaiting_confirmation","pending",null,null,null,null,null,now) {Policy=policy, PolicyBatchId=policyBatchId};
         using var cmd=c.CreateCommand();cmd.Transaction=t;
         cmd.CommandText="INSERT INTO ordinary_deletion_requests(request_id,owner_sid,owner_session,videos_root,host_id,key_digest,request_digest,recording_id,created_ticks,phase,local_state,updated_ticks) VALUES($id,$sid,$session,$root,$host,$key,$hash,$recording,$at,'awaiting_confirmation','pending',$at);";
         cmd.Parameters.AddWithValue("$id",id);cmd.Parameters.AddWithValue("$sid",sid);cmd.Parameters.AddWithValue("$session",session);cmd.Parameters.AddWithValue("$root",root);cmd.Parameters.AddWithValue("$host",row.Host);
         cmd.Parameters.AddWithValue("$key",keyHash);cmd.Parameters.AddWithValue("$hash",requestHash);cmd.Parameters.AddWithValue("$recording",recordingId);cmd.Parameters.AddWithValue("$at",now);
-        if(cmd.ExecuteNonQuery()!=1)throw new InvalidDataException();return new(row,true);
+        if(cmd.ExecuteNonQuery()!=1)throw new InvalidDataException();
+        RetentionDeletionPolicy.Store(c,t,"request",id,policy);
+        if (policyBatchId is not null) BatchDeletionStore.BindPolicyChild(c, t, row, policyBatchId);
+        return new(row,true);
     }
-    internal DeletionRequestRow Update(SqliteConnection c,SqliteTransaction t,DeletionRequestRow row,string? approval,string local,LocalDeletionResult? result,bool finish)
+    internal DeletionRequestRow Update(SqliteConnection c,SqliteTransaction t,DeletionRequestRow row,string? approval,string local,LocalDeletionResult? result,bool finish,string? policyReason=null)
     {
-        var actual=Read(c,t,row.Id,false);if(actual!=row)throw new InvalidDataException();
+        var actual=ReadBoundRequest(c,t,row.Id,false,sid,session,root,requireDispatch: !finish);
+        if(actual!=row)throw new InvalidDataException();
         var next=row with {Phase=finish?"finished":"execution_reserved",LocalState=local,ApprovalId=approval,
             RootRetired=result?.Retirement?.Retired,LedgerRetired=result?.LedgerResourcesRetired,
-            Preparation=result is null?null:CommitName(result.Preparation),Settlement=result is null?null:CommitName(result.Settlement),Updated=clock.GetUtcNow().UtcTicks};
+            Preparation=result is null?null:CommitName(result.Preparation),Settlement=result is null?null:CommitName(result.Settlement),Updated=clock.GetUtcNow().UtcTicks,PolicyReason=policyReason??result?.PolicyReason??row.PolicyReason};
         using var cmd=c.CreateCommand();cmd.Transaction=t;
         cmd.CommandText="UPDATE ordinary_deletion_requests SET phase=$phase,local_state=$local,approval_id=$approval,root_retired=$root_retired,ledger_retired=$ledger_retired,preparation=$preparation,settlement=$settlement,updated_ticks=$updated WHERE request_id COLLATE BINARY=$id AND phase=$old;";
         cmd.Parameters.AddWithValue("$phase",next.Phase);cmd.Parameters.AddWithValue("$local",local);cmd.Parameters.AddWithValue("$approval",(object?)approval??DBNull.Value);
         cmd.Parameters.AddWithValue("$root_retired",next.RootRetired is null?DBNull.Value:next.RootRetired==true?1:0);cmd.Parameters.AddWithValue("$ledger_retired",next.LedgerRetired is null?DBNull.Value:next.LedgerRetired==true?1:0);
         cmd.Parameters.AddWithValue("$preparation",(object?)next.Preparation??DBNull.Value);cmd.Parameters.AddWithValue("$settlement",(object?)next.Settlement??DBNull.Value);cmd.Parameters.AddWithValue("$updated",next.Updated);
-        cmd.Parameters.AddWithValue("$id",row.Id);cmd.Parameters.AddWithValue("$old",row.Phase);if(cmd.ExecuteNonQuery()!=1)throw new InvalidDataException();return next;
+        cmd.Parameters.AddWithValue("$id",row.Id);cmd.Parameters.AddWithValue("$old",row.Phase);if(cmd.ExecuteNonQuery()!=1)throw new InvalidDataException();RetentionDeletionPolicy.StoreReason(c,t,"request",row.Id,next.PolicyReason);return next;
     }
     internal DeletionRequestFacts? Facts(SqliteConnection c,SqliteTransaction t,string id,bool byKey)
     {
@@ -91,12 +101,17 @@ internal sealed class DeletionRequestStore(SqliteOperationalStore store,string s
             if(op is not null)
             {
                 ledger=DeletionLedger.ReadRow(c,t,op);var b=ledger?.Binding??throw new InvalidDataException();
-                if(b.ApprovalId!=row.ApprovalId||b.Sid!=sid||b.Session!=session||b.Root!=root||b.RecordingId!=row.RecordingId||b.HostId!=row.Host||b.PreparedAt.UtcTicks<row.Created)throw new InvalidDataException();
+                if(b.ApprovalId!=row.ApprovalId||b.Sid!=sid||b.Session!=session||b.Root!=root||b.RecordingId!=row.RecordingId||b.HostId!=row.Host||b.PreparedAt.UtcTicks<row.Created||b.Policy!=row.Policy)throw new InvalidDataException();
             }
         }
+        if(row.PolicyReason is not null && row.ApprovalId is not null && ledger?.PolicyReason!=row.PolicyReason)throw new InvalidDataException("Policy result differs from ledger.");
         return new(row,ledger);
     }
-    private DeletionRequestRow? Read(SqliteConnection c,SqliteTransaction t,string id,bool key)
+    private DeletionRequestRow? Read(SqliteConnection c, SqliteTransaction t, string id, bool key)
+        => ReadBoundRequest(c, t, id, key, sid, session, root);
+
+    internal static DeletionRequestRow? ReadBoundRequest(SqliteConnection c, SqliteTransaction t, string id, bool key,
+        string sid, string session, string root, bool requireDispatch = false)
     {
         var names=new[]{"request_id","owner_sid","owner_session","videos_root","host_id","key_digest","request_digest","recording_id","created_ticks","phase","local_state","approval_id","root_retired","ledger_retired","preparation","settlement","updated_ticks"};
         using var cmd=c.CreateCommand();cmd.Transaction=t;
@@ -108,15 +123,18 @@ internal sealed class DeletionRequestStore(SqliteOperationalStore store,string s
         string? Optional(int i)=>r.IsDBNull(i)?null:Text(i);
         bool? Flag(int i)=>r.IsDBNull(i)?null:Number(i) switch{0=>false,1=>true,_=>throw new InvalidDataException()};
         var row=new DeletionRequestRow(Text(0),Text(1),Text(2),Text(3),Text(4),Text(5),Text(6),Text(7),Number(8),Text(9),Text(10),Optional(11),Flag(12),Flag(13),Optional(14),Optional(15),Number(16));
-        if(r.Read()||!DeletionLedger.Id(row.Id)||!DeletionLedger.Id(row.Host)||!Hash(row.KeyHash)||!Hash(row.RequestHash)||
-            !RetentionDeletionCoordinator.ValidRecordingId(row.RecordingId)||row.RequestHash!=RetentionDeletionCoordinator.RequestHash(row.RecordingId)||
+        if(r.Read())throw new InvalidDataException();r.Close();
+        var policy=RetentionDeletionPolicy.Read(c,t,"request",row.Id,out var policyReason);row=row with {Policy=policy,PolicyReason=policyReason};
+        if(policyReason is not null && row.Phase!="finished" || policy?.CompletedBefore.UtcTicks>row.Created)throw new InvalidDataException();
+        if(!DeletionLedger.Id(row.Id)||!DeletionLedger.Id(row.Host)||!Hash(row.KeyHash)||!Hash(row.RequestHash)||
+            !RetentionDeletionCoordinator.ValidRecordingId(row.RecordingId)||row.RequestHash!=RetentionDeletionCoordinator.RequestHash(row.RecordingId,row.Policy)||
             row.Sid!=sid||row.Session!=session||row.Root!=root||sid.Length>256||session.Length>256||root.Length>1024||
             row.Created<0||row.Updated<row.Created||row.Updated>DateTimeOffset.MaxValue.UtcTicks||row.ApprovalId is not null&&!DeletionLedger.Id(row.ApprovalId)||
             row.Phase is not("awaiting_confirmation" or "execution_reserved" or "finished")||row.LocalState is not("pending" or "approved" or "rejected" or "expired" or "cancelled" or "unavailable" or "busy")||
             row.Preparation is not(null or "not_committed" or "committed" or "unknown")||row.Settlement is not(null or "not_committed" or "committed" or "unknown"))throw new InvalidDataException();
         if(row.Phase=="awaiting_confirmation"&&(row.LocalState!="pending"||row.ApprovalId is not null)||row.Phase=="execution_reserved"&&(row.LocalState!="approved"||row.ApprovalId is null)||row.Phase=="finished"&&row.LocalState=="pending")throw new InvalidDataException();
         if((row.Phase!="finished"||row.ApprovalId is null)&&(row.RootRetired is not null||row.LedgerRetired is not null||row.Preparation is not null||row.Settlement is not null))throw new InvalidDataException();
-        return row;
+        return row with { PolicyBatchId = BatchDeletionStore.ValidatePolicyChild(c, t, row, requireDispatch) };
     }
     internal static bool Hash(string? s)=>s is {Length:64}&&s.All(c=>c is >= '0' and <= '9' or >= 'a' and <= 'f');
     internal static string CommitName(DeletionLedgerCommit c)=>c switch{DeletionLedgerCommit.Committed=>"committed",DeletionLedgerCommit.Unknown=>"unknown",_=>"not_committed"};

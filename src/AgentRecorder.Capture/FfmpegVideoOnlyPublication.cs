@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using AgentRecorder.Infrastructure;
+using Microsoft.Win32.SafeHandles;
 
 namespace AgentRecorder.Capture;
 
@@ -42,6 +43,9 @@ public sealed partial class FfmpegCaptureBackend
         internal readonly CaptureConfig Config;
         internal readonly string FinalPath, Directory, SourcePath, RecordingId;
         internal readonly IStagingToFinalPublisher Publisher;
+        internal OwnedBundleDirectory? OriginalDirectory;
+        internal SafeFileHandle? OriginalMedia, OriginalMarker;
+        internal string MarkerPath => Path.Combine(Directory, "owner.json");
         internal readonly CancellationTokenSource Cancellation = new();
         internal readonly CancellationToken Token;
         internal readonly FileCommitGate Gate = new();
@@ -52,6 +56,13 @@ public sealed partial class FfmpegCaptureBackend
         internal int OutputSettled;
         internal int ExitCode = -1;
         internal OutputMeta? Terminal;
+
+        internal void ReleaseStaging()
+        {
+            OriginalMedia?.Dispose();
+            OriginalMarker?.Dispose();
+            OriginalDirectory?.Dispose();
+        }
     }
 
     private void PrepareVideoOnlyRun(CaptureConfig cfg)
@@ -64,20 +75,38 @@ public sealed partial class FfmpegCaptureBackend
         var directory = Path.Combine(parent, ".agent-recorder-" + id);
         var publisher = VideoOnlyPublisherFactory(cfg.OutputConflictPolicy == "overwrite");
         BeforeStagingCreateForTests?.Invoke(directory);
-        // Atomic exclusive directory creation: never take ownership of an existing directory.
-        if (!CreateDirectoryW(ExtendedDirectoryPath(directory), IntPtr.Zero))
-            throw new ApiException(500, "ENCODER_ERROR", "Could not create owned video staging.");
-        var run = new VideoOnlyRun(cfg, _output, directory, Path.Combine(directory, "capture_video.mp4"), id, publisher);
+        var run = new VideoOnlyRun(cfg, _output, directory, Path.Combine(directory, "capture_video.mp4"), id, publisher)
+        {
+            OriginalDirectory = CreateVideoOnlyStagingDirectory(directory)
+        };
         _videoOnlyRun = run;
         try
         {
-            File.WriteAllText(Path.Combine(directory, "owner.json"), JsonSerializer.Serialize(new { run.RecordingId, run.FinalPath }));
+            using (var marker = new FileStream(run.MarkerPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                run.OriginalMarker = HoldVideoOnlyOriginal(marker.SafeFileHandle);
+                JsonSerializer.Serialize(marker, new { run.RecordingId, run.FinalPath });
+            }
             using var reserved = new FileStream(run.SourcePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            run.OriginalMedia = HoldVideoOnlyOriginal(reserved.SafeFileHandle);
         }
         catch
         {
             CompleteFailedVideoOnlyStart(run);
             throw new ApiException(500, "ENCODER_ERROR", "Could not prepare owned video staging.");
+        }
+    }
+
+    private static OwnedBundleDirectory? CreateVideoOnlyStagingDirectory(string path)
+    {
+        try { return OwnedBundleDirectory.Create(path); }
+        catch (IOException)
+        {
+            // Preserve the existing exclusive creation path if it cannot return
+            // a verifiable handle. This run then has no cleanup authority.
+            if (!CreateDirectoryW(ExtendedDirectoryPath(path), IntPtr.Zero))
+                throw new ApiException(500, "ENCODER_ERROR", "Could not create owned video staging.");
+            return null;
         }
     }
 
@@ -88,11 +117,33 @@ public sealed partial class FfmpegCaptureBackend
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateDirectoryW(string path, IntPtr security);
 
+    private const uint VideoOnlyShareAll = 7;
+    private const uint VideoOnlyDeleteAccess = 0x10000;
+
+    private static SafeFileHandle? HoldVideoOnlyOriginal(SafeFileHandle original)
+        => ReopenVideoOnlyOriginal(original, WindowsReadOnlyFileMetadataProbe.ReadAttributes, VideoOnlyShareAll);
+
+    private static SafeFileHandle? ReopenVideoOnlyOriginal(SafeFileHandle? original, uint access, uint share)
+    {
+        if (original is null || original.IsClosed || original.IsInvalid) return null;
+        var reopened = ReOpenFile(original, access, share, 0);
+        if (!reopened.IsInvalid) return reopened;
+        reopened.Dispose();
+        return null;
+    }
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle ReOpenFile(SafeFileHandle original, uint access, uint sharing, uint flags);
+
     private void CompleteFailedVideoOnlyStart(VideoOnlyRun run)
     {
         var meta = FailedVideoOnly(run, "encoder_start_failed");
-        run.Config.StorageSafety?.EndFfmpegVideoOnlyPublication();
-        RetainVideoOnlySource(run, success: false);
+        try
+        {
+            run.Config.StorageSafety?.EndFfmpegVideoOnlyPublication();
+            RetainVideoOnlySource(run, meta, success: false);
+        }
+        finally { run.ReleaseStaging(); }
         Volatile.Write(ref run.OutputSettled, 1);
         lock (_lock) run.OwnerClaimed = true;
         PublishVideoOnlyTerminal(run, meta, -1);
@@ -211,9 +262,13 @@ public sealed partial class FfmpegCaptureBackend
             candidate.PublicationReceipt = null; candidate.OutputFileExists = false; candidate.SizeBytes = 0;
             candidate.QuantizedTailEvidence = null;
         }
-        BeforeVideoOnlyCleanupForTests?.Invoke();
-        run.Config.StorageSafety?.EndFfmpegVideoOnlyPublication();
-        RetainVideoOnlySource(run, success);
+        try
+        {
+            BeforeVideoOnlyCleanupForTests?.Invoke();
+            run.Config.StorageSafety?.EndFfmpegVideoOnlyPublication();
+            RetainVideoOnlySource(run, candidate, success);
+        }
+        finally { run.ReleaseStaging(); }
         StopMicrophoneMonitor();
         // A timed-out Dispose waiter cannot close resources still used by this owner.
         bool disposeRequested;
@@ -243,36 +298,52 @@ public sealed partial class FfmpegCaptureBackend
         StopReason = reason, Warnings = new[] { reason }, StderrLog = reason
     };
 
-    private static bool OwnsStaging(VideoOnlyRun run) =>
-        string.Equals(Path.GetDirectoryName(Path.GetFullPath(run.Directory)),
-            Path.GetDirectoryName(Path.GetFullPath(run.FinalPath)), StringComparison.OrdinalIgnoreCase) &&
-        Path.GetFileName(run.Directory) == ".agent-recorder-" + run.RecordingId &&
-        Path.GetFullPath(run.SourcePath) == Path.Combine(Path.GetFullPath(run.Directory), "capture_video.mp4");
-
-    private static void RetainVideoOnlySource(VideoOnlyRun run, bool success)
+    private static void RetainVideoOnlySource(VideoOnlyRun run, OutputMeta meta, bool success)
     {
-        if (!OwnsStaging(run)) return;
         try
         {
-            var retention = new TempRetentionPolicy();
-            if (success) retention.OnSuccess(run.SourcePath, null);
+            var api = WindowsFileMetadataApi.Instance;
+            if (run.OriginalDirectory is not { } directory || !OwnedBundleDirectory.IsDirectoryAt(directory.Handle, run.Directory) ||
+                !api.Identity(directory.Handle, out var directoryId, out _) || directoryId.VolumeSerialNumber == 0 ||
+                (directoryId.IdLow == 0 && directoryId.IdHigh == 0))
+                return;
+
+            if (success)
+            {
+                if (!TryDeleteVideoOnlyOriginal(run.OriginalMedia, run.SourcePath)) return;
+            }
             else
             {
-                var result = retention.OnFailure(run.RecordingId, run.SourcePath, null);
-                if (result.FailedDirectoryPath is { } failed)
-                    File.WriteAllText(Path.Combine(failed, "diagnostics.json"), JsonSerializer.Serialize(new { reason = "video_finalization_failed", run.FinalPath }));
+                var observed = run.OriginalMedia is { } media
+                    ? PublicationHandleObservation.Read(api, media, run.SourcePath, allowEmpty: true) : null;
+                if (observed?.Snapshot.Identity is not { } expected) return;
+                var result = new TempRetentionPolicy().OnFailure(run.RecordingId, run.SourcePath, null,
+                    _ => JsonSerializer.Serialize(new { reason = "video_finalization_failed", run.FinalPath }), expected);
+                if (result.Errors.Count > 0)
+                    meta.Warnings = (meta.Warnings ?? Array.Empty<string>()).Concat(result.Errors).ToArray();
+                if (!result.VideoMoved) return;
             }
-            if (File.Exists(run.SourcePath))
-            {
-                // Retention I/O failure preserves the exclusively owned directory
-                // and durable owner marker for diagnosis, never sweeps user output.
-                File.WriteAllText(Path.Combine(run.Directory, "diagnostics.json"), "{\"reason\":\"staged_diagnostics_retained\"}");
+
+            run.OriginalMedia?.Dispose();
+            if (!OwnedBundleDirectory.IsDirectoryAt(directory.Handle, run.Directory) ||
+                !TryDeleteVideoOnlyOriginal(run.OriginalMarker, run.MarkerPath))
                 return;
-            }
-            File.Delete(Path.Combine(run.Directory, "owner.json"));
-            Directory.Delete(run.Directory, recursive: false);
+            run.OriginalMarker?.Dispose();
+            // The native disposition rejects a nonempty directory. Never enumerate
+            // or delete any entry other than our bound media and marker.
+            if (OwnedBundleDirectory.IsDirectoryAt(directory.Handle, run.Directory))
+                directory.DeleteEmptyOriginal();
         }
         catch { } // Keep owned diagnostics if cleanup is unavailable.
+    }
+
+    private static bool TryDeleteVideoOnlyOriginal(SafeFileHandle? original, string path)
+    {
+        using var deletion = ReopenVideoOnlyOriginal(original, VideoOnlyDeleteAccess | WindowsReadOnlyFileMetadataProbe.ReadAttributes,
+            WindowsReadOnlyFileMetadataProbe.ShareRead);
+        return deletion is not null &&
+            PublicationHandleObservation.Read(WindowsFileMetadataApi.Instance, deletion, path, allowEmpty: true) is not null &&
+            WindowsPublicationFileOperations.NoReplace.DeleteOriginal(deletion) == PublicationCleanupOutcome.MarkedForDeletion;
     }
 
     private sealed class FinalCaptureProber(CaptureConfig config, string finalPath) : IOutputProber

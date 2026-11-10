@@ -70,6 +70,8 @@ internal static class Program
     {
         if (args.Length == 1 && args[0] == "--internal-storage-capacity-probe")
             return WindowsStorageCapacityProbe.Run();
+        if (args.Length == 1 && args[0] == WindowsAvStagingInventory.ProbeArgument)
+            return WindowsAvStagingInventory.Run();
         // Start timing as early as possible.
         _readiness = new RuntimeReadiness("headless", ApiServer.Port);
 
@@ -302,17 +304,6 @@ internal static class Program
 
         WritePidFile(opts.PidFile);
 
-        // Cleanup failed-recording diagnostics older than 24 hours. Failure here
-        // must not block startup, and the scope is limited to <data-dir>/failed/.
-        try
-        {
-            new TempRetentionPolicy(dataDir).Cleanup();
-        }
-        catch
-        {
-            // Best-effort cleanup; do not prevent service startup.
-        }
-
         var audit = new AuditLogger();
         _audit = audit;
 
@@ -346,15 +337,15 @@ internal static class Program
         var micStatusProvider = new CoreAudioCaptureStatusProvider();
         var systemAudioEndpointProvider = new CoreAudioSystemAudioEndpointProvider();
 
-        var bundleGenerator = new FfmpegRecordingBundleGenerator();
         var engine = new RecordingEngine(
             audit,
             perfTracer,
-            bundleGenerator,
+            bundleGenerator: null,
             micProvider,
             micStatusProvider,
             systemAudioEndpointProvider: systemAudioEndpointProvider);
         engine.ConfigureOrdinaryRecordingHistory(ordinaryRecordingHistory);
+        SqliteManagedVideoQuota.Configure(engine, operationalStore, _dataDir);
         var tray = new HeadlessTrayContext(audit);
         engine.SetTray(tray);
 
@@ -376,6 +367,10 @@ internal static class Program
             mediaVerificationGateway: new SqliteOrdinaryMediaVerificationGateway(new OrdinaryMediaVerificationService(ordinaryRecordingHistory)),
             attachmentVerificationGateway: new SqliteOrdinaryAttachmentVerificationGateway(new OrdinaryAttachmentVerificationService(ordinaryRecordingHistory)),
             historyArtifactCheckGateway: new SqliteHistoryArtifactCheckGateway(new HistoryArtifactCheckService(operationalStore), historyIdentity));
+        server.ConfigureRetentionStorage(_dataDir);
+        server.ConfigureRetentionStaging(_dataDir);
+        server.ConfigureRetentionUsage(operationalStore, _dataDir);
+        server.ConfigureRetentionReconciliation(operationalStore, _dataDir);
 
         server.SetObservationHealthGateway(CreateObservationHealthGateway(server,_readiness!,_dataDir));
 

@@ -5,25 +5,29 @@ using Microsoft.Data.Sqlite;
 namespace AgentRecorder.Persistence;
 
 internal sealed record LocalRetentionFacts(string RecordingId, PublicationIdentityAnchor Anchor,
-    DateTimeOffset CompletedAtUtc, DateTimeOffset Cutoff);
+    DateTimeOffset CompletedAtUtc, DateTimeOffset Cutoff) {internal RetentionDeletionPolicy? Policy {get;init;} }
 
 // Exact, bounded, existing-only read. Nothing here reserves a path or samples a
 // new physical identity. All provider objects retire before returning facts.
 internal sealed class LocalRetentionFactsReader(SqliteOperationalStore store, SqliteOrdinaryRecordingHistoryStore writer,
-    string sid, string binding, string root, TimeProvider clock, Func<string, bool>? exists = null)
+    string sid, string binding, string root, TimeProvider clock, Func<string, bool>? exists = null,
+    RetentionHostKeepLatestProtection? hostProtection = null)
 {
+    private readonly RetentionHostKeepLatestProtection _hostProtection = hostProtection ?? RetentionHostKeepLatestProtection.Startup;
     private SqliteConnection? _connection;
     private SqliteTransaction? _transaction;
     internal bool Retired
     {
         get { try { return _connection is null || _connection.State == System.Data.ConnectionState.Closed && _connection.Handle is null && _transaction?.Connection is null; } catch { return false; } }
     }
-    internal LocalRetentionFacts? Read(string id, CancellationToken cancel)
+    internal LocalRetentionFacts? Read(string id, CancellationToken cancel,RetentionDeletionPolicy? policy=null)
     {
         var started = clock.GetTimestamp(); var cutoff = clock.GetUtcNow().ToUniversalTime();
         void Check() { cancel.ThrowIfCancellationRequested(); if (clock.GetElapsedTime(started) >= TimeSpan.FromSeconds(3)) throw new TimeoutException(); }
         if (!UnifiedHistoryQueryService.ValidIdentity(sid) || !UnifiedHistoryQueryService.ValidIdentity(binding) ||
             !UnifiedHistoryQueryService.ValidId(id) || id.IndexOfAny(new[] { '/', '\\' }) >= 0) return null;
+        if (_hostProtection.InvalidReason is not null)
+            throw new RetentionPolicyProtectedException(RetentionHostKeepLatestProtection.InvalidConfigurationReason);
         Check(); writer.FlushBeforeUnifiedRead(TimeSpan.FromSeconds(3)); Check();
         LocalRetentionFacts? facts;
         using (var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = store.DatabasePath,
@@ -34,7 +38,8 @@ internal sealed class LocalRetentionFactsReader(SqliteOperationalStore store, Sq
             using var t = c.BeginTransaction(deferred: true);
             _transaction = t;
             SqliteOperationalStore.ValidateRetentionGuardStore(c, t); Check();
-            var selected = RetentionReferenceGuard.ReadExactCandidate(new(store, writer), c, t, id);
+            var history = new UnifiedHistoryQueryService(store, writer);
+            var selected = RetentionReferenceGuard.ReadExactCandidate(history, c, t, id);
             if (selected is null) return null;
             var (row, entry) = selected.Value;
             // Retention can preserve an invalid own role as a protected
@@ -50,7 +55,16 @@ internal sealed class LocalRetentionFactsReader(SqliteOperationalStore store, Sq
                 row.CompletedAtUtc is not { } completed || completed >= cutoff || anchor is null ||
                 !string.Equals(anchor.Path, row.OutputPath, StringComparison.Ordinal) || bundle?.Status != "not_applicable" ||
                 !OriginalFileHoldService.ValidScopeInput(root, anchor)) return null;
-            facts = new(id, anchor, completed, cutoff); Check();
+            if (policy is not null)
+            {
+                var relation = history.ReadRetentionRelations(c, t, new[] { entry }, rows).Single();
+                if (RetentionReferenceGuard.Classify(relation, bundle, anchor) != RetentionGuardReason.Checked) return null;
+            }
+            Check();
+            var reason = _hostProtection.Check(policy, history, c, t, id, completed, cancel);
+            Check();
+            if (reason is not null) throw new RetentionPolicyProtectedException(reason);
+            facts = new(id, anchor, completed, cutoff) {Policy=policy}; Check();
         }
         Check();
         // Existence only, no identity issuance/content/thumbnail. The actual

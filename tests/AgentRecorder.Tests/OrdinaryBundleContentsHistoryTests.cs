@@ -178,6 +178,7 @@ public sealed class OrdinaryBundleContentsHistoryTests(ITestOutputHelper output)
         // exactly v43 objects by their owning table; preserve all old assertions.
         cmd.CommandText=cmd.CommandText.Replace("WHERE name!=","WHERE tbl_name<>'ordinary_deletion_operations' AND name!=",StringComparison.Ordinal);
         cmd.CommandText=cmd.CommandText.Replace("WHERE ","WHERE tbl_name NOT IN ('ordinary_deletion_batches','ordinary_deletion_batch_items') AND tbl_name<>'ordinary_deletion_requests' AND ",StringComparison.Ordinal);
+        cmd.CommandText=cmd.CommandText.Replace("WHERE ","WHERE tbl_name NOT IN ('ordinary_deletion_request_policies','ordinary_deletion_operation_policies','ordinary_deletion_batch_policies','ordinary_deletion_batch_policy_children','ordinary_deletion_host_rejections') AND ",StringComparison.Ordinal);
         using(var r=cmd.ExecuteReader())while(r.Read()){result.Add(string.Join("|",Enumerable.Range(0,3).Select(i=>r.GetValue(i).ToString())));if(r.GetString(1)=="table")tables.Add(r.GetString(0));}
         foreach(var table in tables)
         {

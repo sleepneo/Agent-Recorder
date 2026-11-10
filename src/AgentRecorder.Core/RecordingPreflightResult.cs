@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using AgentRecorder.Capture;
 
 namespace AgentRecorder.Core;
 
@@ -12,4 +13,5 @@ internal sealed record RecordingPreflightResult(
     string? ErrorCode = null,
     string? Message = null,
     string? SuggestedAction = null,
-    IReadOnlyList<string>? Warnings = null);
+    IReadOnlyList<string>? Warnings = null,
+    StorageAdmissionShortfall? StorageShortfall = null);

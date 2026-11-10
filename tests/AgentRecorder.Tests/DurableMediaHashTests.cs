@@ -230,35 +230,7 @@ public sealed class DurableMediaHashTests(ITestOutputHelper output)
         using(var c=store.OpenConnection()) {using var cmd=c.CreateCommand();cmd.CommandText="DELETE FROM ordinary_media_hash WHERE recording_id='fresh';";cmd.ExecuteNonQuery();}
         Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(()=>writer.Read("fresh"));Assert.Null(writer.Read("legacy")!.MediaHash);
     }
-    [Theory]
-    [InlineData(false)] [InlineData(true)]
-    public async Task SilentFormalFfmpegFinalizerAndRestartedAuthenticatedThreeApiProjections(bool headless)
-    {
-        using var f=new Fixture();var priorDir=Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");var priorMode=Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
-        RecordingEngine? engine=null;FfmpegCaptureBackend? backend=null;
-        try
-        {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",f.Root);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE","1");DataDirResolver.SetOverride(f.Root);ApiKeyAuth.InitializeForTesting(f.Root);
-            SystemQuery.SetDisplayTopologyProvider(()=>new() {new("display_1","Synthetic",true,new(0,0,1920,1080),1.0,"synthetic-test-display:display_1",DisplayIdentityResolutionStatus.Resolved)});
-            var audit=new RetentionSharedOutputPathTests.QuietAudit();var tray=new Tray(headless);var generator=new FfmpegRecordingBundleGenerator();
-            engine=new(audit,bundleGenerator:generator);engine.ConfigureOrdinaryRecordingHistory(f.Writer);engine.SetTray(tray);
-            backend=new() { VideoInputArgumentsForTests=_=>new[]{"-re","-f","lavfi","-t","1","-i","color=c=black:s=64x64:r=15"} };engine.BackendFactory=_=>(backend,"ffmpeg");
-            engine.CreateRecording(new JsonObject { ["source"]=new JsonObject {["type"]="display",["display_id"]="display_1"},["video"]=new JsonObject {["fps"]=15},["duration_seconds"]=1,["countdown_seconds"]=0,
-                ["output"]=new JsonObject {["directory"]=Path.GetDirectoryName(f.Op.MediaPath),["filename"]="formal.mp4",["conflict_policy"]="fail"}},"task340-synthetic",tray);
-            tray.Confirm!(ConfirmationDecision.Approve());var rec=Assert.Single(engine._recs.Values);
-            await Until(()=>f.Writer.Read(rec.Id)?.Bundle?.Status is "ready" or "failed");Assert.Equal(RecState.completed,rec.State);var row=f.Writer.Read(rec.Id)!;
-            Assert.Equal("ready",row.Bundle!.Status);Assert.NotNull(rec.LastMeta!.PublicationReceipt);Assert.NotNull(row.MediaHash);
-            Assert.Equal(Independent(rec.OutputPath),row.MediaHash!.Value);Assert.False(new FfmpegOutputProber().Probe(rec.OutputPath).HasAudioStream);
-            using(var metadata=JsonDocument.Parse(File.ReadAllText(Path.Combine(row.Bundle.Path!,"metadata.json"))))Assert.Equal(row.MediaHash.Value,metadata.RootElement.GetProperty("media").GetProperty("sha256").GetString());
-            await AssertApis(engine,f.Store,f.Writer,row,headless);engine.Dispose();engine=null;backend.Dispose();backend=null;f.Reopen();
-            engine=new(audit);engine.ConfigureOrdinaryRecordingHistory(f.Writer);engine.SetTray(tray);Assert.Equal(row.MediaHash,f.Writer.Read(rec.Id)!.MediaHash);await AssertApis(engine,f.Store,f.Writer,row,headless);
-        }
-        finally
-        {
-            engine?.Dispose();backend?.Dispose();ApiKeyAuth.ResetForTesting(null);SystemQuery.SetDisplayTopologyProvider(null);DataDirResolver.ClearOverride();
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",priorDir);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE",priorMode);
-        }
-    }
+
     [Theory]
     [InlineData(false)] [InlineData(true)]
     public async Task AvFormalMuxManualAndNaturalFinalizersCarryPrivateMediaReceipt(bool natural)
@@ -274,10 +246,10 @@ public sealed class DurableMediaHashTests(ITestOutputHelper output)
         Assert.True(response.IsSuccessStatusCode,await response.Content.ReadAsStringAsync());var tray=Field<object>(owned,"Tray");tray.GetType().GetMethod("Approve",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(tray,new object?[]{Path.Combine(Field<string>(owned,"Root"),"Videos")});
         var rec=Assert.Single(engine._recs.Values);await Until(()=>rec.State==RecState.recording);
         if(natural)Field<FakeVideoCaptureWorker>(owned,"Video").EmitNaturalExit(0,"");else engine.Stop(rec.Id,"user_requested");
-        await Until(()=>history.Read(rec.Id)?.Bundle?.Status is "ready" or "failed");Assert.Equal(RecState.completed,rec.State);
-        var row=history.Read(rec.Id)!;Assert.Equal("ready",row.Bundle!.Status);Assert.NotNull(row.MediaHash);Assert.NotNull(rec.LastMeta!.PublicationReceipt);
-        Assert.True(new FfmpegOutputProber().Probe(rec.OutputPath).HasAudioStream);Assert.Equal(Independent(rec.OutputPath),row.MediaHash!.Value);
-        await AssertApis(engine,store,history,row,false);AvMuxOwnershipTests.AssertNoOwnedMux(rec.OutputPath);
+        await Until(()=>rec.IsFinalized);Assert.Equal(RecState.completed,rec.State);
+        var row=history.Read(rec.Id)!;Assert.Equal("not_applicable",row.Bundle!.Status);Assert.Null(row.MediaHash);Assert.NotNull(rec.LastMeta!.PublicationReceipt);
+        Assert.False(rec.GenerateBundle);Assert.Equal(0,rec.BundleGenerationStarted);Assert.True(new FfmpegOutputProber().Probe(rec.OutputPath).HasAudioStream);
+
     }
     private static T Field<T>(object fixture,string name)=>(T)fixture.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(fixture)!;
     private static async Task Until(Func<bool> done)

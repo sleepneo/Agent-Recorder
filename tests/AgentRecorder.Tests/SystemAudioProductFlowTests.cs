@@ -37,7 +37,7 @@ public sealed class SystemAudioProductFlowTests : IDisposable
         // capability preflight private too, including isolated build layouts.
         RecordingPreflightChecker.AudioHelperPathResolver = () => "private-system-audio-helper";
         RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new()
-        { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = System.Diagnostics.Stopwatch.Frequency };
+        { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = System.Diagnostics.Stopwatch.Frequency };
     }
 
     public void Dispose()

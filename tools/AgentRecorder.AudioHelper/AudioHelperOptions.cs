@@ -33,6 +33,7 @@ internal sealed class AudioHelperOptions
     public AudioSourceKind SourceKind { get; set; } = AudioSourceKind.Microphone;
     public AudioCaptureEngine CaptureEngine { get; set; } = AudioCaptureEngine.WasapiDirect;
     internal bool AutoHfpPairDiscovery { get; set; }
+    internal string? OwnedWavIdentity { get; set; }
     public string EndpointId { get; set; } = "";
     public string HfpRenderEndpointId { get; set; } = "";
     public string OutputPath { get; set; } = "";
@@ -170,6 +171,17 @@ internal static class AudioHelperArgumentParser
                 if (v == null) return result;
                 opts.AllowedRoot = v;
             }
+            else if (string.Equals(name, "owned-wav", StringComparison.OrdinalIgnoreCase))
+            {
+                var v = TakeNext("owned-wav");
+                if (v == null) return result;
+                if (!OwnedWavTarget.IsValidIdentity(v))
+                {
+                    result.Error = "Invalid --owned-wav file identity";
+                    return result;
+                }
+                opts.OwnedWavIdentity = v;
+            }
             else if (string.Equals(name, "stop-signal", StringComparison.OrdinalIgnoreCase))
             {
                 var v = TakeNext("stop-signal");
@@ -225,7 +237,7 @@ internal static class AudioHelperArgumentParser
                 !string.IsNullOrEmpty(opts.AllowedRoot) ||
                 !string.IsNullOrEmpty(opts.StopSignalPath) ||
                 !string.IsNullOrEmpty(opts.RecordingId) ||
-                opts.AutoHfpPairDiscovery ||
+                opts.AutoHfpPairDiscovery || opts.OwnedWavIdentity is not null ||
                 seen.Contains("capture-engine") ||
                 seen.Contains("source-kind"))
             {
@@ -245,6 +257,12 @@ internal static class AudioHelperArgumentParser
         if (opts.AutoHfpPairDiscovery && opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
         {
             result.Error = "--auto-hfp-pair requires --capture-engine wasapi-direct";
+            return result;
+        }
+
+        if (opts.OwnedWavIdentity is not null && opts.CaptureEngine != AudioCaptureEngine.WasapiDirect)
+        {
+            result.Error = "--owned-wav requires --capture-engine wasapi-direct";
             return result;
         }
 

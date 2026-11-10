@@ -15,7 +15,11 @@ internal static class Program
     private const int ExitRuntimeFailure = 6;
     private const int ExitAlreadyExists = 7;
 
-    internal static async Task<int> Main(string[] args)
+    internal static Task<int> Main(string[] args) => RunAsync(args);
+
+    internal static async Task<int> RunAsync(string[] args,
+        Func<AudioHelperOptions, TimeSpan, (IAudioInput? Input, string? ErrorCode, string? Reason)>? inputFactory = null,
+        EventWriter? testEvents = null)
     {
         var result = AudioHelperArgumentParser.Parse(args);
         if (!result.Ok)
@@ -64,7 +68,8 @@ internal static class Program
         }
 
         var policy = new PathPolicy(allowedRoot);
-        var outputCheck = policy.ValidateOutputPath(opts.OutputPath);
+        var outputCheck = policy.ValidateOutputPath(opts.OutputPath, opts.OwnedWavIdentity);
+        using var ownedWav = outputCheck.OwnedWav;
         if (!outputCheck.Ok)
         {
             WriteStderr(outputCheck.Error);
@@ -83,7 +88,7 @@ internal static class Program
         string outputParent = Path.GetDirectoryName(outputCheck.CanonicalPath)!;
         try
         {
-            Directory.CreateDirectory(outputParent);
+            if (ownedWav is null) Directory.CreateDirectory(outputParent);
         }
         catch (Exception ex)
         {
@@ -94,7 +99,7 @@ internal static class Program
         string stopParent = Path.GetDirectoryName(stopCheck.CanonicalPath)!;
         try
         {
-            Directory.CreateDirectory(stopParent);
+            if (ownedWav is null) Directory.CreateDirectory(stopParent);
         }
         catch (Exception ex)
         {
@@ -102,7 +107,7 @@ internal static class Program
             return ExitRuntimeFailure;
         }
 
-        var events = new EventWriter();
+        var events = testEvents ?? new EventWriter();
         using var cts = new CancellationTokenSource();
         var watcher = new StopWatcher(stopCheck.CanonicalPath, () => cts.Cancel());
 
@@ -114,7 +119,8 @@ internal static class Program
                 return await nativeSession.RunAsync().ConfigureAwait(false);
             }
 
-            using var session = new CaptureSession(opts, outputCheck, events, watcher, cts);
+            using var session = new CaptureSession(opts, outputCheck, events, watcher, cts,
+                inputFactory is null ? null : budget => inputFactory(opts, budget));
             return session.Run();
         }
         catch (Exception ex)
@@ -166,6 +172,7 @@ internal static class Program
         var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? version;
         Console.Out.WriteLine($"{name} {informational}");
         Console.Out.WriteLine($"Protocol: audio-helper-v1");
+        Console.Out.WriteLine("OwnedWav: file-id-v1");
         Console.Out.WriteLine($"TimestampFrequency: {Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture)}");
         Console.Out.Flush();
     }

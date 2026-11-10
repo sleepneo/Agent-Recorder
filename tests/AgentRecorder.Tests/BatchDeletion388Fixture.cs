@@ -34,7 +34,8 @@ internal sealed class BatchDeletion388Fixture:IDisposable
     private readonly bool _real;
     private readonly string? _prior=Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
     internal BatchDeletion388Fixture(int count=2,bool real=false,bool headless=false,bool configured=true,RuntimeReadiness? ready=null,
-        DeletionRequestFixture.Io? batchIo=null,DeletionRequestFixture.Io? childIo=null,DeletionLedgerDatabase? ledger=null,RetentionGuardDatabase? guard=null)
+        DeletionRequestFixture.Io? batchIo=null,DeletionRequestFixture.Io? childIo=null,DeletionLedgerDatabase? ledger=null,RetentionGuardDatabase? guard=null,
+        RetentionHostKeepLatestProtection? hostProtection=null)
     {
         _real=real;F=new(real);Rows.Add(F.Row);
         for(var n=1;n<count;n++)
@@ -60,7 +61,7 @@ internal sealed class BatchDeletion388Fixture:IDisposable
             {Assert.True(WindowsOriginalFileHoldNative.Instance.Standard(Native.Leaf!,out var standard,out _));Assert.NotEqual(0,standard.DeletePending);}
             return result;
         };
-        Authority=new(F.Engine,F.Db.Store,F.Db.Ordinary,Sid,Session,F.Videos,Prompts,F.Clock,F.Admission,Native,F.Files.Admission,F.DatabaseAdmission,F.ComposedAdmission,guard,ledgerDatabase:ledger);
+        Authority=new(F.Engine,F.Db.Store,F.Db.Ordinary,Sid,Session,F.Videos,Prompts,F.Clock,F.Admission,Native,F.Files.Admission,F.DatabaseAdmission,F.ComposedAdmission,guard,ledgerDatabase:ledger,hostProtection:hostProtection);
         ChildIo=childIo??new();BatchIo=batchIo??new();
         Single=new(F.Db.Store,Sid,Session,F.Videos,Authority,F.Clock,ChildIo,Admission,Queries);
         Batch=new(F.Db.Store,Sid,Session,F.Videos,Single,F.Clock,BatchIo,Queries);

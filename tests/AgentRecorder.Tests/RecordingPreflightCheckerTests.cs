@@ -315,7 +315,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
         {
             probed = true;
-            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
         };
 
         var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
@@ -335,7 +335,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
         {
             probed = true;
-            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
         };
 
         var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
@@ -356,7 +356,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
         {
             probed = true;
-            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
         };
 
         var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
@@ -499,6 +499,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         {
             Success = true,
             ProtocolVersion = "audio-helper-v1",
+            OwnedWavCapability = "file-id-v1",
             TimestampFrequency = Stopwatch.Frequency + 1
         };
 
@@ -546,6 +547,7 @@ public class RecordingPreflightCheckerTests : IDisposable
         {
             Success = true,
             ProtocolVersion = "audio-helper-v1",
+            OwnedWavCapability = "file-id-v1",
             TimestampFrequency = Stopwatch.Frequency
         };
 
@@ -566,13 +568,73 @@ public class RecordingPreflightCheckerTests : IDisposable
         RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
         {
             probed = true;
-            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+            return new AudioHelperProbeResult { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
         };
 
         var result = RecordingPreflightChecker.CheckBeforeStart(rec);
 
         Assert.True(result.Passed);
         Assert.True(probed);
+    }
+
+    [Fact]
+    public void Task415SInjectedProbeMustAlsoReportOwnedWav()
+    {
+        var rec = DisplayRecordingWithMicrophone(Path.Combine(_tmp.Path, "out.mp4"));
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => _fakeHelper.ExecutablePath;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new()
+        {
+            Success = true,
+            ProtocolVersion = "audio-helper-v1",
+            TimestampFrequency = Stopwatch.Frequency
+        };
+
+        var result = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+
+        Assert.False(result.Passed);
+        Assert.Equal("audio_helper_protocol_error", result.ErrorCode);
+        Assert.Equal("update_audio_helper", result.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData("reordered", true)]
+    [InlineData("legacy", false)]
+    [InlineData("wrong", false)]
+    [InlineData("duplicate", false)]
+    [InlineData("conflict", false)]
+    [InlineData("prefix", false)]
+    [InlineData("duplicate_protocol", false)]
+    [InlineData("wrong_name", false)]
+    [InlineData("wrong_frequency", false)]
+    [InlineData("oversized", false)]
+    [InlineData("nonzero", false)]
+    public void Task415SPreflightAndSystemAudioAvailabilityUseActualHelperResponse(string response, bool expected)
+    {
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => _fakeHelper.ExecutablePath;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (path, token) =>
+            AudioHelperProbeLauncher.Run(path, TimeSpan.FromSeconds(5), token);
+        var prior = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", response);
+            var output = Path.Combine(_tmp.Path, "out.mp4");
+            var microphone = RecordingPreflightChecker.CheckBeforeConfirmation(DisplayRecordingWithMicrophone(output));
+            var loopback = RecordingPreflightChecker.CheckBeforeConfirmation(DisplayRecordingWithSystemLoopback(output));
+            var availability = RecordingPreflightChecker.ProbeSystemAudioHelperAvailability();
+            Assert.Equal(expected, microphone.Passed);
+            Assert.Equal(expected, loopback.Passed);
+            Assert.Equal(expected, availability.Available);
+            Assert.Equal(microphone.ErrorCode, loopback.ErrorCode);
+            Assert.Equal(loopback.ErrorCode, availability.ReasonCode);
+            if (!expected)
+            {
+                Assert.Equal(response == "nonzero" ? "audio_helper_probe_failed" : "audio_helper_protocol_error", loopback.ErrorCode);
+                Assert.Equal(response == "nonzero" ? "check_audio_helper_version" : "update_audio_helper", loopback.SuggestedAction);
+            }
+        }
+        finally { Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", prior); }
     }
 
     [Fact]

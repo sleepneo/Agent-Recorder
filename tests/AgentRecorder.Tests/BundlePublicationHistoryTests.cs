@@ -244,57 +244,7 @@ public sealed class BundlePublicationHistoryTests(ITestOutputHelper output)
         output.WriteLine(string.Join("\n", plans));
     }
 
-    [Theory]
-    [InlineData(false)] [InlineData(true)]
-    public async Task FormalCoreLavfiProducerAndAuthenticatedExistingApiExposeOnlyObservations(bool headless)
-    {
-        using var f = new Fixture();
-        var priorData = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR"); var priorMode = Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");
-        RecordingEngine? engine = null; ApiServer? api = null; FfmpegCaptureBackend? backend = null;
-        try
-        {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", f.Root); Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", "1"); DataDirResolver.SetOverride(f.Root); ApiKeyAuth.InitializeForTesting(f.Root);
-            SystemQuery.SetDisplayTopologyProvider(() => new() { new("display_1", "Synthetic", true, new SystemQuery.Bounds(0, 0, 1920, 1080), 1.0, "synthetic-test-display:display_1", DisplayIdentityResolutionStatus.Resolved) });
-            var audit = new RetentionSharedOutputPathTests.QuietAudit(); var tray = new ApiTray(headless); var generator = new FfmpegRecordingBundleGenerator();
-            engine = new(audit, bundleGenerator: generator); engine.ConfigureOrdinaryRecordingHistory(f.Writer); engine.SetTray(tray);
-            backend = new() { VideoInputArgumentsForTests = _ => new[] { "-re", "-f", "lavfi", "-t", "1", "-i", "color=c=black:s=64x64:r=15" } };
-            engine.BackendFactory = _ => (backend, "ffmpeg");
-            engine.CreateRecording(new JsonObject { ["source"] = new JsonObject { ["type"] = "display", ["display_id"] = "display_1" }, ["video"] = new JsonObject { ["fps"] = 15 }, ["duration_seconds"] = 1, ["countdown_seconds"] = 0,
-                ["output"] = new JsonObject { ["directory"] = f.Root, ["filename"] = "core.mp4", ["conflict_policy"] = "fail" } }, "task337-synthetic", tray);
-            tray.Confirm!(ConfirmationDecision.Approve()); var recording = Assert.Single(engine._recs.Values);
-            var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (DateTime.UtcNow < deadline && f.Writer.Read(recording.Id)?.Bundle?.Status is not ("ready" or "failed")) await Task.Delay(20);
-            var row = f.Writer.Read(recording.Id)!; Assert.Equal(RecState.completed, recording.State); Assert.Equal("ready", row.Bundle!.Status); Assert.NotNull(row.Bundle.IdentityEvidence);
-            Assert.Equal(recording.Id, row.Bundle.IdentityEvidence.RecordingId);
-            Assert.Equal(recording.OrdinaryBundleOperation!.OperationId, row.Bundle.IdentityEvidence.OperationId);
-            api = new(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0,
-                unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(new(f.Store, f.Writer, headless), () => (Sid, Session)), artifactCheckGateway: new SqliteOrdinaryArtifactCheckGateway(new(f.Writer))); api.Start();
-            using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new($"http://127.0.0.1:{api.BoundPort}"), Timeout = TimeSpan.FromSeconds(8) };
-            var endpoint = "/api/v1/recording-history/" + recording.Id + "/artifacts/check";
-            using (var denied = await client.GetAsync(endpoint)) Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
-            client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
-            using (var bad = await client.GetAsync(endpoint + "?path=foreign")) Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
-            using (var response = await client.GetAsync(endpoint))
-            {
-                Assert.Equal(HttpStatusCode.OK, response.StatusCode); var text = await response.Content.ReadAsStringAsync(); using var json = JsonDocument.Parse(text);
-                Assert.All(json.RootElement.GetProperty("data").GetProperty("bundle").GetProperty("contents").EnumerateArray(), item => Assert.Equal("match", item.GetProperty("identity_state").GetString()));
-                foreach (var privateName in new[] { "file_id", "volume_id", "operation_id", "receipt", "anchor" }) Assert.DoesNotContain(privateName, text, StringComparison.OrdinalIgnoreCase);
-            }
-            using (var response = await client.GetAsync("/api/v1/capabilities"))
-            {
-                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync()); var capability = json.RootElement.GetProperty("data").GetProperty("ordinary_artifact_check");
-                Assert.Equal("media_and_five_bundle_publication_anchors", capability.GetProperty("identity_scope").GetString());
-                Assert.Equal(6, capability.GetProperty("max_files").GetInt32()); Assert.Equal(64, capability.GetProperty("max_distinct_ancestors").GetInt32()); Assert.Equal(3000, capability.GetProperty("deadline_ms").GetInt32());
-                Assert.False(capability.GetProperty("deletion_supported").GetBoolean()); Assert.False(capability.GetProperty("content_verification").GetBoolean());
-            }
-            output.WriteLine("Authorized synthetic lavfi backend -> real Core operation -> formal Bundle generator -> V35 writer -> existing authenticated artifact API five matches, private evidence absent.");
-        }
-        finally
-        {
-            api?.Stop(); engine?.Dispose(); backend?.Dispose(); ApiKeyAuth.ResetForTesting(null); SystemQuery.SetDisplayTopologyProvider(null); DataDirResolver.ClearOverride();
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", priorData); Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE", priorMode);
-        }
-    }
+
     private sealed class ApiTray(bool headless) : ITrayContext
     {
         internal Action<ConfirmationDecision>? Confirm;

@@ -49,7 +49,7 @@ public sealed partial class OrdinaryWgcBundleTests
             Assert.Equal(first.Id, first.AuthorizationProof.RecordingId); Assert.Equal(second.Id, second.AuthorizationProof.RecordingId);
             f.Tray.Confirmations[first.Id](ConfirmationDecision.Approve()); Assert.Equal(2, f.FactoryCalls);
             f.Generator.Release.TrySetResult(); one.Process.Finish.TrySetResult();
-            await Until(() => first.IsFinalized && first.BundleSnapshot.Status == "ready");
+            await Until(() => first.IsFinalized && first.BundleSnapshot.Status == "not_applicable");
             Assert.Equal(RecState.recording, second.State); Assert.False(two.Process.HasExited);
             Assert.False(two.Backend.OutputRetirement.IsCompleted);
             Assert.Equal(identityA, a.WindowIdentity); Assert.Equal(identityB, b.WindowIdentity);
@@ -59,12 +59,12 @@ public sealed partial class OrdinaryWgcBundleTests
                 Assert.Equal("completed", (await Get(client, "/api/v1/recordings/" + first.Id)).GetProperty("status").GetString());
                 Assert.Equal("recording", (await Get(client, "/api/v1/recordings/" + second.Id)).GetProperty("status").GetString());
             }
-            two.Process.Finish.TrySetResult(); await Until(() => second.IsFinalized && second.BundleSnapshot.Status == "ready");
+            two.Process.Finish.TrySetResult(); await Until(() => second.IsFinalized && second.BundleSnapshot.Status == "not_applicable");
             await one.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5)); await two.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
             await PathCanonical381RHistory(f, a); await PathCanonical381RHistory(f, b);
             Assert.Equal(Hash(f.Clip),Hash(a.OutputPath)); Assert.Equal(Hash(redClip),Hash(b.OutputPath));
             Assert.NotEqual(Hash(a.OutputPath),Hash(b.OutputPath));
-            Assert.NotEqual(a.OrdinaryTargetKey, b.OrdinaryTargetKey); Assert.NotEqual(a.OrdinaryBundleOperation, b.OrdinaryBundleOperation);
+            Assert.NotEqual(a.OrdinaryTargetKey, b.OrdinaryTargetKey); Assert.Null(a.OrdinaryBundleOperation); Assert.Null(b.OrdinaryBundleOperation);
             Assert.Null(f.Writer.Read(a.Id)!.NestedRole); Assert.Null(f.Writer.Read(b.Id)!.ParentRecordingId);
             Assert.All(f.Tray.UiEvents, p => Assert.Equal(f.Engine._recs[p.RecordingId].WindowIdentity, p.WindowIdentity));
             SaveSeriesBundleEvidence("independent382-two-" + reverse, new { reverse, first = first.Id, second = second.Id,
@@ -104,7 +104,7 @@ public sealed partial class OrdinaryWgcBundleTests
             Assert.Equal(RecState.recording, a.State); Assert.False(live.Process.HasExited);
             Assert.True(RuntimeOutputTestEngine.Read(f.Engine, a.OutputPath)!.Paths.Single().InUse);
             live.Process.Finish.TrySetResult(); f.Generator.Release.TrySetResult();
-            await Until(() => a.IsFinalized && a.BundleSnapshot.Status == "ready");
+            await Until(() => a.IsFinalized && a.BundleSnapshot.Status == "not_applicable");
             await PathCanonical381RHistory(f, a); Assert.Equal(b.State.ToString(), f.Writer.Read(b.Id)!.Status);
         }
         finally { await NestedWindow381Drain(f); }
@@ -191,7 +191,7 @@ public sealed partial class OrdinaryWgcBundleTests
             f.Engine.Stop(a.Id,"user_requested"); await Until(()=>a.IsFinalized);
             Assert.Equal(RecState.completed,a.State); Assert.Equal(RecState.recording,b.State);
             processes[(nint)43].Finish.TrySetResult(); f.Generator.Release.TrySetResult();
-            await Until(()=>b.IsFinalized&&b.BundleSnapshot.Status=="ready");
+            await Until(()=>b.IsFinalized&&b.BundleSnapshot.Status == "not_applicable");
             Assert.Equal(1,processes[(nint)42].BeginObserved); await PathCanonical381RHistory(f,b);
         }
         catch(Exception e)
@@ -212,34 +212,23 @@ public sealed partial class OrdinaryWgcBundleTests
     }
 
     [Fact]
-    public async Task IndependentWindow382IdleExitWaitsForBothOriginalBundleHosts()
+    public async Task IndependentWindow382IdleExitWaitsForBothOriginalVideoWriters()
     {
         using var f = RuntimeFixture(); await f.Prepare(); NestedWindow381Providers(f); f.StartApi();
-        var queue = new List<Func<Task>>();
-        var started = new HashSet<int>();
-        async Task Run(int i) { if (started.Add(i)) await queue[i](); }
-        f.Engine.BundleGenerationDispatcherForTests = run => { lock (queue) queue.Add(run); return Task.CompletedTask; };
-        var a = await NestedWindow381Accept(f, IndependentWindow382Request(f));
-        var b = await NestedWindow381Accept(f, IndependentWindow382Request(f, "window_43"));
-        var one = await IndependentWindow382Approve(f, a); var two = await IndependentWindow382Approve(f, b);
+        f.Engine.BundleGenerationDispatcherForTests=_=>throw new Xunit.Sdk.XunitException("Unexpected Bundle dispatch");
+        var a=await NestedWindow381Accept(f,IndependentWindow382Request(f));
+        var b=await NestedWindow381Accept(f,IndependentWindow382Request(f,"window_43"));
+        var one=await IndependentWindow382Approve(f,a);var two=await IndependentWindow382Approve(f,b);
         try
         {
-            one.Process.Finish.TrySetResult(); two.Process.Finish.TrySetResult();
-            await Until(() => a.IsFinalized && b.IsFinalized && BundleUseCount(f) == 2);
-            Assert.NotNull(f.Engine.TryReserveIdleHostShutdown(() => null));
-            Assert.False(f.Engine.RetentionHostStopping);
-            f.Generator.Release.TrySetResult(); await Run(0); await Until(() => BundleUseCount(f) == 1);
-            Assert.NotNull(f.Engine.TryReserveIdleHostShutdown(() => null)); Assert.False(f.Engine.RetentionHostStopping);
-            await Run(1); await Until(() => BundleUseCount(f) == 0);
-            await one.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5)); await two.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Null(f.Engine.TryReserveIdleHostShutdown(() => null)); Assert.True(f.Engine.RetentionHostStopping);
+            Assert.NotNull(f.Engine.TryReserveIdleHostShutdown(()=>null));
+            one.Process.Finish.TrySetResult();await Until(()=>a.IsFinalized);await one.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(RecState.recording,b.State);Assert.NotNull(f.Engine.TryReserveIdleHostShutdown(()=>null));
+            two.Process.Finish.TrySetResult();await Until(()=>b.IsFinalized);await two.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
+            await Until(()=>f.Engine.GetIndependentWindowBudget().Reserved==0);
+            Assert.Equal(0,f.Generator.Calls);Assert.Equal(0,BundleUseCount(f));
+            Assert.Null(f.Engine.TryReserveIdleHostShutdown(()=>null));Assert.True(f.Engine.RetentionHostStopping);
         }
-        finally
-        {
-            f.Generator.Release.TrySetResult();
-            foreach (var rec in f.Engine._recs.Values.Where(r => !r.IsFinalized)) f.Engine.Stop(rec.Id, "user_requested");
-            for (int i = 0; i < queue.Count; i++) await Run(i);
-            await NestedWindow381Drain(f);
-        }
+        finally {await NestedWindow381Drain(f);}
     }
 }

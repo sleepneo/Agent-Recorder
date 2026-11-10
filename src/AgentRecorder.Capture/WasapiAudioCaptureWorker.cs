@@ -47,16 +47,22 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
     private int _hostProcessExited;
     private readonly WorkerStartBoundary _hostStart = new();
     internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    internal bool StagingWriterRetired => _hostStart.ObserveWriterRetired(ReadWriterRetirement);
     private void ObserveHostProcessExit()
     { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
 
     private bool ReadStartedHostRetirement()
     {
-        ObserveHostProcessExit();
-        try { return Volatile.Read(ref _hostProcessExited) != 0 && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+        try { return ReadWriterRetirement() && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
                     Volatile.Read(ref _hostStderrRetired) != 0 &&
                     (_microphoneMonitorTask?.IsCompleted ?? true); }
         catch { return false; }
+    }
+
+    private bool ReadWriterRetirement()
+    {
+        ObserveHostProcessExit();
+        return Volatile.Read(ref _hostProcessExited) != 0;
     }
     private Task? _stdoutReader;
     private Task? _watcher;
@@ -95,6 +101,18 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
 
     private string? _stopSignalPath;
     private string? _outputPath;
+    internal AvSplitStaging.Input? OwnedWavInput { get; set; }
+    private string? _expectedOwnedWavIdentity;
+    private int _ownedWavTerminalVerified;
+    internal bool HasOwnedWavTerminalEvidence
+    {
+        get
+        {
+            lock (_lock)
+                return Volatile.Read(ref _ownedWavTerminalVerified) != 0 && Volatile.Read(ref _protocolErrorRaised) == 0 &&
+                    _terminalSummary?.State is AudioHelperSessionState.Success or AudioHelperSessionState.Stopped or AudioHelperSessionState.Failed;
+        }
+    }
     private string? _allowedRoot;
 
     internal string? HelperExePathOverride { get; set; }
@@ -213,7 +231,9 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         if (string.IsNullOrWhiteSpace(endpointId))
             throw new ApiException(400, "audio_endpoint_id_unmappable", "Could not map microphone device id to CoreAudio endpoint id.");
 
-        _allowedRoot = AllowedRootOverride ?? dir ?? Path.GetTempPath();
+        // Split capture derives its scope from the reserved leaf. Standalone
+        // and diagnostic callers retain their existing allowed-root behavior.
+        _allowedRoot = (OwnedWavInput is null ? AllowedRootOverride : null) ?? dir ?? Path.GetTempPath();
         var recordingId = Path.GetFileNameWithoutExtension(outputPath) ?? "rec_unknown";
         _expectedRecordingId = recordingId;
         _stopSignalPath = StopSignalPathOverride ?? Path.Combine(_allowedRoot, $"{recordingId}_audio_stop.signal");
@@ -224,6 +244,16 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         var helperExe = HelperExePathOverride ?? AudioHelperExePathResolver.Resolve();
         var args = BuildArgs(endpointId, outputPath, _allowedRoot, _stopSignalPath, recordingId,
             HelperArgumentsOverride, EnableAutomaticHfpPairDiscovery, cfg.IsSystemLoopback);
+        if (OwnedWavInput is { } input)
+        {
+            if (!string.Equals(input.Path, outputPath, StringComparison.Ordinal) ||
+                !string.Equals(_allowedRoot, dir, StringComparison.OrdinalIgnoreCase) || input.Identity() is not { } identity)
+                throw new IOException("Could not verify the reserved WASAPI WAV.");
+            _expectedOwnedWavIdentity = FormattableString.Invariant(
+                $"{identity.VolumeSerialNumber:x16}{identity.IdLow:x16}{identity.IdHigh:x16}");
+            args.Add("--owned-wav");
+            args.Add(_expectedOwnedWavIdentity);
+        }
 
         _proc = new Process
         {
@@ -553,6 +583,17 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
             return;
         }
 
+        if (_expectedOwnedWavIdentity is { } expected)
+        {
+            bool requiresEvidence = evt.Result is AudioHelperEventResult.Started or AudioHelperEventResult.Ok or AudioHelperEventResult.Stopped;
+            if (evt.OwnedWavIdentityDuplicate || ((requiresEvidence || evt.OwnedWavIdentity is not null) &&
+                !string.Equals(evt.OwnedWavIdentity, expected, StringComparison.Ordinal)))
+            {
+                RaiseProtocolError("protocol_owned_wav_unverified", "The helper did not verify the reserved WAV identity.");
+                return;
+            }
+        }
+
         if (evt.AudioSourceKindDuplicate)
         {
             RaiseProtocolError("protocol_duplicate_audio_source_kind", "AudioSourceKind appeared more than once in one event block.");
@@ -800,6 +841,8 @@ public sealed class WasapiAudioCaptureWorker : IAudioCaptureWorker, IAudioHelper
         events.Add(evt);
         var summary = AudioHelperEventStreamParser.ValidateAndSummarize(events);
         lock (_lock) _terminalSummary = summary;
+        if (_expectedOwnedWavIdentity is { } expected && string.Equals(evt.OwnedWavIdentity, expected, StringComparison.Ordinal))
+            Volatile.Write(ref _ownedWavTerminalVerified, 1);
     }
 
     private void RaiseProtocolError(string reason, string detailedReason)

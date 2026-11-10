@@ -22,7 +22,7 @@ internal sealed class MediaOnlyFixture : IDisposable
     internal readonly SqliteOperationalStore Store;
     internal readonly SqliteOrdinaryRecordingHistoryStore Writer;
     internal readonly RecordingEngine Engine;
-    internal readonly FfmpegRecordingBundleGenerator Generator=AgentRecorder.App.Program.CreateRecordingBundleGenerator();
+    internal readonly IRecordingBundleGenerator Generator;
     internal readonly RecordingTray Tray=new();
     internal readonly LocalRetentionApprovalFixture.Ui Ui=new();
     internal readonly Native NativeApi;
@@ -39,12 +39,13 @@ internal sealed class MediaOnlyFixture : IDisposable
     private readonly List<FfmpegCaptureBackend> _backends=new();
     private readonly string? _mode=Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE"),_data=Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
     private readonly string? _prior=DataDirResolver.HasOverride?DataDirResolver.Resolve():null;
-    internal MediaOnlyFixture()
+    internal MediaOnlyFixture(string? fixtureParent=null)
     {
+        if(fixtureParent is not null)Root=Path.GetFullPath(Path.Combine(fixtureParent,"media-"+Guid.NewGuid().ToString("N")));
         Directory.CreateDirectory(Root);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE","1");Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",Root);DataDirResolver.SetOverride(Root);
         SystemQuery.SetDisplayTopologyProvider(()=>new(){new("display_1","Synthetic",true,new(0,0,1920,1080),1,"synthetic-test-display:display_1",DisplayIdentityResolutionStatus.Resolved)});
         Store=new(Path.Combine(Root,"history.db"));Store.Initialize();Writer=new(Store);
-        Generator.BeforeMediaHashForTests=_=>{Interlocked.Increment(ref GeneratorCalls);Assert.True(GenerateRelease.Wait(TimeSpan.FromSeconds(12)));if(FailBundle)throw new IOException("owned generation fault");};
+        Generator=new ForbiddenBundleGenerator400(()=>Interlocked.Increment(ref GeneratorCalls));
         Engine=new(new RetentionSharedOutputPathTests.QuietAudit(),bundleGenerator:Generator,microphoneProvider:Devices);Engine.ConfigureOrdinaryRecordingHistory(Writer);Engine.SetTray(Tray);
         Engine.BackendFactory=_=>
         {
@@ -70,7 +71,7 @@ internal sealed class MediaOnlyFixture : IDisposable
         if(quick){cfg.Remove("source");cfg["target"]=new JsonObject{["type"]="primary_display"};}
         var r=await Post(quick?"/api/v1/recordings/quick":"/api/v1/recordings",cfg.ToJsonString());Assert.InRange((int)r.Status,200,299);
         var rec=Engine._recs[r.Json.GetProperty("data").GetProperty("recording_id").GetString()!];Assert.Equal(RecState.pending_confirmation,rec.State);
-        Assert.Equal(policy>=0,rec.GenerateBundle);Assert.Equal(rec.GenerateBundle,Tray.Presentation!.Summary.Artifacts!.Bundle);
+        Assert.False(rec.GenerateBundle);Assert.Equal(rec.GenerateBundle,Tray.Presentation!.Summary.Artifacts!.Bundle);
         Assert.Equal(rec.GenerateBundle,r.Json.GetProperty("data").GetProperty("summary").GetProperty("artifacts").GetProperty("bundle").GetBoolean());return rec;
     }
     internal async Task Complete(Recording rec,bool manual=false,bool changed=false)
@@ -117,7 +118,8 @@ internal sealed class MediaOnlyFixture : IDisposable
         internal PublicationIdentityAnchor? Expected;internal Action? Before;internal int Calls;internal bool DeletePending;
         public bool Supported=>_n.Supported;public uint DriveType(string r)=>_n.DriveType(r);
         public SafeFileHandle Open(string p,uint a,uint s,uint d,uint f,out int e)=>_n.Open(p,a,s,d,f,out e);
-        public bool Basic(SafeFileHandle h,out FileBasicInformation v,out int e)=>_n.Basic(h,out v,out e);public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>_n.Standard(h,out v,out e);public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>_n.Identity(h,out v,out e);public uint FinalPath(SafeFileHandle h,StringBuilder b,int c,out int e)=>_n.FinalPath(h,b,c,out e);public OriginalFileCloseOutcome Close(SafeFileHandle h)=>_n.Close(h);
+        public bool Basic(SafeFileHandle h,out FileBasicInformation v,out int e)=>_n.Basic(h,out v,out e);public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>_n.Standard(h,out v,out e);public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>_n.Identity(h,out v,out e);public string? ReadShortLeaf(SafeFileHandle h) => _n.ReadShortLeaf(h);
+ public uint FinalPath(SafeFileHandle h,StringBuilder b,int c,out int e)=>_n.FinalPath(h,b,c,out e);public OriginalFileCloseOutcome Close(SafeFileHandle h)=>_n.Close(h);
         public OriginalFileDispositionResult RequestDisposition(SafeFileHandle h)
         {
             Calls++;var expected=Assert.IsType<PublicationIdentityAnchor>(Expected);Assert.Equal(root,Path.GetDirectoryName(expected.Path));Assert.StartsWith(Path.GetFullPath(Path.Combine(TestHelper.ProjectRoot,".local-data/temp/task362"))+Path.DirectorySeparatorChar,expected.Path,StringComparison.OrdinalIgnoreCase);

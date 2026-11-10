@@ -170,6 +170,197 @@ public sealed class FfmpegVideoOnlyPublicationTests(ITestOutputHelper output)
         Assert.False(File.Exists(backend.VideoOnlyStagingPath)); Assert.Empty(Directory.GetFiles(f.Videos, "*.publish-tmp-*.mp4")); if (ops.Original is not null) { Assert.True(ops.Original.IsClosed); Assert.Equal(1, ops.Deletes); }
     }
     [Theory]
+    [InlineData("media")]
+    [InlineData("marker")]
+    [InlineData("extra")]
+    public async Task Task412SuccessfulPublicationPreservesForeignStagingReplacement(string replace)
+    {
+        using var f = new Files();
+        await f.Generate();
+        var publisher = new Publisher(StagingToFinalPublisher.Instance);
+        using var backend = Backend(publisher);
+        var backup = Path.Combine(f.Root, "original-backup");
+        string? stage = null, marker = null, replacement = null;
+        ObservedFileIdentity? finalIdentity = null, replacementIdentity = null;
+        byte[]? finalBytes = null;
+        backend.BeforeVideoOnlyCleanupForTests = () =>
+        {
+            finalIdentity = Identity(f.Final);
+            finalBytes = File.ReadAllBytes(f.Final);
+            stage = backend.VideoOnlyStagingPath!;
+            marker = Path.Combine(Path.GetDirectoryName(stage)!, "owner.json");
+            replacement = replace switch
+            {
+                "media" => stage,
+                "marker" => marker,
+                _ => Path.Combine(Path.GetDirectoryName(stage)!, "other-run.txt")
+            };
+            if (replace != "extra") File.Move(replacement, backup);
+            File.WriteAllText(replacement, "foreign replacement");
+            replacementIdentity = Identity(replacement);
+        };
+        Start(backend, Config(f));
+        var result = await backend.VideoOnlyCompletion!.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(result.OutputFileExists, result.StderrLog);
+        Assert.Equal(0, backend.ExitCode);
+        Assert.True(backend.IsVideoOnlyOutputSettled);
+        Assert.Equal(finalIdentity, Assert.IsType<PublicationReceipt>(result.PublicationReceipt).Anchor.Identity);
+        Assert.Equal(finalIdentity, Identity(f.Final));
+        Assert.Equal(finalBytes, File.ReadAllBytes(f.Final));
+        Assert.Equal(replace != "extra", File.Exists(backup));
+        Assert.NotNull(replacement);
+        Assert.True(File.Exists(replacement), "Cleanup removed a foreign staging replacement after publication.");
+        Assert.Equal(replacementIdentity, Identity(replacement));
+        Assert.Equal("foreign replacement", File.ReadAllText(replacement));
+        Assert.Equal(replace != "extra", File.Exists(marker));
+        Assert.Equal(replace == "media", File.Exists(stage));
+    }
+
+    [Fact]
+    public async Task Task412OriginalDirectoryCannotBeSwappedDuringCleanup()
+    {
+        using var f = new Files();
+        await f.Generate();
+        using var backend = Backend(new Publisher(StagingToFinalPublisher.Instance));
+        string? directory = null;
+        var backup = Path.Combine(f.Root, "foreign-directory");
+        Exception? swap = null;
+        backend.BeforeVideoOnlyCleanupForTests = () =>
+        {
+            directory = Path.GetDirectoryName(backend.VideoOnlyStagingPath)!;
+            swap = Record.Exception(() => Directory.Move(directory, backup));
+        };
+        Start(backend, Config(f));
+        var result = await backend.VideoOnlyCompletion!.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(result.OutputFileExists, result.StderrLog);
+        Assert.Equal(0, backend.ExitCode);
+        Assert.True(backend.IsVideoOnlyOutputSettled);
+        Assert.IsAssignableFrom<IOException>(swap);
+        Assert.NotNull(directory);
+        Assert.False(Directory.Exists(directory));
+        Assert.False(Directory.Exists(backup));
+        Assert.Equal(Assert.IsType<PublicationReceipt>(result.PublicationReceipt).Anchor.Identity, Identity(f.Final));
+    }
+
+    [Fact]
+    public async Task Task412LockedOriginalLeavesStageInPlaceWithoutDisposeRetry()
+    {
+        using var f = new Files();
+        await f.Generate();
+        using var backend = Backend(new Publisher(StagingToFinalPublisher.Instance));
+        FileStream? held = null;
+        string? stage = null;
+        byte[]? final = null;
+        backend.BeforeVideoOnlyCleanupForTests = () =>
+        {
+            final = File.ReadAllBytes(f.Final);
+            stage = backend.VideoOnlyStagingPath!;
+            held = new FileStream(stage, FileMode.Open, FileAccess.Read, FileShare.Read);
+        };
+        OutputMeta result;
+        try
+        {
+            Start(backend, Config(f));
+            result = await backend.VideoOnlyCompletion!.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally { held?.Dispose(); }
+
+        Assert.NotNull(stage);
+        Assert.True(result.OutputFileExists, result.StderrLog);
+        Assert.Equal(0, backend.ExitCode);
+        Assert.True(backend.IsVideoOnlyOutputSettled);
+        Assert.True(File.Exists(stage));
+        var original = Identity(stage);
+        var bytes = File.ReadAllBytes(stage);
+        backend.Dispose();
+        Assert.Equal(original, Identity(stage));
+        Assert.Equal(bytes, File.ReadAllBytes(stage));
+        Assert.True(File.Exists(Path.Combine(Path.GetDirectoryName(stage)!, "owner.json")));
+        Assert.Equal(final, File.ReadAllBytes(f.Final));
+        Assert.Equal(Assert.IsType<PublicationReceipt>(result.PublicationReceipt).Anchor.Identity, Identity(f.Final));
+    }
+
+    [Theory]
+    [InlineData("marker")]
+    [InlineData("media")]
+    public async Task Task412FailedPublicationPreservesForeignReplacementAndRetainsOnlyOriginalMedia(string replace)
+    {
+        using var f = new Files();
+        await f.Generate();
+        var old = Identity(f.Final);
+        using var backend = Backend(new Publisher(StagingToFinalPublisher.Instance));
+        backend.BeforeVideoOnlyFinalizeForTests = path => File.WriteAllText(path, "invalid original");
+        var backup = Path.Combine(f.Root, "original-backup");
+        string? stage = null, replacement = null;
+        ObservedFileIdentity? replacementIdentity = null;
+        backend.BeforeVideoOnlyCleanupForTests = () =>
+        {
+            stage = backend.VideoOnlyStagingPath!;
+            replacement = replace == "media" ? stage : Path.Combine(Path.GetDirectoryName(stage)!, "owner.json");
+            File.Move(replacement, backup);
+            File.WriteAllText(replacement, "foreign replacement");
+            replacementIdentity = Identity(replacement);
+        };
+        Start(backend, Config(f));
+        var result = await backend.VideoOnlyCompletion!.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Failed(backend, result, f.Final);
+        OldFinal(f, old);
+        Assert.True(backend.IsVideoOnlyOutputSettled);
+        Assert.NotNull(stage);
+        Assert.NotNull(replacement);
+        Assert.Equal(replacementIdentity, Identity(replacement));
+        Assert.Equal("foreign replacement", File.ReadAllText(replacement));
+        Assert.True(File.Exists(backup));
+        if (replace == "media")
+        {
+            Assert.False(File.Exists(Retained(f, stage)));
+            Assert.Equal("invalid original", File.ReadAllText(backup));
+        }
+        else
+        {
+            Assert.False(File.Exists(stage));
+            Assert.Equal("invalid original", File.ReadAllText(Retained(f, stage)));
+        }
+    }
+
+    [Fact]
+    public async Task Task411VideoOnlyFailurePreservesOccupiedDiagnosticsAndUnmovedStaging()
+    {
+        using var f = new Files();
+        await f.Generate();
+        var original = Identity(f.Final);
+        var publisher = new Publisher(StagingToFinalPublisher.Instance);
+        using var backend = Backend(publisher);
+        string? oldVideo = null, oldJson = null, stagingJson = null;
+        backend.BeforeVideoOnlyFinalizeForTests = stage =>
+        {
+            oldVideo = Retained(f, stage);
+            var directory = Directory.CreateDirectory(Path.GetDirectoryName(oldVideo)!).FullName;
+            oldJson = Path.Combine(directory, "diagnostics.json");
+            stagingJson = Path.Combine(Path.GetDirectoryName(stage)!, "diagnostics.json");
+            File.WriteAllText(oldVideo, "existing video diagnostic");
+            File.WriteAllText(oldJson, "existing JSON");
+            File.WriteAllText(stagingJson, "existing staging JSON");
+            File.WriteAllText(stage, "invalid owned video");
+        };
+
+        Start(backend, Config(f));
+        var terminal = await backend.VideoOnlyCompletion!.WaitAsync(TimeSpan.FromSeconds(10));
+        Failed(backend, terminal, f.Final);
+        OldFinal(f, original);
+        Assert.Contains("retention_directory_unavailable", terminal.Warnings!);
+        Assert.Equal("existing video diagnostic", File.ReadAllText(oldVideo!));
+        Assert.Equal("existing JSON", File.ReadAllText(oldJson!));
+        Assert.Equal("existing staging JSON", File.ReadAllText(stagingJson!));
+        Assert.Equal("invalid owned video", File.ReadAllText(backend.VideoOnlyStagingPath!));
+        Assert.True(File.Exists(Path.Combine(Path.GetDirectoryName(backend.VideoOnlyStagingPath)!, "owner.json")));
+        Assert.True(backend.IsVideoOnlyOutputSettled);
+    }
+
+    [Theory]
     [InlineData("launch")] [InlineData("directory_collision")] [InlineData("admission")]
     public async Task StartupFailureAndAbortPreserveOldFinalAndNeverOwnOtherStaging(string fault)
     {

@@ -51,23 +51,8 @@ public sealed class MediaOnlyPublicationTests
         var replay=await f.DeleteRequest(rec);Assert.Equal(id,replay);await f.ReadRequest(id);Assert.Equal(1,f.Ui.Begins);Assert.Equal(1,f.NativeApi.Calls);Assert.Equal(replacement,File.ReadAllBytes(rec.OutputPath));Assert.Equal(newIdentity,WindowsReadOnlyFileMetadataProbe.Instance.Observe(rec.OutputPath).Before!.Identity);Assert.Equal(before,Snapshot(f));
         File.WriteAllText(Path.Combine(f.Root,"formal-media-deletion.json"),JsonSerializer.Serialize(new{root=f.Root,recording_id=rec.Id,request_id=id,operation_id=final.GetProperty("operation_id").GetString(),media=rec.OutputPath,original,generator= f.Generator.GetType().FullName,generator_calls=f.GeneratorCalls,formal_mp4=new{probe.Width,probe.Height,probe.DurationSeconds,original.Length},bundle=row.Bundle.Status,media_hash_recorded=false,manual=manualAndDirectoryChange,quick,local_directory_changed=manualAndDirectoryChange,native_calls=f.NativeApi.Calls,delete_pending=f.NativeApi.DeletePending,result=final,replacement_identity=newIdentity,replacement_bytes_preserved=true,history_and_anchor_unchanged=true}),new UTF8Encoding(false));
     }
-    [Theory][InlineData(0,false)][InlineData(1,false)][InlineData(1,true)]
-    public async Task SameProductionGeneratorDefaultAndTrueReadyOrFailedRemainProtected(int policy,bool fail)
-    {
-        using var f=new MediaOnlyFixture();f.FailBundle=fail;var rec=await f.Create(policy);await f.Complete(rec);await MediaOnlyFixture.Until(()=>f.Writer.Read(rec.Id)?.Bundle?.Status==(fail?"failed":"ready"));
-        var row=f.Writer.Read(rec.Id)!;Assert.Equal(1,f.GeneratorCalls);Assert.NotNull(rec.OrdinaryBundleOperation);Assert.NotNull(rec.LastMeta!.PublicationReceipt);Assert.Equal("completed",row.Status);if(!fail){Assert.Equal(5,Directory.GetFiles(row.Bundle!.Path!).Length);Assert.NotNull(row.MediaHash);}
-        var before=Snapshot(f);var bytes=File.ReadAllBytes(rec.OutputPath);var id=await f.DeleteRequest(rec);Assert.True(await f.Coordinator.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(8)));var query=await f.ReadRequest(id);Assert.Equal(0,f.Ui.Begins);Assert.Equal(0,f.NativeApi.Calls);Assert.Equal(JsonValueKind.Null,query.GetProperty("operation_id").ValueKind);Assert.Equal(bytes,File.ReadAllBytes(rec.OutputPath));Assert.Equal(before,Snapshot(f));
-        File.WriteAllText(Path.Combine(f.Root,"formal-bundle-protection.json"),JsonSerializer.Serialize(new{recording_id=rec.Id,request_id=id,policy,fail,bundle=row.Bundle,generator=f.Generator.GetType().FullName,generator_calls=f.GeneratorCalls,native_calls=0,local_ui_calls=0,history_and_anchor_unchanged=true}),new UTF8Encoding(false));
-    }
-    [Fact]
-    public async Task GeneratingBundleAndSequentialPoliciesDoNotBecomeNotApplicableOrContaminateNextRequest()
-    {
-        using var f=new MediaOnlyFixture();var first=await f.Create(-1);await f.Complete(first);Assert.Equal("not_applicable",f.Writer.Read(first.Id)!.Bundle!.Status);Assert.Equal(0,f.GeneratorCalls);
-        f.GenerateRelease.Reset();var second=await f.Create(1,true);await f.Complete(second);await MediaOnlyFixture.Until(()=>f.GeneratorCalls==1);Assert.Equal("generating",f.Writer.Read(second.Id)!.Bundle!.Status);
-        try{var id=await f.DeleteRequest(second);Assert.True(await f.Coordinator.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(8)));await f.ReadRequest(id);Assert.Equal(0,f.Ui.Begins);Assert.Equal(0,f.NativeApi.Calls);Assert.Equal("not_applicable",f.Writer.Read(first.Id)!.Bundle!.Status);}
-        finally{f.GenerateRelease.Set();}
-        await MediaOnlyFixture.Until(()=>f.Writer.Read(second.Id)?.Bundle?.Status=="ready");Assert.False(first.GenerateBundle);Assert.True(second.GenerateBundle);Assert.Equal(1,f.GeneratorCalls);
-    }
+
+
     [Fact]
     public async Task FormalMediaCanBeLocallyRejectedWithoutAnyNativeDisposition()
     {

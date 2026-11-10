@@ -13,7 +13,8 @@ namespace AgentRecorder.Persistence;
 /// Initial acceptance is synchronous; lifecycle snapshots are applied by one
 /// bounded worker so SQLite latency never runs under the Engine recording lock.
 /// </summary>
-public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHistoryStore, IOrdinaryRecordingHistoryDrainable, IOrdinaryRecordingBundleHistoryWriter
+public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHistoryStore, IOrdinaryRecordingHistoryDrainable,
+    IOrdinaryRecordingBundleHistoryWriter, IOrdinaryRecordingHistoryCommitObserver
 {
     private const int QueueCapacity = 128;
     private const int MaxTrackedWriteFailures = 128;
@@ -114,6 +115,12 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
     }
 
     public bool TryPublish(OrdinaryRecordingHistorySnapshot snapshot)
+        => TryPublish(snapshot, null);
+
+    void IOrdinaryRecordingHistoryCommitObserver.PublishWithCommitObserver(OrdinaryRecordingHistorySnapshot snapshot, Action committed)
+        => TryPublish(snapshot, committed);
+
+    private bool TryPublish(OrdinaryRecordingHistorySnapshot snapshot, Action? committed)
     {
         if (!TryCloseBundleStartupRecovery())
         {
@@ -126,7 +133,7 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
         {
             ValidateSnapshot(snapshot);
             var sequence = Interlocked.Increment(ref _publishSequence);
-            var accepted = _queue.Writer.TryWrite(new SnapshotWork(snapshot, sequence));
+            var accepted = _queue.Writer.TryWrite(new SnapshotWork(snapshot, sequence, committed));
             if (!accepted)
             {
                 RecordWriteFailure(snapshot, sequence, "history_queue_full");
@@ -338,12 +345,13 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
             }
             if (item is not SnapshotWork update) continue;
             Exception? last = null;
+            var durablySettled = false;
             for (var attempt = 0; attempt < 2; attempt++)
             {
                 try
                 {
                     BeforePersistForTests?.Invoke(update.Snapshot);
-                    var durablySettled = PersistUpdate(update.Snapshot);
+                    durablySettled = PersistUpdate(update.Snapshot);
                     last = null;
                     if (durablySettled)
                         ClearCoveredWriteFailure(update.Snapshot, update.Sequence);
@@ -358,6 +366,10 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
             if (last is not null)
             {
                 RecordWriteFailure(update.Snapshot, update.Sequence, last.GetType().Name);
+            }
+            else if (durablySettled && update.Committed is { } committed)
+            {
+                try { committed(); } catch { }
             }
             AfterPersistForTests?.Invoke(update.Snapshot);
         }
@@ -749,7 +761,7 @@ public sealed class SqliteOrdinaryRecordingHistoryStore : IOrdinaryRecordingHist
 
     private sealed record CursorState(long HighWater, long BeforeCreatedTicks, string BeforeRecordingId);
     private abstract record WorkItem;
-    private sealed record SnapshotWork(OrdinaryRecordingHistorySnapshot Snapshot, long Sequence) : WorkItem;
+    private sealed record SnapshotWork(OrdinaryRecordingHistorySnapshot Snapshot, long Sequence, Action? Committed) : WorkItem;
     private sealed record BundleWork(OrdinaryRecordingBundleUpdate Update, long Sequence) : WorkItem;
     private sealed record BundleWriteFailure(long Sequence, OrdinaryRecordingBundleUpdate Update);
     private sealed record BarrierWork(TaskCompletionSource<bool> Completion) : WorkItem;

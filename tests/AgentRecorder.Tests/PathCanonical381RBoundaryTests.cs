@@ -34,7 +34,7 @@ public sealed partial class OrdinaryWgcBundleTests
             // The initial requested name remains the original anti-rename claim input.
             Assert.Equal(initial, rec.OrdinaryRequestedOutputPath);
             f.Generator.Release.TrySetResult(); await f.Terminal(rec, false);
-            await Until(() => rec.BundleSnapshot.Status == "ready");
+            await Until(() => rec.BundleSnapshot.Status == "not_applicable");
             await PathCanonical381RHistory(f, rec);
         }
         finally { await NestedWindow381Drain(f); }
@@ -72,16 +72,16 @@ public sealed partial class OrdinaryWgcBundleTests
             Assert.NotSame(outer.AuthorizationProof, inner.AuthorizationProof);
             Assert.NotEqual(outer.AuthorizationProof!.ScopeDigest, inner.AuthorizationProof!.ScopeDigest);
             f.Generator.Release.TrySetResult(); ip.Finish.TrySetResult();
-            await Until(() => inner.IsFinalized && inner.BundleSnapshot.Status == "ready");
+            await Until(() => inner.IsFinalized && inner.BundleSnapshot.Status == "not_applicable");
             await ib.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal(RecState.recording, outer.State); Assert.False(op.HasExited);
             await PathCanonical381RHistory(f, inner);
-            op.Finish.TrySetResult(); await Until(() => outer.IsFinalized && outer.BundleSnapshot.Status == "ready");
+            op.Finish.TrySetResult(); await Until(() => outer.IsFinalized && outer.BundleSnapshot.Status == "not_applicable");
             await ob.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
             await PathCanonical381RHistory(f, outer);
             Assert.Equal(120, outer.LastMeta!.DurationSeconds); Assert.Equal(20, inner.LastMeta!.DurationSeconds);
             Assert.NotEqual(outer.OrdinaryTargetKey, inner.OrdinaryTargetKey);
-            Assert.NotEqual(outer.BundleSnapshot.Path, inner.BundleSnapshot.Path);
+            Assert.NotEqual(outer.OutputPath,inner.OutputPath);Assert.Null(outer.BundleSnapshot.Path);Assert.Null(inner.BundleSnapshot.Path);
             Assert.Equal(outer.Id, f.Writer.Read(inner.Id)!.ParentRecordingId);
             SaveSeriesBundleEvidence("path381r-two-windows", new { outer = outer.Id, inner = inner.Id,
                 outerDuration = outer.LastMeta.DurationSeconds, innerDuration = inner.LastMeta.DurationSeconds,
@@ -132,40 +132,7 @@ public sealed partial class OrdinaryWgcBundleTests
         finally { await NestedWindow381Drain(f); }
     }
 
-    [Theory]
-    [InlineData(false, false)][InlineData(true, false)]
-    [InlineData(false, true)][InlineData(true, true)]
-    public async Task PathCanonical381REquivalentBundleNamespaceRejectsVideoAndSeriesBeforeCreatingDirectories(bool local, bool series)
-    {
-        using var f = RuntimeFixture(); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        Func<Task>? work = null; f.Engine.BundleGenerationDispatcherForTests = run => { work = run; return Task.CompletedTask; };
-        var video = f.Create("window"); await f.Approve(video); await f.Terminal(video, false);
-        var bundle = Path.ChangeExtension(video.OutputPath, ".bundle");
-        var directory = PathCanonical381RDirectory(Path.Combine(bundle, "must-not-create"), "mixed") + "/";
-        f.StartApi();
-        try
-        {
-            var q = series ? SeriesBundleRequest(f, local ? Path.Combine(f.Root, "pending") : directory) : f.Request("window");
-            if (!series) q["output"]!["directory"] = local ? Path.Combine(f.Root, "pending") : directory;
-            if (local)
-            {
-                var pending = await NestedWindow381Accept(f, q);
-                f.Tray.Confirm!(ConfirmationDecision.Approve(directory));
-                Assert.Equal(RecState.rejected, pending.State); Assert.Equal("OUTPUT_PATH_IN_USE", pending.StopReason);
-                Assert.Null(pending.AuthorizationProof);
-            }
-            else
-            {
-                var count = f.Engine._confs.Count; var result = await NestedWindow381Post(f, q);
-                Assert.Equal(HttpStatusCode.Conflict, result.Status); Assert.Contains("OUTPUT_PATH_IN_USE", result.Body);
-                Assert.Equal(count, f.Engine._confs.Count); Assert.Single(f.Engine._recs);
-            }
-            Assert.False(Directory.Exists(bundle)); Assert.Equal(1, f.FactoryCalls); Assert.Equal(0, runner.Calls);
-        }
-        finally { f.Generator.Release.TrySetResult(); await work!(); await NestedWindow381Drain(f); }
-        Assert.Equal("ready", video.BundleSnapshot.Status);
-    }
+
 
     [Theory][InlineData(false)][InlineData(true)]
     public async Task PathCanonical381RSeriesAdmissionAndLocalChangeUseCanonicalDirectory(bool local)

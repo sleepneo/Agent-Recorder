@@ -31,7 +31,7 @@ public sealed partial class CodexProfileRecordingRegressionTests
     private void RegionHelper()
     {
         RecordingPreflightChecker.AudioHelperPathResolver=()=>"private-task367-helper";
-        RecordingPreflightChecker.AudioHelperProbeRunner=(_,_)=>new(){Success=true,ProtocolVersion="audio-helper-v1",TimestampFrequency=System.Diagnostics.Stopwatch.Frequency};
+        RecordingPreflightChecker.AudioHelperProbeRunner=(_,_)=>new(){Success=true,ProtocolVersion="audio-helper-v1",OwnedWavCapability = "file-id-v1",TimestampFrequency=System.Diagnostics.Stopwatch.Frequency};
         RecordingPreflightChecker.ShouldUseWasapiBackend=()=>true;
     }
     private sealed class RegionEndpoints : ISystemAudioEndpointProvider
@@ -185,15 +185,10 @@ public sealed partial class CodexProfileRecordingRegressionTests
         using var response=await RegionPost(RegionBody());Assert.True(response.IsSuccessStatusCode,await response.Content.ReadAsStringAsync());
         var rec=Assert.Single(_engine._recs.Values);_tray.Decision!(ConfirmationDecision.Approve());
         Assert.True(SpinWait.SpinUntil(()=>rec.State==RecState.recording,TimeSpan.FromSeconds(3)));
-        // Exercise the actual completed-recording projection without pretending synthetic PCM is a real MP4.
-        var method=typeof(RecordingEngine).GetMethod("TryPrepareBundleGeneration",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance)!;
-        var args=new object?[]{rec,new OutputMeta{DurationSeconds=20,Container="mp4",Width=640,Height=480,Fps=30},null};
-        Assert.True((bool)method.Invoke(_engine,args)!);var request=Assert.IsType<RecordingBundleRequest>(args[2]);
-        Assert.Equal(rec.FixedRegionProfileReference!.Value.ProfileDigest,request.ProfileDigest);Assert.Equal("region_only",request.ProfileReuseMode);
-        Assert.Equal(20,request.RequestedDurationSeconds);Assert.Equal(3,request.CountdownSeconds);Assert.Equal("medium",request.VideoQuality);Assert.Equal(rec.OutputPath,request.MediaPath);
-        var metadata=typeof(FfmpegRecordingBundleGenerator).GetMethod("BuildMetadata",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Static)!.Invoke(null,new object[]{request,request.MediaPath,0L,"synthetic"});
-        using var json=JsonDocument.Parse(JsonSerializer.Serialize(metadata));var recording=json.RootElement.GetProperty("recording");
-        Assert.Equal("region_only",recording.GetProperty("profile_reuse_mode").GetString());Assert.Equal(request.ProfileDigest,recording.GetProperty("profile_ref").GetProperty("digest").GetString());
+        Assert.False(rec.GenerateBundle);Assert.Equal("region_only",rec.ProfileReuseMode);
+        Assert.Equal(20,rec.DurationSeconds);Assert.Equal(3,rec.CountdownSeconds);Assert.Equal("medium",rec.Config.Quality);
+        Assert.NotNull(rec.FixedRegionProfileReference);Assert.Equal(0,rec.BundleGenerationStarted);Assert.Null(rec.OrdinaryBundleOperation);
+
     }
     [Fact]
     public async Task RegionOnlyCreationWaitReturnsActualRecordingAndFrozenProvenance()

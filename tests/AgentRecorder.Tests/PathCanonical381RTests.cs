@@ -28,11 +28,7 @@ public sealed partial class OrdinaryWgcBundleTests
         using (var transaction = connection.BeginTransaction())
             Assert.Equal(rec.LastMeta!.PublicationReceipt!.Anchor,
                 PublicationAnchorStorage.Read(connection, transaction, new[] { row })[rec.Id]);
-        Assert.Equal("ready", row.Bundle!.Status);
-        Assert.Equal(rec.OutputPath, row.Bundle.IdentityEvidence!.MediaPath);
-        Assert.Equal(rec.OrdinaryBundleOperation!.OperationId, row.Bundle.IdentityEvidence.OperationId);
-        Assert.Equal(Hash(rec.OutputPath), row.MediaHash!.Value);
-        Assert.Equal(5, row.Bundle.ContentsEvidence!.Contents.Count);
+        Assert.Equal("not_applicable", row.Bundle!.Status);Assert.Null(row.Bundle.IdentityEvidence);Assert.Null(row.MediaHash);Assert.Null(rec.OrdinaryBundleOperation);Assert.Equal(0,f.Generator.Calls);
         using var client = f.Client();
         foreach (var path in new[] { "/api/v1/recording-history/" + rec.Id,
             "/api/v1/recording-history", "/api/v1/history?source=ordinary" })
@@ -41,7 +37,7 @@ public sealed partial class OrdinaryWgcBundleTests
             var item = path.Contains("/recording-history/") ? data.GetProperty("recording") :
                 data.GetProperty("items").EnumerateArray().Single(x => x.GetProperty("recording_id").GetString() == rec.Id);
             Assert.Equal("completed", item.GetProperty("status").GetString());
-            Assert.Equal("ready", item.GetProperty("bundle").GetProperty("status").GetString());
+            Assert.Equal("not_applicable", item.GetProperty("bundle").GetProperty("status").GetString());
         }
     }
 
@@ -63,7 +59,7 @@ public sealed partial class OrdinaryWgcBundleTests
             var rec = f.Engine._recs[data["recording_id"]!.GetValue<string>()];
             var presented = data["summary"]!["output"]!.GetValue<string>();
             await f.Approve(rec); f.Generator.Release.TrySetResult(); await f.Terminal(rec, false);
-            await Until(() => rec.BundleSnapshot.Status is "ready" or "failed");
+            await Until(() => rec.BundleSnapshot.Status == "not_applicable");
             await Until(() => BundleUseCount(f) == 0);
             var snapshot = (OrdinaryRecordingHistorySnapshot)typeof(RecordingEngine)
                 .GetMethod("CreateOrdinaryHistorySnapshot", BindingFlags.NonPublic | BindingFlags.Static)!
@@ -82,7 +78,7 @@ public sealed partial class OrdinaryWgcBundleTests
                 unsettled = f.Writer.UnsettledWriteFailureCountForTests,
                 attachmentCount = Directory.Exists(Path.ChangeExtension(rec.OutputPath, ".bundle"))
                     ? Directory.GetFiles(Path.ChangeExtension(rec.OutputPath, ".bundle")).Length : 0 });
-            Assert.Equal("ready", rec.BundleSnapshot.Status);
+            Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
             Assert.Null(validation); Assert.All(statuses.Values, code => Assert.Equal(200, code));
             Assert.Equal(rec.LastMeta.PublicationReceipt.Anchor.Path, presented);
             Assert.Equal(presented, rec.OutputPath); Assert.Equal(rec.OutputPath, rec.Config.OutputPath);

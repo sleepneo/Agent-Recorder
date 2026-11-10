@@ -37,16 +37,35 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
     {
         internal int Opens,Basics,Standards,Identities,Finals;
         internal List<SafeFileHandle> Handles=new();
+        internal List<SafeFileHandle> DirectoryHandles=new();
         internal Action<int>? BeforeBasic;
         private readonly IWindowsFileMetadataApi _real=WindowsFileMetadataApi.Instance;
         public bool Supported=>_real.Supported;
         public uint DriveType(string root)=>_real.DriveType(root);
         public SafeFileHandle Open(string path,uint access,uint share,uint creation,uint flags,out int error)
-        {Opens++;Assert.Equal(0x80u,access);Assert.Equal(1u,share);Assert.Equal(3u,creation);Assert.Equal(0x02200000u,flags);var h=_real.Open(path,access,share,creation,flags,out error);Handles.Add(h);return h;}
-        public bool Basic(SafeFileHandle h,out FileBasicInformation i,out int error){Basics++;BeforeBasic?.Invoke(Basics);return _real.Basic(h,out i,out error);}
-        public bool Standard(SafeFileHandle h,out FileStandardInformation i,out int error){Standards++;return _real.Standard(h,out i,out error);}
-        public bool Identity(SafeFileHandle h,out FileIdentityInformation i,out int error){Identities++;return _real.Identity(h,out i,out error);}
-        public uint FinalPath(SafeFileHandle h,StringBuilder b,int size,out int error){Finals++;return _real.FinalPath(h,b,size,out error);}
+        {
+            Assert.Equal(3u,creation);Assert.Equal(0x02200000u,flags);
+            if (access == OriginalFileScopeResources.Access)
+            {
+                Assert.Equal(OriginalFileScopeResources.Sharing,share);
+                var directory=_real.Open(path,access,share,creation,flags,out error);
+                DirectoryHandles.Add(directory);return directory;
+            }
+            Opens++;Assert.Equal(0x80u,access);Assert.Equal(1u,share);
+            var h=_real.Open(path,access,share,creation,flags,out error);Handles.Add(h);return h;
+        }
+        public bool Basic(SafeFileHandle h,out FileBasicInformation i,out int error)
+        {
+            if (!DirectoryHandles.Contains(h)) { Basics++;BeforeBasic?.Invoke(Basics); }
+            return _real.Basic(h,out i,out error);
+        }
+        public bool Standard(SafeFileHandle h,out FileStandardInformation i,out int error)
+        {if (!DirectoryHandles.Contains(h)) Standards++;return _real.Standard(h,out i,out error);}
+        public bool Identity(SafeFileHandle h,out FileIdentityInformation i,out int error)
+        {if (!DirectoryHandles.Contains(h)) Identities++;return _real.Identity(h,out i,out error);}
+        public uint FinalPath(SafeFileHandle h,StringBuilder b,int size,out int error)
+        {if (!DirectoryHandles.Contains(h)) Finals++;return _real.FinalPath(h,b,size,out error);}
+        public string? ReadShortLeaf(SafeFileHandle h) => _real.ReadShortLeaf(h);
     }
     internal static void HardLink(string link,string target)
     {Assert.True(CreateHardLinkW(link,target,IntPtr.Zero),"Synthetic hard-link preparation failed: "+Marshal.GetLastWin32Error());}
@@ -57,7 +76,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
     {
         using var f=new Files();var path=f.Create();var beforeWrite=File.GetLastWriteTimeUtc(path);var api=new Trace();var o=new WindowsReadOnlyFileMetadataProbe(api).Observe(path);
         Assert.Equal(FileObservationOutcome.Sampled,o.Outcome);Assert.Equal(o.Before,o.After);Assert.Equal(12,o.Before!.Length);Assert.Equal(1u,o.Before.Links);Assert.NotNull(o.Before.Identity);Assert.Equal(path,o.BeforePath,ignoreCase:true);
-        Assert.Equal(1,api.Opens);Assert.Equal(2,api.Basics);Assert.Equal(2,api.Standards);Assert.Equal(2,api.Identities);Assert.Equal(2,api.Finals);Assert.True(api.Handles.Single().IsClosed);Assert.Equal(beforeWrite,File.GetLastWriteTimeUtc(path));
+        Assert.Equal(1,api.Opens);Assert.Equal(2,api.Basics);Assert.Equal(2,api.Standards);Assert.Equal(2,api.Identities);Assert.Equal(2,api.Finals);Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));Assert.Equal(beforeWrite,File.GetLastWriteTimeUtc(path));
         using var exclusive=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None);Assert.Equal(12,exclusive.Length);
     }
     [Fact]
@@ -69,7 +88,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
         var db=new UnifiedHistoryTestDatabase(f.Root);try
         {
             db.Ordinary.Register(PublicationAnchorTestFixture.Anchored(db.Recording("hard",completed:true) with{OutputPath=path,BundleRegistration=new(null)},native:true));var snapshot=db.Snapshot();var api=new Trace();var page=Service(db,new WindowsReadOnlyFileMetadataProbe(api)).GetPage(Sid,Session,20,At.AddHours(1));
-            Assert.Equal("hard_linked_output",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);Assert.Equal(0,page.ObservedCandidateBytes);Assert.Equal(snapshot,db.Snapshot());Assert.True(api.Handles.Single().IsClosed);
+            Assert.Equal("hard_linked_output",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);Assert.Equal(0,page.ObservedCandidateBytes);Assert.Equal(snapshot,db.Snapshot());Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));
         }finally{db.Ordinary.Dispose();SqliteConnection.ClearAllPools();}
     }
     [Fact]
@@ -78,7 +97,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
         using var f=new Files();var path=f.Create();using var writer=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None);
         var conflict=Assert.Throws<IOException>(()=>{using var second=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None);});Assert.True((conflict.HResult&0xffff) is 32 or 33);
         var api=new Trace();var o=new WindowsReadOnlyFileMetadataProbe(api).Observe(path);
-        Assert.Equal(FileObservationOutcome.Sampled,o.Outcome);Assert.Equal(o.Before,o.After);Assert.Equal(1,api.Opens);Assert.True(api.Handles.Single().IsClosed);
+        Assert.Equal(FileObservationOutcome.Sampled,o.Outcome);Assert.Equal(o.Before,o.After);Assert.Equal(1,api.Opens);Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));
         output.WriteLine("Real data-handle sharing conflict executed (32/33); FILE_READ_ATTRIBUTES metadata open still succeeded. Native probe sharing-error mapping is separately fault-tested, not claimed exercised here.");
     }
     [Theory]
@@ -89,7 +108,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
         {
             db.Ordinary.Register(PublicationAnchorTestFixture.Anchored(db.Recording("changing",completed:true) with{OutputPath=path,BundleRegistration=new(null)},native:true));var api=new Trace();var changed=false;
             api.BeforeBasic=n=>{if(n!=2)return;if(change=="write_time")File.SetLastWriteTimeUtc(path,File.GetLastWriteTimeUtc(path).AddMinutes(1));else File.SetAttributes(path,FileAttributes.ReadOnly);changed=true;};
-            var page=Service(db,new WindowsReadOnlyFileMetadataProbe(api)).GetPage(Sid,Session,20,At.AddHours(1));Assert.True(changed);Assert.Equal("file_identity_changed",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);Assert.True(api.Handles.Single().IsClosed);
+            var page=Service(db,new WindowsReadOnlyFileMetadataProbe(api)).GetPage(Sid,Session,20,At.AddHours(1));Assert.True(changed);Assert.Equal("file_identity_changed",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.Equal(1,page.UnknownCandidateFileCount);Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));
         }finally{File.SetAttributes(path,FileAttributes.Normal);db.Ordinary.Dispose();SqliteConnection.ClearAllPools();}
     }
     [Fact]
@@ -99,7 +118,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
         {
             db.Ordinary.Register(PublicationAnchorTestFixture.Anchored(db.Recording("rename",completed:true) with{OutputPath=path,BundleRegistration=new(null)},native:true));
             api.BeforeBasic=n=>{if(n==2){File.Move(path,renamed);moved=true;}};
-            var page=Service(db,new WindowsReadOnlyFileMetadataProbe(api)).GetPage(Sid,Session,20,At.AddHours(1));Assert.True(moved);Assert.Equal("resolved_path_mismatch",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.True(api.Handles.Single().IsClosed);
+            var page=Service(db,new WindowsReadOnlyFileMetadataProbe(api)).GetPage(Sid,Session,20,At.AddHours(1));Assert.True(moved);Assert.Equal("resolved_path_mismatch",Assert.Single(page.Items).ReasonCode);Assert.Null(page.Items[0].ObservedFileBytes);Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));
             Assert.Equal(FileObservationOutcome.Missing,WindowsReadOnlyFileMetadataProbe.Instance.Observe(path).Outcome);Assert.Equal(FileObservationOutcome.Sampled,WindowsReadOnlyFileMetadataProbe.Instance.Observe(renamed).Outcome);
             output.WriteLine("Real rename succeeded during pure metadata handle; second same-handle final path changed and preview protected. No rename pin or ancestor lock claimed.");
         }finally{db.Ordinary.Dispose();SqliteConnection.ClearAllPools();}
@@ -121,7 +140,7 @@ public sealed class WindowsReadOnlyFileMetadataNativeTests(ITestOutputHelper out
             var error=Marshal.GetLastWin32Error();output.WriteLine("Synthetic leaf symlink was not created; untested native symlink branch, Win32 preparation error="+error);
             Assert.True(error is 1314 or 5 or 50 or 87,"Unexpected synthetic symlink preparation error.");return;
         }
-        try{var api=new Trace();Assert.Equal(FileObservationOutcome.ReparsePoint,new WindowsReadOnlyFileMetadataProbe(api).Observe(link).Outcome);Assert.Equal(0,api.Identities);Assert.True(api.Handles.Single().IsClosed);output.WriteLine("Real leaf symlink branch executed using OPEN_REPARSE_POINT.");}
+        try{var api=new Trace();Assert.Equal(FileObservationOutcome.ReparsePoint,new WindowsReadOnlyFileMetadataProbe(api).Observe(link).Outcome);Assert.Equal(0,api.Identities);Assert.True(api.Handles.Single().IsClosed);Assert.All(api.DirectoryHandles,h=>Assert.True(h.IsClosed));output.WriteLine("Real leaf symlink branch executed using OPEN_REPARSE_POINT.");}
         finally{File.Delete(link);}
     }
     [Fact]

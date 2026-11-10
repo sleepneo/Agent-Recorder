@@ -36,48 +36,7 @@ public sealed partial class OrdinaryWgcBundleTests
         File.WriteAllText(Path.Combine(directory, name + ".json"), JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }));
     }
 
-    [Fact]
-    public async Task SeriesBundleActualApiMustRejectBeforeCreatingQueuedBundleDirectory()
-    {
-        using var f = RuntimeFixture(); await f.Prepare();
-        var runner = new SeriesBundlePngRunner(); ConfigureSeriesBundle(f, runner);
-        Func<Task>? run = null;
-        f.Engine.BundleGenerationDispatcherForTests = work => { run = work; return Task.CompletedTask; };
-        var video = f.Create("display"); await f.Approve(video); await f.Terminal(video, false);
-        // The public terminal precedes Bundle dispatch. Await the actual
-        // natural-exit host before observing its queued delegate.
-        await f.Wgc!.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
-        var target = Path.ChangeExtension(video.OutputPath, ".bundle");
-        Assert.NotNull(run); Assert.False(Directory.Exists(target));
-        var beforeHash = ScreenshotSeriesArtifacts.Sha256File(video.OutputPath);
-        var confirmations = f.Engine._confs.Count;
-        f.StartApi(); using var client = f.Client();
-        HttpStatusCode status; string body; bool created; int newConfirmations;
-        try
-        {
-            using var response = await client.PostAsync("/api/v1/recordings?creation_wait_ms=0",
-                new StringContent(SeriesBundleRequest(f, Path.Combine(target, "child")).ToJsonString(), Encoding.UTF8, "application/json"));
-            status = response.StatusCode; body = await response.Content.ReadAsStringAsync();
-            created = Directory.Exists(target); newConfirmations = f.Engine._confs.Count - confirmations;
-            SaveSeriesBundleEvidence("raw-before-cleanup", new { http = (int)status, body, created, newConfirmations,
-                frameCalls = runner.Calls, frameOperations = f.Engine.ActiveScreenshotSeriesOperationCountForTests,
-                videoFactories = f.FactoryCalls, proofs = f.Engine._recs.Values.Count(r => r.IsScreenshotSeries && r.AuthorizationProof is not null),
-                series = f.Engine._recs.Values.Where(r => r.IsScreenshotSeries).Select(r => new { r.Mode, r.BackendType, state = r.State.ToString(), plan = r.ApprovedCapturePlan?.PlannedBackend }),
-                video = video.State.ToString(), bundle = video.BundleSnapshot.Status });
-        }
-        finally
-        {
-            foreach (var pending in f.Engine._recs.Values.Where(r => r.IsScreenshotSeries)) f.Engine.Stop(pending.Id, "user_requested");
-            f.Generator.Release.TrySetResult(); await run!();
-        }
-        SaveSeriesBundleEvidence("raw-after-host", new { video = video.State.ToString(), mainIntact = beforeHash == ScreenshotSeriesArtifacts.Sha256File(video.OutputPath),
-            bundle = video.BundleSnapshot.Status, directoryExists = Directory.Exists(target), frameCalls = runner.Calls });
-        Assert.Equal(HttpStatusCode.Conflict, status);
-        Assert.Contains("OUTPUT_PATH_IN_USE", body); Assert.False(created); Assert.Equal(0, newConfirmations);
-        Assert.Equal(0, runner.Calls); Assert.Single(f.Engine._recs);
-        Assert.Equal(beforeHash, ScreenshotSeriesArtifacts.Sha256File(video.OutputPath));
-        Assert.Equal("ready", video.BundleSnapshot.Status);
-    }
+
 
     private sealed class SeriesBundlePngRunner : IScreenshotFrameRunner
     {

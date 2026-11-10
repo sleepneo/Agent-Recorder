@@ -39,6 +39,7 @@ internal static class ObservationHealthText
         ("Window", "窗口", "Window"), ("Display", "显示器", "Display"), ("Region", "区域", "Region"),
         ("Experimental", "WGC 为实验策略；以下是冻结配置，不代表能力或录制实测。窗口捕获仍需本地确认。", "WGC is experimental; frozen configuration below does not prove capability or recording. Window capture still requires local confirmation."),
         ("Registered", "已注册", "Registered"), ("Unregistered", "未注册", "Unregistered"),
+        ("HotkeyDisabled", "此热键已停用。", "This hotkey is disabled."),
         ("Time", "采样时间", "Sample time"), ("Receipt", "证据接收时间", "Evidence receipt time"),
         ("Reason", "原因", "Reason"), ("Path", "完整路径", "Full path"), ("Source", "来源", "Source"),
         ("Policy", "策略", "Policy"), ("ReadyPath", "本实例就绪文件位置", "Instance ready file location"),

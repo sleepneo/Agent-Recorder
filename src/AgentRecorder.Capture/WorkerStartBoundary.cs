@@ -66,6 +66,15 @@ internal sealed class WorkerStartBoundary
         }
     }
 
+    internal bool ObserveWriterRetired(Func<bool> startedWriterRetired)
+    {
+        lock (_gate)
+        {
+            if (_starting || _cleanupRunning || _previousUnknown) return false;
+            return _state == ResourceState.NoResources || startedWriterRetired();
+        }
+    }
+
     internal void Close(Func<bool> cleanup)
     {
         lock (_gate) { _closed = true; _cleanup ??= cleanup; if (_starting) return; }

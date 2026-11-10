@@ -15,6 +15,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="AgentRecorder.Tests" />
     <InternalsVisibleTo Include="AgentRecorder.App" />
+    <InternalsVisibleTo Include="AgentRecorder.Api" />
   </ItemGroup>
 
 </Project>

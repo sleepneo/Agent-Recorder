@@ -62,7 +62,7 @@ public sealed class OrdinaryWindowTargetApiTests
             Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",Db.Root);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE",null);DataDirResolver.SetOverride(Db.Root);
             RecordingPreflightChecker.StorageCapacityProvider=new Capacity();
             RecordingPreflightChecker.AudioHelperPathResolver=()=>"task336-version-only.exe";
-            RecordingPreflightChecker.AudioHelperProbeRunner=(_,_)=>new(){Success=true,ProtocolVersion="audio-helper-v1",TimestampFrequency=Stopwatch.Frequency};
+            RecordingPreflightChecker.AudioHelperProbeRunner=(_,_)=>new(){Success=true,ProtocolVersion="audio-helper-v1",OwnedWavCapability = "file-id-v1",TimestampFrequency=Stopwatch.Frequency};
             SystemQuery.SetWindowProvider((_,_)=>new(){new("window_42","Owned synthetic title","task336.exe",7,false,false,new(0,0,320,240))});
             SystemQuery.SetDisplayProvider(()=>new(){new("display_1","Synthetic",true,new(0,0,1920,1080),1)});
             Engine=new(new RetentionSharedOutputPathTests.QuietAudit(),systemAudioEndpointProvider:new Devices()){CountdownSteps=0,DisableDeadlineWatchdogForTests=true};

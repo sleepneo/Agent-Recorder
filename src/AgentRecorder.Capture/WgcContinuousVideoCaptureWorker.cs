@@ -21,6 +21,9 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
     private WgcContinuousCaptureBackend? _hostRetirementBackend;
     internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
     private bool ReadStartedHostRetirement() => (_backend ?? _hostRetirementBackend)?.OutputRetirement.IsCompletedSuccessfully == true;
+    internal bool StagingWriterRetired => _hostStart.ObserveWriterRetired(
+        () => (_backend ?? _hostRetirementBackend)?.OutputWriterRetired == true);
+    internal AvSplitStaging? IntermediateStaging { get; set; }
     private WgcContinuousCaptureBackend? _backend;
     private OutputMeta? _terminalMeta;
     private int _exitCode = -1;
@@ -92,7 +95,7 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
         Interlocked.Exchange(ref _launchAnchorTicks, _timestampProvider());
         try
         {
-            backend.Start(CreateVideoOnlyConfig(cfg, outputPath), _authorizationProof);
+            backend.Start(CreateVideoOnlyConfig(cfg, outputPath, IntermediateStaging), _authorizationProof);
         }
         catch
         {
@@ -208,7 +211,7 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
         }
     }
 
-    private static CaptureConfig CreateVideoOnlyConfig(CaptureConfig source, string outputPath)
+    private static CaptureConfig CreateVideoOnlyConfig(CaptureConfig source, string outputPath, AvSplitStaging? staging)
     {
         return new CaptureConfig
         {
@@ -223,6 +226,7 @@ internal sealed class WgcContinuousVideoCaptureWorker : IVideoCaptureWorker
             WritePaths = source.WritePaths,
             StorageSafety = source.StorageSafety,
             StorageIntermediatePublication = true,
+            AvIntermediateStaging = staging,
             AudioSourceKind = AudioCaptureSourceKind.None,
             Microphone = false,
             Fps = source.Fps,

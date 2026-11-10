@@ -13,9 +13,29 @@ internal static class PendingOutputUseStorage
     internal static Dictionary<string, PendingOutputUseState> Read(SqliteConnection connection, SqliteTransaction transaction,
         IReadOnlyList<OrdinaryRecordingHistorySnapshot> rows,
         Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? observe)
+        => ReadCore(connection, transaction, rows.Select(r => (r.RecordingId, r.OutputPath)).ToArray(), observe, false);
+
+    // One directory set and one 501-row sentinel for ALL candidates and aliases.
+    // Do not reuse the mixed query once per alias: that both resets its budget
+    // and adds template meanings to names which were only observed as aliases.
+    internal static Dictionary<string, PendingOutputUseState> ReadExactAliases(SqliteConnection connection, SqliteTransaction transaction,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> paths,
+        Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? observe)
     {
-        var targets = rows.Select(r => UnifiedHistoryQueryService.SplitFrozenTarget(r.OutputPath)).ToArray();
-        var result = rows.ToDictionary(r => r.RecordingId, _ => PendingOutputUseState.None, StringComparer.Ordinal);
+        if (paths.Count is < 1 or > 100 || paths.Values.Any(p => p.Count is < 1 or > 3))
+            throw new InvalidDataException("Invalid pending alias request.");
+        return ReadCore(connection, transaction, paths.SelectMany(p => p.Value.Select(path => (p.Key, path))).ToArray(), observe, true);
+    }
+
+    private static Dictionary<string, PendingOutputUseState> ReadCore(SqliteConnection connection, SqliteTransaction transaction,
+        IReadOnlyList<(string Id, string Path)> rows,
+        Action<SqliteConnection,SqliteTransaction,string,IReadOnlyList<KeyValuePair<string,object>>>? observe, bool exactOnly)
+    {
+        if (!exactOnly && rows.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != rows.Count)
+            throw new InvalidDataException("Duplicate pending output target.");
+        var targets = rows.Select(r => UnifiedHistoryQueryService.SplitFrozenTarget(r.Path)).ToArray();
+        if (exactOnly && targets.Any(t => t.Name is null)) throw new InvalidDataException("Invalid pending alias path.");
+        var result = rows.Select(r => r.Id).Distinct(StringComparer.Ordinal).ToDictionary(id => id, _ => PendingOutputUseState.None, StringComparer.Ordinal);
         var directories = targets.SelectMany(t => new[] { t.WithoutTail, t.WithTail }).Where(d => d is not null)
             .Cast<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (directories.Length == 0) return result; // Existing frozen-path indeterminate handling owns unsplittable candidates.
@@ -28,7 +48,7 @@ internal static class PendingOutputUseStorage
         static string Text(string column,int maximum) => "CASE WHEN typeof(uses."+column+")='text' AND length(CAST(uses."+column+" AS BLOB))<="+(4*maximum)+" AND instr(uses."+column+",char(0))=0 AND length(uses."+column+")<="+maximum+" THEN uses."+column+" ELSE NULL END";
         // Preserve old branch kinds: 0=fixed, 1=setup template, 2=Profile template.
         var paths = SqliteSchemaV38.Paths.Select((p,i) => (Kind:i, Path:p))
-            .Concat(SqliteSchemaV39.Paths.Select(p => (Kind:0, Path:p)));
+            .Concat(SqliteSchemaV39.Paths.Select(p => (Kind:0, Path:p))).Where(p => !exactOnly || p.Kind == 0);
         var branches = paths.Select(source =>
         {
             var p = source.Path; var i = source.Kind;
@@ -61,10 +81,10 @@ internal static class PendingOutputUseStorage
                 var state = !valid ? PendingOutputUseState.Unknown : use.Kind == 0 ?
                     (string.Equals(use.Value,target.Name,StringComparison.OrdinalIgnoreCase)?PendingOutputUseState.SetupExact:PendingOutputUseState.None) :
                     (MatchesTemplate(target.Name,use.Value!)?PendingOutputUseState.Template:PendingOutputUseState.None);
-                var old = result[rows[i].RecordingId];
+                var old = result[rows[i].Id];
                 // An exact known purpose wins; uncertainty remains visible ahead of a template hit.
                 if (state == PendingOutputUseState.SetupExact || old != PendingOutputUseState.SetupExact &&
-                    (state == PendingOutputUseState.Unknown || old == PendingOutputUseState.None)) result[rows[i].RecordingId] = state;
+                    (state == PendingOutputUseState.Unknown || old == PendingOutputUseState.None)) result[rows[i].Id] = state;
             }
         }
         return result;

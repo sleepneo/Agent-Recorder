@@ -26,7 +26,7 @@ internal sealed class PathPolicy
         }
     }
 
-    public PathCheckResult ValidateOutputPath(string outputPath)
+    public PathCheckResult ValidateOutputPath(string outputPath, string? ownedWavIdentity = null)
     {
         var result = new PathCheckResult();
         if (string.IsNullOrWhiteSpace(outputPath))
@@ -92,6 +92,26 @@ internal sealed class PathPolicy
         if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
         {
             result.Error = "Output parent directory does not exist";
+            return result;
+        }
+
+        if (ownedWavIdentity is not null)
+        {
+            const string prefix = ".agent-recorder-av-";
+            var directoryName = Path.GetFileName(parent);
+            if (!IsSameCanonicalPath(parent, AllowedRoot) || !directoryName.StartsWith(prefix, StringComparison.Ordinal) ||
+                !Guid.TryParseExact(directoryName[prefix.Length..], "N", out _) ||
+                !OwnedWavTarget.IsValidIdentity(ownedWavIdentity))
+            {
+                result.Error = "Owned WAV must be in the exact split A/V staging directory";
+                return result;
+            }
+
+            var target = new OwnedWavTarget(full, ownedWavIdentity);
+            result.CanonicalPath = result.PartialPath = full;
+            result.OwnedWav = target;
+            result.OpenPartialStream = target.OpenForWrite;
+            result.Ok = true;
             return result;
         }
 
@@ -359,4 +379,5 @@ internal sealed class PathCheckResult
     public string CanonicalPath { get; set; } = "";
     public string PartialPath { get; set; } = "";
     public Func<Stream>? OpenPartialStream { get; set; }
+    internal OwnedWavTarget? OwnedWav { get; set; }
 }

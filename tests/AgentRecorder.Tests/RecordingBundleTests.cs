@@ -536,7 +536,7 @@ public partial class RecordingBundleTests : IDisposable
     }
 
     [Fact]
-    public void CreateRecording_ResponseIncludesBundlePending()
+    public void CreateRecording_ResponseIncludesBundleNotApplicable()
     {
         var audit = new CaptureAuditLogger();
         var engine = new RecordingEngine(audit);
@@ -550,7 +550,7 @@ public partial class RecordingBundleTests : IDisposable
             var json = JsonSerializer.Serialize(resp);
             using var doc = JsonDocument.Parse(json);
             var bundle = doc.RootElement.GetProperty("bundle");
-            Assert.Equal("pending", bundle.GetProperty("status").GetString());
+            Assert.Equal("not_applicable", bundle.GetProperty("status").GetString());
             Assert.True(bundle.GetProperty("path").ValueKind == JsonValueKind.Null);
             Assert.Empty(bundle.GetProperty("contents").EnumerateArray());
             Assert.True(bundle.GetProperty("error_code").ValueKind == JsonValueKind.Null);
@@ -611,37 +611,7 @@ public partial class RecordingBundleTests : IDisposable
         Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
     }
 
-    [Fact]
-    public void RecordingEngine_FfmpegMp4Success_TriggersBundleGenerationOnce()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CountingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
 
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
-
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = MediaPath("mp4-once"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("mp4-once") }
-        };
-        rec.LastMeta = new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        backend.FireNaturalExit(0, rec.LastMeta);
-
-        Assert.Equal(RecState.completed, rec.State);
-        // The fake generator returns synchronously, so the snapshot may already be
-        // "ready" by the time we observe it. The important invariant is that
-        // generation was triggered exactly once.
-        SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2));
-        Assert.Equal(1, generator.CallCount);
-        Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
-    }
 
     [Fact]
     public void RecordingEngine_FailedRecording_DoesNotTriggerBundleGeneration()
@@ -671,77 +641,9 @@ public partial class RecordingBundleTests : IDisposable
         Assert.Equal(0, generator.CallCount);
     }
 
-    [Theory]
-    [InlineData("ffmpeg", true)]
-    [InlineData("ffmpeg-region", true)]
-    [InlineData("ffmpeg-window-region", true)]
-    [InlineData("wgc-continuous", false)]
-    [InlineData("some-unknown-backend", false)]
-    public void RecordingEngine_BackendEligibility_OnlyFfmpegMp4BackendsGenerateBundle(string backendType, bool shouldGenerate)
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CapturingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
 
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, backendType);
 
-        var rec = new Recording
-        {
-            SourceType = backendType == "ffmpeg" ? "display" : "region",
-            BackendType = backendType,
-            OutputPath = MediaPath("eligible-" + backendType),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("eligible-" + backendType) }
-        };
-        rec.LastMeta = new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 };
-        engine.StartCaptureForTests(rec, new NoOpTray());
 
-        backend.FireNaturalExit(0, rec.LastMeta);
-
-        if (shouldGenerate)
-        {
-            Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
-            Assert.Equal(1, generator.CallCount);
-            Assert.Equal(backendType, generator.LastRequest?.Backend);
-            Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
-        }
-        else
-        {
-            Assert.Equal(0, generator.CallCount);
-            Assert.Equal("not_applicable", rec.BundleSnapshot.Status);
-        }
-    }
-
-    [Theory]
-    [InlineData("display", "ffmpeg")]
-    [InlineData("region", "ffmpeg-region")]
-    [InlineData("window", "ffmpeg-window-region")]
-    public void RecordingEngine_MetadataBackend_WritesActualBackendIdentifier(string sourceType, string backendType)
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CapturingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
-
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, backendType);
-
-        var rec = new Recording
-        {
-            SourceType = sourceType,
-            BackendType = backendType,
-            OutputPath = MediaPath("backend-" + sourceType),
-            Config = new CaptureConfig { SourceKind = sourceType, Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("backend-" + sourceType) }
-        };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        backend.FireNaturalExit(0, new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 });
-
-        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
-        Assert.Equal(1, generator.CallCount);
-        Assert.Equal(backendType, generator.LastRequest?.Backend);
-    }
 
     [Fact]
     public void RecordingEngine_UserRejectedConfirmation_BundleIsNotApplicable()
@@ -881,35 +783,7 @@ public partial class RecordingBundleTests : IDisposable
         Assert.Equal(0, generator.CallCount);
     }
 
-    [Fact]
-    public async Task RecordingEngine_CompletedStateNeverPublishedWithPendingBundle()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new BlockingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
 
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
-
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = MediaPath("race-pending"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("race-pending") }
-        };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        generator.Release = new TaskCompletionSource();
-        backend.FireNaturalExit(0, new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 });
-
-        await generator.Entered;
-        Assert.Equal(RecState.completed, rec.State);
-        Assert.Equal("generating", rec.BundleSnapshot.Status);
-
-        generator.Release.SetResult();
-    }
 
     [Fact]
     public void RecordingEngine_MicrophoneMissingAudioTrack_MergesWarningIntoRecording()
@@ -1024,13 +898,7 @@ public partial class RecordingBundleTests : IDisposable
         });
 
         Assert.Equal(RecState.completed, rec.State);
-        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromSeconds(2)));
-        Assert.Equal(1, generator.CallCount);
-        Assert.NotNull(generator.LastRequest);
-        Assert.True(rec.BundleSnapshot.Status is "generating" or "ready");
-        Assert.True(generator.LastRequest!.AudioMicrophone);
-        Assert.Equal("lost", generator.LastRequest.AudioStatus);
-        Assert.Equal("mic_1", generator.LastRequest.AudioDeviceId);
+        Assert.Equal(0,generator.CallCount);Assert.Null(generator.LastRequest);Assert.Equal("not_applicable",rec.BundleSnapshot.Status);Assert.True(rec.Microphone);Assert.Equal("lost",rec.LastMeta!.AudioStatus);
         Assert.Contains(rec.Warnings, w => w.Contains("microphone_lost"));
     }
 
@@ -1067,7 +935,7 @@ public partial class RecordingBundleTests : IDisposable
             using var doc2 = JsonDocument.Parse(json2);
             Assert.Equal("stopping", doc2.RootElement.GetProperty("status").GetString());
             Assert.True(doc2.RootElement.TryGetProperty("bundle", out var bundle));
-            Assert.Equal("pending", bundle.GetProperty("status").GetString());
+            Assert.Equal("not_applicable", bundle.GetProperty("status").GetString());
         }
         finally
         {
@@ -1135,197 +1003,15 @@ public partial class RecordingBundleTests : IDisposable
         Assert.Equal(expected, CaptureBackendSelector.IsFfmpegMp4Backend(backendType));
     }
 
-    [Fact]
-    public async Task RecordingEngine_BundleFailure_KeepsRecordingCompleted_AndLogsSingleBundleFailed()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new FailingBundleGenerator("bundle_frame_extract_failed");
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
 
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
 
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = MediaPath("bundle-fail"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("bundle-fail") }
-        };
-        rec.LastMeta = new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 };
-        engine.StartCaptureForTests(rec, new NoOpTray());
 
-        backend.FireNaturalExit(0, rec.LastMeta);
 
-        await Task.Delay(100);
-        Assert.Equal(RecState.completed, rec.State);
-        Assert.Equal("failed", rec.BundleSnapshot.Status);
-        Assert.Equal("bundle_frame_extract_failed", rec.BundleSnapshot.ErrorCode);
-        Assert.Single(audit.Events, e => e.evt == "recording.bundle_failed");
-    }
 
-    [Fact]
-    public async Task RecordingEngine_StopAndNaturalExitRace_OnlyGeneratesBundleOnce()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CountingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        var tray = new NoOpTray();
-        engine.SetTray(tray);
 
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
 
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            CountdownSeconds = 0,
-            OutputPath = MediaPath("race"),
-            Config = new CaptureConfig { SourceKind = "region", CountdownSeconds = 0, Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("race") }
-        };
-        var meta = new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 };
-        rec.LastMeta = meta;
-        engine.StartCaptureForTests(rec, tray);
 
-        backend.StopResult = meta;
 
-        // Fire natural exit and explicit stop concurrently many times.
-        var tasks = new List<Task>();
-        for (int i = 0; i < 20; i++)
-        {
-            tasks.Add(Task.Run(() => backend.FireNaturalExit(0, meta)));
-            tasks.Add(Task.Run(() =>
-            {
-                try { engine.Stop(rec.Id, "user_requested"); } catch { }
-            }));
-        }
-        await Task.WhenAll(tasks);
-
-        SpinWait.SpinUntil(() => generator.CallCount >= 1, TimeSpan.FromSeconds(2));
-        Assert.Equal(1, generator.CallCount);
-    }
-
-    [Fact]
-    public void RecordingEngine_ConfirmationOutputDirectoryOverride_BundleUsesNewPath()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CapturingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        var tray = new NoOpTray();
-        engine.SetTray(tray);
-
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
-
-        var originalDir = _tmpDir;
-        var newDir = Path.Combine(_tmpDir, "overridden");
-        Directory.CreateDirectory(newDir);
-
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = MediaPath("orig"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("orig") }
-        };
-        engine.StartCaptureForTests(rec, tray);
-
-        // Simulate user choosing a different output directory after confirmation.
-        var newPath = Path.Combine(newDir, "moved.mp4");
-        File.WriteAllText(newPath, "video");
-        rec.OutputPath = newPath;
-        rec.Config.OutputPath = newPath;
-
-        backend.FireNaturalExit(0, new OutputMeta
-        {
-            Container = "mp4",
-            Codec = "h264",
-            DurationSeconds = 1.0,
-            SizeBytes = 1024,
-            Width = 100,
-            Height = 100
-        });
-
-        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromMilliseconds(100)));
-        Assert.Equal(newPath, generator.LastRequest?.MediaPath);
-        Assert.EndsWith("moved.bundle", rec.BundleSnapshot.Path!);
-    }
-
-    [Fact]
-    public void RecordingEngine_MetaOutputPath_DiffersFromRecordingOutputPath_GeneratingUsesApprovedFinalPath()
-    {
-        var audit = new CaptureAuditLogger();
-        var generator = new CapturingBundleGenerator();
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
-
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
-
-        var recOutputPath = MediaPath("recording-output");
-        var metaOutputPath = MediaPath("actual-media");
-        File.WriteAllText(recOutputPath, "approved final video bytes");
-        File.WriteAllText(metaOutputPath, "actual video bytes");
-
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = recOutputPath,
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = recOutputPath }
-        };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        backend.FireNaturalExit(0, new OutputMeta
-        {
-            Container = "mp4",
-            Codec = "h264",
-            DurationSeconds = 1.0,
-            SizeBytes = 1024,
-            Width = 100,
-            Height = 100,
-            OutputPath = metaOutputPath
-        });
-
-        Assert.True(SpinWait.SpinUntil(() => generator.CallCount > 0, TimeSpan.FromMilliseconds(100)));
-        Assert.Equal(recOutputPath, generator.LastRequest?.MediaPath);
-        Assert.EndsWith("recording-output.bundle", rec.BundleSnapshot.Path!);
-    }
-
-    [Fact]
-    public async Task RecordingEngine_BundleReady_UpdatesSnapshotContents()
-    {
-        var audit = new CaptureAuditLogger();
-        var bundleDir = Path.Combine(_tmpDir, "ready-bundle");
-        Directory.CreateDirectory(bundleDir);
-        foreach (var name in new[] { "metadata.json", "thumbnail.jpg", "first_frame.png", "last_frame.png", "marks.json" })
-            File.WriteAllText(Path.Combine(bundleDir, name), name);
-
-        var generator = new FixedBundleGenerator(bundleDir);
-        var engine = new RecordingEngine(audit, bundleGenerator: generator);
-        engine.SetTray(new NoOpTray());
-
-        var backend = new FakeCaptureBackend();
-        engine.BackendFactory = _ => (backend, "ffmpeg");
-
-        var rec = new Recording
-        {
-            SourceType = "region",
-            BackendType = "ffmpeg",
-            OutputPath = MediaPath("ready"),
-            Config = new CaptureConfig { SourceKind = "region", Bounds = (0, 0, 100, 100), Fps = 30, OutputPath = MediaPath("ready") }
-        };
-        engine.StartCaptureForTests(rec, new NoOpTray());
-
-        backend.FireNaturalExit(0, new OutputMeta { Container = "mp4", Codec = "h264", DurationSeconds = 1.0, SizeBytes = 1024, Width = 100, Height = 100 });
-
-        await Task.Delay(100);
-        Assert.Equal("ready", rec.BundleSnapshot.Status);
-        Assert.Equal(5, rec.BundleSnapshot.Contents.Count);
-        Assert.All(rec.BundleSnapshot.Contents, c => Assert.True(c.SizeBytes > 0));
-    }
 
     [Fact]
     public async Task BundledFfmpeg_GeneratesValidBundle()

@@ -58,6 +58,9 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         // replaces its receipt with a deliberately wrong name/checksum.
         if(sql.StartsWith("INSERT INTO schema_migrations VALUES(47,'future'"))
             db.RawExecute("DELETE FROM schema_migrations WHERE version=47;");
+        // Keep the original theory ID while still injecting a genuinely future receipt.
+        if(sql.StartsWith("INSERT INTO schema_migrations VALUES(49,'future'"))
+            sql=sql.Replace("VALUES(49,",$"VALUES({SqliteOperationalStore.CurrentSchemaVersion+1},",StringComparison.Ordinal);
         db.RawExecute(sql);
     }
     public static IEnumerable<object[]> SchemaFaults => Faults();
@@ -94,7 +97,7 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
         var once = OldBytes(f.Db.Store.DatabasePath, include42: true);
         new SqliteOperationalStore(f.Db.Store.DatabasePath).Initialize(); f.Db.Store.Initialize();
         Assert.Equal(once, OldBytes(f.Db.Store.DatabasePath, include42: true));
-        Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion); // Current Initialize installs the separate v43/v44 additions.
+        Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion); // Current Initialize installs the separate v43/v44 additions.
         Assert.Equal(1, f.Db.Scalar("SELECT count(*) FROM future_window_publication_anchors WHERE authorization_id='null_marker' AND volume_id IS NULL AND file_id IS NULL;"));
         using var c = f.Db.Store.OpenReadOnlyConnection(); using var t = c.BeginTransaction(IsolationLevel.Serializable, deferred: true);
         SqliteSchemaV42.Validate(c, t); t.Commit();
@@ -135,6 +138,9 @@ public sealed class SqlitePublicationIdentityReferenceTests(ITestOutputHelper ou
             using var rd = cmd.ExecuteReader();
             while (rd.Read())
             {
+                if ((!include42 || through is <51) && rd.GetString(2) == SqliteSchemaV51.Table) continue;
+                if ((!include42 || through is <49) && rd.GetString(2) is "ordinary_deletion_request_policies" or "ordinary_deletion_operation_policies") continue;
+                if ((!include42 || through is <50) && rd.GetString(2) is "ordinary_deletion_batch_policies" or "ordinary_deletion_batch_policy_children") continue;
                 if ((!include42 || through is <48) && (rd.GetString(2) is "ordinary_deletion_batches" or "ordinary_deletion_batch_items")) continue;
                 // The v41 comparison excludes only subsequent v42/v43/v44 objects.
                 // Task360 separately compares EVERY v42 value/definition across v43.

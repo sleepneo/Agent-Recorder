@@ -6,10 +6,16 @@ internal static class ArtifactMetadataWorker
     private static int _busy;
     internal static bool HostBusy => Volatile.Read(ref _busy) != 0;
     internal static async Task<T?> ReadAsync<T>(Func<CancellationToken,T?> run, Func<string,T> snapshot,
-        Func<CancellationToken,Task> deadlineFactory, Action? retired, CancellationToken cancellation) where T : class
+        Func<CancellationToken,Task> deadlineFactory, Action? retired, CancellationToken cancellation,
+        TaskCompletionSource? actualRetirement = null) where T : class
     {
-        if (cancellation.IsCancellationRequested) return snapshot("cancelled");
-        if (Interlocked.CompareExchange(ref _busy,1,0)!=0) return snapshot("busy");
+        T Rejected(string reason)
+        {
+            actualRetirement?.TrySetResult();
+            return snapshot(reason);
+        }
+        if (cancellation.IsCancellationRequested) return Rejected("cancelled");
+        if (Interlocked.CompareExchange(ref _busy,1,0)!=0) return Rejected("busy");
         var workCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         using var deadlineCancellation=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         Task deadline; Task<T?> work;
@@ -22,14 +28,14 @@ internal static class ArtifactMetadataWorker
                 finally
                 {
                     try { workCancellation.Dispose(); }
-                    finally { Volatile.Write(ref _busy,0); retired?.Invoke(); }
+                    finally { Volatile.Write(ref _busy,0); actualRetirement?.TrySetResult(); retired?.Invoke(); }
                 }
             });
         }
         catch
         {
             workCancellation.Dispose(); Volatile.Write(ref _busy,0);
-            return snapshot("failed");
+            return Rejected("failed");
         }
         try
         {

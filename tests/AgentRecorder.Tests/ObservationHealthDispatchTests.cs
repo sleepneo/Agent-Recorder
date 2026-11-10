@@ -87,6 +87,24 @@ public sealed class ObservationHealthDispatchTests
         var owner=Owner();owner=owner with{Chapter=owner.Chapter with{Expected=expected,Registered=registered}};
         Assert.Equal(reason,ObservationHealthResponse.From(ObservationHealthSnapshot.Partial(owner,HealthProbeState.NotChecked)).Hotkeys.Chapter.ReasonCode);
     }
+    [Theory]
+    [InlineData("unknown",false,false,false,null,0)]
+    [InlineData("DISABLED",false,false,false,null,0)]
+    [InlineData("disabled",true,false,false,null,0)]
+    [InlineData("disabled",false,true,false,null,0)]
+    [InlineData("disabled",false,false,true,null,0)]
+    [InlineData("disabled",false,false,false,"Ctrl+Shift+F11",0)]
+    [InlineData("disabled",false,false,false,null,1409)]
+    public void MissingOrContradictoryChapterEvidenceRemainsUnknown(string policy, bool supported, bool registered, bool expected, string? gesture, int error)
+    {
+        var owner = Owner() with { Chapter = new(supported, registered, gesture, policy, expected, error) };
+        var sample = ObservationHealthSnapshot.Partial(owner, HealthProbeState.NotChecked);
+        var chapter = ObservationHealthResponse.From(sample).Hotkeys.Chapter;
+        Assert.Equal("unknown", chapter.Policy);
+        Assert.Equal("unknown", chapter.State);
+        Assert.Equal("not_checked", chapter.ReasonCode);
+        Assert.Equal(HealthState.Unknown, State(sample, "chapter"));
+    }
     [Fact]
     public void ProjectionWhitelistsMaliciousCodesMetadataEnumsAndGestureAndKeepsEvidenceSeparated()
     {

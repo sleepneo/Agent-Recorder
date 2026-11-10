@@ -13,11 +13,11 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-AgentRecorderDataDir")]
 public sealed class MediaOnlyPolicyTests
 {
-    [Theory][InlineData(0,false)][InlineData(1,false)][InlineData(-1,false)][InlineData(0,true)][InlineData(1,true)][InlineData(-1,true)]
-    public async Task RawAndQuickFreezeDefaultTrueAndExplicitBooleanInConfirmationAndStatus(int policy,bool quick)
+    [Theory][InlineData(0,false)][InlineData(-1,false)][InlineData(0,true)][InlineData(-1,true)]
+    public async Task RawAndQuickFreezeVideoOnlyInConfirmationAndStatus(int policy,bool quick)
     {
         using var f=new MediaOnlyFixture();var rec=await f.Create(policy,quick);Assert.Equal(0,f.BackendCalls);Assert.Equal(0,f.GeneratorCalls);
-        using var response=await f.Client.GetAsync("/api/v1/recordings/"+rec.Id);var data=JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("data");Assert.Equal(policy>=0,data.GetProperty("config").GetProperty("artifacts").GetProperty("bundle").GetBoolean());
+        using var response=await f.Client.GetAsync("/api/v1/recordings/"+rec.Id);var data=JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("data");Assert.False(data.GetProperty("config").GetProperty("artifacts").GetProperty("bundle").GetBoolean());
         f.Tray.Confirm!(ConfirmationDecision.Reject());Assert.Equal(RecState.rejected,rec.State);Assert.Equal(0,f.BackendCalls);Assert.Equal(0,f.NativeApi.Calls);
     }
     public static IEnumerable<object[]> InvalidPolicies()
@@ -42,9 +42,9 @@ public sealed class MediaOnlyPolicyTests
         var r=await f.Post(quick?"/api/v1/recordings/quick":"/api/v1/recordings",cfg.ToJsonString());Assert.Equal(HttpStatusCode.BadRequest,r.Status);Assert.Equal(0,f.Devices.Calls);Assert.Equal(0,f.Tray.Windows);Assert.Equal(0,f.Tray.Regions);Assert.Empty(f.Engine._recs);
     }
     [Fact]
-    public void EmptyPolicyDefaultsTrueAndProfileDomainCannotBypassPolicyGate()
+    public void EmptyPolicyDefaultsFalseAndProfileDomainCannotBypassPolicyGate()
     {
-        using var f=new MediaOnlyFixture();var cfg=f.Request();cfg["artifacts"]=new JsonObject();var rec=ConfigParser.Build(cfg,"owned",out var summary);Assert.True(rec.GenerateBundle);Assert.True(summary.Artifacts!.Bundle);
+        using var f=new MediaOnlyFixture();var cfg=f.Request();cfg["artifacts"]=new JsonObject();var rec=ConfigParser.Build(cfg,"owned",out var summary);Assert.False(rec.GenerateBundle);Assert.False(summary.Artifacts!.Bundle);
         var called=0;var bad=f.Request(-1);Assert.Throws<ApiException>(()=>f.Engine.CreateRecordingFromFixedRegionProfile(bad,"owned",f.Tray,new("P",1,AgentRecorder.Core.Automation.RecurringFixedRegionProfileVersion.DigestPrefix+new string('a',64)),()=>{called++;return null;}));Assert.Equal(0,called);
     }
     [Fact]
@@ -61,10 +61,10 @@ public sealed class MediaOnlyPolicyTests
         {
             try
             {
-                using var f=new MediaOnlyFixture();var cfg=f.Request(bundle?1:-1);f.Engine.CreateRecording(cfg,"owned",f.Tray);var p=f.Tray.Presentation!;var choices=new List<ConfirmationDecision>();
+                using var f=new MediaOnlyFixture();var cfg=f.Request(-1);f.Engine.CreateRecording(cfg,"owned",f.Tray);var p=f.Tray.Presentation!;var choices=new List<ConfirmationDecision>();
                 using var form=new ConfirmationForm(new PendingConfirmationItem(p,_=>{}),1,1,choices.Add,previewProvider:new Preview(),textProvider:new UiTextProvider(language));
                 form.Size=new Size(1000,760);_=form.Handle;form.PerformLayout();Assert.Equal(13,form.GetInfoRowTextsForTests().Count);
-                Assert.Contains(form.GetInfoRowTextsForTests(),row=>row.Value==(language==UiLanguage.ZhCn?bundle?"MP4与录制说明包":"仅MP4":bundle?"MP4 and recording bundle":"MP4 only"));Assert.False(form.Visible);Assert.Same(form.AcceptButton,form.CancelButton);Assert.NotNull(form.CancelButton);Assert.Empty(choices);
+                Assert.Contains(form.GetInfoRowTextsForTests(),row=>row.Value==(language==UiLanguage.ZhCn?"仅MP4":"MP4 only"));Assert.False(form.Visible);Assert.Same(form.AcceptButton,form.CancelButton);Assert.NotNull(form.CancelButton);Assert.Empty(choices);
                 form.CloseWithoutResult();f.Tray.Confirm!(ConfirmationDecision.Reject());
             }
             catch(Exception e){error=e;}
@@ -72,10 +72,11 @@ public sealed class MediaOnlyPolicyTests
     }
     private sealed class Preview:IScreenPreviewProvider{public Bitmap Capture(ConfirmationCaptureBounds b,Size s)=>new(s.Width,s.Height);}
     [Fact]
-    public async Task ProductionAppConstructsRealGeneratorAndAdvertisesScopedDefault()
+    public async Task ProductionAppDoesNotAssembleGeneratorAndAdvertisesVideoOnly()
     {
-        Assert.IsType<AgentRecorder.Capture.FfmpegRecordingBundleGenerator>(Program.CreateRecordingBundleGenerator());var type=typeof(Program);var factory=type.GetMethod("CreateRecordingBundleGenerator",BindingFlags.Static|BindingFlags.NonPublic)!;
-        var calls=(IEnumerable<MethodBase>)typeof(RetentionRuntimeHostTests).GetMethod("Calls",BindingFlags.Static|BindingFlags.NonPublic)!.Invoke(null,new object[]{type.GetMethod("Run",BindingFlags.Static|BindingFlags.NonPublic)!})!;Assert.Contains(factory,calls);
-        using var f=new MediaOnlyFixture();using var response=await f.Client.GetAsync("/api/v1/capabilities");var data=JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("data");var cap=data.GetProperty("recording_artifacts");Assert.True(cap.GetProperty("default_bundle").GetBoolean());Assert.Equal(2,cap.GetProperty("endpoints").GetArrayLength());Assert.Equal("ordinary_non_nested_video",cap.GetProperty("scope").GetString());Assert.False(data.GetProperty("retention_preview").GetProperty("deletion_supported").GetBoolean());
+        var type=typeof(Program);
+        var calls=(IEnumerable<MethodBase>)typeof(RetentionRuntimeHostTests).GetMethod("Calls",BindingFlags.Static|BindingFlags.NonPublic)!.Invoke(null,new object[]{type.GetMethod("Run",BindingFlags.Static|BindingFlags.NonPublic)!})!;
+        Assert.DoesNotContain(calls,m=>m.DeclaringType==typeof(AgentRecorder.Capture.FfmpegRecordingBundleGenerator));
+        using var f=new MediaOnlyFixture();using var response=await f.Client.GetAsync("/api/v1/capabilities");var data=JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("data");var cap=data.GetProperty("recording_artifacts");Assert.False(cap.GetProperty("default_bundle").GetBoolean());Assert.Equal(2,cap.GetProperty("endpoints").GetArrayLength());Assert.Equal("all_new_video_recordings",cap.GetProperty("scope").GetString());Assert.False(data.GetProperty("retention_preview").GetProperty("deletion_supported").GetBoolean());
     }
 }

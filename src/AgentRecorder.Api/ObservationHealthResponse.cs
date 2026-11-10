@@ -23,7 +23,12 @@ internal static class ObservationHealthFacts
     internal static string ToolReason(string? value)=>value is "path_only" or "tool_not_found" or "tool_resolution_failed" or "not_checked"?value:"unknown";
     internal static string Source(string? value)=>value is "env:AGENT_RECORDER_FFMPEG_DIR" or "app_dir" or "project_tools" or "path" or "WgcHelperExePathResolver" or "AudioHelperExePathResolver"?value:"unknown";
     internal static string DesktopReason(string? value)=>value is "not_checked" or "interactive_desktop" or "desktop_locked" or "windows_required" or "input_desktop_unavailable" or "session_unavailable" or "interactive_desktop_required" or "desktop_observation_failed"?value:"desktop_observation_failed";
-    internal static string HotkeyPolicy(HealthHotkey key)=>key.Policy is "always" or "while_recording"?key.Policy:"unknown";
+    internal static string HotkeyPolicy(HealthHotkey key) => key switch
+    {
+        { Policy: "always" or "while_recording" } => key.Policy,
+        { Policy: "disabled", Supported: false, Registered: false, Expected: false, Gesture: null, ErrorCode: 0 } => "disabled",
+        _ => "unknown"
+    };
     internal static HealthState HotkeyState(HealthHotkey key)=>HotkeyPolicy(key)=="unknown"?HealthState.Unknown:
         !key.Supported?HealthState.Unsupported:key.Registered?HealthState.Available:!key.Expected?HealthState.Idle:HealthState.Unavailable;
     internal static HealthState ApiState(ObservationHealthOwner owner)

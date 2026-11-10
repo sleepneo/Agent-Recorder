@@ -113,14 +113,10 @@ public class RuntimeRecoveryMetadataTests : IDisposable
     /// so the preconditions pass and the test exercises the FinalizeOutput path
     /// (the same path the real AirPods failure took).
     /// </summary>
-    private string StageTempVideo(string outputPath)
+    private void StageTempVideo(FakeVideoCaptureWorker worker)
     {
-        var recordingId = Path.GetFileNameWithoutExtension(outputPath);
-        var tempDir = Path.Combine(DataDirResolver.Resolve(), "temp");
-        Directory.CreateDirectory(tempDir);
-        var tempVideo = Path.Combine(tempDir, recordingId + "_video.mp4");
-        File.Copy(CreateValidVideo(2), tempVideo);
-        return tempVideo;
+        var fixture = CreateValidVideo(2);
+        worker.FirstFrameObserved += _ => File.Copy(fixture, worker.OutputPath!, overwrite: true);
     }
 
     private static void RunFfmpeg(string arguments)
@@ -162,7 +158,7 @@ public class RuntimeRecoveryMetadataTests : IDisposable
         var backend = CreateAvSplitBackend(audio, video, _tmpDir);
         engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
         var rec = CreateRecording(outputPath);
-        StageTempVideo(outputPath);
+        StageTempVideo(video);
         engine.StartCaptureForTests(rec, tray);
 
         Assert.True(SpinWait.SpinUntil(() => rec.State == RecState.failed, TimeSpan.FromSeconds(10)),
@@ -237,7 +233,7 @@ public class RuntimeRecoveryMetadataTests : IDisposable
         var backend = CreateAvSplitBackend(audio, video, _tmpDir, runner);
         engine.BackendFactory = _ => (backend, "ffmpeg-av-split");
         var rec = CreateRecording(outputPath);
-        StageTempVideo(outputPath);
+        StageTempVideo(video);
         engine.StartCaptureForTests(rec, tray);
 
         Assert.True(SpinWait.SpinUntil(() => rec.State == RecState.completed, TimeSpan.FromSeconds(10)),

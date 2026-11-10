@@ -116,6 +116,15 @@ internal sealed class OriginalFileScopeResources
         }
         return null;
     }
+    internal string? ReadDataRootShortLeaf(Action stop)
+    {
+        if (_directories.Count < 2) return null;
+        var root = _directories[^2];
+        stop();
+        var snapshot = WindowsShortFileName.ReadDirectory(_native, root.Handle!, root.Path);
+        stop();
+        return snapshot is not null && snapshot.Identity == root.Identity ? snapshot.ShortLeaf : null;
+    }
     private OriginalFileHoldReason? Sample(DirectoryResource resource, Action stop, out ObservedFileIdentity? identity)
     {
         identity = null;

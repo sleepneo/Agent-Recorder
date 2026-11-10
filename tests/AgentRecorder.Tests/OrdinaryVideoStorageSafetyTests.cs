@@ -119,7 +119,7 @@ public sealed class OrdinaryVideoStorageSafetyTests
         private readonly IStorageCapacityProvider _priorProvider = RecordingPreflightChecker.StorageCapacityProvider;
         private readonly string? _priorDir = DataDirResolver.HasOverride ? DataDirResolver.Resolve() : null;
         private readonly Dictionary<string,string?> _environment;
-        internal Fixture()
+        internal Fixture(RecordingStorageReserve? reserve = null)
         {
             _environment = new[] { "AGENT_RECORDER_TEST_MODE", "AGENT_RECORDER_DATA_DIR", CaptureBackendSelector.DisplayBackendEnvVar,
                 CaptureBackendSelector.RegionBackendEnvVar }.ToDictionary(k => k, Environment.GetEnvironmentVariable);
@@ -133,7 +133,9 @@ public sealed class OrdinaryVideoStorageSafetyTests
                 new(0,0,1920,1080), 1.0, Display.Fingerprint, DisplayIdentityResolutionStatus.Resolved) });
             Store = new(Path.Combine(Root, "history.db")); Store.Initialize(); History = new(Store);
             Audit = new(Path.Combine(Root,"audit.jsonl"));
-            Engine = new(Audit, bundleGenerator: new FfmpegRecordingBundleGenerator()) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
+            Engine = new(Audit, tracer: null, bundleGenerator: new ForbiddenBundleGenerator400(),
+                microphoneProvider: null, microphoneStatusProvider: null, displayTopologyProvider: null,
+                systemAudioEndpointProvider: null, storageReserve: reserve) { CountdownSteps = 0, StorageMonitorDelay = Clock.Delay };
             Engine.ConfigureOrdinaryRecordingHistory(History); Engine.SetTray(Tray);
             Engine.BackendFactory = cfg => { var b = new Backend(); Backends.Add(b); return (b, cfg.SourceKind == "region" ? "ffmpeg-region" : "ffmpeg"); };
             ApiKeyAuth.InitializeForTesting(Root);
@@ -204,7 +206,7 @@ public sealed class OrdinaryVideoStorageSafetyTests
     public async Task QueuedOldCallbackAndDirectoryApprovalHaveOneLayoutWinner(bool failureClaimsFirst)
     {
         using var f=new Fixture();await f.Accepted();var rec=f.Single;var oldPath=rec.OutputPath;
-        using var old=RecordingStoragePolicy.CreateSafety(rec,f.Capacity);old.EnsureAdmission();rec.Config.StorageSafety=old;
+        using var old=RecordingStoragePolicy.CreateSafety(rec,f.Capacity,f.Engine.StorageReserve);old.EnsureAdmission();rec.Config.StorageSafety=old;
         var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var done=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);using var release=new ManualResetEventSlim();
         var handle=typeof(RecordingEngine).GetMethod("HandleStorageFailure",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
@@ -276,9 +278,212 @@ public sealed class OrdinaryVideoStorageSafetyTests
         if(unknown) f.Capacity.Query=(_,_)=>throw new IOException("owned volume unavailable");
         using var response=await f.Create(route,source);Assert.Equal(HttpStatusCode.BadRequest,response.StatusCode);
         using var body=JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        Assert.Equal(unknown ? WindowStorageSafety.UnavailableCode : WindowStorageSafety.LowSpaceCode,body.RootElement.GetProperty("error").GetProperty("code").GetString());
+        var error = body.RootElement.GetProperty("error");
+        Assert.Equal(unknown ? WindowStorageSafety.UnavailableCode : WindowStorageSafety.LowSpaceCode,error.GetProperty("code").GetString());
+        Assert.Equal(unknown ? "Storage capacity could not be verified for recording."
+            : "Insufficient storage capacity for recording and publication.", error.GetProperty("message").GetString());
+        var details = error.GetProperty("details");
+        Assert.Equal("before_confirmation", details.GetProperty("stage").GetString());
+        Assert.Equal("check_storage_capacity", details.GetProperty("suggested_action").GetString());
+        if (unknown)
+            Assert.False(details.TryGetProperty("storage", out _));
+        else
+            AssertStorageShortfall(details.GetProperty("storage"), (route == "raw" ? 456L : 496L) * 1024 * 1024, 0, "output");
         Assert.Empty(f.Engine._recs);Assert.Empty(f.Tray.Confirmations);Assert.Empty(f.Backends);
-        Assert.NotEmpty(f.Capacity.Requests);Assert.All(f.Capacity.Requests,q=>Assert.Equal(new[] { f.Root },q));
+        Assert.Equal(new[] { f.Root }, Assert.Single(f.Capacity.Requests));
+    }
+
+    [Theory]
+    [InlineData("2048", 2048, "environment", -1)]
+    [InlineData("2048", 2048, "environment", 0)]
+    [InlineData("2048", 2048, "environment", 1)]
+    [InlineData("", 256, "default", -1)]
+    [InlineData("", 256, "default", 0)]
+    public async Task Task416ConfiguredReserveMatchesCapabilityAndAdmission(string input, int reserveMiB, string source, long delta)
+    {
+        const long mib = 1024L * 1024;
+        long reserve = reserveMiB * mib;
+        long budget = reserve + 240 * mib;
+        using var f = new Fixture(RecordingStorageReserve.Parse(input));
+        f.Capacity.Free = budget + delta;
+        using var capabilities = JsonDocument.Parse(await f.Client.GetStringAsync("/api/v1/capabilities"));
+        var setting = capabilities.RootElement.GetProperty("data").GetProperty("recording").GetProperty("storage_reserve");
+        Assert.Equal(reserve, setting.GetProperty("effective_bytes").GetInt64());
+        Assert.Equal(source, setting.GetProperty("source").GetString());
+        Assert.Equal(JsonValueKind.Null, setting.GetProperty("invalid_reason").ValueKind);
+        using var response = await f.Create("quick", "display");
+        if (delta < 0)
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            using var error = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var body = error.RootElement.GetProperty("error");
+            Assert.Equal(WindowStorageSafety.LowSpaceCode, body.GetProperty("code").GetString());
+            AssertStorageShortfall(body.GetProperty("details").GetProperty("storage"), budget, budget + delta, "output");
+            Assert.Empty(f.Tray.Confirmations);
+        }
+        else
+        {
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+            Assert.Single(f.Tray.Confirmations);
+        }
+        Assert.Empty(f.Backends);
+        Assert.Equal(new[] { f.Root }, Assert.Single(f.Capacity.Requests));
+    }
+
+    [Theory]
+    [InlineData("255", "out_of_range")]
+    [InlineData(" \t ", "invalid_integer")]
+    public async Task Task416InvalidStartupReserveIsDiagnosableWithoutSamplingOrConfirmation(string input, string reason)
+    {
+        using var f = new Fixture(RecordingStorageReserve.Parse(input));
+        using var capabilities = JsonDocument.Parse(await f.Client.GetStringAsync("/api/v1/capabilities"));
+        var setting = capabilities.RootElement.GetProperty("data").GetProperty("recording").GetProperty("storage_reserve");
+        Assert.False(setting.TryGetProperty("effective_bytes", out var bytes) && bytes.ValueKind != JsonValueKind.Null);
+        Assert.Equal(reason, setting.GetProperty("invalid_reason").GetString());
+        Assert.Equal(RecordingStorageReserve.EnvironmentVariable, setting.GetProperty("environment_variable").GetString());
+        using var response = await f.Create("quick", "display");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal(WindowStorageSafety.UnavailableCode, error.GetProperty("code").GetString());
+        var details = error.GetProperty("details");
+        Assert.Equal("before_confirmation", details.GetProperty("stage").GetString());
+        Assert.Equal("fix_storage_reserve_configuration", details.GetProperty("suggested_action").GetString());
+        Assert.False(details.TryGetProperty("storage", out _));
+        Assert.Empty(f.Capacity.Requests);
+        Assert.Empty(f.Tray.Confirmations);
+        Assert.Empty(f.Backends);
+    }
+
+    [Fact]
+    public async Task Task416ApprovalSamplesReplacementVolumeWithOriginalReserve()
+    {
+        const long mib = 1024L * 1024;
+        using var f = new Fixture(RecordingStorageReserve.Parse("2048"));
+        await f.Accepted();
+        var replacement = Path.Combine(f.Root, "replacement");
+        f.Capacity.Query = (paths, _) => Task.FromResult<IReadOnlyList<StorageVolumeSample>>(paths.Select(path =>
+            new StorageVolumeSample(path, "replacement-volume", (2048 + 200) * mib - 1)).ToArray());
+        f.Tray.Approve(replacement);
+        await Observe(() => f.Single.IsFinalized);
+        Assert.Equal(new[] { replacement }, f.Capacity.Requests.Last());
+        Assert.Empty(f.Backends);
+        Assert.False(File.Exists(f.Single.OutputPath));
+        f.TerminalOnce(f.Single, WindowStorageSafety.LowSpaceCode);
+    }
+
+    [Fact]
+    public async Task Task416RuntimeDropBelowReserveUsesTypedFailureAndCannotPublish()
+    {
+        const long mib = 1024L * 1024;
+        using var f = new Fixture(RecordingStorageReserve.Parse("2048"));
+        await f.Accepted();
+        f.Tray.Approve();
+        await Observe(() => f.Single.State == RecState.recording);
+        await f.Clock.WaitForDelay();
+        // Video-only keeps its existing estimated publication-copy demand until the actual copy begins.
+        f.Capacity.Free = (2048 + 100) * mib;
+        f.Clock.Tick();
+        await f.Clock.WaitForDelay();
+        Assert.Equal(RecState.recording, f.Single.State);
+        f.Capacity.Free--;
+        f.Clock.Tick();
+        await Observe(() => f.Single.IsFinalized && f.History.Read(f.Single.Id)?.Status == "failed");
+        Assert.Equal(1, Assert.Single(f.Backends).Aborts);
+        Assert.False(File.Exists(f.Single.OutputPath));
+        f.TerminalOnce(f.Single, WindowStorageSafety.LowSpaceCode);
+    }
+
+    [Fact]
+    public void Task416ProcessReserveSnapshotSurvivesEnvironmentChanges()
+    {
+        var startup = RecordingStorageReserve.Startup;
+        var variable = RecordingStorageReserve.EnvironmentVariable;
+        var previous = Environment.GetEnvironmentVariable(variable);
+        using var temp = new TempDirectory();
+        using var first = new RecordingEngine(new Audit(Path.Combine(temp.Path, "first.jsonl")));
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, startup.EffectiveBytes == 2048L * 1024 * 1024 ? "4096" : "2048");
+            using var second = new RecordingEngine(new Audit(Path.Combine(temp.Path, "second.jsonl")));
+            Assert.Same(startup, RecordingStorageReserve.Startup);
+            Assert.Same(startup, first.StorageReserve);
+            Assert.Same(startup, second.StorageReserve);
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
+    }
+
+    internal static void AssertStorageShortfall(JsonElement storage, long required, long available, params string[] uses)
+    {
+        Assert.Equal(new[] { "available_bytes", "required_bytes", "shortfall_bytes", "uses" },
+            storage.EnumerateObject().Select(property => property.Name).Order());
+        Assert.Equal(required, storage.GetProperty("required_bytes").GetInt64());
+        Assert.Equal(available, storage.GetProperty("available_bytes").GetInt64());
+        Assert.Equal(required - available, storage.GetProperty("shortfall_bytes").GetInt64());
+        Assert.Equal(uses, storage.GetProperty("uses").EnumerateArray().Select(use => use.GetString()));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Admission409ConcurrentRequestsKeepTheirOwnEvidence(bool expire)
+    {
+        using var f = new Fixture();
+        var lateDirectory = Path.Combine(f.Root, "late");
+        var currentDirectory = Path.Combine(f.Root, "current");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var late = new TaskCompletionSource<IReadOnlyList<StorageVolumeSample>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Capacity.Query = (paths, _) =>
+        {
+            var path = Assert.Single(paths);
+            if (path == lateDirectory)
+            {
+                entered.SetResult();
+                return late.Task;
+            }
+            return Task.FromResult<IReadOnlyList<StorageVolumeSample>>([new(path, "private-volume", 19)]);
+        };
+
+        Task<HttpResponseMessage> Send(string directory, int duration)
+        {
+            var request = f.Request();
+            request["output"]!["directory"] = directory;
+            request.Remove("duration_seconds");
+            request["stop_condition"] = new JsonObject { ["type"] = "duration", ["seconds"] = duration };
+            return f.Post("/api/v1/recordings?creation_wait_ms=0", request);
+        }
+
+        var pending = Send(lateDirectory, 120);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(pending.IsCompleted);
+            using var current = await Send(currentDirectory, 60);
+            Assert.Equal(HttpStatusCode.BadRequest, current.StatusCode);
+            using var known = JsonDocument.Parse(await current.Content.ReadAsStringAsync());
+            var details = known.RootElement.GetProperty("error").GetProperty("details");
+            AssertStorageShortfall(details.GetProperty("storage"), 496L * 1024 * 1024, 19, "output");
+
+            if (!expire) late.SetResult([new(lateDirectory, "private-volume", 1)]);
+            using var first = await pending;
+            Assert.Equal(HttpStatusCode.BadRequest, first.StatusCode);
+            using var firstBody = JsonDocument.Parse(await first.Content.ReadAsStringAsync());
+            var error = firstBody.RootElement.GetProperty("error");
+            Assert.Equal(expire ? WindowStorageSafety.UnavailableCode : WindowStorageSafety.LowSpaceCode,
+                error.GetProperty("code").GetString());
+            if (expire)
+                Assert.False(error.GetProperty("details").TryGetProperty("storage", out _));
+            else
+                AssertStorageShortfall(error.GetProperty("details").GetProperty("storage"), 736L * 1024 * 1024, 1, "output");
+            Assert.Equal(2, f.Capacity.Requests.Count);
+            Assert.Empty(f.Engine._recs);
+            Assert.Empty(f.Tray.Confirmations);
+            Assert.Empty(f.Backends);
+        }
+        finally
+        {
+            late.TrySetResult([new(lateDirectory, "private-volume", 1)]);
+        }
     }
 
     [Theory]
@@ -430,7 +635,7 @@ public sealed class OrdinaryVideoStorageSafetyTests
             Assert.StartsWith(f.Root,backend.VideoOnlyStagingPath!);Assert.NotEqual(rec.OutputPath,backend.VideoOnlyStagingPath);
             Assert.False(File.Exists(backend.VideoOnlyStagingPath));Assert.False(rec.Config.StorageSafety.TryAbort(WindowStorageSafety.LowSpaceCode));
             var row=f.History.Read(rec.Id)!;Assert.Equal("completed",row.Status);Assert.Equal(1,f.AnchorCount(rec.Id));
-            await Observe(()=>f.History.Read(rec.Id)!.Bundle?.Status=="ready");Assert.True(Directory.Exists(f.History.Read(rec.Id)!.Bundle!.Path));
+            await Observe(()=>f.History.Read(rec.Id)!.Bundle?.Status=="not_applicable");Assert.Null(f.History.Read(rec.Id)!.Bundle!.Path);Assert.Equal(0,rec.BundleGenerationStarted);
             await rec.Config.StorageSafety.MonitorCompletion.WaitAsync(TimeSpan.FromSeconds(5));Assert.Equal("owned sentinel",File.ReadAllText(irrelevant));
         } finally { Environment.SetEnvironmentVariable("TEMP",oldTemp); }
     }

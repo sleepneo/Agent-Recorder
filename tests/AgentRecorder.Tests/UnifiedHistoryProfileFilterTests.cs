@@ -200,7 +200,7 @@ public sealed class UnifiedHistoryProfileFilterTests(ITestOutputHelper output)
         var before=RawSnapshot(path,old:true);var store=new SqliteOperationalStore(path);store.Initialize();var once=RawSnapshot(path);store.Initialize();Assert.Equal(once,RawSnapshot(path));Assert.Equal(before,RawSnapshot(path,old:true));
         using var writer=new SqliteOrdinaryRecordingHistoryStore(store);var query=new UnifiedHistoryQueryService(store,writer);
         Assert.Equal(2L,Assert.Single(query.GetPage(Sid,Session,1,new("ordinary",ProfileId:"Profile-A",ProfileVersion:2)).Items).ProfileVersion);
-        Assert.Equal(48,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(SqliteSchemaV26.MigrationChecksum,SqliteSchemaCatalog.Migrations.Single(m=>m.Version==26).Checksum);
+        Assert.Equal(51,SqliteOperationalStore.CurrentSchemaVersion);Assert.Equal(SqliteSchemaV26.MigrationChecksum,SqliteSchemaCatalog.Migrations.Single(m=>m.Version==26).Checksum);
     }
     internal static string RawSnapshot(string path,bool old=false,int? schemaThrough=null)
     {
@@ -211,6 +211,9 @@ public sealed class UnifiedHistoryProfileFilterTests(ITestOutputHelper output)
         // Default/current snapshots must still include the complete ledger.
         if(schemaThrough is <43)tables.Remove(SqliteSchemaV43.Table);
         if(schemaThrough is <44)tables.Remove(SqliteSchemaV44.Table);
+        if(schemaThrough is <49){tables.Remove("ordinary_deletion_request_policies");tables.Remove("ordinary_deletion_operation_policies");}
+        if(schemaThrough is <50){tables.Remove("ordinary_deletion_batch_policies");tables.Remove("ordinary_deletion_batch_policy_children");}
+        if(schemaThrough is <51)tables.Remove(SqliteSchemaV51.Table);
         if(schemaThrough is <48){tables.Remove("ordinary_deletion_batches");tables.Remove("ordinary_deletion_batch_items");}
         foreach(var table in tables)
         {using var cmd=c.CreateCommand();cmd.CommandText="SELECT rowid,* FROM \""+table+"\""+(table=="schema_migrations"&&schemaThrough is not null?" WHERE version<="+schemaThrough.Value:"")+" ORDER BY rowid;";using var r=cmd.ExecuteReader();while(r.Read())parts.Add(table+":"+string.Join("|",Enumerable.Range(0,r.FieldCount).Select(i=>r.GetValue(i).ToString())));}
@@ -218,6 +221,9 @@ public sealed class UnifiedHistoryProfileFilterTests(ITestOutputHelper output)
         if(schemaThrough is <43)parts.RemoveAll(p=>p.StartsWith(SqliteSchemaV43.Table+":",StringComparison.Ordinal));
         if(schemaThrough is <44)parts.RemoveAll(p=>p.StartsWith(SqliteSchemaV44.Table+":",StringComparison.Ordinal));
         if(schemaThrough is <48)parts.RemoveAll(p=>p.StartsWith("ordinary_deletion_batches:",StringComparison.Ordinal)||p.StartsWith("ordinary_deletion_batch_items:",StringComparison.Ordinal));
+        if(schemaThrough is <49)parts.RemoveAll(p=>p.StartsWith("ordinary_deletion_request_policies:",StringComparison.Ordinal)||p.StartsWith("ordinary_deletion_operation_policies:",StringComparison.Ordinal));
+        if(schemaThrough is <50)parts.RemoveAll(p=>p.StartsWith("ordinary_deletion_batch_policies:",StringComparison.Ordinal)||p.StartsWith("ordinary_deletion_batch_policy_children:",StringComparison.Ordinal));
+        if(schemaThrough is <51)parts.RemoveAll(p=>p.StartsWith(SqliteSchemaV51.Table+":",StringComparison.Ordinal));
         return string.Join("\n",parts);
     }
 }

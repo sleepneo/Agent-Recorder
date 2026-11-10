@@ -25,15 +25,21 @@ public sealed class VideoCaptureWorker : IVideoCaptureWorker
     private int _hostProcessExited;
     private readonly WorkerStartBoundary _hostStart = new();
     internal bool HostResourcesRetired => _hostStart.ObserveRetired(ReadStartedHostRetirement);
+    internal bool StagingWriterRetired => _hostStart.ObserveWriterRetired(ReadWriterRetirement);
     private void ObserveHostProcessExit()
     { try { if (_proc?.HasExited == true) Volatile.Write(ref _hostProcessExited, 1); } catch { } }
 
     private bool ReadStartedHostRetirement()
     {
-        ObserveHostProcessExit();
-        try { return Volatile.Read(ref _hostProcessExited) != 0 && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
+        try { return ReadWriterRetirement() && HasExited && (_watcher?.IsCompleted ?? false) && (_stdoutReader?.IsCompleted ?? false) &&
                     (Volatile.Read(ref _hostStderrRetired) != 0 || _proc?.ErrorStreamClosed == true); }
         catch { return false; }
+    }
+
+    private bool ReadWriterRetirement()
+    {
+        ObserveHostProcessExit();
+        return Volatile.Read(ref _hostProcessExited) != 0;
     }
     private Task? _stdoutReader;
     private Task? _watcher;

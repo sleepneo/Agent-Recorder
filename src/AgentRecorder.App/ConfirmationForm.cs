@@ -1163,7 +1163,7 @@ internal sealed class ConfirmationForm : Form, IConfirmationDialog
         AddInfoRow(_infoTable, row++, _text.Get("Confirmation_Info_Countdown"), GetCountdownDisplay());
         if(summary.Mode == "video")
             AddInfoRow(_infoTable,row++,_text.Get("Confirmation_Info_Artifacts"),
-                _text.Get(summary.Artifacts?.Bundle == false ? "Confirmation_Value_MediaOnly" : "Confirmation_Value_MediaAndBundle"));
+                _text.Get("Confirmation_Value_MediaOnly"));
         var rawAudio = DisplayValue(summary.Audio);
         var audioSourceKind = DisplayValue(summary.AudioSourceKind);
         string audioLabel;

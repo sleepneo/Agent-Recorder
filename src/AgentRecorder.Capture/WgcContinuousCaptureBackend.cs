@@ -36,6 +36,18 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
     private int _callbackOwnerThread, _disposeAfterCallback;
     private bool _cleanupRunning;
     internal Task OutputRetirement => Task.WhenAll(_completionSignal.Task, _stagingReleased.Task, _resultHostRetired.Task);
+    // The result owner can publish the split backend's input. It releases
+    // that responsibility before dispatching the natural-exit callback.
+    internal bool OutputWriterRetired
+    {
+        get
+        {
+            lock (_lifecycleLock)
+                return _setupFinished.Task.IsCompletedSuccessfully && _resourceRetirement.IsCompletedSuccessfully &&
+                    _resultOwners == 0 &&
+                    (LifecycleState)_lifecycleState is LifecycleState.Completing or LifecycleState.Completed or LifecycleState.Disposed;
+        }
+    }
     private readonly CancellationTokenSource _finalizationCts = new();
     private readonly IFileCommitGate _commitGate = new FileCommitGate();
 
@@ -1288,6 +1300,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(
                 _finalizationCts.Token, cfg.StorageSafety?.AbortToken ?? CancellationToken.None);
             var gate = cfg.StorageSafety?.CreateCommitGate(_commitGate, !cfg.StorageIntermediatePublication) ?? _commitGate;
+            if (cfg.AvIntermediateStaging is { } staging)
+                gate = new AvIntermediateCommitGate(staging, gate);
             publish = _publisher.PublishAsync(stagingOutput, cfg.OutputPath, linked.Token, gate)
                 .GetAwaiter().GetResult();
         }
@@ -1300,6 +1314,8 @@ public sealed class WgcContinuousCaptureBackend : ICaptureBackend, IFirstFrameOb
         {
             return BuildFailureMeta(result, cfg, "publish_failed: " + (publish.FailureCategory ?? "unknown"));
         }
+        if (cfg.AvIntermediateStaging is { } intermediate && intermediate.Video.Identity() is null)
+            return BuildFailureMeta(result, cfg, "av_staging_video_handoff_unavailable");
 
         // Commit succeeded. From here on we only perform infallible field assignment.
         long finalSize;

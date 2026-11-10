@@ -121,7 +121,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
 
     private sealed class HeldGenerator : IRecordingBundleGenerator
     {
-        internal readonly FfmpegRecordingBundleGenerator Real = AgentRecorder.App.Program.CreateRecordingBundleGenerator();
+        internal readonly FfmpegRecordingBundleGenerator Real = new FfmpegRecordingBundleGenerator();
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<RecordingBundleRequest> Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Func<RecordingBundleRequest, Task<RecordingBundleGenerationResult>>? Fault;
@@ -221,7 +221,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
                 Set(CaptureBackendSelector.WgcEnvVar, "wgc-continuous"); DataDirResolver.SetOverride(Root);
                 RecordingPreflightChecker.StorageCapacityProvider = new Capacity();
                 RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(Root, "audio-helper.exe");
-                RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+                RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
                 File.WriteAllText(Path.Combine(Root, "audio-helper.exe"), "synthetic-not-executed");
                 File.WriteAllText(Path.Combine(Root, "wgc-helper.exe"), "synthetic-not-executed");
                 SystemQuery.SetDisplayProvider(() => new() { new("display_1", "Synthetic", true, new(0, 0, 64, 64), 1) });
@@ -305,9 +305,9 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
             else
             {
                 var denied = Assert.Throws<ApiException>(() => Engine.AddMark(rec.Id, "标记346", "agent"));
-                Assert.Equal("MARK_DELIVERY_UNAVAILABLE", denied.Code);
+                Assert.Equal("UNSUPPORTED_FEATURE", denied.Code);
                 using var details = JsonDocument.Parse(JsonSerializer.Serialize(denied.Details));
-                Assert.Equal(rec.GenerateBundle ? "bundle_generator_unavailable" : "bundle_disabled", details.RootElement.GetProperty("reason").GetString());
+                Assert.Equal("video_only_delivery", details.RootElement.GetProperty("reason").GetString());
                 Assert.Empty(rec.SnapshotMarks());
             }
         }
@@ -438,133 +438,21 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         output.WriteLine($"Synthetic events -> actual WGC managed session -> {(audio ? "intermediate video + real AV mux" : "real silent final publisher")} -> actual FFmpeg five attachments -> private exact operation/digests -> SQLite/three HTTP projections/reopen; {rec.SourceType}, {rec.BackendType}.");
     }
 
-    [Theory]
-    [InlineData("display", false)] [InlineData("display", true)]
-    [InlineData("region", false)] [InlineData("region", true)]
-    [InlineData("window", false)] [InlineData("window", true)]
-    public async Task ActualSilentSessionFinalPublicationAndBundle(string source, bool manual)
-    { using var f = new Fixture(); await f.Prepare(); var rec = f.Create(source); await f.Approve(rec); await f.Terminal(rec, manual); await Verify(f, rec); }
 
-    [Theory]
-    [InlineData(false)] [InlineData(true)]
-    public async Task ActualWgcVideoAdapterAndAvFinalMuxReceipt(bool manual)
-    { using var f = new Fixture(); await f.Prepare(true); var rec = f.Create("window", true); await f.Approve(rec); await f.Terminal(rec, manual); Assert.Equal("wgc-window-av-split", rec.BackendType); await Verify(f, rec, true); }
 
-    [Theory]
-    [InlineData("profile")] [InlineData("nested")] [InlineData("quick")]
-    public async Task ExistingOrdinaryOriginsUseSamePublicationChain(string origin)
-    {
-        using var f = new Fixture(); await f.Prepare(); Recording rec;
-        if (origin == "quick")
-        {
-            f.StartApi(); using var client = f.Client();
-            var cfg = new JsonObject { ["target"] = new JsonObject { ["type"] = "primary_display" }, ["duration_seconds"] = 1, ["countdown_seconds"] = 0, ["output"] = f.Request("display")["output"]!.DeepClone() };
-            using var response = await client.PostAsync("/api/v1/recordings/quick", new StringContent(cfg.ToJsonString(), Encoding.UTF8, "application/json"));
-            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync()); rec = f.Pending(); f.Api!.Stop(); f.Api = null;
-        }
-        else rec = f.Create(origin == "profile" ? "region" : "display", origin: origin);
-        await f.Approve(rec); await f.Terminal(rec, false); await Verify(f, rec);
-        if (origin == "profile") Assert.Equal("P", f.Writer.Read(rec.Id)!.ProfileId);
-        if (origin == "nested") Assert.Equal("outer", f.Writer.Read(rec.Id)!.NestedRole);
-    }
 
-    [Theory]
-    [InlineData("exception")] [InlineData("conflict")] [InlineData("foreign_path")] [InlineData("transaction_unavailable")]
-    public async Task BundleFailurePreservesSuccessfulWgcMedia(string fault)
-    {
-        using var f = new Fixture(); await f.Prepare(); var rec = f.Create("display"); await f.Approve(rec); await f.Terminal(rec, false);
-        await f.Generator.Started.Task; var hash = Hash(rec.OutputPath);
-        if (fault == "exception") f.Generator.Fault = _ => throw new IOException("owned_generator_fault");
-        if (fault == "foreign_path") f.Generator.Fault = _ => Task.FromResult(RecordingBundleGenerationResult.Ready(Path.Combine(f.Root, "foreign.bundle")));
-        if (fault == "transaction_unavailable") f.Generator.Real.PublisherFactory = () => new() { StageForTests = (stage, _) => { if (stage == "before_commit") throw new PlatformNotSupportedException("owned_TxF_unavailable_fault"); } };
-        if (fault == "conflict") { Directory.CreateDirectory(rec.OrdinaryBundleOperation!.BundlePath); File.WriteAllText(Path.Combine(rec.OrdinaryBundleOperation.BundlePath, "sentinel"), "owned-conflict"); }
-        f.Generator.Release.TrySetResult(); await Until(() => f.Writer.Read(rec.Id)?.Bundle?.Status == "failed");
-        Assert.Equal("completed", f.Writer.Read(rec.Id)!.Status); Assert.Equal(RecState.completed, rec.State); Assert.Equal(hash, Hash(rec.OutputPath));
-        Assert.NotNull(rec.LastMeta!.PublicationReceipt); Assert.Null(f.Writer.Read(rec.Id)!.MediaHash); Assert.Equal(1, f.Generator.Calls);
-        if (fault == "conflict") Assert.Equal("owned-conflict", File.ReadAllText(Path.Combine(rec.OrdinaryBundleOperation!.BundlePath, "sentinel")));
-        // The injected exception is an expected generation fault already handled by Core.
-        if (fault == "exception") { await Assert.ThrowsAsync<IOException>(() => f.Generator.Work!); f.Generator.ObservedFault = f.Generator.Work; }
-    }
 
-    [Fact]
-    public async Task NaturalStopRaceAndForeignOrLateWriterCannotChangeWinner()
-    {
-        using var f = new Fixture(); await f.Prepare(); var rec = f.Create("window"); await f.Approve(rec);
-        using var release = new ManualResetEventSlim(); var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Wgc!.OnBeforeCallbackArbiterForTests = () => { entered.TrySetResult(); Assert.True(release.Wait(TimeSpan.FromSeconds(5))); };
-        f.Process!.Finish.TrySetResult(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var stopping = Task.Run(() => f.Engine.Stop(rec.Id, "user_requested")); release.Set(); await stopping;
-        f.Wgc.OnBeforeCallbackArbiterForTests = null;
-        await Until(() => rec.IsFinalized); var request = await f.Generator.Started.Task; var op = rec.OrdinaryBundleOperation!;
-        await Until(() => f.Writer.Read(rec.Id)?.Bundle?.Status == "generating");
-        Assert.True(f.Writer.TryPublishBundle(new(op with { OperationId = Guid.NewGuid().ToString("N") }, new("failed", op.BundlePath, RecordingBundleErrorCodes.PublishFailed))));
-        Assert.Equal("generating", f.Writer.Read(rec.Id)!.Bundle!.Status);
-        f.Generator.Release.TrySetResult(); await Until(() => f.Writer.Read(rec.Id)?.Bundle?.Status == "ready"); var winner = f.Writer.Read(rec.Id)!;
-        Assert.True(f.Writer.TryPublishBundle(new(op, new("failed", op.BundlePath, RecordingBundleErrorCodes.PublishFailed))));
-        // Replacing an accepted contents set is an existing write-failure latch.
-        // It must not silently alter the winner; restart retains the durable facts.
-        await Until(() => ((System.Collections.IDictionary)typeof(SqliteOrdinaryRecordingHistoryStore).GetField("_unsettledBundleFailures", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(f.Writer)!).Count == 1);
-        Assert.Throws<OrdinaryRecordingHistoryUnavailableException>(() => f.Writer.Read(rec.Id));
-        Assert.False(f.Writer.DrainAndDispose(TimeSpan.FromSeconds(5)));
-        Assert.True(((Task)typeof(SqliteOrdinaryRecordingHistoryStore).GetField("_worker", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(f.Writer)!).IsCompletedSuccessfully);
-        f.Store.Initialize(); f.Writer = new(f.Store); Assert.Equal(winner, f.Writer.Read(rec.Id));
-        Assert.Equal(1, f.Generator.Calls); Assert.Equal(op.OperationId, request.PublicationOperationId); Assert.Equal(RecState.completed, rec.State);
-    }
 
-    [Fact]
-    public async Task UnknownNativeIdentityKeepsCompatibilityWithoutTrustedDigest()
-    {
-        using var f = new Fixture { UnknownNative = true }; f.Generator.Real.MediaHashMetadataApi = new BundlePublicationIdentityTests.NoIdentityApi();
-        f.Generator.Real.PublisherFactory = () => new() { IdentityApi = new BundlePublicationIdentityTests.NoIdentityApi() };
-        await f.Prepare(); var rec = f.Create("display"); await f.Approve(rec); await f.Terminal(rec, false);
-        await f.Generator.Started.Task; Assert.Null(rec.LastMeta!.PublicationReceipt); f.Generator.Release.TrySetResult();
-        await Until(() => f.Writer.Read(rec.Id)?.Bundle?.Status == "ready"); var row = f.Writer.Read(rec.Id)!;
-        Assert.Null(row.MediaHash); Assert.Null(row.Bundle!.IdentityEvidence); Assert.Null(row.Bundle.ContentHashEvidence); Assert.Equal(5, row.Bundle.ContentsEvidence!.Contents.Count);
-        f.Engine.Dispose(); f.Reopen(); Assert.Equal(row.Bundle, f.Writer.Read(rec.Id)!.Bundle); Assert.Null(f.Writer.Read(rec.Id)!.MediaHash);
-    }
 
-    [Fact]
-    public async Task NestedInnerAndOuterKeepSeparateWgcPublicationOperations()
-    {
-        using var f = new Fixture(); await f.Prepare(); var outer = f.Create("display", origin: "nested"); await f.Approve(outer); var outerProcess = f.Process!;
-        var cfg = f.Request("region"); cfg["output"]!["filename"] = "inner.mp4";
-        cfg["nested"] = new JsonObject { ["role"] = "inner", ["session_id"] = "task346-session", ["parent_recording_id"] = outer.Id };
-        f.Engine.CreateRecording(cfg, "task346", f.Tray); var inner = Assert.Single(f.Engine._recs.Values, r => r.Id != outer.Id);
-        Assert.True(inner.IsOrdinaryLocalRequest); Assert.Equal(RecState.pending_confirmation, inner.State); Assert.Equal(1, f.FactoryCalls);
-        f.Tray.Confirm!(ConfirmationDecision.Approve()); await Until(() => inner.State == RecState.recording); Assert.Equal(2, f.FactoryCalls);
-        f.Engine.AddMark(inner.Id, "inner346", "agent"); f.Process!.Finish.TrySetResult(); await Until(() => inner.IsFinalized);
-        await f.Generator.Started.Task; f.Generator.Release.TrySetResult(); await Until(() => f.Writer.Read(inner.Id)?.Bundle?.Status == "ready");
-        outerProcess.Finish.TrySetResult(); await Until(() => outer.IsFinalized); await Until(() => f.Writer.Read(outer.Id)?.Bundle?.Status == "ready");
-        Assert.Equal(2, f.Generator.Calls); Assert.NotEqual(inner.OrdinaryBundleOperation!.OperationId, outer.OrdinaryBundleOperation!.OperationId);
-        foreach (var rec in new[] { outer, inner })
-        {
-            var row = f.Writer.Read(rec.Id)!; Assert.Equal("completed", row.Status); Assert.Equal(rec.Id, row.Bundle!.IdentityEvidence!.RecordingId);
-            Assert.Equal(rec.OrdinaryBundleOperation!.OperationId, row.Bundle.IdentityEvidence.OperationId); Assert.Equal(Hash(rec.OutputPath), row.MediaHash!.Value);
-            Assert.NotNull(rec.LastMeta!.PublicationReceipt); Assert.Equal(rec.OutputPath, rec.LastMeta.PublicationReceipt!.Anchor.Path);
-        }
-        Assert.Equal(outer.Id, f.Writer.Read(inner.Id)!.ParentRecordingId); Assert.Equal("inner", f.Writer.Read(inner.Id)!.NestedRole);
-        using var metadata = JsonDocument.Parse(File.ReadAllText(Path.Combine(inner.OrdinaryBundleOperation.BundlePath, "metadata.json")));
-        Assert.Equal("inner", metadata.RootElement.GetProperty("recording").GetProperty("nested_role").GetString());
-        Assert.Equal(outer.Id, metadata.RootElement.GetProperty("recording").GetProperty("parent_recording_id").GetString());
-    }
 
-    [Theory]
-    [InlineData("pending")] [InlineData("rejected")] [InlineData("expired")] [InlineData("failed_media")] [InlineData("no_generator")]
-    public async Task OrdinaryNegativePathsDoNotGenerate(string path)
-    {
-        using var f = new Fixture(path != "no_generator"); await f.Prepare();
-        var rec = f.Create("display");
-        if (path == "rejected") { f.Tray.Confirm!(ConfirmationDecision.Reject()); Assert.Equal(RecState.rejected, rec.State); }
-        if (path == "expired") { f.Engine.TriggerConfirmationExpiryForTests(rec.ConfirmationId!); await Until(() => rec.State == RecState.expired); f.Tray.Confirm!(ConfirmationDecision.Approve()); Assert.Equal(RecState.expired, rec.State); }
-        if (path is "pending" or "rejected" or "expired") { Assert.Equal(0, f.FactoryCalls); Assert.Null(f.Process); }
-        else
-        {
-            await f.Approve(rec); if (path == "failed_media") f.Process!.FailMedia = true;
-            f.Process!.Finish.TrySetResult(); await Until(() => rec.IsFinalized);
-            Assert.Equal(path == "failed_media" ? RecState.failed : RecState.completed, rec.State);
-        }
-        Assert.Equal(0, f.Generator.Calls); Assert.Equal(path == "pending" ? "pending" : "not_applicable", rec.BundleSnapshot.Status);
-    }
+
+
+
+
+
+
+
+
 
     private sealed class Counting : IRecordingBundleGenerator
     {
@@ -581,25 +469,7 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         internal void FireNaturalExit(int code, OutputMeta meta) => natural!(code, meta);
         public int ExitCode => 0; public void Dispose() { }
     }
-    [Theory]
-    [InlineData("ffmpeg", false, "mp4", true)] [InlineData("ffmpeg-region", false, "mp4", true)]
-    [InlineData("ffmpeg-window-region", false, "mp4", true)] [InlineData("ffmpeg-av-split", false, "mp4", true)]
-    [InlineData("ffmpeg-region-av-split", false, "mp4", true)] [InlineData("ffmpeg-window-region-av-split", false, "mp4", true)]
-    [InlineData("wgc-continuous", true, "mp4", true)] [InlineData("wgc-window-av-split", true, "mp4", true)]
-    [InlineData("wgc-continuous", false, "mp4", false)] [InlineData("wgc-window-av-split", false, "mp4", false)]
-    [InlineData("wgc-unknown", true, "mp4", false)] [InlineData("WGC-CONTINUOUS", true, "mp4", false)]
-    [InlineData("wgc-continuous", true, "avi", false)] [InlineData("wgc-window-av-split", true, "avi", false)]
-    public async Task LocalEligibilityOnlyAndOriginalSixFfmpegBackends(string backend, bool ordinary, string container, bool expected)
-    {
-        // This is only a classification test, deliberately not publication evidence.
-        using var f = new Fixture(); var gen = new Counting(); using var engine = new RecordingEngine(new RetentionSharedOutputPathTests.QuietAudit(), bundleGenerator: gen);
-        var capture = new EligibilityBackend(); engine.SetTray(f.Tray); engine.BackendFactory = _ => (capture, backend);
-        var rec = new Recording { IsOrdinaryLocalRequest = ordinary, SourceType = "region", BackendType = backend, OutputPath = Path.Combine(f.Root, "eligibility.mp4"), Config = new() { SourceKind = "region", Bounds = (0, 0, 64, 64), OutputPath = Path.Combine(f.Root, "eligibility.mp4") } };
-        engine.StartCaptureForTests(rec, f.Tray); capture.FireNaturalExit(0, new() { Container = container, Codec = "h264", DurationSeconds = 1, SizeBytes = 1024, Width = 64, Height = 64 });
-        if (expected) await Until(() => gen.Calls == 1); else Assert.Equal(0, gen.Calls);
-        Assert.Equal(expected, rec.BundleSnapshot.Status is "generating" or "ready");
-        Assert.Equal(backend.StartsWith("ffmpeg", StringComparison.Ordinal), CaptureBackendSelector.IsFfmpegMp4Backend(backend));
-    }
+
 
     [Fact]
     public void ConstructorFailureRestoresScopedProvidersAndEnvironment()
@@ -609,13 +479,5 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         Assert.Equal(old, Environment.GetEnvironmentVariable(CaptureBackendSelector.DisplayBackendEnvVar)); Assert.Same(capacity, RecordingPreflightChecker.StorageCapacityProvider);
     }
 
-    [Theory]
-    [InlineData("wgc-continuous")] [InlineData("wgc-window-av-split")]
-    public void ScreenshotModeCannotEnterNewWgcBundleEligibility(string backend)
-    {
-        using var f = new Fixture(); var rec = new Recording { IsOrdinaryLocalRequest = true, BackendType = backend, Config = new() { Mode = ScreenshotSeriesConfig.ModeName } };
-        var args = new object?[] { rec, new OutputMeta { Container = "mp4" }, null };
-        Assert.False((bool)typeof(RecordingEngine).GetMethod("TryPrepareBundleGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(f.Engine, args)!);
-        Assert.Equal(0, f.Generator.Calls); Assert.Equal(0, f.FactoryCalls);
-    }
+
 }

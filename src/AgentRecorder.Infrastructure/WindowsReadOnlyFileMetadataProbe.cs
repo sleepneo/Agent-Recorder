@@ -10,10 +10,15 @@ internal sealed record ObservedFileIdentity(ulong VolumeSerialNumber, ulong IdLo
 internal sealed record HandleMetadataSnapshot(long Length, long AllocationSize, uint Links, FileAttributes Attributes,
     byte DeletePending, byte Directory, long LastWriteTime, ObservedFileIdentity? Identity);
 internal sealed record FileMetadataObservation(FileObservationOutcome Outcome, HandleMetadataSnapshot? Before = null,
-    HandleMetadataSnapshot? After = null, string? BeforePath = null, string? AfterPath = null);
+    HandleMetadataSnapshot? After = null, string? BeforePath = null, string? AfterPath = null)
+{
+    internal string? ShortLeaf { get; init; } = "";
+    internal string? DataRootShortLeaf { get; init; } = "";
+}
 internal interface IReadOnlyFileMetadataProbe
 {
     FileMetadataObservation? Observe(string path);
+    FileMetadataObservation? ObserveRetention(string path) => Observe(path);
 }
 
 internal sealed class WindowsReadOnlyFileMetadataProbe : IReadOnlyFileMetadataProbe
@@ -25,12 +30,19 @@ internal sealed class WindowsReadOnlyFileMetadataProbe : IReadOnlyFileMetadataPr
     private readonly IWindowsFileMetadataApi _api;
     internal WindowsReadOnlyFileMetadataProbe(IWindowsFileMetadataApi api) => _api = api;
 
-    public FileMetadataObservation Observe(string path)
+    public FileMetadataObservation Observe(string path) => Observe(path, shortName: false);
+    public FileMetadataObservation ObserveRetention(string path) => Observe(path, shortName: true);
+
+    private FileMetadataObservation Observe(string path, bool shortName)
     {
         try
         {
             if (!_api.Supported || !IsCanonicalLocalPath(path) || _api.DriveType(path[..3]) is not (2 or 3 or 6))
                 return new(FileObservationOutcome.Unavailable);
+            var dataRoot = shortName ? Path.GetDirectoryName(Path.GetDirectoryName(path)!) : null;
+            using var rootHandle = dataRoot is null ? null : _api.Open(@"\\?\" + dataRoot,
+                OriginalFileScopeResources.Access, OriginalFileScopeResources.Sharing, OpenExisting, OpenFlags, out _);
+            var firstRoot = rootHandle is null ? null : WindowsShortFileName.ReadDirectory(_api, rootHandle, dataRoot!);
             // One existing leaf; no READ_DATA, WRITE_DATA or DELETE access.
             using var handle = _api.Open(@"\\?\" + path, ReadAttributes, ShareRead, OpenExisting, OpenFlags, out var error);
             if (handle.IsInvalid || handle.IsClosed) return Failure(error);
@@ -40,13 +52,23 @@ internal sealed class WindowsReadOnlyFileMetadataProbe : IReadOnlyFileMetadataPr
             if ((basic.Attributes & (uint)FileAttributes.Directory) != 0) return new(FileObservationOutcome.Directory);
             if (!ReadRest(handle, basic, out var first, out error)) return Failure(error);
             if (!FinalPath(handle, out var firstPath)) return new(FileObservationOutcome.ResolvedPathUnavailable);
+            var firstShortLeaf = shortName ? _api.ReadShortLeaf(handle) : "";
             if (!_api.Basic(handle, out basic, out error)) return Failure(error);
             if (!ValidAttributes(basic.Attributes)) return new(FileObservationOutcome.Unavailable);
             if ((basic.Attributes & (uint)(FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
                 return new(FileObservationOutcome.MetadataChanged);
             if (!ReadRest(handle, basic, out var second, out error)) return Failure(error);
             if (!FinalPath(handle, out var secondPath)) return new(FileObservationOutcome.ResolvedPathUnavailable);
-            return new(FileObservationOutcome.Sampled, first, second, firstPath, secondPath);
+            var secondShortLeaf = shortName ? _api.ReadShortLeaf(handle) : "";
+            var secondRoot = rootHandle is null ? null : WindowsShortFileName.ReadDirectory(_api, rootHandle, dataRoot!);
+            return new(FileObservationOutcome.Sampled, first, second, firstPath, secondPath)
+            {
+                ShortLeaf = firstShortLeaf == secondShortLeaf ? firstShortLeaf : null,
+                DataRootShortLeaf = !shortName ? "" :
+                    firstRoot is not null && firstRoot == secondRoot &&
+                    firstRoot.Identity.VolumeSerialNumber == first?.Identity?.VolumeSerialNumber
+                        ? firstRoot.ShortLeaf : null
+            };
         }
         catch { return new(FileObservationOutcome.Unavailable); }
     }
@@ -118,6 +140,7 @@ internal interface IWindowsFileMetadataApi
     bool Standard(SafeFileHandle handle, out FileStandardInformation information, out int error);
     bool Identity(SafeFileHandle handle, out FileIdentityInformation information, out int error);
     uint FinalPath(SafeFileHandle handle, StringBuilder buffer, int capacity, out int error);
+    string? ReadShortLeaf(SafeFileHandle handle) => null;
 }
 internal sealed class WindowsFileMetadataApi : IWindowsFileMetadataApi
 {
@@ -137,6 +160,7 @@ internal sealed class WindowsFileMetadataApi : IWindowsFileMetadataApi
     { var ok = IdentityInfo(handle, 18, out information, (uint)Marshal.SizeOf<FileIdentityInformation>()); error = Marshal.GetLastWin32Error(); return ok; }
     public uint FinalPath(SafeFileHandle handle, StringBuilder buffer, int capacity, out int error)
     { var length = GetFinalPathNameByHandleW(handle, buffer, (uint)capacity, 0); error = Marshal.GetLastWin32Error(); return length; }
+    public string? ReadShortLeaf(SafeFileHandle handle) => WindowsShortFileName.Read(handle);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);

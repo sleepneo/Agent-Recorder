@@ -1,21 +1,14 @@
 # Agent Recorder API
 
-Ordinary non-nested video requests at raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` accept `"artifacts":{"bundle":false}` when the user wants only the MP4. Omitting artifacts or bundle defaults to true; explicit true keeps the full five-attachment Bundle. The policy freezes at creation and appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a local output-directory change. The bilingual local confirmation shows “MP4 only” or “MP4 and recording bundle”. Capture authorization, target and output proofs remain required.
+This reference describes v0.1.21 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
 
-Artifacts must be an object containing only an optional JSON boolean bundle. Null, wrong types, unknown/duplicate fields and duplicate policies return `400 INVALID_ARGUMENT` before device/source/selection/confirmation or file work. Profile execution/configuration, Plan/Lease/future-window, screenshot-series and nested recording reject this field, even when true. `capabilities.recording_artifacts` publishes modes, default, routes and scope.
+All new video recordings deliver video only. Ordinary raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` requests may omit `artifacts`, use `{}`, or send `{"artifacts":{"bundle":false}}`. Explicit true returns `400 UNSUPPORTED_FEATURE`, with `details.field=artifacts.bundle` and `details.reason=bundle_generation_disabled`, before device/source/selection/confirmation or file work. No additional natural-language instruction is needed to obtain this default. The effective false value appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a locally approved output-directory change.
 
-False keeps the actual App generator installed but skips Bundle preparation/generation for this recording: no operation, `.bundle` or attachment extraction. Main MP4 validation, original-handle publication, terminal winner and durable history remain. Completed history atomically records `bundle.status="not_applicable"`; `media_hash` stays unknown/null because its existing generation stage did not run. Default Bundle generation and generating/ready/failed/interrupted protection remain. The MP4-only policy adds no migration; old media/facts are not backfilled or reinterpreted.
+Artifacts must be an object containing only an optional JSON boolean bundle. Null, wrong types, unknown/duplicate fields and duplicate policies return `400 INVALID_ARGUMENT`. Existing Profile execution/configuration, Plan/Lease/future-window, screenshot-series and nested restrictions on the field remain unchanged. Those new video execution paths also deliver video only. `capabilities.recording_artifacts` reports `modes=["mp4_only"]`, `default_bundle=false` and `bundle_generation_supported=false`.
 
-A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. The policy is not deletion approval. Its main-output claim retires at a known production backend's actual settlement boundary; live or unknown work remains protected. Default Bundle outputs remain protected. Independent source/synthetic-input checks and one real 5-second silent FFmpeg selected-region run with local cancellation, approval and idempotent replay have passed. This does not establish all-backend or general retention acceptance.
+The App and Headless host no longer construct a generator for new recordings: no Bundle operation, attachment directory, thumbnail, first/last-frame extraction or marks file is scheduled. Capture authorization, target/output proofs, media validation, original-handle publication, terminal winner and durable history remain. New recordings have `bundle.status="not_applicable"`; generation-derived hashes remain unknown/null. Existing Bundle files, history, identities, hashes and protections are not rewritten or removed. Screenshot-series images and their required manifest are a separate unchanged contract.
 
-This reference describes v0.1.20 contracts through SQLite v48:
-history, health, artifacts, generation digests, read-only retention preview and
-locally confirmed single deletion request plumbing. The restricted implementation
-has passed source checks. App recordings default to Bundles and remain protected;
-explicit media-only recording has passed independent source/synthetic-input
-checks and the limited real desktop flow described above.
-Inspect `/capabilities` on the running host. Generation-time durable media hashes are described at the
-end of this reference. Explicit main-media and five-attachment verification have passed independent source acceptance. They share one host content-verification worker. Single deletion requests use the separate local-confirmation contract below.
+A successful media-only MP4 can be submitted by recording ID to the separate deletion-request API only if its original anchor/size, fixed Videos scope and all existing use protections qualify. Video-only delivery is not deletion approval. Its main-output claim retires at the known production backend's actual settlement boundary; live or unknown work and historical Bundle references remain protected. Default 10-second silent selected-region delivery has passed real desktop acceptance; this does not establish every backend/audio combination or general retention acceptance. Historical generation hashes and explicit media/attachment verification remain described below, sharing the existing content-verification worker.
 
 Base URL: `http://127.0.0.1:37891/api/v1`
 
@@ -140,7 +133,7 @@ The existing `{ok,data,request_id}` envelope returns HTTP 200 with `data.sample_
 | `instance` | `version`, `mode`, `pid`, actual `listening_port` (null when not listening), `ready_state`, frozen `data_directory`, `sampled_at`, `evidence_type=runtime_snapshot`. Ready requires this host's live publication receipt, not a stale file or PID check. |
 | `desktop` | `ui_required`; `startup` contains static receipt state/time; `current` contains dynamic read-only desktop state/time. Each has `reason_code`, `evidence_type`, and `limitation`. Headless's lack of UI requirement does not establish an interactive desktop. |
 | `tools` | `ffmpeg`, `ffprobe`, `wgc_helper`, `audio_helper`: `path`, whitelisted `source`, `state`, `reason_code`, `sampled_at`, `evidence_type=path_only`. A found path does not verify execution. |
-| `hotkeys` | `stop`, `chapter`: `supported`, `registered`, whitelisted `gesture`, `policy`, `state`, `reason_code`, `sampled_at`, `evidence_type=owner_snapshot`. Chapter's unregistered idle state is `idle`, required registration failure is `registration_failed`; Headless reports unsupported. |
+| `hotkeys` | `stop`, `chapter`: `supported`, `registered`, whitelisted `gesture`, `policy`, `state`, `reason_code`, `sampled_at`, `evidence_type=owner_snapshot`. When the App owner confirms chapter hotkeys are disabled, `chapter` reports `supported=false`, `registered=false`, `gesture=null`, `policy=disabled`, `state=unsupported`, and `reason_code=unsupported` both at idle and during recording. Missing or contradictory evidence gives `state=unknown`. Headless reports both hotkeys as unsupported. |
 | `backends` | `window`, `display`, `region`: frozen `policy`, `experimental`, `capture_check=not_checked`, `evidence_type=configuration_only`; `microphone`, `system_audio`: backend `supported`, `device_check=not_checked`, `evidence_type=backend_support_only`. |
 
 Codes and snake_case keys are independent of UI language. No blanket `healthy`/`can_record` field is provided. Partial snapshots mark unsampled probes `not_checked`; unavailable owner facts remain unknown. Secrets, identity/SID, titles, device lists and raw exceptions are excluded. Reading starts no tool/helper process or capture and writes no business data.
@@ -336,26 +329,25 @@ Chapter-mark capabilities are reported at the response root:
 ```json
 {
   "chapter_marks": {
-    "supported": true,
+    "supported": false,
     "endpoint": "/api/v1/recordings/{recording_id}/marks",
-    "requires_bundle": true,
+    "requires_bundle": false,
     "mp4_embedded": false,
-    "timestamp_basis": "server_call_on_first_frame_timeline",
-    "delivery_artifact": "bundle/marks.json",
+    "timestamp_basis": "not_applicable",
+    "delivery_artifact": null,
     "local_hotkey": {
-      "supported": true,
+      "supported": false,
       "registered": false,
-      "gesture": "Ctrl+Shift+F11",
-      "registration_policy": "while_recording"
+      "gesture": null,
+      "registration_policy": "disabled"
     }
   }
 }
 ```
 
-The tray host registers the local hotkey only while at least one Bundle-eligible
-recording is in the exact `recording` state. MP4-only entries are skipped without
-counting them as failures. `supported` describes the API, not per-recording eligibility. The headless host reports API support but no
-local hotkey.
+New recordings do not accept chapter marks. Neither App nor Headless advertises
+this feature, and the local chapter hotkey is not registered. The stop hotkey
+remains a separate supported control. Existing historical marks remain readable.
 
 Quick recipe fields:
 
@@ -829,13 +821,33 @@ reparse targets are resolved to volume identities; unsupported or unverifiable
 storage fails closed. Admission sums simultaneous video, PCM, mux partial and
 publication-copy estimates per volume, using the existing conservative video
 estimate (at least 100 MiB or 2 MiB/second) for each video and PCM component
-(with 4 KiB WAV header allowance), plus a 256 MiB safety margin per volume. This is
-an estimate, not a reservation or quota. Checks repeat before capture helpers
+(with 4 KiB WAV header allowance), plus the configured free-space reserve once
+per volume. Checks repeat before capture helpers
 start, including the future authorization execution boundary.
 
+App and Headless read `AGENT_RECORDER_STORAGE_RESERVE_MIB` once at startup. An
+unset variable or an exactly empty string uses the 256 MiB (268,435,456 byte)
+default. Nonempty values must be ASCII decimal integers from 256 through 65536,
+with no whitespace. For a 2 GiB floor, set `2048` and restart the host. This is
+the free-space floor for protected
+recordings. Admission adds estimated write demand above the floor. Current
+available bytes are sampled separately on each affected volume. The setting
+does not allocate space, track cumulative recording usage, or trigger cleanup.
+Output directory selection changes the volumes checked, while the startup
+setting applies equally across API requests and Profiles.
+
+`GET /api/v1/capabilities` exposes `data.recording.storage_reserve` with
+`effective_bytes`, `source` (`default` or `environment`), `environment_variable`
+and `invalid_reason` when the explicit setting is invalid (`invalid_integer`
+or `out_of_range`). An invalid setting has no effective byte value. Protected
+recordings fail before confirmation with `storage_capacity_unavailable` and
+`error.details.suggested_action=fix_storage_reserve_configuration`. Read-only
+queries remain available.
+
 Through capture, mux and final publication, an internal monitor samples about
-every five seconds. Any monitored volume below 256 MiB aborts with
-`storage_space_low`; exactly 256 MiB is allowed. An unavailable, changed or
+every five seconds. A monitored volume below the reserve plus any applicable
+remaining publication copy demand aborts with `storage_space_low`. Meeting
+that threshold exactly passes. An unavailable, changed or
 unverifiable volume, invalid capacity, or timed-out query uses
 `storage_capacity_unavailable`. A query has a two-second deadline. Trusted
 storage aborts settle as `failed`, with the reason in `stop_reason`, and publish
@@ -862,7 +874,7 @@ ffmpeg-av-split/ffmpeg-region-av-split for display/region, shares the same safet
 It freezes approved output plus the actual application AV temp directory, excluding
 unused WGC TEMP. Admission sums video and conservative PCM on AV temp, and mux
 partial and publication copy on output, merging roles by actual volume identity
-with one 256 MiB watermark per volume. Checks run before confirmation, after
+with one configured reserve per volume. Checks run before confirmation, after
 approval, immediately before audio start and at countdown completion before video
 start; monitoring covers audio preparation too. Native final publication accounts
 only for actual remaining copy bytes, synchronized with capacity samples.
@@ -874,6 +886,24 @@ synchronization tolerances do not change. Point-in-time checks are not a disk
 reservation, quota or retention execution. Controlled low-capacity and virtual-volume
 disconnect/recovery passed for the tested silent path; actual OS ENOSPC and
 all audio/backend combinations remain unverified.
+
+For ordinary local video, a preflight HTTP 400 with `error.code=storage_space_low`
+and `error.details.stage=before_confirmation` may include `error.details.storage`.
+Its `required_bytes` is the existing admission budget for the first volume found
+below budget, and `available_bytes` is the lowest available-space sample for that
+volume from the same check. `shortfall_bytes` is their difference. The `uses`
+array lists the applicable roles on that volume: `output` for the final output,
+`av_temp` for audio/video staging, and `wgc_temp` for WGC staging. Several
+roles can share a volume or a directory. Available space may be zero, and meeting
+the budget exactly passes this comparison. The field is omitted without reliable
+shortfall evidence and reveals no volume identity or temporary path.
+
+These figures describe this request's budget at the time of preflight. They
+provide no estimate of final media size and no guarantee of available or
+reclaimable space. Other volumes may also be below budget. An agent can explain
+the reported roles and byte shortfall and ask the user about shortening the
+recording or choosing a suitable output location when `output` is involved.
+Changing the output location alone does not address a temp-only shortage.
 
 Ordinary video requests cannot concurrently occupy the same normalized final path
 when either Run is ordinary FFmpeg AV. Registration returns `409 OUTPUT_PATH_IN_USE`;
@@ -1702,6 +1732,7 @@ Long-polling response includes additional fields:
 - For terminal recordings it is computed from `completed_at` and remains stable across repeated queries.
 - `output.duration_seconds` is the media file duration from ffprobe; the two may differ slightly due to encoding, rounding, and backend behavior. Do not use `duration_seconds` as a substitute for `elapsed_seconds`.
 - `output.path` is always the locally user-approved final save target (`Recording.OutputPath`). On success it points to the published final media; on failure the final media is not published and `bytes_written`/`size_bytes` is `0`. A/V split worker files, mux staging files, and failed diagnostic retention files are internal evidence and are never public output paths.
+- App and Headless startup leave existing capture staging and failed diagnostics in `DataDir/temp` and `DataDir/failed` in place regardless of age. These files may continue to occupy disk space. The retention API still applies to its existing managed video scope.
 
 New fields:
 
@@ -1778,68 +1809,30 @@ returns `405 METHOD_NOT_ALLOWED`. The local user must confirm via local UI.
 
 ## Chapter Marks
 
-Marks are timeline annotations, not embedded MP4 chapters or burned-in text.
-They are delivered in `marks.json` only when a recording bundle is enabled.
-MP4-only recordings reject marks with HTTP 409 `MARK_DELIVERY_UNAVAILABLE`.
-Marks also require an available Bundle generator and an already supported backend;
-they never enable Bundle automatically, add a sidecar, or modify the MP4.
-Acceptance returns `delivery.status=pending`, not a delivery guarantee. Later Bundle
-failure is reported through the existing Bundle status and leaves the MP4 intact.
-The mark refers to server call time, not the time a human sent natural language.
-
-Add a labeled mark to one active recording:
-
-```http
-POST /recordings/{recording_id}/marks
-Content-Type: application/json
-X-Agent-Recorder-Key: <api-key>
-
-{
-  "label": "Important decision"
-}
-```
-
-`source` may be omitted and defaults to `agent`; an authenticated API caller
-may explicitly send only `agent`. The reserved `hotkey` source is assigned by
-the local `Ctrl+Shift+F11` path and cannot be forged remotely.
-
-Success returns the accepted mark without requiring another GET:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "recording_id": "rec_xxx",
-    "mark": {
-      "t_ms": 1234,
-      "label": "Important decision",
-      "source": "agent"
-    },
-    "delivery": { "artifact": "bundle/marks.json", "status": "pending" }
-  },
-  "request_id": "req_xxx"
-}
-```
-
-The endpoint accepts marks only in the exact `recording` state. `label` is
-trimmed after Unicode/control-character validation, must remain non-empty, and
-may contain at most 200 Unicode scalar values. `t_ms` is a non-negative integer
-on the recording's trusted first-frame monotonic timeline.
+Chapter-mark creation is disabled for new video-only recordings.
+`POST /recordings/{recording_id}/marks` retains request validation and authentication,
+but a valid request for a known Recording returns `409 UNSUPPORTED_FEATURE`
+(`details.field=chapter_marks`, `details.reason=video_only_delivery`).
+It does not return an accepted mark or add an attachment. Historical `marks.json`
+is a legacy data format, not a current recording workflow.
 
 | HTTP | Code | Meaning |
 | ---: | --- | --- |
 | 400 | `INVALID_ARGUMENT` | Invalid JSON, label, or source. |
 | 404 | `RECORDING_NOT_FOUND` | Recording ID does not exist. |
-| 409 | `RECORDING_NOT_ACTIVE` | Recording is not in the exact `recording` state or has no trusted first-frame anchor. |
-| 409 | `MARK_DELIVERY_UNAVAILABLE` | `details.reason`: `bundle_disabled`, `bundle_generator_unavailable`, or `backend_not_supported`. |
-| 409 | `UNSUPPORTED_FEATURE` | Screenshot series does not support marks. |
+| 409 | `UNSUPPORTED_FEATURE` | New recordings do not support chapter-mark creation. |
 
 ## Recording Bundle
 
-Ordinary locally confirmed video with exact backend `wgc-continuous` (silent display, region or strict window) or `wgc-window-av-split` (strict window with fixed system loopback) also uses this same five-file Bundle and durable generation digest chain after successful MP4 publication. Existing raw/quick/Profile/nested request rules, backend eligibility, experiments and audio support remain in force; this does not expand independent standing/recurring/required/future execution. Bundle generation remains asynchronous and its failure leaves the completed MP4 intact. History GET does not hash or backfill content; explicit verification uses existing endpoints and budgets. Native evidence unavailable means the existing compatible unknown result. Three silent native windows passed scoped MP4, Bundle, history and digest acceptance; this does not certify all backend combinations or long-running stress.
+This section documents legacy Bundle data and compatibility with older releases,
+including the published v0.1.20. It is not a capability of new video recordings
+in the current workspace. Existing files and saved ready/failed/unknown states
+remain readable and protected; they are not backfilled or reclassified.
+History GET does not generate or hash content. Explicit historical verification
+retains its existing endpoints and budgets.
 
-Successful supported FFmpeg and ordinary WGC MP4 recordings produce a structured bundle next
-to the video file. For `D:\Videos\demo.mp4` the bundle is:
+Older supported FFmpeg and ordinary WGC recordings could produce a structured
+Bundle next to the video file. For `D:\Videos\demo.mp4` the historical layout is:
 
 ```text
 D:\Videos\demo.bundle\
@@ -2599,7 +2592,7 @@ history, recording and authorization APIs retain their contracts.
 
 ## Read-only explicit-ID retention evaluations
 
-`POST /api/v1/retention/evaluations` lets an agent summarize a supplied list of old recording IDs without paging through history or requesting approval. The host uses SQLite V48. It is not a batch deletion API.
+`POST /api/v1/retention/evaluations` lets an agent summarize a supplied list of old recording IDs without paging through history or requesting approval. It is not a batch deletion API.
 
 ```json
 {"recording_ids":["rec_a","rec_b"],"completed_before":"2026-11-01T00:00:00Z"}
@@ -3167,7 +3160,7 @@ Default App recordings generate a Bundle, including a registered failed state wh
 
 The ready interactive App connects a host-owned local confirmation coordinator to these routes. Headless and hosts without this wiring advertise `capabilities.retention_deletion.supported=false` and return `503 RETENTION_DELETION_UNAVAILABLE`, without a confirmation window or native action. The configured API key is required even when optional authentication is disabled elsewhere. API authentication does not approve deletion.
 
-Send `POST /api/v1/retention/deletion-requests` with exactly `{"recording_id":"rec_example"}` and one `Idempotency-Key` header. The trimmed key must contain 1–128 printable ASCII characters, excluding whitespace, slash, backslash and comma. The UTF-8 body is bounded to 2048 bytes; unknown/duplicate fields, duplicate headers, invalid types, NUL, paths, query parameters and extra body arguments return `400 INVALID_ARGUMENT`. The recording ID is bounded to 200 characters. Neither owner/root nor approval/operation material can be supplied. The host freezes its SID/session, Videos root and actual engine/store/writer/UI.
+Send `POST /api/v1/retention/deletion-requests` with `recording_id` and optional `policy` (see the policy-bound single-deletion section below); the unbound body remains `{"recording_id":"rec_example"}`. Send one `Idempotency-Key` header. The trimmed key must contain 1–128 printable ASCII characters, excluding whitespace, slash, backslash and comma. The UTF-8 body is bounded to 2048 bytes; unknown/duplicate fields, duplicate headers, invalid types, NUL, paths, query parameters and extra body arguments return `400 INVALID_ARGUMENT`. The recording ID is bounded to 200 characters. Neither owner/root nor approval/operation material can be supplied. The host freezes its SID/session, Videos root and actual engine/store/writer/UI.
 
 `202` means a durable request exists, not approval or a deletion result. The normal envelope's `data` includes `deletion_request_id`, `recording_id`, `request_state`, `local_confirmation_state`, `persisted_request_phase`, `query_url` and result fields below. Follow `query_url`, for example `GET /api/v1/retention/deletion-requests/{id}`, without a body or query parameters. IDs are exactly 32 lowercase hexadecimal characters; encoded separators and multiple segments are rejected. Missing and foreign requests share `404 DELETION_REQUEST_NOT_FOUND`. The query returns `200` for known requests, including requests with unknown outcomes. Invalid durable evidence, a busy worker or stopping/unready host returns a sanitized `503`; follow its `suggested_action` and query the same request.
 
@@ -3182,7 +3175,7 @@ The independent local window identifies the filename, copyable full path, size a
 Scope is one completed ordinary main MP4 directly under the host's fixed Videos root, with its original trusted publication anchor, successful size, explicitly not-applicable Bundle and passing existing finite-use protections. Paths/directories, batches, quota cleanup, Plan/future entries, attachments and unknown legacy files are unsupported. No identity is recollected to grant authority. `capabilities.retention_deletion` publishes both endpoints, this scope, `requires_local_confirmation=true`, `single_item=true`, `permanent=true`, `no_trash=true`, `unattended=false` and the result/recovery semantics. `retention_preview` remains separately read-only with `deletion_supported=false`, `reference_protection_ready=false` and `physical_identity_protection_ready=false`; neither capability establishes a complete reference graph or namespace freeze. This implementation and private automated UI adapters do not constitute real desktop confirmation or release-package acceptance.
 
 
-## Bounded batch deletion requests (SQLite V48)
+## Bounded batch deletion requests
 
 An agent can explain explicit candidates using read-only evaluation, then request ordered orchestration of **1–5 existing single-item deletion flows**. Every item still needs its own independent local confirmation. API authentication, an earlier age_candidate, a batch ID or a response is not approval. This is not one approval for a batch, an unattended retention policy, or a space-reclamation guarantee.
 
@@ -3195,13 +3188,13 @@ Content-Type: application/json
 {"recording_ids":["rec_a","rec_b"]}
 ```
 
-Exactly one recording_ids array, 1–5 ordinal-distinct IDs in the supplied order, and one existing-policy Idempotency-Key are required. IDs use the original single-deletion validator, including its existing writer/domain limits (the nominal 200-character envelope does not relax the original domain limit). UTF-8 body is bounded to4096 bytes, JSON depth4; invalid encoding, duplicate/unknown fields or headers, null/wrong types, extra bytes/Transfer-Encoding, query parameters, paths, force, Lease, source and root inputs are rejected before business dispatch. Body transport reads have a total three-second budget; existing header size bounds remain. No new approval, continue, force-release or retry endpoint exists.
+Send one recording_ids array with 1–5 ordinal-distinct IDs in the supplied order and one Idempotency-Key. The request also accepts an optional policy object. IDs use the original single-deletion validator, including its existing writer/domain limits (the nominal 200-character envelope does not relax the original domain limit). UTF-8 body is bounded to4096 bytes, JSON depth4; invalid encoding, duplicate/unknown fields or headers, null/wrong types, extra bytes/Transfer-Encoding, query parameters, paths, force, Lease, source and root inputs are rejected before business dispatch. Body transport reads have a total three-second budget; existing header size bounds remain. No new approval, continue, force-release or retry endpoint exists.
 
 The existing ready interactive App and configured API key are required. The single-deletion authentication codes remain (missing/invalid key HTTP401, FORBIDDEN identifies an invalid key). Headless, absent gateway and unready/stopping hosts advertise unsupported and return503 `RETENTION_BATCH_DELETION_UNAVAILABLE`; they cannot install an approval-success provider. Supported scope remains ordinary completed original main MP4, fixed host Videos root, recorded publication identity and all existing execution-time guards. Bundle/directories/series, plan/future-window media and custom roots remain excluded.
 
-HTTP202 means a durable parent and its complete ordered item bindings exist, not local approval or disposition. GET `/api/v1/retention/batch-deletion-requests/{32-lowercase-hex-id}` accepts no body/query and never dispatches or repairs state; missing and foreign SID/session/root use the same404 `BATCH_DELETION_REQUEST_NOT_FOUND`. Corrupt evidence, unknown close or a busy/budget-exhausted query returns503. Same key/same ordered list returns the same parent; changed order/body returns409 `IDEMPOTENCY_KEY_CONFLICT`. Do not invent another key to bypass an attempt.
+HTTP202 means a durable parent and its complete ordered item bindings exist, not local approval or disposition. GET `/api/v1/retention/batch-deletion-requests/{32-lowercase-hex-id}` accepts no body/query and never dispatches or repairs state; missing and foreign SID/session/root use the same404 `BATCH_DELETION_REQUEST_NOT_FOUND`. Corrupt evidence, unknown close or a busy/budget-exhausted query returns503. The same key and normalized body return the same parent. Changes to IDs, order, cutoff, count or policy presence return HTTP 409 `IDEMPOTENCY_KEY_CONFLICT`. Do not invent another key to bypass an attempt.
 
-V48 stores only parent/item orchestration relationships and a receipt; V1–V47 definitions/checksums are unchanged. The parent freezes host identity/root/incarnation, body digest, private binding digest and all random per-item child IDs/keys before any child/UI. FULL commit and positive DB retirement precede child dispatch. A second FULL reservation of exactly one position precedes calling the actual RetentionDeletionCoordinator internally; no recursive HTTP or duplicate native implementation is used. Neither private keys nor binding digests, Permit/approval material or native handles are returned.
+V48 introduced parent/item orchestration relationships and a receipt. V1–V47 definitions/checksums are unchanged. The parent freezes host identity/root/incarnation, body digest, private binding digest and all random per-item child IDs/keys before any child/UI. FULL commit and positive DB retirement precede child dispatch. A second FULL reservation of exactly one position precedes calling the actual RetentionDeletionCoordinator internally; no recursive HTTP or duplicate native implementation is used. Neither private keys nor binding digests, Permit/approval material or native handles are returned.
 
 The response uses the usual envelope. data includes batch_deletion_request_id/query_url, batch_state, created_at_utc/expires_at_utc, stop_reason, batch_resources_retired (nullable actual owner evidence), non_atomic=true, per_item_local_confirmation=true, rollback_supported=false, success_semantics, disposition_accepted_count, not_requested_count and ordered items. Each item has position, recording_id, state/reason_code, the requested child's deletion_request_id when reserved, resources_retired and that original request's limited public progress/ledger/retirement result. not_requested items have no child result and do not imply a cancelled native action. accepted count reflects observed original OS disposition acceptance, including a partially completed batch; it is not bytes recovered or a guarantee that every item completed safely. Known acceptance can coexist with a non_success orchestration result after settlement uncertainty.
 
@@ -3211,7 +3204,115 @@ Only the exact original child's positive request/UI/Permit/DB/native/runtime ret
 
 Creation/status waits retain three-second read/store budgets (SQLite per-command/busy1s), original local confirmation/Permit limits remain60s each, and the batch has a10-minute maximum dispatch lifetime. The earlier of the monotonic admission-time limit and saved UTC expiry wins; a wall-clock rollback cannot extend it. Deadline/cancellation is not proof of resource retirement. An established batch is host-owned: HTTP disconnect/FIN/RST or polling never owns its UI/Permit, and does not retry or cancel it. Host stop/expiry requests cancellation; unknown or late resources retain admission and block idle exit until positively retired. Recreating a gateway/coordinator in the same process cannot hide an earlier actual flow/query slot: the existing quota strongly retains its owner and drain observes the original retirement task, or remains unavailable when that ownership cannot be proved. There is one actual status worker shared with the existing deletion query quota; cancellation cannot close another thread's DB/native objects or release its slot early.
 
-After restart, unfinished parents project interrupted/unknown read-only from the exact saved parent/item/child/approval/ledger relationships. GET and same-key POST never recover approval, re-display a window, rerun native disposition or continue remaining items. File absence, a new same-name object or a PID is not recovery evidence. The old single request and read-only evaluation contracts remain separate. `capabilities.retention_batch_deletion` states max5, ordered/sequential/per_item_local_confirmation/stop_on_first_non_success, non-atomic/no rollback/no Recycle Bin,600-second lifetime,3-second queries and no restart execution recovery. The host uses SQLite V48. Two-item rejection, per-item approval and same-key replay have passed real desktop acceptance.
+After restart, unfinished parents project interrupted/unknown read-only from the exact saved parent/item/child/approval/ledger relationships. GET and same-key POST never recover approval, re-display a window, rerun native disposition or continue remaining items. File absence, a new same-name object or a PID is not recovery evidence. The old single request and read-only evaluation contracts remain separate. `capabilities.retention_batch_deletion` states max5, ordered/sequential/per_item_local_confirmation/stop_on_first_non_success, non-atomic/no rollback/no Recycle Bin,600-second lifetime,3-second queries and no restart execution recovery. Two-item rejection, per-item approval and same-key replay have passed real desktop acceptance.
+
+### Bind a rule to one ordered batch (SQLite V50)
+
+```json
+{"recording_ids":["rec_a","rec_b"],"policy":{"completed_before":"2026-11-01T00:00:00Z","keep_latest_count":20}}
+```
+
+Use the single-request policy syntax. Supply an explicit UTC cutoff at or before the current time and a JSON integer from 1 to 1000. Both fields are required when policy is present. Equivalent UTC forms and JSON formatting normalize to the same rule. The batch and each requested child's response carry the frozen policy and its digest. The original request shape omits policy and retains its original hash and response.
+
+Each requested child checks the rule before prompting and again inside its execution transaction after local approval. Each confirmation applies to its own MP4. Only a positively retired child with committed, usable acceptance permits the next item. `within_keep_latest`, `completion_not_before_cutoff`, `local_confirmation_rejected`, `local_confirmation_expired`, and other unsuccessful or uncertain outcomes stop the sequence. Inspect the stop reason and each child's original disposition evidence. Later items remain `not_requested`. The latest set counts completed history in this host, including rows whose files may be missing. A client-supplied rule applies to this request only. The host floor also applies to every child, including requests without `policy`.
+
+V50 adds immutable parent policy and child linkage tables. The prior tables and request hashes remain usable. Corrupt or incomplete bindings return unavailable. GET and same-key replay read the persisted result, including interrupted batches after restart. Take the usual database backup before upgrading. `capabilities.retention_batch_deletion.policy_supported` indicates availability, with `policy_keep_latest_count_max=1000`, `policy_rechecked_per_item=true`, and `permanent_policy_supported=false` on the current interactive host.
+
+## Host keep-latest protection
+
+Set `AGENT_RECORDER_RETENTION_PROTECT_LATEST_COUNT` in the local host's startup
+environment. An unset value or `0` disables this floor. ASCII decimal integers
+from 1 through 1000 protect that many completed ordinary history rows. The host
+reads the value once. Restart to apply a change. API requests, Profiles and
+local confirmations cannot lower it.
+
+The ready interactive App enforces the floor on single and ordered batch
+deletion, with or without a client `policy`. Each child checks before local
+confirmation and again in the protected execution transaction before native
+disposition. Ranking uses completion UTC descending, then recording ID in
+BINARY descending order. Completed rows whose files are missing still count.
+The request's cutoff and keep count add restrictions. If both counts apply, the
+host reads the maximum required ranking once per snapshot and tests each
+count separately. A host hit returns `within_host_keep_latest`. A request-only
+hit returns `within_keep_latest`, and its cutoff can return
+`completion_not_before_cutoff`. Unverifiable ranking blocks execution.
+
+`capabilities.retention_deletion.host_keep_latest` and
+`capabilities.retention_batch_deletion.host_keep_latest` report `effective_count`,
+`source`, `environment_variable`, `invalid_reason`, and `enforcement_supported`.
+Headless reports the setting with enforcement and deletion unsupported.
+An explicit invalid value has no effective count. New attempts finish without
+execution with `host_keep_latest_configuration_invalid` and
+`fix_host_keep_latest_configuration_and_restart`. Corrupt or unavailable
+ordering can report `host_keep_latest_unavailable`. A protected or unavailable
+child stops its batch and leaves later children `not_requested`. Read-only
+queries remain available. Same-key replay returns the original request result
+after a restart or a configuration change.
+
+V51 stores only rejection receipts with the original request or operation.
+The configuration stays in the local startup environment. This floor restricts
+Recorder's existing managed deletion paths. It schedules no cleanup and grants
+no deletion eligibility or permission. Manual deletion by the user or other
+software remains outside this protection.
+
+## Managed video volume capacity
+
+Send authenticated `GET /api/v1/retention/storage` with an empty body and no query parameters. `capabilities.retention_storage` reports `supported`, the endpoint, `scope=managed_videos_volume`, `read_only=true`, `sample_timeout_ms=2000`, and `actual_workers_max=1`. Ready App and Headless hosts use the same isolated Windows probe. Reading capabilities and readiness does not start it.
+
+A successful response contains the following fields under `data`.
+
+```json
+{
+  "scope": "managed_videos_volume",
+  "available_bytes": 524288000,
+  "sampled_at_utc": "2026-11-07T08:00:00Z"
+}
+```
+
+The host resolves its own `DataDir/Videos` to the local fixed volume, following supported local mount points. A missing directory is sampled through its nearest existing ancestor, without creating it. `available_bytes` is the free space available to the calling process when sampled. Zero is a valid measurement. `sampled_at_utc` is the host's UTC observation time for the validated probe result. Reclaimable space, media usage, quota balance and admission for a future recording are separate questions. Use the normal recording flow for admission.
+
+An unready or unconfigured host, unsupported volume, invalid sample, busy probe or expired wait returns HTTP 503 `RETENTION_STORAGE_UNAVAILABLE`. A method other than GET returns 405, and a query or body returns 400. One capacity probe per host process can be active. Timeout, confirmed reset and host stop request cancellation of that probe. The actual owner retains its slot until cleanup is verified. App idle shutdown checks that ownership, and both hosts include it in normal drain. The endpoint accepts no path and runs no history or directory scan.
+
+## A/V staging inventory
+
+Send authenticated `GET /api/v1/retention/staging` with no query or body. The
+`data.retention_staging` capability reports support, the endpoint, the
+`av_split_staging` scope and the scan limits. Reading capabilities does not
+launch this scan. Ready App and Headless hosts freeze their own `DataDir/temp`
+at startup. The scan visits direct `.agent-recorder-av-<32 hexadecimal digits>`
+directories and matches only direct `*_video.mp4` or `*_audio.wav` leaves. It
+reads file metadata. System TEMP, `Videos`, `failed`, save destinations, Bundle
+contents, WGC staging and diagnostic files are outside the scope.
+
+A 200 response has `scope`, `observed_directories`, `verified_files`,
+`logical_bytes`, `skipped_entries`, `visited_entries`, `sampled_at_utc`,
+`complete` and `reason_codes` under `data`. Counts and logical bytes include
+only identity-verified entries. `skipped_entries` counts matching entries
+discarded during verification. `visited_entries` also counts nonmatching
+entries, including any dot entries returned by Windows. A confirmed absent
+root can return a complete zero result without creating a directory.
+
+`complete=false` identifies partial totals. The reasons are `entry_reparse`,
+`entry_unavailable`, `entry_changed`, `multiple_links`, `entry_limit`,
+`scan_deadline`, `enumeration_failed` and `logical_bytes_overflow`. A partial
+result can show zero observed bytes. Root uncertainty or a probe without a
+usable result returns HTTP 503 `RETENTION_STAGING_UNAVAILABLE` with
+`error.details.reason_code` and no totals. Reasons include `not_ready`,
+`root_unavailable`, `root_changed`, `scan_deadline`, `probe_busy`,
+`probe_retirement_unknown`, `probe_failed`, `timeout` and `cancelled`. Other
+methods return 405. A query or body returns 400.
+
+The private worker returns at most 512 directory records across both levels,
+with a 32-component root chain limit including the drive root. Its cooperative
+scan deadline is 1,250 ms and the host waits up to 2,000 ms. Only one staging
+worker per host process may be active. A timeout, confirmed connection reset
+or host stop requests cancellation. The slot remains occupied until the
+original child, pipes and handles have retired.
+
+This observation reports logical file lengths and may include active
+recordings. It supplies neither a disk allocation measurement nor a reclaimable
+space estimate. The response carries no paths, titles, ownership or orphan
+classification and grants no deletion authority.
 
 ## Agent-requested idle shutdown
 
@@ -3257,11 +3358,11 @@ does not change a pending request. Headless or missing gateway is unavailable.
 duration_seconds is required, a JSON integer 1–600. countdown_seconds defaults to
 3 and optionally accepts the ordinary 0–10 integer contract. Unknown, duplicate,
 mistyped or conflicting fields fail before target/device/UI/file operations.
-Only video, nonnested, default Bundle is supported: reject artifacts (including
+Only video, nonnested, video-only delivery is supported: reject artifacts (including
 true/false), nested, series fields, source, raw profile_ref and stop_condition.
 Plans, Leases and unattended execution cannot use this target.
 
-Creation/status/audit/Bundle expose the original profile_ref and
+Creation/status/audit expose the original profile_ref and
 profile_reuse_mode=region_only. Durable history retains the exact reference and
 effective duration/audio/output under source_type=fixed_region_profile_region;
 its target key remains a normal region key. Older rows have an unknown/null reuse
@@ -3274,8 +3375,230 @@ silent execution; mixing duration/audio overrides remains invalid.
 
 Set `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS` only in the host launch environment. Missing means 2; strict decimal integers 1–10 are valid (10 is the software hard limit). The Engine freezes this policy at initialization; changing the environment later or sending request fields cannot alter it. Invalid/overflow/out-of-range values disable this independent capability and raw requests return `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` before confirmation or worker creation. No HTTP limit mutation exists.
 
-`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports null effective limit/remaining; `available=false`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own WGC/output and queued/generating/original Bundle host work demonstrably retire. Unknown dispatch/retirement remains reserved. A full budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
+`recording.window_surface.independent_windows` reports `configured_limit`, `max_concurrent`, `default_limit`, `hard_limit`, `policy_source`, `configuration_valid`, `budget_scope`, and `budget.{reserved,finalizing_or_unknown,remaining}`. Invalid policy reports unavailable remaining capacity and `available=false`; the invalid setting is identified by `invalid_environment_variable`. A snapshot is not a future reservation guarantee. Pending through finalizing each reserves once; terminal runs retain that reservation until their own actual WGC/output resources demonstrably retire. Unknown dispatch/retirement remains reserved. A full count budget returns `409 TOO_MANY_CONCURRENT_RECORDINGS` with `reason_code=independent_window_budget_exhausted`, effective `configured_limit`, `reserved`, `finalizing_or_unknown` and `remaining`.
+
+The same branch also enforces `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND`, frozen at Engine initialization. Missing means `497664000` pixels/second (the arithmetic value of two 3840x2160x30 streams, not a measured hardware capacity). Explicit settings must be ASCII decimal positive Int64 values; empty, signed, whitespace, fractional and overflowing values are invalid. Invalid settings return `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID` before confirmation or capture, identifying the setting in `details.environment_variable`; other recording contracts are unchanged.
+
+Each reservation costs full physical window-surface width x height x configured FPS (15/24/30/60), not DIP or the visible/clipped desktop rectangle. Checked Int64 arithmetic applies. Count and pixel-rate limits must both fit; equality is allowed. Unreliable geometry/rate or multiplication overflow returns `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID` before new output/confirmation. Insufficient pixel capacity returns `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`, with requested/reserved/configured/remaining `pixels_per_second` values in details. Final admission is atomic; no HTTP field can raise limits, and geometry changes keep the existing approval revalidation/failure contract.
+
+`pixel_rate_budget` reports `unit=pixels_per_second`, `configuration_valid`, `policy_source`, `environment_variable`, `default_pixels_per_second`, `configured_pixels_per_second`, `reserved_pixels_per_second`, `finalizing_or_unknown_pixels_per_second`, `remaining_pixels_per_second`, `cost_basis`, and `scope`. It shares one snapshot with count reservations. Unknown or unretired work retains both costs. `snapshot_is_reservation`, `performance_guaranteed`, `hardware_capacity_measured` and `whole_machine_resource_budget` are false: this software admission policy is not a CPU/GPU/encoder/disk throughput measurement or guarantee.
 
 This budget covers this Engine's independent ordinary raw silent windows and their unretired delivery, not all OS workers or hardware capacity. Top-level concurrency is a descriptive maximum across separate contracts; legacy nested/region rules remain two, and quick/Profile/Plan/Lease/future/audio/mixed sources gain no extra capability. Every accepted recording still needs its own local confirmation. `stress_tested=false`; no quality reduction, backend substitution, desktop fallback or automatic PiP composition. WIN1…WIN10 identify local controls only; API identity remains Recording ID.
 
 SQLite V48 includes the reference protections introduced in V46. Existing retention preview and execution-time Guard now include saved Bundle media/attachment identity tuples and the seven persisted exact media/attachment path fields. Only an exact BINARY self-owner of the same ordinary main media is excluded; same-ID attachments and matching orphan/corrupt foreign business facts remain protected. Missing or invalid schema/provider evidence fails closed; GET does not migrate. No new deletion routes or complete reference graph are implied.
+
+
+### Keep-latest read-only evaluation
+
+`POST /api/v1/retention/evaluations` accepts optional `keep_latest_count`, a JSON integer from 1 through 1000. Omitting it preserves the previous response and semantics. Null, fractions, strings, duplicates and unknown fields are rejected before business reads.
+
+```json
+{"recording_ids":["rec_example_a","rec_example_b"],"completed_before":"2026-11-01T00:00:00Z","keep_latest_count":20}
+```
+
+The set includes visible completed ordinary videos in the current host database, ordered by trusted completion UTC descending, then exact BINARY Recording ID descending. It includes newer records outside the request and is chosen independently of completed_before. Legacy Bundle and externally saved ordinary videos can count, without gaining deletion eligibility. Plan/future/screenshot-series records do not count. Existing caller/SID/session and host-root visibility applies; no per-record ownership system or cross-principal access is added. Unrequested IDs, paths and set counts are not returned.
+
+Latest membership and requested persistent evidence share one read-only SQLite transaction. Corrupt ordering facts, missing/unsupported providers and busy/timeout states fail closed. The existing single actual ArtifactMetadataWorker and 3000ms total budget remain shared; cancellation does not free an unretired worker.
+
+A kept item is protected/within_keep_latest without native metadata, hash or alias probing. Full database validation and earlier missing/corrupt evidence reasons retain priority. Other items use the original complete protection kernel. AgeCandidate remains a time/lexical-scope observation and can remain true for a kept item; its observed bytes remain unknown. Candidate bytes are logical lengths, never reclaimable space or safe_to_delete.
+
+Only requests with the new field receive policy: keep_latest_count, ordering=completed_at_utc_desc_recording_id_binary_desc, snapshot_only=true, persistent=false, execution_supported=false and constrains_later_deletion=false. Capabilities add keep_latest_supported, keep_latest_count_max=1000 and scope. This does not save policy, issue a Permit, approve or delete files, and **does not constrain later deletion API calls**. Deletion still needs individual local approval and fresh execution checks.
+
+
+### Paged keep-latest preview
+
+Example intent: “Evaluate recordings before November 1, keep the latest 20, and page through the protection reasons.” Use `GET /api/v1/retention/preview?completed_before=2026-11-01T00:00:00Z&limit=20&keep_latest_count=20`, then follow next_cursor with the same N and cutoff. Omitting the field preserves the old preview/cursor contract. N must be strict decimal 1–1000; empty, whitespace, signs, fractions, overflow, duplicate and unknown parameters are rejected. Limit remains 1–100.
+
+This reuses the explicit-ID rule's latest set, ordering and reason priority. Completed ordinary videos outside the page/cutoff, legacy Bundles and external locations can count without gaining deletion eligibility. Protected items remain in the page; within_keep_latest items have no native file sampling. Other items use the original full protection kernel. AgeCandidate and logical byte aggregates are observations, never a safe deletion list or reclaimable space.
+
+Page membership/persistent references and latest membership share one read-only SQLite transaction. The original cursor encoding/checksum now also binds N alongside principal, host root, cutoff, filters and membership watermarks. Adding/removing/changing the rule invalidates reuse. No transaction spans HTTP pages: watermarks bound new members, while each page recomputes latest N and can observe changed completion/protection states. New policy declares snapshot_scope=page_local, cross_page_snapshot=false, persistent=false, execution_supported=false and constrains_later_deletion=false. It never returns the unrequested latest set.
+
+The new path shares one actual ArtifactMetadataWorker and a 3000ms budget including identity, database/disposal and file observations. Unretired work retains the slot after timeout/cancellation. Unsupported/unready providers return503 without synchronous fallback. Capabilities.retention_preview declares keep_latest_supported, keep_latest_count_max=1000, keep_latest_snapshot=page_local, keep_latest_deadline_ms=3000, keep_latest_actual_worker_max=1 and no execution; capability reads do not query history.
+
+This is read-only, nonpersistent observation, not permanent protection or deletion approval. It does not constrain later deletion API calls; individual local approval and fresh execution checks still apply.
+
+
+### Bind a retention rule to this one deletion (SQLite V49)
+
+The existing single-item `POST /api/v1/retention/deletion-requests` accepts optional policy:
+
+```json
+{"recording_id":"rec_example","policy":{"completed_before":"2026-11-01T00:00:00Z","keep_latest_count":20}}
+```
+
+Both fields are required together: explicit UTC cutoff not in the future and strict JSON integer N=1–1000. Null, wrong types, fractions/exponents, overflow, duplicate and unknown fields return400. One Idempotency-Key and individual local approval remain required. Omission preserves the legacy request hash and behavior. Same key with different ID/policy/presence returns409; same normalized rule replays the original result without UI or execution. JSON whitespace/field order do not affect the digest; UTC ticks normalize Z and +00:00, while whitespace inside the timestamp is rejected. Key trimming retains the original contract.
+
+This client policy restricts only this request and adds to the host floor. Latest completed ordinary history is ordered by completion UTC/BINARY ID. Missing files still count. Before confirmation, time/latest membership and original eligibility are checked. Policy rejection is durably finished without execution, with `reason_code=within_keep_latest` or `completion_not_before_cutoff` and no UI, Permit or native disposition. Creation remains asynchronous HTTP 202. Query the same request ID for its terminal result.
+
+After local approval the original BEGIN IMMEDIATE execution transaction, original-file scope, policy and full reference/identity/use checks remain held through one consumed attempt and OS disposition. Changed facts can prevent deletion; no target substitution, retry or relaxed N occurs. The localized confirmation displays this one permanent MP4 deletion, its cutoff/N, no Recycle Bin undo and that preview is not approval. Unknown/timeouts/unproven resource closure retain conservative results and ownership.
+
+Results include the stored policy and canonical digest. To use the same rule on a sequence, bind it explicitly on the batch endpoint. Unbound deletion does not inherit a previous403/404 read-only observation: explicitly bind this request to impose a restriction. This is not a permanent setting, automatic cleanup or a physical-space reclamation guarantee.
+
+V49 introduced the single request and operation policy side tables and preserved the earlier migration definitions. Legacy rows have null policy. Missing/corrupt new policy cannot downgrade to legacy. Restart permits history reads only, never approval recovery or continued execution. Existing upgrade backup rules apply; V49 and earlier binaries reject a V50 database. Published v0.1.20 remains V48.
+
+### Managed video recorded usage
+
+Send authenticated GET /api/v1/retention/usage without query parameters or a
+body. Ready App and Headless hosts use the startup-frozen DataDir/Videos
+scope. Other methods return 405. Query parameters and body framing that
+allows a payload return 400. Capabilities data.retention_usage describes the
+endpoint, scope and limits without querying the database.
+
+A single read-only SQLite snapshot covers completed ordinary main MP4
+registrations directly under that scope. External or nested saves, Bundle
+attachments, screenshot series, plans, Leases, future windows and A/V staging
+are excluded. A legacy Bundle main MP4 can qualify. The published length and
+full volume/file identity must be bound to the ordinary history row.
+Compatible registrations of one identity contribute bytes once. Conflicting
+paths or lengths for one managed identity make its registrations unknown.
+
+The response has scope=managed_ordinary_main_mp4 and sampled_at_utc.
+scoped_recordings is the sum of included_recordings, unknown_recordings and
+excluded_settled_recordings. included_objects counts distinct included
+identities. excluded_settled_dispositions counts matching operation receipts
+and can differ from the excluded registration count. Only settled accepted
+dispositions with retired resources qualify. They must match the managed
+root, path, published length and identity, identify a matching registration
+and have been prepared after every completion in that identity group. Pending,
+indeterminate, rejected and mismatched operations leave the recorded bytes
+included.
+
+recorded_logical_bytes is the included subtotal. complete is false when
+reason_codes contains publication_evidence_missing or
+publication_identity_conflict. If there are unknown records and no included
+objects the byte value is null. A complete empty result reports zero. The
+response exposes aggregate facts and UTC time only.
+
+The endpoint checks up to 4,096 completed history rows, 4,096 ledger rows and
+512 candidate receipt bindings, with limit detection and a 3,000 ms budget
+including dispatch and disposal. It shares the one actual metadata worker
+with the existing read-only endpoints. Cancellation or timeout retains its
+slot and App idle-exit protection until the worker retires. A failed sample
+returns 503 RETENTION_USAGE_UNAVAILABLE with error.details.reason_code and
+without totals. Codes are not_ready, scope_unavailable, busy, cancelled,
+timeout, history_limit, ledger_limit, receipt_validation_limit, data_invalid
+and failed.
+
+| Read-only endpoint | What the bytes describe |
+| --- | --- |
+| /retention/usage | Logical lengths from registered publications in the managed scope |
+| /retention/storage | Currently available bytes on the managed Videos volume |
+| /retention/staging | Observed logical lengths of matching A/V staging files |
+
+Usage performs no directory scan, media access, volume probe, history backfill
+or database business writes. Missing files and external manual deletions can
+remain visible in the recorded usage. A disposition receipt records acceptance
+of that operation. Physical allocation, space actually freed, reclaimable
+bytes and quota balances are outside these totals.
+
+### Managed video recorded quota
+
+Set AGENT_RECORDER_MANAGED_VIDEO_QUOTA_MIB in the host launch environment.
+An absent value or explicit 0 disables the quota. ASCII decimal integers
+1–1048576 enable it, in MiB (1 MiB = 1,048,576 bytes). The value is fixed at
+host startup. Capabilities recording.managed_video_quota reports enabled,
+configuration_valid, effective_bytes, source, environment_variable,
+invalid_reason, maximum_mib, scope, max_protected_runs and the read limits.
+
+The quota covers individually locally approved ordinary videos already using
+the storage-safety contract whose final main MP4 is directly under the host's
+DataDir/Videos. This includes eligible raw and quick recordings and region
+reuse. External and nested save directories, screenshots, Plans, Leases,
+future windows and other backends follow their existing startup rules.
+
+Before requesting local confirmation, the host checks the current registered
+logical bytes plus the existing conservative video estimate. Equality is
+allowed. Approval can change the destination. The host checks the approved
+scope and takes a fresh sample under the sole protected Run slot before
+backend construction. A pre-confirmation pass reserves nothing. Disabled
+quota skips both usage reads.
+
+The calculation uses the same read-only SQLite facts as /retention/usage and
+requires complete evidence. It can inspect up to 4,096 completed history
+rows, 4,096 ledger rows and 512 matching receipt bindings per sample, within
+3,000 ms. The current storage reserve continues to check actual available
+space independently.
+
+| Error code | HTTP before confirmation | Meaning |
+| --- | --- | --- |
+| MANAGED_VIDEO_QUOTA_CONFIGURATION_INVALID | 503 | Invalid startup setting for a covered recording |
+| MANAGED_VIDEO_QUOTA_EXCEEDED | 409 | Registered bytes plus the estimate exceed the limit |
+| MANAGED_VIDEO_QUOTA_BUSY | 409 | A protected Run owns the slot |
+| MANAGED_VIDEO_QUOTA_USAGE_UNAVAILABLE | 503 | The registered usage or prior Run settlement cannot be confirmed |
+
+Details include reason_code and stage. Only a confirmed shortfall includes
+configured_bytes, recorded_bytes, estimated_bytes and shortfall_bytes.
+After local approval, the same codes are reported through the failed
+recording's stop_reason and managed_video_quota_failure. A busy or incomplete
+snapshot, read timeout, corrupt history or a scan limit conservatively refuses
+a covered start. The response can report previous_run_unsettled when a
+terminal Run still lacks settlement evidence.
+
+Successful media is retained even if it exceeds the estimate. The slot
+releases after the same Run's completed history and publication anchor
+commit. For a failed or cancelled Run that owned the slot, release requires a
+committed terminal result and proof that output work retired without a final
+publication attempt. An ambiguous attempt or an unconfirmed write retains
+the slot. Future requests use the actual length recorded by the publication.
+This is a host-local admission policy with logical byte accounting. Disk
+allocation, cross-process reservations and automatic cleanup are outside
+its scope.
+
+### Managed video reconciliation
+
+Send authenticated GET /api/v1/retention/reconciliation on a ready App or
+Headless host. The scope is the host's startup-frozen DataDir/Videos and
+its direct ordinary main MP4 candidates. The endpoint accepts no path,
+filter, cursor, query parameter or request body. Capabilities
+retention_reconciliation reports the scope and limits without sampling.
+Other methods return 405. A query or payload returns 400.
+
+The data response contains scope=managed_ordinary_main_mp4, root_state
+(present or confirmed absent), sampled_at_utc, complete and reason_codes.
+The four aggregate counts use distinct case-insensitive candidate names:
+
+| Field | Meaning |
+| --- | --- |
+| matched_files | A verified file and compatible completed registration agree on path, full file identity and logical length |
+| files_without_matching_registration | A verified direct candidate has no matching scoped ordinary registration |
+| missing_registrations | An anchored registered location lacks a corresponding directory entry, known alias or observed identity elsewhere in this scan |
+| uncertain_candidates | A candidate cannot be classified reliably |
+
+Compatible duplicate registrations count once. A same-path replacement,
+changed length, known short-name alias, identity conflict, absent publication
+evidence, hard link, reparse point, sharing conflict or inaccessible file can
+produce uncertainty. A renamed identity can make both names uncertain.
+complete=false indicates uncertainty. A complete sample can still contain
+unmatched files or missing registrations. Old deletion settlements do not
+remove registrations from this diagnostic comparison. Plans, Leases, future
+windows, screenshot series, old Bundle attachments and other uses are outside
+the registration set.
+
+The directory scan binds the local drive and each ancestor to a read-only
+handle and opens children relative to their observed parent. The scanner
+checks two directory listings, file metadata and a rebound root chain. It
+does not follow reparse points, descend into subdirectories, inspect media
+contents or open paths obtained from history. The file handle's read access
+enforces sharing while the scanner queries only metadata. Each pass checks
+up to 512 directory entries including nonmatching names and dot entries,
+with up to 32 directory components including the drive. The file phase
+has a 1,250 ms budget. The separate SQLite read-only snapshot has a 1,500 ms
+budget and checks up to 4,096 completed history rows. Total budget is
+3,000 ms, including dispatch and resource disposal. Only one shared actual
+metadata worker runs per process. A timeout or cancellation retains that
+worker's slot until its actual retirement.
+
+A root or namespace that cannot be verified, corrupt history, an exceeded
+budget or a failed query returns HTTP 503 RETENTION_RECONCILIATION_UNAVAILABLE
+with error.details.reason_code and no counts. Reasons include root_unavailable,
+root_changed, enumeration_failed, scan_limit, scan_timeout, history_limit,
+database_timeout, data_invalid, busy, timeout, cancelled, failed and not_ready.
+A partial sample may use entry_reparse, entry_unverified, multiple_links,
+publication_evidence_missing, publication_identity_conflict and
+path_or_identity_conflict.
+
+Filesystem and SQLite observations occur at separate points in time.
+The response is aggregate diagnostic evidence. An unmatched file can be
+in use or have another purpose. The endpoint provides no deletion authority
+or reclaimable-space estimate, and it does not change recorded usage or
+admission quota accounting.

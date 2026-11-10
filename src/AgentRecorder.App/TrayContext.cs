@@ -27,10 +27,10 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     public bool SupportsGlobalStopHotkey => true;
     public bool IsGlobalStopHotkeyRegistered => _globalStopHotkey?.Registered ?? false;
     public string? GlobalStopHotkeyGesture => "Ctrl+Shift+F10";
-    public bool SupportsChapterMarksLocalHotkey => true;
+    public bool SupportsChapterMarksLocalHotkey => false;
     public bool IsChapterMarksHotkeyRegistered => _chapterMarksHotkey?.Registered ?? false;
-    public string? ChapterMarksHotkeyGesture => "Ctrl+Shift+F11";
-    public string ChapterMarksHotkeyRegistrationPolicy => "while_recording";
+    public string? ChapterMarksHotkeyGesture => null;
+    public string ChapterMarksHotkeyRegistrationPolicy => "disabled";
     internal IUiTextProvider CurrentUiTextProvider => _uiText;
     internal IWindowActivator ConfirmationWindowActivator => _confirmationWindowActivator;
 
@@ -192,24 +192,6 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
             _audit.Log("tray.global_hotkey_error", new { error = ex.Message, gesture = GlobalStopHotkeyGesture });
         }
 
-        // The mark hotkey uses the same message-window implementation but remains
-        // unregistered until an exact RecState.recording transition is observed.
-        try
-        {
-            _chapterMarksHotkey = _chapterMarksHotkeyFactory?.Invoke(OnChapterMarkHotkeyPressed)
-                ?? new GlobalChapterMarkHotkey(OnChapterMarkHotkeyPressed,
-                    onError: _ => _audit.Log("tray.chapter_mark_hotkey_callback_error", new { error_code = "callback_exception" }));
-        }
-        catch (Exception)
-        {
-            _chapterMarksHotkey = null;
-            _audit.Log("tray.chapter_mark_hotkey_error", new
-            {
-                gesture = ChapterMarksHotkeyGesture,
-                error_code = "initialization_failed",
-                active_recording_count = 0
-            });
-        }
     }
 
     private void UpdateLanguageMenuChecks()
@@ -831,7 +813,7 @@ internal sealed class TrayContext : ApplicationContext, ITrayContext, IRecording
     }
 
     private static bool IsExactRecording(RecordingUiPresentation presentation)
-        => presentation.State == RecordingUiState.Recording && presentation.ChapterMarksEligible;
+        => false;
 
     private RecordingUiPresentation[] SnapshotExactRecordings()
     {

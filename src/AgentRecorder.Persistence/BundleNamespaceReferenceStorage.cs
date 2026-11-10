@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 
 namespace AgentRecorder.Persistence;
 
-// Saved lexical scopes only. All batches belong to the caller's original snapshot.
+// Persisted lexical scopes. All batches belong to the caller's original snapshot.
 internal static class BundleNamespaceReferenceStorage
 {
     internal const int MaxCandidates = 100;
@@ -12,6 +12,31 @@ internal static class BundleNamespaceReferenceStorage
     internal const int KeysPerBatch = 256;
     internal const int MaxParametersPerBatch = 2 * KeysPerBatch;
     internal const int MaxBatches = (MaxTotalKeys + KeysPerBatch - 1) / KeysPerBatch;
+    internal const int MaxLegacyOwnersPerKey = 8;
+
+    private static readonly string LegacyMp4Scope = $"""
+        CASE WHEN substr(requested.directory_path,-7) COLLATE {SqliteOutputPathCollation.Name} = '.bundle'
+        THEN (
+            SELECT COUNT(*) > {MaxLegacyOwnersPerKey} OR COALESCE(MAX(CASE
+                WHEN owner.status_code IN ('pending_confirmation','preparing','countdown','recording','finalizing',
+                    'failed','cancelled','rejected','expired','interrupted_unknown') THEN 0
+                WHEN owner.status_code = 'completed' AND typeof(owner.recording_id) = 'text' AND EXISTS (
+                    SELECT 1 FROM ordinary_recording_bundles b
+                    WHERE b.recording_id = owner.recording_id
+                      AND b.media_output_path COLLATE BINARY = owner.output_path
+                      AND b.status_code = 'not_applicable'
+                      AND b.operation_id IS NULL AND b.bundle_path IS NULL AND b.error_code IS NULL
+                ) THEN 0
+                ELSE 1 END), 0)
+            FROM (
+                SELECT recording_id, status_code, output_path FROM ordinary_recording_history
+                INDEXED BY idx_ordinary_recording_history_shared_output_path
+                WHERE output_path COLLATE {SqliteOutputPathCollation.Name} =
+                    substr(requested.directory_path,1,length(requested.directory_path)-7) || '.mp4'
+                LIMIT {MaxLegacyOwnersPerKey + 1}
+            ) owner
+        ) ELSE 0 END
+        """;
 
     internal static IReadOnlyList<string>? AncestorKeys(string? path)
     {
@@ -60,12 +85,15 @@ internal static class BundleNamespaceReferenceStorage
             var batch = all.Skip(offset).Take(KeysPerBatch).ToArray();
             var expected = batch.Select(k => k.Id).ToHashSet(StringComparer.Ordinal);
             using var command = connection.CreateCommand(); command.Transaction = transaction;
+            // Invert DerivePath only for historical MP4s. The suffix test also
+            // excludes trailing-separator keys. Limit index hits before testing
+            // registration so even many matching media-only rows fail closed.
             command.CommandText = "WITH requested(recording_id,directory_path) AS (VALUES " +
                 string.Join(",", batch.Select((_, i) => "($id" + i + ",$dir" + i + ")")) + ") " +
                 "SELECT requested.recording_id, MAX(" + string.Join(" OR ", SqliteSchemaV47.Indexes.Select(index =>
                     "EXISTS(SELECT 1 FROM " + index.Table + " scope INDEXED BY " + index.Name +
                     " WHERE scope.bundle_path COLLATE " + SqliteOutputPathCollation.Name + "=requested.directory_path)")) +
-                ") FROM requested GROUP BY requested.recording_id COLLATE BINARY;";
+                " OR " + LegacyMp4Scope + ") FROM requested GROUP BY requested.recording_id COLLATE BINARY;";
             for (var i = 0; i < batch.Length; i++)
             {
                 command.Parameters.AddWithValue("$id" + i, batch[i].Id);

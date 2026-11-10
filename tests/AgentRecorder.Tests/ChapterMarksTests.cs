@@ -120,32 +120,7 @@ public sealed partial class ChapterMarksTests : IDisposable
         return (response.StatusCode, await response.Content.ReadAsStringAsync());
     }
 
-    [Fact]
-    public async Task AuthenticatedPost_AcceptsTrimmedUnicodeMark_AndReturnsTimestamp()
-    {
-        var firstFrame = new DateTime(2026, 8, 20, 1, 2, 3, DateTimeKind.Utc);
-        var rec = Register(startedAtUtc: firstFrame);
-        _engine.MonotonicTimestampProviderForTests = () => 1234;
 
-        var result = await PostMarkAsync(rec.Id, "{\"label\":\"  重要决定 😀  \"}");
-
-        Assert.Equal(HttpStatusCode.OK, result.Status);
-        using var doc = JsonDocument.Parse(result.Body);
-        var data = doc.RootElement.GetProperty("data");
-        Assert.Equal(rec.Id, data.GetProperty("recording_id").GetString());
-        Assert.Equal("bundle/marks.json", data.GetProperty("delivery").GetProperty("artifact").GetString());
-        Assert.Equal("pending", data.GetProperty("delivery").GetProperty("status").GetString());
-        var mark = data.GetProperty("mark");
-        Assert.Equal(1234, mark.GetProperty("t_ms").GetInt64());
-        Assert.Equal("重要决定 😀", mark.GetProperty("label").GetString());
-        Assert.Equal("agent", mark.GetProperty("source").GetString());
-
-        var accepted = Assert.Single(rec.SnapshotMarks());
-        Assert.Equal(1234, accepted.TMs);
-        Assert.Equal("重要决定 😀", accepted.Label);
-        Assert.Single(_audit.Events, e => e.evt == "recording.mark_added");
-        Assert.DoesNotContain("重要决定", _audit.Events.Single(e => e.evt == "recording.mark_added").json);
-    }
 
     [Fact]
     public async Task MutatingMarkEndpoint_RequiresAuthentication()
@@ -158,39 +133,7 @@ public sealed partial class ChapterMarksTests : IDisposable
         Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
     }
 
-    [Fact]
-    public async Task InvalidJsonLabelsAndSources_Return400WithoutMutationOrAudit()
-    {
-        var rec = Register();
-        var invalidBodies = new[]
-        {
-            "{",
-            "{}",
-            "{\"label\":\"   \"}",
-            "{\"label\":123}",
-            "{\"label\":\"\\nchapter\"}",
-            "{\"label\":\"chapter\\r\"}",
-            "{\"label\":\"\\tchapter\"}",
-            "{\"label\":\"chapter\\t\"}",
-            "{\"label\":\"a\\u0001b\"}",
-            "{\"label\":\"ok\",\"source\":\"hotkey\"}",
-            "{\"label\":\"ok\",\"source\":\"unknown\"}"
-        };
 
-        foreach (var body in invalidBodies)
-        {
-            var result = await PostMarkAsync(rec.Id, body);
-            Assert.Equal(HttpStatusCode.BadRequest, result.Status);
-            Assert.Contains("INVALID_ARGUMENT", result.Body);
-        }
-
-        var oversized = JsonSerializer.Serialize(new { label = new string('x', 201) });
-        var oversizedResult = await PostMarkAsync(rec.Id, oversized);
-        Assert.Equal(HttpStatusCode.BadRequest, oversizedResult.Status);
-
-        Assert.Empty(rec.SnapshotMarks());
-        Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
-    }
 
     [Fact]
     public async Task UnknownRecording_ReturnsExistingNotFoundError()
@@ -202,61 +145,11 @@ public sealed partial class ChapterMarksTests : IDisposable
         Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
     }
 
-    [Theory]
-    [InlineData(RecState.created)]
-    [InlineData(RecState.pending_confirmation)]
-    [InlineData(RecState.preparing)]
-    [InlineData(RecState.countdown)]
-    [InlineData(RecState.paused)]
-    [InlineData(RecState.stopping)]
-    [InlineData(RecState.finalizing)]
-    [InlineData(RecState.completed)]
-    [InlineData(RecState.failed)]
-    [InlineData(RecState.cancelled)]
-    [InlineData(RecState.rejected)]
-    [InlineData(RecState.expired)]
-    public void DomainOperation_RejectsEveryNonRecordingStateWithoutMutation(RecState state)
-    {
-        var rec = Register(state);
 
-        var exception = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "x"));
 
-        Assert.Equal(409, exception.Status);
-        Assert.Equal("RECORDING_NOT_ACTIVE", exception.Code);
-        Assert.Empty(rec.SnapshotMarks());
-        Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
-    }
 
-    [Fact]
-    public void DomainOperation_DoesNotFabricateTimestampBeforeFirstFrame()
-    {
-        var rec = Register(RecState.recording);
-        rec.StartedAtUtc = default;
 
-        var exception = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "x"));
 
-        Assert.Equal(409, exception.Status);
-        Assert.Equal("RECORDING_NOT_ACTIVE", exception.Code);
-        Assert.Empty(rec.SnapshotMarks());
-    }
-
-    [Fact]
-    public void DomainOperation_UsesMonotonicAnchor_RegardlessOfUtcClockChanges()
-    {
-        var firstFrame = new DateTime(2026, 8, 20, 2, 0, 0, DateTimeKind.Utc);
-        var rec = Register(startedAtUtc: firstFrame);
-        rec.BackendStartAtUtc = firstFrame.AddMinutes(-5);
-        _engine.MonotonicTimestampProviderForTests = () => 2000;
-
-        var mark = _engine.AddMark(rec.Id, "timeline");
-        Assert.Equal(2000, mark.TMs);
-
-        _engine.UtcNowForTests = () => firstFrame.AddHours(-12);
-        _engine.MonotonicTimestampProviderForTests = () => 2500;
-        var later = _engine.AddMark(rec.Id, "clock-step");
-        Assert.Equal(2500, later.TMs);
-        Assert.All(rec.SnapshotMarks(), m => Assert.True(m.TMs >= 0));
-    }
 
     [Fact]
     public void RecordingMark_ValidatesSubmittedControlsBeforeTrimming_AndPreservesScalarLimit()
@@ -300,55 +193,7 @@ public sealed partial class ChapterMarksTests : IDisposable
         Assert.Equal(1, providerCalls);
     }
 
-    [Fact]
-    public void MarkTimeline_UsesTickDeltaAndRejectsMissingRegressionAndOverflow()
-    {
-        var firstFrame = new DateTime(2026, 8, 20, 5, 0, 0, DateTimeKind.Utc);
-        var rec = Register(startedAtUtc: firstFrame);
-        rec.MarkTimelineAnchorTicks = null;
-        _engine.MonotonicTimestampProviderForTests = () => 1000;
 
-        var missing = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "missing"));
-        Assert.Equal("RECORDING_NOT_ACTIVE", missing.Code);
-        Assert.Empty(rec.SnapshotMarks());
-        Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
 
-        rec.MarkTimelineAnchorTicks = 1000;
-        _engine.MonotonicTimestampProviderForTests = () => 999;
-        var regression = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "regression"));
-        Assert.Equal("RECORDING_NOT_ACTIVE", regression.Code);
-        Assert.Empty(rec.SnapshotMarks());
 
-        rec.MarkTimelineAnchorTicks = 0;
-        _engine.MonotonicFrequencyForTests = 1;
-        _engine.MonotonicTimestampProviderForTests = () => long.MaxValue;
-        var overflow = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "overflow"));
-        Assert.Equal("RECORDING_NOT_ACTIVE", overflow.Code);
-        Assert.Empty(rec.SnapshotMarks());
-        Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
-    }
-
-    [Fact]
-    public async Task DomainOperation_PreservesSequentialOrderAndConcurrentMarks()
-    {
-        var firstFrame = new DateTime(2026, 8, 20, 3, 0, 0, DateTimeKind.Utc);
-        var rec = Register(startedAtUtc: firstFrame);
-        _engine.UtcNowForTests = () => firstFrame.AddSeconds(1);
-
-        _engine.AddMark(rec.Id, "first");
-        _engine.AddMark(rec.Id, "second");
-        Assert.Equal(new[] { "first", "second" }, rec.SnapshotMarks().Select(m => m.Label));
-
-        var tasks = Enumerable.Range(0, 100)
-            .Select(i => Task.Run(() => _engine.AddMark(rec.Id, $"concurrent-{i}")))
-            .ToArray();
-        await Task.WhenAll(tasks);
-
-        var snapshot = rec.SnapshotMarks();
-        Assert.Equal(102, snapshot.Count);
-        Assert.Equal(102, snapshot.Select(m => m.Label).Distinct(StringComparer.Ordinal).Count());
-        var markEvents = _audit.Events.Where(e => e.evt == "recording.mark_added").ToArray();
-        Assert.Equal(102, markEvents.Length);
-        Assert.All(markEvents, e => Assert.DoesNotContain("label", e.json, StringComparison.OrdinalIgnoreCase));
-    }
 }

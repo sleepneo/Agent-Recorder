@@ -314,6 +314,7 @@ public class RecordingEnginePreflightTests : IDisposable
         {
             Success = true,
             ProtocolVersion = "audio-helper-v1",
+            OwnedWavCapability = "file-id-v1",
             TimestampFrequency = Stopwatch.Frequency
         };
 
@@ -519,6 +520,81 @@ public class RecordingEnginePreflightTests : IDisposable
         Assert.Empty(engine._confs);
         Assert.Empty(engine._recs);
         Assert.DoesNotContain(audit.Events, e => e.Event == "confirmation.created");
+    }
+
+    [Fact]
+    public void Task415SLegacyResponseRejectsBeforeConfirmation()
+    {
+        using var helper = new FakeAudioHelperDeployment(_tmp.Path);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => helper.ExecutablePath;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (path, token) =>
+            AudioHelperProbeLauncher.Run(path, TimeSpan.FromSeconds(5), token);
+        var prior = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", "legacy");
+            var audit = new CapturingAuditLogger();
+            var tray = new ControllableTray { DeferCallback = true };
+            var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
+            using var engine = MakeEngine(audit, tray, mic);
+
+            var error = Assert.Throws<ApiException>(() =>
+                engine.CreateRecording(DisplayConfigWithMicrophone("out.mp4"), "test-agent", tray));
+            Assert.Equal("audio_helper_protocol_error", error.Code);
+            Assert.Contains("update_audio_helper", JsonSerializer.Serialize(error.Details));
+            Assert.Empty(engine._confs);
+            Assert.Empty(engine._recs);
+            Assert.DoesNotContain(audit.Events, e => e.Event == "confirmation.created");
+        }
+        finally { Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", prior); }
+    }
+
+    [Theory]
+    [InlineData(false, "legacy")]
+    [InlineData(true, "wrong")]
+    public void Task415SRechecksHelperCapabilityAfterApproval(bool loopback, string changedResponse)
+    {
+        using var helper = new FakeAudioHelperDeployment(_tmp.Path);
+        RecordingPreflightChecker.ShouldUseWasapiBackend = () => true;
+        RecordingPreflightChecker.AudioHelperPathResolver = () => helper.ExecutablePath;
+        int probes = 0;
+        RecordingPreflightChecker.AudioHelperProbeRunner = (path, token) =>
+        {
+            probes++;
+            return AudioHelperProbeLauncher.Run(path, TimeSpan.FromSeconds(5), token);
+        };
+        var prior = Environment.GetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE");
+        try
+        {
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", "reordered");
+            var audit = new CapturingAuditLogger();
+            var tray = new ControllableTray { DeferCallback = true };
+            var mic = new FakeMicrophoneProvider(new MicrophoneDeviceInfo("fake-mic", "Test Mic", true, "active"));
+            using var engine = MakeEngine(audit, tray, mic, new WindowEndpoints());
+            var request = DisplayConfigWithMicrophone("out.mp4");
+            if (loopback)
+                request["audio"] = new JsonObject { ["system_audio"] = new JsonObject
+                    { ["enabled"] = true, ["device_id"] = WindowEndpoints.Endpoint.Id } };
+
+            engine.CreateRecording(request, "test-agent", tray);
+            var recording = Assert.Single(engine._recs.Values);
+            Assert.Equal(RecState.pending_confirmation, recording.State);
+            Assert.Equal(1, probes);
+
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", changedResponse);
+            tray.InvokeApproved();
+            Assert.True(SpinWait.SpinUntil(() => recording.IsFinalized, TimeSpan.FromSeconds(5)));
+            Assert.Equal(2, probes);
+            Assert.Equal(RecState.failed, recording.State);
+            Assert.Null(recording.Backend);
+            Assert.False(recording.BackendStartAttempted);
+            var failure = Assert.Single(audit.Payloads, x => x.Event == "recording.preflight_failed").Data;
+            Assert.Equal("before_start", failure.GetProperty("stage").GetString());
+            Assert.Equal("audio_helper_protocol_error", failure.GetProperty("error_code").GetString());
+            Assert.Equal("update_audio_helper", failure.GetProperty("suggested_action").GetString());
+        }
+        finally { Environment.SetEnvironmentVariable("AGENT_RECORDER_FAKE_VERSION_CASE", prior); }
     }
 
     [Fact]

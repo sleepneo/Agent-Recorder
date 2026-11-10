@@ -142,7 +142,11 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     }
 
     private sealed record OrdinaryOutputClaim(OrdinaryOutputOwner Current, OrdinaryOutputOwner? Previous);
-    private OrdinaryOutputClaim? ClaimOrdinaryOutput(Recording rec, string path, string? requestedPath = null)
+    private OrdinaryOutputClaim? ClaimOrdinaryOutput(Recording rec, string path, string? requestedPath = null) =>
+        ClaimOrdinaryOutputWithWitnesses(rec, path, requestedPath, null);
+
+    private OrdinaryOutputClaim? ClaimOrdinaryOutputWithWitnesses(Recording rec, string path, string? requestedPath,
+        OrdinaryOutputRetirementWitness[]? retirementWitnesses)
     {
         if (!rec.IsOrdinaryLocalRequest || rec.Mode != "video") return null;
         var normalized = Path.GetFullPath(path);
@@ -152,7 +156,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         var av = RecordingStoragePolicy.IsOrdinaryAv(rec);
         // Backend evidence may take a worker lock. Observe outside the path
         // arbitration lock, then validate the exact registration again inside it.
-        var retired = ObserveRetiredOrdinaryOutputs();
+        var retired = retirementWitnesses ?? ObserveRetiredOrdinaryOutputs();
         lock (_ordinaryOutputLock)
         {
             if (HasBundleNamespaceConflictUnderLock(normalized, requested, preparationRequested) ||
@@ -431,6 +435,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     // Synchronous, bounded native metadata only; called once outside engine/recording locks.
     internal Func<nint, int, WindowProcessMetadata?> OrdinaryWindowMetadataForTests { get; set; } = WindowProcessMetadataReader.Observe;
 
+    internal RecordingStorageReserve StorageReserve { get; }
+
     public RecordingEngine(AuditLogger audit, IPerformanceTracer? tracer = null,
         IRecordingBundleGenerator? bundleGenerator = null,
         IMicrophoneDeviceProvider? microphoneProvider = null,
@@ -467,8 +473,10 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         Func<RecurringLeaseCaptureExecutionTicket, DateTimeOffset, RecurringLeaseCurrentSafetyDecision>? recurringStartSafetyValidator = null,
         IRecurringOccurrenceEnvironmentProvider? recurringEnvironmentProvider = null,
         StandingLeaseStartSafetyInterlock? futureWindowStartSafetyInterlock = null,
-        Func<FutureWindowOneShotExecutionTicket, DateTimeOffset, string?>? futureWindowStartSafetyValidator = null)
+        Func<FutureWindowOneShotExecutionTicket, DateTimeOffset, string?>? futureWindowStartSafetyValidator = null,
+        RecordingStorageReserve? storageReserve = null)
     {
+        StorageReserve = storageReserve ?? RecordingStorageReserve.Startup;
         _audit = audit;
         _tracer = tracer ?? NoOpPerformanceTracer.Instance;
         _bundleGenerator = bundleGenerator;
@@ -641,92 +649,9 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     /// </summary>
     public RecordingMark AddMark(string recordingId, string label, string source = "agent")
     {
-        var rec = Get(recordingId);
-
-        if (!string.Equals(source, "agent", StringComparison.Ordinal) &&
-            !string.Equals(source, "hotkey", StringComparison.Ordinal))
-        {
-            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
-                new { field = "source", allowed = new[] { "agent", "hotkey" } });
-        }
-
-        if (label is null)
-        {
-            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
-                new { field = "label", reason = "required" });
-        }
-
-        RecordingMark mark;
-        lock (rec)
-        {
-            if (rec.IsScreenshotSeries)
-                throw new ApiException(409, "UNSUPPORTED_FEATURE",
-                    "Chapter marks are not applicable to screenshot_series recordings.",
-                    new { suggested_action = "use_video_recording_for_chapter_marks" });
-
-            if (rec.State != RecState.recording)
-            {
-                throw RecordingNotActive(rec);
-            }
-
-            // Both the UTC metadata and monotonic mark anchor are established
-            // by the trusted first-frame transition. Never synthesize either
-            // from request/approval/backend/countdown/bundle timestamps.
-            if (rec.StartedAtUtc == default ||
-                !rec.MarkTimelineAnchorTicks.HasValue ||
-                rec.MarkTimelineAnchorTicks.Value < 0)
-            {
-                throw new ApiException(409, "RECORDING_NOT_ACTIVE",
-                    "Recording timeline has not observed its first frame yet.",
-                    new
-                    {
-                        current_state = rec.State.ToString(),
-                        suggested_action = "wait_for_first_frame"
-                    });
-            }
-
-            long nowTicks;
-            try
-            {
-                nowTicks = MonotonicTimestampProviderForTests();
-            }
-            catch
-            {
-                throw TimelineNotReady(rec, "monotonic_clock_unavailable");
-            }
-
-            if (!TryConvertMonotonicDeltaToMilliseconds(
-                    rec.MarkTimelineAnchorTicks.Value, nowTicks,
-                    MonotonicFrequencyForTests, out var tMs))
-            {
-                throw TimelineNotReady(rec, "monotonic_clock_invalid");
-            }
-
-            if (BundleDeliveryUnavailableReason(rec) is { } deliveryReason)
-                throw new ApiException(409, "MARK_DELIVERY_UNAVAILABLE",
-                    "Marks require an eligible recording bundle.", new { reason = deliveryReason });
-
-            try
-            {
-                mark = new RecordingMark(tMs, label, source);
-            }
-            catch (ArgumentException)
-            {
-                // Do not copy the label or constructor text into an API error.
-                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
-                    new { field = "label", reason = "must_be_valid_unicode_text" });
-            }
-
-            rec.AddMark(mark);
-            _audit.Log("recording.mark_added", new
-            {
-                recording_id = rec.Id,
-                t_ms = mark.TMs,
-                source = mark.Source
-            });
-        }
-
-        return mark;
+        _ = Get(recordingId);
+        throw new ApiException(409, "UNSUPPORTED_FEATURE", "Chapter marks are unavailable for new video-only recordings.",
+            new { field = "chapter_marks", reason = "video_only_delivery" });
     }
 
     private static ApiException RecordingNotActive(Recording rec) =>
@@ -1058,12 +983,28 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         // that do not require user interaction.
         // =====================================================================
         var capturePlan = (_capturePlanFactory ?? CaptureBackendSelector.BuildPlan)(rec.Config);
+        long independentWindowPixelRate = 0;
+        if (independentWindow)
+        {
+            independentWindowPixelRate = CalculateIndependentWindowPixelRate(capturePlan, rec.Config.Fps);
+            if (!rec.Config.RequireWindowSurface || rec.Config.AudioRequested || rec.NestedRole is not null ||
+                capturePlan!.WindowHandle != rec.Config.WindowHandle || capturePlan.PlannedBackend != "wgc-continuous")
+                throw InvalidIndependentWindowPlan();
+            // Non-capturing geometry is resolved outside the lock. Reject a known
+            // excess before preflight filesystem probes; this check reserves nothing.
+            lock (_lock)
+            {
+                var active = _recs.Values.Where(r => r.State is RecState.preparing or RecState.countdown or
+                    RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing).ToList();
+                ValidateIndependentWindowAdmission(rec.Config.WindowHandle, active, independentWindowPixelRate);
+            }
+        }
         rec.ApprovedCapturePlan = capturePlan;
         rec.IsOrdinaryLocalRequest = true;
         independentWindow &= rec.Mode == "video" && rec.Config.RequireWindowSurface &&
             !rec.Config.AudioRequested && rec.NestedRole is null && capturePlan.IsWindowSurface;
         if (rec.Mode == "video") rec.OrdinaryBackendCreation = new WorkerStartBoundary();
-        var beforeConfirmationPreflight = RecordingPreflightChecker.CheckBeforeConfirmation(rec);
+        var beforeConfirmationPreflight = RecordingPreflightChecker.CheckBeforeConfirmation(rec, StorageReserve);
         if (!beforeConfirmationPreflight.Passed)
         {
             _audit.Log("recording.preflight_failed", new
@@ -1079,13 +1020,15 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             // Recording object exists but was never registered; treat as an intent-level
             // validation failure rather than a recording terminal event.
             _tracer.IntentValidated(traceId, endpoint, success: false, errorCode: beforeConfirmationPreflight.ErrorCode);
+            var details = new Dictionary<string, object?>
+            {
+                ["suggested_action"] = beforeConfirmationPreflight.SuggestedAction,
+                ["stage"] = "before_confirmation"
+            };
+            if (beforeConfirmationPreflight.StorageShortfall is { } shortfall)
+                details["storage"] = shortfall;
             throw new ApiException(400, beforeConfirmationPreflight.ErrorCode!,
-                beforeConfirmationPreflight.Message!,
-                new
-                {
-                    suggested_action = beforeConfirmationPreflight.SuggestedAction,
-                    stage = "before_confirmation"
-                });
+                beforeConfirmationPreflight.Message!, details);
         }
 
         // Construct the immutable, non-capturing decision before any local
@@ -1101,6 +1044,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         rec.BackendType = capturePlan.PlannedBackend;
 
         bool needConfirm = PolicyEngine.RequiresConfirmation();
+        if (needConfirm) CheckManagedQuotaBeforeConfirmation(rec);
         rec.State = needConfirm ? RecState.pending_confirmation : RecState.preparing;
         if (_ordinaryRecordingHistory is not null && !rec.IsScreenshotSeries &&
             !rec.IsStandingLeaseExecution && !rec.IsRecurringLeaseExecution &&
@@ -1125,6 +1069,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         // not just the count check. During Phase-3 (Build), another request
         // may have registered an outer/inner that changes the guard outcome.
         // =====================================================================
+        var independentRetirementWitnesses = independentWindow ? ObserveRetiredOrdinaryOutputs() : null;
         lock (_lock)
         {
             if (Volatile.Read(ref _disposeStarted) != 0)
@@ -1134,7 +1079,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 .Where(r => r.State is RecState.preparing or RecState.countdown or RecState.recording or RecState.stopping or RecState.pending_confirmation or RecState.finalizing)
                 .ToList();
 
-            if (independentWindow) ValidateIndependentWindowAdmission(rec.Config.WindowHandle, currentActive);
+            if (independentWindow) ValidateIndependentWindowAdmission(rec.Config.WindowHandle, currentActive, independentWindowPixelRate);
 
             if (isNested)
             {
@@ -1197,12 +1142,18 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 ? new WindowRecordingIdentity(checked(_nextIndependentWindowNumber + 1),
                     string.IsNullOrWhiteSpace(rec.SourceTitle) ? capturePlan.TargetIdentity ?? $"HWND {rec.Config.WindowHandle}" : rec.SourceTitle)
                 : null;
-            ClaimAndCreateOrdinaryOutput(rec, rec.OutputPath);
+            if (independentWindow)
+            {
+                rec.IndependentWindowAdmissionPending = true;
+                ClaimOrdinaryOutputWithWitnesses(rec, rec.OutputPath, null, independentRetirementWitnesses);
+            }
+            else
+                ClaimAndCreateOrdinaryOutput(rec, rec.OutputPath);
             if (windowIdentity is not null)
             {
                 rec.WindowIdentity = windowIdentity;
                 _nextIndependentWindowNumber = windowIdentity.Number;
-                _independentWindowReservations.Add(rec.Id, rec);
+                _independentWindowReservations.Add(rec.Id, new(rec, independentWindowPixelRate));
             }
             _recs[rec.Id] = rec;
             if (rec.OrdinaryHistoryPublication is not null)
@@ -1221,6 +1172,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             {
                 try
                 {
+                    if (independentWindow) Directory.CreateDirectory(Path.GetDirectoryName(rec.OutputPath)!);
                     _ordinaryRecordingHistory!.Register(CreateOrdinaryHistorySnapshot(rec));
                 }
                 catch (Exception ex)
@@ -1258,7 +1210,29 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                     }
                 }
             }
-            finally { CompleteOrdinaryHistoryRegistration(); }
+            finally
+            {
+                SettleIndependentWindowAdmission(rec);
+                CompleteOrdinaryHistoryRegistration();
+            }
+        }
+
+        if (independentWindow && rec.OrdinaryHistoryPublication is null)
+        {
+            try { Directory.CreateDirectory(Path.GetDirectoryName(rec.OutputPath)!); }
+            catch
+            {
+                lock (_lock)
+                {
+                    _recs.TryRemove(rec.Id, out _);
+                    ReleaseUnregisteredOrdinaryOutput(rec);
+                    _independentWindowReservations.Remove(rec.Id);
+                }
+                throw;
+            }
+            finally { SettleIndependentWindowAdmission(rec); }
+            lock (rec)
+                if (rec.IsFinalized || IsTerminalState(rec.State)) return GetStatus(rec.Id);
         }
 
         // Intent validation is complete: config parsed, preflight passed, and the
@@ -1375,6 +1349,9 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                         if (!TryPreflightBeforeStart(rec, conf, tray))
                             return;
 
+                        if (!TryAdmitManagedQuotaAfterApproval(rec, traceId, tray))
+                            return;
+
                         StartCapture(rec, traceId, tray);
                     }
                     else
@@ -1452,7 +1429,17 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
     private void PublishOrdinaryHistorySnapshot(Recording rec)
     {
-        try { _ordinaryRecordingHistory?.TryPublish(CreateOrdinaryHistorySnapshot(rec)); }
+        try
+        {
+            var store = _ordinaryRecordingHistory;
+            if (store is null) return;
+            var snapshot = CreateOrdinaryHistorySnapshot(rec);
+            if (rec.IsFinalized && rec.ManagedQuotaAdmission is { } admission &&
+                _managedVideoQuota is { } quota && store is IOrdinaryRecordingHistoryCommitObserver observer)
+                observer.PublishWithCommitObserver(snapshot, () => quota.Acknowledge(admission, snapshot));
+            else
+                store.TryPublish(snapshot);
+        }
         catch { }
     }
 
@@ -2341,7 +2328,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     /// </summary>
     private bool TryPreflightBeforeStart(Recording rec, Confirmation? conf, ITrayContext tray)
     {
-        var preflight = RecordingPreflightChecker.CheckBeforeStart(rec);
+        var preflight = RecordingPreflightChecker.CheckBeforeStart(rec, StorageReserve);
         if (preflight.Passed)
             return true;
 
@@ -5016,7 +5003,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         rec.Config.WritePaths.ValidateOutputPath(rec.Config);
         if (rec.Config.StorageSafety is null)
         {
-            rec.Config.StorageSafety = RecordingStoragePolicy.CreateSafety(rec, RecordingPreflightChecker.StorageCapacityProvider, StorageMonitorDelay);
+            rec.Config.StorageSafety = RecordingStoragePolicy.CreateSafety(rec, RecordingPreflightChecker.StorageCapacityProvider,
+                StorageReserve, StorageMonitorDelay);
         }
         rec.Config.StorageSafety.EnsureAdmission();
     }
@@ -6176,8 +6164,6 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     {
         CancelCountdown(rec.Id);
         StopDisplayRuntimeMonitor(rec.Id);
-        RecordingBundleRequest? bundleRequest = null;
-        OrdinaryBundleOutputUse? bundleUse = null;
         bool finalizationSuccess = false;
         lock (rec)
         {
@@ -6329,14 +6315,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
                 if (natural)
                     rec.StopReason = "duration_reached";
 
-                // Decide bundle eligibility and snapshot BEFORE publishing the completed
-                // state. Long-polling waiters must never observe completed + pending.
-                bool bundleEligible = TryPrepareBundleGeneration(rec, meta, out var req);
-                bundleRequest = req;
-                if (bundleEligible) bundleUse = BindOrdinaryBundleOutputUse(rec, req!);
-                rec.BundleSnapshot = bundleEligible
-                    ? RecordingBundleSnapshot.Generating(DeriveBundlePath(req!.MediaPath))
-                    : RecordingBundleSnapshot.NotApplicable();
+                // New video delivery has no attachment worker or namespace reservation.
+                rec.BundleSnapshot = RecordingBundleSnapshot.NotApplicable();
 
                 rec.State = RecState.completed;
                 TraceEncoderSelection(rec, meta);
@@ -6480,10 +6460,6 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
 
         RetireMediaOnlyOutputAfterFinalization(rec);
 
-        if (bundleRequest != null)
-        {
-            DispatchBundleGeneration(rec, bundleRequest, bundleUse);
-        }
 
         tray.SetIdle(CreateRecordingUiPresentation(rec, RecordingUiState.Idle));
 
@@ -7352,7 +7328,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         string container = meta?.Container ?? string.Empty;
         string codec = meta?.Codec ?? string.Empty;
 
-        return new
+        var status = new
         {
             recording_id = rec.Id,
             profile_reuse_mode = rec.ProfileReuseMode,
@@ -7424,6 +7400,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             },
             bundle = BundleObj(rec)
         };
+        return AddManagedQuotaFailure(status, rec.ManagedQuotaFailure);
     }
 
     public object GetOutput(string id)
@@ -7451,6 +7428,8 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
         return new
         {
             recording_id = rec.Id,
+            status = PublicRecordingStatus(rec),
+            error = rec.Error ?? "",
             profile_reuse_mode = rec.ProfileReuseMode,
             profile_ref = ProfileRefObject(rec),
             mode = rec.Mode,
@@ -7749,7 +7728,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             or RecState.rejected or RecState.expired;
         int? nextPollHintMs = isTerminal ? null : 1000;
 
-        return new
+        var status = new
         {
             RecordingId = rec.Id,
             Mode = rec.Mode,
@@ -7822,6 +7801,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
             NextPollHintMs = nextPollHintMs,
             Bundle = BundleObj(rec)
         };
+        return AddManagedQuotaFailure(status, rec.ManagedQuotaFailure);
     }
 
     public IEnumerable<object> List() => _recs.Values.Select(r => new

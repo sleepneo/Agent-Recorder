@@ -22,9 +22,9 @@ internal sealed class DeletionRequestFixture:IDisposable
     internal readonly HttpClient Client;
     private readonly string? _prior=Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
     internal DeletionRequestFixture(bool real=false,bool headless=false,bool configured=true,Io? database=null,DeletionLedgerDatabase? ledger=null,
-        RetentionGuardDatabase? guard=null,RuntimeReadiness? readiness=null)
+        RetentionGuardDatabase? guard=null,RuntimeReadiness? readiness=null,RetentionHostKeepLatestProtection? hostProtection=null)
     {
-        F=new(real);Database=database??new();Authority=F.Service(ledgerDatabase:ledger,database:guard);
+        F=new(real);Database=database??new();Authority=F.Service(ledgerDatabase:ledger,database:guard,hostProtection:hostProtection);
         Coordinator=new(F.Db.Store,UnifiedHistoryTestDatabase.Sid,UnifiedHistoryTestDatabase.Session,F.Videos,Authority,F.Clock,Database,new(),new());
         var tray=new Tray(headless);F.Engine.SetTray(tray);F.Engine.BackendFactory=_=>throw new IOException("No capture permitted.");
         Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",F.Db.Root);ApiKeyAuth.InitializeForTesting(F.Db.Root);

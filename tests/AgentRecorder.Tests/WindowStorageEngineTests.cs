@@ -293,7 +293,7 @@ public sealed partial class WindowStorageEngineTests : IDisposable
             { ffmpeg = ffprobe = typeof(RecordingEngine).Assembly.Location; return true; };
             RecordingPreflightChecker.AudioHelperPathResolver = () => "fake-version-only.exe";
             RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new AudioHelperProbeResult
-                { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = Stopwatch.Frequency };
+                { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = Stopwatch.Frequency };
         }
         public void Dispose()
         { RecordingPreflightChecker.EncoderProvider = _encoder; RecordingPreflightChecker.AudioHelperPathResolver = _helper; RecordingPreflightChecker.AudioHelperProbeRunner = _probe; }

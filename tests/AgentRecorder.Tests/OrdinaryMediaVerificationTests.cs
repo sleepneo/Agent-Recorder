@@ -283,36 +283,7 @@ public sealed class OrdinaryMediaVerificationTests(ITestOutputHelper output)
         using(var host=new Host(f,null,headless)) {using var c=host.Client();using(var r=await c.PostAsync(Endpoint,new StringContent("{}")))Assert.Equal(HttpStatusCode.ServiceUnavailable,r.StatusCode);
             var caps=await Data(await c.GetAsync("/api/v1/capabilities"));Assert.False(caps.GetProperty("ordinary_media_verification").GetProperty("supported").GetBoolean());}
     }
-    [Theory] [InlineData(false)] [InlineData(true)]
-    public async Task SyntheticFormalFfmpegPublicationAndRestartVerifyThroughHttpWhileOldReadsStayCheap(bool headless)
-    {
-        using var f=new Fixture();var priorMode=Environment.GetEnvironmentVariable("AGENT_RECORDER_TEST_MODE");var priorDir=Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
-        RecordingEngine? engine=null;FfmpegCaptureBackend? backend=null;
-        try
-        {
-            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",f.Root);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE","1");DataDirResolver.SetOverride(f.Root);
-            SystemQuery.SetDisplayTopologyProvider(()=>new(){new("display_1","Synthetic",true,new(0,0,1920,1080),1.0,"synthetic-test-display:display_1",DisplayIdentityResolutionStatus.Resolved)});
-            var audit=new RetentionSharedOutputPathTests.QuietAudit();var tray=new Tray(headless);engine=new(audit,bundleGenerator:new FfmpegRecordingBundleGenerator());engine.ConfigureOrdinaryRecordingHistory(f.Writer);engine.SetTray(tray);
-            backend=new(){VideoInputArgumentsForTests=_=>new[]{"-re","-f","lavfi","-t","1","-i","color=c=black:s=64x64:r=15"}};engine.BackendFactory=_=>(backend,"ffmpeg");
-            engine.CreateRecording(new JsonObject { ["source"]=new JsonObject {["type"]="display",["display_id"]="display_1"},["video"]=new JsonObject {["fps"]=15},["duration_seconds"]=1,["countdown_seconds"]=0,
-                ["output"]=new JsonObject {["directory"]=Path.GetDirectoryName(f.Op.MediaPath),["filename"]="formal.mp4",["conflict_policy"]="fail"}},"task341-synthetic",tray);
-            tray.Confirm!(ConfirmationDecision.Approve());var rec=Assert.Single(engine._recs.Values);await Until(()=>f.Writer.Read(rec.Id)?.Bundle?.Status is "ready" or "failed");
-            Assert.Equal(RecState.completed,rec.State);var row=f.Writer.Read(rec.Id)!;Assert.Equal("ready",row.Bundle!.Status);Assert.NotNull(rec.LastMeta!.PublicationReceipt);
-            var expected=Hash(rec.OutputPath);Assert.Equal(expected,row.MediaHash!.Value);engine.Dispose();engine=null;backend.Dispose();backend=null;f.Reopen();
-            var native=new Native();var service=new OrdinaryMediaVerificationService(f.Writer.ReadArtifactFacts,new Ancestors(),native);var reads=0;service.ReadForTests=async(s,b,t)=> {reads++;return await s.ReadAsync(b,t);};
-            using var host=new Host(f,service,headless);using var c=host.Client();var before=f.Snapshot();
-            foreach(var path in new[]{"/api/v1/recording-history","/api/v1/recording-history/"+rec.Id,"/api/v1/history?source=ordinary","/api/v1/recording-history/"+rec.Id+"/artifacts/check",
-                "/api/v1/retention/preview?completed_before="+Uri.EscapeDataString(DateTimeOffset.UtcNow.ToString("O"))})await Data(await c.GetAsync(path));
-            Assert.Equal(0,reads);Assert.Empty(native.Handles);
-            var caps=await Data(await c.GetAsync("/api/v1/capabilities"));var v=caps.GetProperty("ordinary_media_verification");Assert.True(v.GetProperty("supported").GetBoolean());Assert.Equal(1_073_741_824,v.GetProperty("max_bytes").GetInt64());Assert.Equal(30000,v.GetProperty("deadline_ms").GetInt32());Assert.Equal(1,v.GetProperty("max_concurrent").GetInt32());
-            Assert.Equal("main_media",v.GetProperty("scope").GetString());Assert.Equal("bundle_generation",v.GetProperty("reference_basis").GetString());Assert.True(v.GetProperty("read_only").GetBoolean());Assert.False(v.GetProperty("deletion_supported").GetBoolean());
-            var artifact=caps.GetProperty("ordinary_artifact_check");Assert.True(artifact.GetProperty("metadata_only").GetBoolean());Assert.False(artifact.GetProperty("content_verification").GetBoolean());
-            var result=await Verify(c,Endpoint.Replace("/r/","/"+rec.Id+"/"),"");Assert.Equal("match",result.GetProperty("comparison").GetString());Assert.True(result.GetProperty("content_verified").GetBoolean());
-            Assert.Equal(expected,result.GetProperty("recorded_hash").GetProperty("value").GetString());Assert.Equal(expected,result.GetProperty("observed_hash").GetProperty("value").GetString());Assert.Equal(row.OutputSizeBytes,result.GetProperty("bytes_read").GetInt64());Assert.Equal(before,f.Snapshot());
-            output.WriteLine("Formal approved Engine -> lavfi backend -> original media receipt -> real five-file Bundle -> persisted SHA -> reopened writer -> authenticated loopback HTTP; host mode="+tray.HostMode);
-        }
-        finally {engine?.Dispose();backend?.Dispose();SystemQuery.SetDisplayTopologyProvider(null);DataDirResolver.ClearOverride();Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR",priorDir);Environment.SetEnvironmentVariable("AGENT_RECORDER_TEST_MODE",priorMode);}
-    }
+
     [Fact]
     public async Task SqliteSnapshotFreezesHashAndOriginalAnchorTogetherWithoutRepairingChanges()
     {

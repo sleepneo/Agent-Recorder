@@ -190,6 +190,7 @@ public sealed partial class ApiServer
         _retentionPreviewGateway = retentionPreviewGateway;
         _retentionEvaluationGateway = retentionEvaluationGateway;
         _retentionDeletionGateway = retentionDeletionGateway;
+        _retentionHostProtection = retentionDeletionGateway?.HostProtection ?? RetentionHostKeepLatestProtection.Startup;
         _retentionBatchDeletionGateway = retentionBatchDeletionGateway;
         _artifactCheckGateway = artifactCheckGateway;
         _historyArtifactCheckGateway = historyArtifactCheckGateway;
@@ -262,6 +263,8 @@ public sealed partial class ApiServer
         }
         try { _retentionBatchDeletionGateway?.Stop(); } catch { }
         try { _retentionDeletionGateway?.Stop(); } catch { }
+        _retentionStorage?.Stop();
+        _retentionStaging?.Stop();
     }
 
     public void Stop() => StopCore(Timeout.InfiniteTimeSpan);
@@ -291,6 +294,14 @@ public sealed partial class ApiServer
         CloseActiveClientsAndSnapshot(out var clients);
         BeforeStopClientDrainWaitForTests?.Invoke();
         if(!WaitForTask(Task.WhenAll(clients), Remaining(timeout, startedAt)))return false;
+        var storageDrain = _retentionStorage?.WaitForIdleAsync();
+        if (storageDrain is not null && (!WaitForTask(storageDrain, Remaining(timeout, startedAt)) ||
+            !storageDrain.GetAwaiter().GetResult())) return false;
+        var stagingDrain = _retentionStaging?.WaitForIdleAsync();
+        if (stagingDrain is not null && (!WaitForTask(stagingDrain, Remaining(timeout, startedAt)) ||
+            !stagingDrain.GetAwaiter().GetResult())) return false;
+        var reconciliationDrain = _retentionReconciliation?.WaitForIdleAsync();
+        if (reconciliationDrain is not null && !WaitForTask(reconciliationDrain, Remaining(timeout, startedAt))) return false;
         var batchDrain=_retentionBatchDeletionGateway?.WaitForIdleAsync();
         if(batchDrain is not null&&(!WaitForTask(batchDrain,Remaining(timeout,startedAt))||!batchDrain.GetAwaiter().GetResult()))return false;
         var deletionDrain=_retentionDeletionGateway?.WaitForIdleAsync();
@@ -376,11 +387,14 @@ public sealed partial class ApiServer
                 var body = request.Body;
                 var method = request.Method;
                 var path = request.Path;
+                var retentionStaging = IsRetentionStagingPath(path);
+                var retentionUsage = IsRetentionUsagePath(path);
+                var retentionReconciliation = IsRetentionReconciliationPath(path);
 
                 if (RequiresAuth(method, path))
                 {
                     var key=request.Headers.GetValueOrDefault("x-agent-recorder-key");
-                    if(IsRetentionEvaluationPath(path))
+                    if(IsRetentionEvaluationPath(path) || IsRetentionStoragePath(path) || retentionStaging || retentionUsage || retentionReconciliation)
                     {
                         if(!ApiKeyAuth.IsEnabled)throw new ApiException(401,"UNAUTHORIZED","API key is required.");
                         ApiKeyAuth.ValidateHeader(key);
@@ -403,9 +417,36 @@ public sealed partial class ApiServer
                 if (!shutdown && admission is null)
                     throw new ApiException(503, "HOST_SHUTTING_DOWN", "Host work admission is closed.");
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                var disconnect=(IsRetentionEvaluationPath(path)||IsBatchDeletionPath(path)||IsDeletionPath(path)||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
+                var disconnect=(path==Prefix+"/retention/preview" && request.Query.ContainsKey("keep_latest_count") || IsRetentionEvaluationPath(path)||IsBatchDeletionPath(path)||IsDeletionPath(path)||IsRetentionStoragePath(path)||retentionStaging||retentionUsage||retentionReconciliation||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
-                try { responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token); }
+                try
+                {
+                    if (IsRetentionStoragePath(path))
+                    {
+                        responseBody = await ReadRetentionStorageAsync(request, reqId, requestCancellation.Token);
+                        status = 200;
+                        responseHeaders = new(StringComparer.OrdinalIgnoreCase);
+                    }
+                    else if (retentionStaging)
+                    {
+                        responseBody = await ReadRetentionStagingAsync(request, reqId, requestCancellation.Token);
+                        status = 200;
+                        responseHeaders = new(StringComparer.OrdinalIgnoreCase);
+                    }
+                    else if (retentionUsage)
+                    {
+                        responseBody = await ReadRetentionUsageAsync(request, reqId, requestCancellation.Token);
+                        status = 200;
+                        responseHeaders = new(StringComparer.OrdinalIgnoreCase);
+                    }
+                    else if (retentionReconciliation)
+                    {
+                        responseBody = await ReadRetentionReconciliationAsync(request, reqId, requestCancellation.Token);
+                        status = 200;
+                        responseHeaders = new(StringComparer.OrdinalIgnoreCase);
+                    }
+                    else responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token);
+                }
                 finally { requestCancellation.Cancel(); await disconnect; }
                 if (shutdown && status == 202) BeforeHostShutdownResponseWriteForTests?.Invoke();
                 await WriteJson(stream, status, responseBody, responseHeaders, strictFlush: shutdown);
@@ -418,7 +459,7 @@ public sealed partial class ApiServer
             catch (ApiException ex)
             {
                 await WriteJson(stream, ex.Status, ApiResponse.Err(ex.Code, ex.Message, ex.Details, reqId));
-                if(ex is EvaluationRequestException or BatchDeletionRequestException)await FinishRejectedEvaluation(client,stream);
+                if(ex is EvaluationRequestException or BatchDeletionRequestException or RetentionStorageRequestException or RetentionStagingRequestException or RetentionUsageRequestException or RetentionReconciliationRequestException)await FinishRejectedEvaluation(client,stream);
             }
             catch (Exception ex)
             {
@@ -525,6 +566,18 @@ public sealed partial class ApiServer
         var evaluation=IsRetentionEvaluationPath(rawPath);
         var deletion=IsDeletionPath(rawPath);
         var batch=IsBatchDeletionPath(rawPath);
+        var staging = IsRetentionStagingPath(rawPath);
+        var usage = IsRetentionUsagePath(rawPath);
+        var reconciliation = IsRetentionReconciliationPath(rawPath);
+        var noBody = reconciliation || usage || staging || IsRetentionStoragePath(rawPath);
+        ApiException InvalidNoBodyRequest() => reconciliation ? new RetentionReconciliationRequestException() :
+            usage ? new RetentionUsageRequestException() :
+            staging ? new RetentionStagingRequestException() : new RetentionStorageRequestException();
+        if (noBody)
+        {
+            try { _ = new UTF8Encoding(false, true).GetString(headerBytes, 0, headerEnd); }
+            catch (DecoderFallbackException) { throw InvalidNoBodyRequest(); }
+        }
         if(deletion||evaluation||batch)
         {try{_=new UTF8Encoding(false,true).GetString(headerBytes,0,headerEnd);}catch(DecoderFallbackException){throw batch?InvalidBatchDeletion():evaluation?InvalidEvaluation():InvalidDeletion();}}
 
@@ -556,6 +609,10 @@ public sealed partial class ApiServer
             contentLength is <0 or >EvaluationBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidEvaluation();
         if(batch&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
             contentLength is <0 or >BatchDeletionBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidBatchDeletion();
+        if (noBody && (headers.ContainsKey("Transfer-Encoding") || duplicateHeaders.Contains("Content-Length") ||
+            headerBytes.Length != headerEnd || clValue is not null &&
+            (clValue.Length == 0 || clValue.Any(c => !char.IsAsciiDigit(c)) || !int.TryParse(clValue, out var length) || length != 0)))
+            throw InvalidNoBodyRequest();
         using var evaluationReadDeadline=(evaluation||batch)?new CancellationTokenSource(TimeSpan.FromSeconds(3)):null;
         byte[] bodyBytes = Array.Empty<byte>();
         var bodyStart = headerEnd;
@@ -635,7 +692,11 @@ public sealed partial class ApiServer
             if (!string.IsNullOrWhiteSpace(reqBody) && reqBody.Trim() != "{}")
                 throw new ApiException(400, "INVALID_SHUTDOWN_REQUEST", "Idle shutdown accepts no options or force flag.");
             string? busy;
-            try { busy = _engine.HostAdmission.TryClose(() => _engine.TryReserveIdleHostShutdown(_hostShutdownBusy)); }
+            try
+            {
+                busy = _engine.HostAdmission.TryClose(() => _engine.TryReserveIdleHostShutdown(
+                    () => _retentionStorage?.ShutdownBusyReason ?? _retentionStaging?.ShutdownBusyReason ?? _hostShutdownBusy()));
+            }
             catch { busy = "owner_state_unknown"; }
             if (busy is not null) throw new ApiException(409, "HOST_BUSY", "Host remains available; no work was cancelled.", new { reason_code = busy });
             status = 202;
@@ -695,7 +756,7 @@ public sealed partial class ApiServer
                 return GetUnifiedHistory(req, reqId);
 
             case ("GET", "/retention/preview"):
-                return GetRetentionPreview(req, reqId);
+                return GetRetentionPreview(req, reqId, cancellation);
 
             case ("GET", "/recording-history"):
                 if (req.Query.Keys.Any(key => key is not ("limit" or "cursor")))
@@ -869,24 +930,43 @@ public sealed partial class ApiServer
         return date.ToUniversalTime();
     }
 
-    private string GetRetentionPreview(HttpRequest request, string requestId)
+    private string GetRetentionPreview(HttpRequest request, string requestId,CancellationToken cancellation=default)
     {
-        if (request.Query.Keys.Any(key => key is not ("completed_before" or "limit" or "cursor")) ||
+        if (request.Query.Keys.Any(key => key is not ("completed_before" or "limit" or "cursor" or "keep_latest_count")) ||
             !request.Query.TryGetValue("completed_before", out var rawBefore))
-            throw new ApiException(400, "INVALID_ARGUMENT", "Only completed_before, limit and cursor are supported; completed_before is required.");
+            throw new ApiException(400, "INVALID_ARGUMENT", "Only completed_before, limit, cursor and keep_latest_count are supported; completed_before is required.");
         var before = ParseExplicitUtcTime(rawBefore);
         var limit = 20;
         if (before > DateTimeOffset.UtcNow || request.Query.TryGetValue("limit", out var rawLimit) &&
-            (!int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100))
+            (rawLimit.Any(c=>c<'0'||c>'9') || !int.TryParse(rawLimit, NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > 100))
             throw new ApiException(400, "INVALID_ARGUMENT", "The cutoff cannot be in the future; limit must be between 1 and 100.");
+        int? keep=null;
+        if(request.Query.TryGetValue("keep_latest_count",out var rawKeep)) {
+            if(rawKeep.Length==0 || rawKeep.Any(c=>c<'0'||c>'9') || !int.TryParse(rawKeep,NumberStyles.None,CultureInfo.InvariantCulture,out var n) || n is <1 or >1000)
+                throw new ApiException(400,"INVALID_ARGUMENT","keep_latest_count must be an integer from 1 through 1000.");
+            keep=n;
+        }
         var gateway = _retentionPreviewGateway ?? throw new ApiException(503, "RETENTION_PREVIEW_UNAVAILABLE", "Retention preview is not configured.");
         RetentionPreviewPage page;
-        try { page = gateway.GetPage(limit, before, request.Query.GetValueOrDefault("cursor")); }
+        try {
+            if(keep is {} count) {
+                if(!gateway.SupportsKeepLatest || _acceptingStopped!=0 || _stopped!=0 ||
+                    _readiness is not null && (_readiness.ReadObservation() is not {Disposed:false,PublishedReadyFile:not null} ready || _tray.HostMode!="headless" && ready.StartupInteractiveDesktopReady!=true))
+                    throw new ApiException(503,"RETENTION_PREVIEW_UNAVAILABLE","Keep-latest preview is unavailable.");
+                using var budget=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                RetentionEvaluationResult? result;
+                try {result=gateway.ReadWithKeepLatestAsync(limit,before,request.Query.GetValueOrDefault("cursor"),count,budget.Token).WaitAsync(TimeSpan.FromMilliseconds(3000),budget.Token).GetAwaiter().GetResult();}
+                finally {budget.Cancel();}
+                page=result is {State:"complete",Page:{} value}?value:throw new ApiException(503,"RETENTION_PREVIEW_UNAVAILABLE","Keep-latest preview is unavailable.",new {reason_code=result?.State??"failed"});
+                if(page.PageSize!=limit || page.Items.Count>limit || page.EvaluatedCount!=page.Items.Count || page.CompletedBefore!=before)throw new InvalidDataException("Invalid preview page.");
+            } else page = gateway.GetPage(limit, before, request.Query.GetValueOrDefault("cursor"));
+        }
+        catch(ApiException){throw;}
         catch (UnifiedHistoryArgumentException)
         { throw new ApiException(400, "INVALID_ARGUMENT", "The preview arguments or cursor are invalid."); }
         catch (Exception)
         { throw new ApiException(503, "RETENTION_PREVIEW_UNAVAILABLE", "Retention preview is temporarily unavailable."); }
-        return ApiResponse.Ok(new
+        var response=ApiResponse.Ok(new
         {
             items = page.Items.Select(e => new
             {
@@ -904,6 +984,12 @@ public sealed partial class ApiServer
             deletion_supported = false, reference_protection_ready = false, physical_identity_protection_ready = false,
             snapshot = "membership_watermarks_states_and_file_samples_live_per_page", bundle_included = false
         }, requestId);
+        if(keep is {} countValue) {
+            var node=JsonNode.Parse(response)!;
+            node["data"]!["policy"]=JsonSerializer.SerializeToNode(new {keep_latest_count=countValue,ordering="completed_at_utc_desc_recording_id_binary_desc",snapshot_scope="page_local",cross_page_snapshot=false,persistent=false,execution_supported=false,constrains_later_deletion=false});
+            return node.ToJsonString();
+        }
+        return response;
     }
 
     private string GetUnifiedHistory(HttpRequest request, string requestId)
@@ -1881,68 +1967,9 @@ public sealed partial class ApiServer
 
     private string AddMark(string recordingId, string reqBody, string reqId)
     {
-        JsonDocument document;
-        try
-        {
-            document = JsonDocument.Parse(reqBody);
-        }
-        catch (JsonException)
-        {
-            throw new ApiException(400, "INVALID_ARGUMENT", "Invalid JSON body.");
-        }
-
-        using (document)
-        {
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-                throw new ApiException(400, "INVALID_ARGUMENT", "Mark body must be a JSON object.");
-
-            if (!root.TryGetProperty("label", out var labelElement))
-            {
-                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
-                    new { field = "label", reason = "required" });
-            }
-
-            if (labelElement.ValueKind != JsonValueKind.String)
-            {
-                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark label.",
-                    new { field = "label", reason = "must_be_string" });
-            }
-
-            var label = labelElement.GetString();
-            string source = "agent";
-            if (root.TryGetProperty("source", out var sourceElement))
-            {
-                if (sourceElement.ValueKind != JsonValueKind.String)
-                {
-                    throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
-                        new { field = "source", reason = "must_be_agent" });
-                }
-                source = sourceElement.GetString() ?? "";
-            }
-
-            // The domain operation also supports the local hotkey, but
-            // this authenticated remote endpoint must not let an agent claim
-            // that source.
-            if (!string.Equals(source, "agent", StringComparison.Ordinal))
-            {
-                throw new ApiException(400, "INVALID_ARGUMENT", "Invalid mark source.",
-                    new { field = "source", allowed = new[] { "agent" } });
-            }
-
-            var mark = _engine.AddMark(recordingId, label!, source);
-            return ApiResponse.Ok(new
-            {
-                recording_id = recordingId,
-                mark = new
-                {
-                    t_ms = mark.TMs,
-                    label = mark.Label,
-                    source = mark.Source
-                },
-                delivery = new { artifact = "bundle/marks.json", status = "pending" }
-            }, reqId);
-        }
+        _ = _engine.GetStatus(recordingId);
+        throw new ApiException(409, "UNSUPPORTED_FEATURE", "Chapter marks are unavailable for new video-only recordings.",
+            new { field = "chapter_marks", reason = "video_only_delivery" });
     }
 
     private string CreateRecording(HttpRequest req, string reqBody, string reqId)
@@ -3684,6 +3711,29 @@ public sealed partial class ApiServer
                 modes = new[] { "video", ScreenshotSeriesConfig.ModeName },
                 sources = new[] { "display", "window", "region" },
                 audio = new[] { "microphone", "system_audio" },
+                storage_reserve = new
+                {
+                    effective_bytes = _engine.StorageReserve.EffectiveBytes,
+                    source = _engine.StorageReserve.Source,
+                    environment_variable = RecordingStorageReserve.EnvironmentVariable,
+                    invalid_reason = _engine.StorageReserve.InvalidReason
+                },
+                managed_video_quota = new
+                {
+                    enabled = _engine.ManagedQuotaSetting.Enabled,
+                    configuration_valid = _engine.ManagedQuotaSetting.InvalidReason is null,
+                    effective_bytes = _engine.ManagedQuotaSetting.EffectiveBytes,
+                    source = _engine.ManagedQuotaSetting.Source,
+                    invalid_reason = _engine.ManagedQuotaSetting.InvalidReason,
+                    environment_variable = ManagedVideoQuotaSetting.EnvironmentVariable,
+                    maximum_mib = ManagedVideoQuotaSetting.MaximumMiB,
+                    scope = ManagedVideoQuotaSetting.Scope,
+                    max_protected_runs = 1,
+                    history_limit = ManagedVideoUsage.HistoryLimit,
+                    ledger_limit = ManagedVideoUsage.LedgerLimit,
+                    receipt_validation_limit = ManagedVideoUsage.ReceiptValidationLimit,
+                    deadline_ms = (int)ManagedVideoUsage.Timeout.TotalMilliseconds
+                },
                 audio_capabilities = new
                 {
                     microphone = new { supported = MicrophoneBackendSupported, status = GetFreshMicrophoneAvailability() },
@@ -3700,12 +3750,28 @@ public sealed partial class ApiServer
                         supported = true, available = windowSurfaceProbe.Available && independentPolicy.Valid,
                         configuration_valid = independentPolicy.Valid,
                         reason_code = independentPolicy.Valid ? null : "invalid_host_configuration",
+                        invalid_environment_variable = independentPolicy.InvalidEnvironmentVariable,
                         configured_limit = independentPolicy.ConfiguredLimit, default_limit = IndependentWindowPolicy.DefaultLimit,
                         hard_limit = IndependentWindowPolicy.HardLimit, policy_source = independentPolicy.Source,
                         environment_variable = IndependentWindowPolicy.EnvironmentVariable,
                         budget_scope = "engine_independent_windows_and_unretired_delivery",
                         budget = new { reserved = independentBudget.Reserved, finalizing_or_unknown = independentBudget.FinalizingOrUnknown,
                             remaining = independentBudget.Remaining, snapshot_is_reservation = false },
+                        pixel_rate_budget = new
+                        {
+                            unit = "pixels_per_second", configuration_valid = independentPolicy.ConfiguredPixelsPerSecond.HasValue,
+                            policy_source = independentPolicy.PixelRateSource,
+                            environment_variable = IndependentWindowPolicy.PixelRateEnvironmentVariable,
+                            default_pixels_per_second = IndependentWindowPolicy.DefaultPixelsPerSecond,
+                            configured_pixels_per_second = independentPolicy.ConfiguredPixelsPerSecond,
+                            reserved_pixels_per_second = independentBudget.ReservedPixelsPerSecond,
+                            finalizing_or_unknown_pixels_per_second = independentBudget.FinalizingOrUnknownPixelsPerSecond,
+                            remaining_pixels_per_second = independentBudget.RemainingPixelsPerSecond,
+                            cost_basis = "physical_window_surface_width_times_height_times_configured_fps",
+                            scope = "current_engine_independent_windows_and_unretired_delivery",
+                            snapshot_is_reservation = false, performance_guaranteed = false,
+                            hardware_capacity_measured = false, whole_machine_resource_budget = false
+                        },
                         endpoint = "/api/v1/recordings", max_concurrent = independentPolicy.ConfiguredLimit,
                         mode = "ordinary_interactive_raw_video", audio = new[] { "none" },
                         per_run_confirmation_required = true, parent_relationship_required = false,
@@ -3822,13 +3888,17 @@ public sealed partial class ApiServer
             },
             recording_artifacts = new
             {
-                modes=new[]{"mp4_and_bundle","mp4_only"},default_bundle=true,
+                modes=new[]{"mp4_only"},default_bundle=false,
                 request_field="artifacts.bundle",endpoints=new[]{"/api/v1/recordings","/api/v1/recordings/quick"},
-                scope="ordinary_non_nested_video",requires_local_confirmation=true,
+                scope="all_new_video_recordings",requires_local_confirmation=true,
+                request_scope="ordinary_non_nested_video",
+                bundle_generation_supported=false,explicit_true_error="UNSUPPORTED_FEATURE",
                 existing_bundle_protection_unchanged=true,media_only_digest="unknown_without_bundle_generation"
             },
             retention_deletion = new
             {
+                policy_supported=DeletionSupported && _retentionDeletionGateway?.PolicySupported==true,policy_keep_latest_count_max=1000,policy_scope="this_single_locally_approved_request_only",policy_rechecked_in_execution_transaction=true,permanent_policy_supported=false,
+                host_keep_latest = RetentionHostProtectionCapability(DeletionSupported),
                 supported=DeletionSupported,request_endpoint="/api/v1/retention/deletion-requests",query_endpoint="/api/v1/retention/deletion-requests/{id}",
                 scope="single_completed_ordinary_main_mp4_in_fixed_host_videos_with_original_anchor_and_not_applicable_bundle",
                 requires_local_confirmation=true,single_item=true,permanent=true,no_trash=true,unattended=false,
@@ -3837,6 +3907,10 @@ public sealed partial class ApiServer
             },
             retention_batch_deletion = new
             {
+                policy_supported=BatchDeletionSupported && _retentionBatchDeletionGateway?.PolicySupported==true,
+                policy_keep_latest_count_max=1000,policy_scope="this_ordered_batch_per_item_local_approval",
+                policy_rechecked_per_item=true,permanent_policy_supported=false,
+                host_keep_latest = RetentionHostProtectionCapability(BatchDeletionSupported),
                 supported=BatchDeletionSupported,request_endpoint="/api/v1/retention/batch-deletion-requests",query_endpoint="/api/v1/retention/batch-deletion-requests/{id}",
                 recording_ids_max=5,ordered=true,sequential=true,per_item_local_confirmation=true,stop_on_first_non_success=true,
                 atomic=false,rollback_supported=false,recycle_bin=false,headless_supported=false,batch_lifetime_seconds_max=600,
@@ -3847,12 +3921,20 @@ public sealed partial class ApiServer
             {
                 supported=_retentionEvaluationGateway is not null,endpoint="/api/v1/retention/evaluations",method="POST",
                 read_only=true,deletion_supported=false,execution_supported=false,reference_protection_ready=false,
+                keep_latest_supported=_retentionEvaluationGateway?.SupportsKeepLatest==true,keep_latest_count_max=1000,
+                keep_latest_scope="visible_ordinary_completed_videos_current_host_database_snapshot",keep_latest_persistent=false,keep_latest_execution_supported=false,
                 recording_ids_max=20,recording_id_length_max=200,body_bytes_max=EvaluationBodyLimit,deadline_ms=3000,
                 scope="host_data_directory_videos_ordinary_mp4",input_order_preserved=true,actual_worker_max=1,
                 ancestor_attribute_checks_max=640,file_observations_max=20,file_samples_snapshot=false
             },
+            retention_storage = RetentionStorageCapability(),
+            retention_staging = RetentionStagingCapability(),
+            retention_usage = RetentionUsageCapability(),
+            retention_reconciliation = RetentionReconciliationCapability(),
             retention_preview = new
             {
+                keep_latest_supported=_retentionPreviewGateway?.SupportsKeepLatest==true,keep_latest_count_max=1000,
+                keep_latest_snapshot="page_local",keep_latest_deadline_ms=3000,keep_latest_actual_worker_max=1,keep_latest_execution_supported=false,
                 supported = _retentionPreviewGateway is not null, endpoint = "/api/v1/retention/preview",
                 read_only = true, deletion_supported = false, reference_protection_ready = false,
                 physical_identity_protection_ready = false, scope = "host_data_directory_videos_ordinary_mp4",
@@ -3921,17 +4003,17 @@ public sealed partial class ApiServer
             },
             chapter_marks = new
             {
-                supported = true,
+                supported = false,
                 endpoint = "/api/v1/recordings/{recording_id}/marks",
-                requires_bundle = true,
+                requires_bundle = false,
                 mp4_embedded = false,
-                timestamp_basis = "server_call_on_first_frame_timeline",
-                delivery_artifact = "bundle/marks.json",
+                timestamp_basis = "not_applicable",
+                delivery_artifact = (string?)null,
                 local_hotkey = new
                 {
-                    supported = _tray.SupportsChapterMarksLocalHotkey,
-                    registered = _tray.SupportsChapterMarksLocalHotkey && _tray.IsChapterMarksHotkeyRegistered,
-                    gesture = _tray.SupportsChapterMarksLocalHotkey ? _tray.ChapterMarksHotkeyGesture : null,
+                    supported = false,
+                    registered = false,
+                    gesture = (string?)null,
                     registration_policy = _tray.ChapterMarksHotkeyRegistrationPolicy
                 }
             },

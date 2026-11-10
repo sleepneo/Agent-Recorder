@@ -48,7 +48,7 @@ public sealed class NeverStartedWorkerRetirementTests
         var oldResolver = RecordingPreflightChecker.AudioHelperPathResolver;
         var oldProbe = RecordingPreflightChecker.AudioHelperProbeRunner;
         RecordingPreflightChecker.AudioHelperPathResolver = () => "private-preflight-helper";
-        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", TimestampFrequency = System.Diagnostics.Stopwatch.Frequency };
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) => new() { Success = true, ProtocolVersion = "audio-helper-v1", OwnedWavCapability = "file-id-v1", TimestampFrequency = System.Diagnostics.Stopwatch.Frequency };
         RecordingPreflightChecker.FreeSpaceProvider = (string _, out long free) => { free = 100L << 30; return true; };
         RecordingPreflightChecker.EncoderProvider = (out string? ffmpeg, out string? ffprobe) =>
         { ffmpeg = ffprobe = typeof(NeverStartedWorkerRetirementTests).Assembly.Location; return true; };

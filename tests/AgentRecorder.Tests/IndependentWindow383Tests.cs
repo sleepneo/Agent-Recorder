@@ -92,34 +92,18 @@ public sealed partial class OrdinaryWgcBundleTests
             f.Generator.Release.TrySetResult();
             foreach(var run in runs) {
                 f.Tray.Confirmations[run.Rec.Id](ConfirmationDecision.Approve());
-                run.Process.Finish.TrySetResult();await Until(()=>run.Rec.IsFinalized && run.Rec.BundleSnapshot.Status=="ready" && f.Writer.Read(run.Rec.Id)?.Bundle?.Status=="ready");
+                run.Process.Finish.TrySetResult();await Until(()=>run.Rec.IsFinalized && run.Rec.BundleSnapshot.Status == "not_applicable" && f.Writer.Read(run.Rec.Id)?.Bundle?.Status=="not_applicable");
                 await PathCanonical381RHistory(f,run.Rec);Assert.Equal(Hash(f.Clip),Hash(run.Rec.OutputPath));
             }
             await Task.WhenAll(runs.Select(x=>x.Backend.OutputRetirement)).WaitAsync(TimeSpan.FromSeconds(5));
             await Until(()=>f.Engine.GetIndependentWindowBudget().Reserved==0);
             Assert.Equal(10,records.Select(x=>x.OrdinaryTargetKey).Distinct().Count());
-            Assert.Equal(10,records.Select(x=>x.OrdinaryBundleOperation).Distinct().Count());
+            Assert.All(records,x=>Assert.Null(x.OrdinaryBundleOperation)); Assert.Equal(0,f.Generator.Calls);
             SaveSeriesBundleEvidence("independent383-ten-"+reverse,new {count=10,reserved=f.Engine.GetIndependentWindowBudget().Reserved,ids=records.Select(x=>x.Id).ToArray(),native_gpu_test=false});
         } finally {await NestedWindow381Drain(f);}
     }
 
-    [Theory][InlineData(false)][InlineData(true)]
-    public async Task IndependentWindow383TerminalBundleQueueOrUnknownDispatchKeepsBudget(bool unknown)
-    {
-        using var env=new WindowBudgetEnvironment("1");using var f=IndependentWindow383Fixture();await f.Prepare();IndependentWindow383Providers(f);f.StartApi();
-        Func<Task>? queued=null;
-        f.Engine.BundleGenerationDispatcherForTests=run=>{queued=run;if(unknown)throw new IOException("owned dispatch unknown");return Task.CompletedTask;};
-        var a=await NestedWindow381Accept(f,IndependentWindow382Request(f));var live=await IndependentWindow382Approve(f,a);
-        try {
-            live.Process.Finish.TrySetResult();await Until(()=>a.IsFinalized && queued is not null);
-            await live.Backend.OutputRetirement.WaitAsync(TimeSpan.FromSeconds(5));
-            var budget=f.Engine.GetIndependentWindowBudget();Assert.Equal(1,budget.Reserved);Assert.Equal(1,budget.FinalizingOrUnknown);
-            var response=await NestedWindow381Post(f,IndependentWindow382Request(f,"window_43"));Assert.Equal(HttpStatusCode.Conflict,response.Status);
-            Assert.Contains("\"finalizing_or_unknown\":1",response.Body);Assert.NotNull(f.Engine.TryReserveIdleHostShutdown(()=>null));
-            f.Generator.Release.TrySetResult();await queued!();queued=null;await Until(()=>f.Engine.GetIndependentWindowBudget().Reserved==0);
-            var next=await NestedWindow381Accept(f,IndependentWindow382Request(f,"window_43"));Assert.True(next.WindowIdentity!.Number>a.WindowIdentity!.Number);
-        } finally {f.Generator.Release.TrySetResult();if(queued is not null)await queued();await NestedWindow381Drain(f);}
-    }
+
 
     [Theory][InlineData("reject")][InlineData("stop")][InlineData("expire")][InlineData("backend")]
     public async Task IndependentWindow383NoResourcesRetirementReturnsOnlyItsOwnBudget(string ending)

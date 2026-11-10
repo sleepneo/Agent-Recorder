@@ -26,12 +26,12 @@ public sealed partial class ChapterMarksTests
         var result = await PostMarkAsync(rec.Id, "{\"label\":\"位置\"}");
         Assert.Equal(HttpStatusCode.Conflict, result.Status);
         using var json = JsonDocument.Parse(result.Body);
-        Assert.Equal("MARK_DELIVERY_UNAVAILABLE", json.RootElement.GetProperty("error").GetProperty("code").GetString());
-        Assert.Equal("bundle_disabled", json.RootElement.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
+        Assert.Equal("UNSUPPORTED_FEATURE", json.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal("video_only_delivery", json.RootElement.GetProperty("error").GetProperty("details").GetProperty("reason").GetString());
         foreach (var source in new[] { "agent", "hotkey" })
         {
             var ex = Assert.Throws<ApiException>(() => _engine.AddMark(rec.Id, "x", source));
-            Assert.Equal("MARK_DELIVERY_UNAVAILABLE", ex.Code);
+            Assert.Equal("UNSUPPORTED_FEATURE", ex.Code);
         }
         Assert.Empty(rec.SnapshotMarks());
         Assert.Equal(audit, _audit.Events.ToArray());
@@ -56,21 +56,20 @@ public sealed partial class ChapterMarksTests
         var rec = Register(backend: backend, ordinary: ordinary);
         var before = rec.BundleSnapshot;
         for (int i = 0; i < 3; i++)
-            Assert.Equal(eligible, _engine.CreateRecordingUiPresentationForTests(rec, RecordingUiState.Recording).ChapterMarksEligible);
+            Assert.False(_engine.CreateRecordingUiPresentationForTests(rec, RecordingUiState.Recording).ChapterMarksEligible);
         Assert.Equal(0, rec.BundleGenerationStarted);
         Assert.Same(before, rec.BundleSnapshot);
         var result = await PostMarkAsync(rec.Id, "{\"label\":\"backend scope\"}");
-        Assert.Equal(eligible ? HttpStatusCode.OK : HttpStatusCode.Conflict, result.Status);
-        if (!eligible)
+        Assert.Equal(HttpStatusCode.Conflict, result.Status);
         {
-            Assert.Contains("backend_not_supported", result.Body);
+            Assert.Contains("video_only_delivery", result.Body);
             Assert.Empty(rec.SnapshotMarks());
             Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
         }
         var prepare = typeof(RecordingEngine).GetMethod("TryPrepareBundleGeneration", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         var args = new object?[] { rec, new OutputMeta { Container = "mp4" }, null };
-        Assert.Equal(eligible, (bool)prepare.Invoke(_engine, args)!);
-        Assert.Equal(eligible ? 1 : 0, rec.BundleGenerationStarted);
+        Assert.False((bool)prepare.Invoke(_engine, args)!);
+        Assert.Equal(0, rec.BundleGenerationStarted);
     }
 
     [Fact]
@@ -82,9 +81,9 @@ public sealed partial class ChapterMarksTests
         foreach (var source in new[] { "agent", "hotkey" })
         {
             var ex = Assert.Throws<ApiException>(() => engine.AddMark(rec.Id, "x", source));
-            Assert.Equal("MARK_DELIVERY_UNAVAILABLE", ex.Code);
+            Assert.Equal("UNSUPPORTED_FEATURE", ex.Code);
             using var details = JsonDocument.Parse(JsonSerializer.Serialize(ex.Details));
-            Assert.Equal("bundle_generator_unavailable", details.RootElement.GetProperty("reason").GetString());
+            Assert.Equal("video_only_delivery", details.RootElement.GetProperty("reason").GetString());
         }
         Assert.False(engine.CreateRecordingUiPresentationForTests(rec, RecordingUiState.Recording).ChapterMarksEligible);
         Assert.Empty(rec.SnapshotMarks());
@@ -98,7 +97,7 @@ public sealed partial class ChapterMarksTests
             client.DefaultRequestHeaders.Add("X-Agent-Recorder-Key", ApiKeyAuth.CurrentApiKey);
             using var response = await client.PostAsync($"http://127.0.0.1:{server.BoundPort}/api/v1/recordings/{rec.Id}/marks", JsonContent("{\"label\":\"x\"}"));
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-            Assert.Contains("bundle_generator_unavailable", await response.Content.ReadAsStringAsync());
+            Assert.Contains("video_only_delivery", await response.Content.ReadAsStringAsync());
             Assert.Empty(rec.SnapshotMarks());
             Assert.DoesNotContain(_audit.Events, e => e.evt == "recording.mark_added");
         }
@@ -115,7 +114,7 @@ public sealed partial class ChapterMarksTests
         var rec = Register(state, bundle: false);
         var response = await PostMarkAsync(rec.Id, "{\"label\":\"x\"}");
         Assert.Equal(HttpStatusCode.Conflict, response.Status);
-        Assert.Contains("RECORDING_NOT_ACTIVE", response.Body);
+        Assert.Contains("UNSUPPORTED_FEATURE", response.Body);
         Assert.Empty(rec.SnapshotMarks());
     }
     [Fact]
@@ -125,7 +124,7 @@ public sealed partial class ChapterMarksTests
         rec.MarkTimelineAnchorTicks = null;
         var response = await PostMarkAsync(rec.Id, "{\"label\":\"x\"}");
         Assert.Equal(HttpStatusCode.Conflict, response.Status);
-        Assert.Contains("RECORDING_NOT_ACTIVE", response.Body);
+        Assert.Contains("UNSUPPORTED_FEATURE", response.Body);
         Assert.Empty(rec.SnapshotMarks());
     }
 

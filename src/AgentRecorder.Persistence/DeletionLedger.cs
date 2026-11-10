@@ -8,10 +8,14 @@ namespace AgentRecorder.Persistence;
 internal enum DeletionLedgerCommit { NotCommitted, Committed, Unknown }
 internal sealed record DeletionLedgerWrite(DeletionLedgerCommit Commit, bool ResourcesRetired, bool Usable);
 internal sealed record DeletionLedgerBinding(string OperationId,string ApprovalId,string Sid,string Session,string HostId,
-    string RecordingId,string Root,PublicationIdentityAnchor Anchor,DateTimeOffset Completed,DateTimeOffset Cutoff,string Semantics,DateTimeOffset PreparedAt);
+    string RecordingId,string Root,PublicationIdentityAnchor Anchor,DateTimeOffset Completed,DateTimeOffset Cutoff,string Semantics,DateTimeOffset PreparedAt)
+{
+    internal RetentionDeletionPolicy? Policy {get;init;}
+    internal string? PolicyBatchId { get; init; }
+}
 internal enum DeletionRecoveryState { PendingLive, UnsettledUnknown, OtherHostUnknown, Settled }
 internal sealed record DeletionLedgerEntry(DeletionLedgerBinding Binding, DeletionRecoveryState State, LocalDeletionProgress? Progress,
-    LocalDeletionReason? Reason,int? Win32Error,bool? OurResourcesRetired,int? Primary,int? DatabaseCleanup,int? NativeCleanup);
+    LocalDeletionReason? Reason,int? Win32Error,bool? OurResourcesRetired,int? Primary,int? DatabaseCleanup,int? NativeCleanup) {internal string? PolicyReason {get;init;} }
 
 // Only connection-local FULL is changed. No pooling, creation, migration or
 // provider objects on cancellation/timer threads. Fault hooks are private-host seams.
@@ -75,7 +79,11 @@ internal sealed class DeletionLedger(SqliteOperationalStore store,string sid,str
             if(result is null)
             {
                 Step("before_insert");command.CommandText="INSERT INTO ordinary_deletion_operations("+string.Join(',',SqliteSchemaV43.BindingColumns)+",phase) VALUES("+string.Join(',',SqliteSchemaV43.BindingColumns.Select(x=>"$"+x))+",'prepared_unknown');";
-                if(command.ExecuteNonQuery()!=1)throw new InvalidDataException();Step("after_insert");
+                if(command.ExecuteNonQuery()!=1)throw new InvalidDataException();
+                RetentionDeletionPolicy.Store(c,t,"operation",b.OperationId,b.Policy);
+                if (ReadRequestBatchId(c,t,b,requireDispatch: true) != b.PolicyBatchId)
+                    throw new InvalidDataException("Batch binding differs from the prepared operation.");
+                Step("after_insert");
             }
             else
             {
@@ -86,7 +94,7 @@ internal sealed class DeletionLedger(SqliteOperationalStore store,string sid,str
                 command.Parameters.AddWithValue("$primary",result.Retirement is null?DBNull.Value:(int)result.Retirement.Primary);
                 command.Parameters.AddWithValue("$database",result.Retirement?.Database is null?DBNull.Value:(int)result.Retirement.Database.Cleanup);
                 command.Parameters.AddWithValue("$native",result.Retirement?.Preparation?.Scope is null?DBNull.Value:result.Retirement.Preparation.Scope.Retired?0:1);
-                command.Parameters.AddWithValue("$settled",clock.GetUtcNow().UtcTicks);Step("before_update");if(command.ExecuteNonQuery()!=1)throw new InvalidDataException();Step("after_update");
+                command.Parameters.AddWithValue("$settled",clock.GetUtcNow().UtcTicks);Step("before_update");if(command.ExecuteNonQuery()!=1)throw new InvalidDataException();RetentionDeletionPolicy.StoreReason(c,t,"operation",b.OperationId,result.PolicyReason);Step("after_update");
             }
             Step("before_commit");commit=DeletionLedgerCommit.Unknown;_io.Commit(t);commit=DeletionLedgerCommit.Committed;Step("after_commit");usable=true;
         }
@@ -110,7 +118,8 @@ internal sealed class DeletionLedger(SqliteOperationalStore store,string sid,str
         if(!Id(b.OperationId)||!Id(b.ApprovalId)||!Id(b.HostId)||!UnifiedHistoryQueryService.ValidIdentity(b.Sid)||b.Sid.Length>256||
             !UnifiedHistoryQueryService.ValidIdentity(b.Session)||b.Session.Length>256||!UnifiedHistoryQueryService.ValidId(b.RecordingId)||b.RecordingId.Length>200||
             b.RecordingId.IndexOfAny(new[]{'/','\\'})>=0||!OriginalFileHoldService.ValidScopeInput(b.Root,b.Anchor)||b.Semantics!=LocalRetentionApproval.Semantics||
-            b.Completed.Offset!=TimeSpan.Zero||b.Cutoff.Offset!=TimeSpan.Zero||b.PreparedAt.Offset!=TimeSpan.Zero||b.Completed>=b.Cutoff||b.Cutoff>b.PreparedAt)throw new InvalidDataException("Invalid deletion binding.");
+            b.PolicyBatchId is not null && (b.Policy is null || !Id(b.PolicyBatchId)) ||
+            b.Policy is {} policy && (policy.CompletedBefore>b.PreparedAt || b.Completed>=policy.CompletedBefore)||b.Completed.Offset!=TimeSpan.Zero||b.Cutoff.Offset!=TimeSpan.Zero||b.PreparedAt.Offset!=TimeSpan.Zero||b.Completed>=b.Cutoff||b.Cutoff>b.PreparedAt)throw new InvalidDataException("Invalid deletion binding.");
     }
     private static void Bind(SqliteCommand c,DeletionLedgerBinding b)
     {
@@ -119,12 +128,36 @@ internal sealed class DeletionLedger(SqliteOperationalStore store,string sid,str
         object[] values={b.OperationId,b.ApprovalId,b.Sid,b.Session,b.HostId,b.RecordingId,b.Root,b.Anchor.Path,volume,file,b.Anchor.Length,b.Completed.UtcTicks,b.Cutoff.UtcTicks,b.Semantics,b.PreparedAt.UtcTicks};
         for(var i=0;i<values.Length;i++){var p=c.Parameters.AddWithValue("$"+SqliteSchemaV43.BindingColumns[i],values[i]);if(values[i] is byte[])p.SqliteType=SqliteType.Blob;}
     }
+    private static string? ReadRequestBatchId(SqliteConnection c, SqliteTransaction t, DeletionLedgerBinding binding,
+        bool requireDispatch)
+    {
+        using var command = c.CreateCommand();
+        command.Transaction = t;
+        command.CommandText = "SELECT request_id FROM ordinary_deletion_requests WHERE approval_id COLLATE BINARY=$approval;";
+        command.Parameters.AddWithValue("$approval", binding.ApprovalId);
+        string id;
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read())
+            {
+                if (binding.Policy is not null) throw new InvalidDataException("Policy has no bound request.");
+                return null;
+            }
+            id = reader.GetValue(0) as string ?? throw new InvalidDataException();
+            if (!Id(id) || reader.Read()) throw new InvalidDataException();
+        }
+        var request = DeletionRequestStore.ReadBoundRequest(c, t, id, false, binding.Sid, binding.Session, binding.Root, requireDispatch);
+        if (request is null || request.Policy != binding.Policy || request.RecordingId != binding.RecordingId ||
+            request.Host != binding.HostId || request.ApprovalId != binding.ApprovalId || request.Created > binding.PreparedAt.UtcTicks)
+            throw new InvalidDataException("Request policy differs from ledger.");
+        return request.PolicyBatchId;
+    }
     internal static void ValidatePrepared(SqliteConnection c,SqliteTransaction t,Prepared proof)
     {
-        var row=ReadRow(c,t,proof.Binding.OperationId);
+        var row=ReadRow(c,t,proof.Binding.OperationId,requireDispatch: true);
         if(row is null||row.Binding!=proof.Binding||row.State==DeletionRecoveryState.Settled)throw new InvalidDataException("Prepared deletion differs.");
     }
-    internal static DeletionLedgerEntry? ReadRow(SqliteConnection c,SqliteTransaction t,string op)
+    internal static DeletionLedgerEntry? ReadRow(SqliteConnection c,SqliteTransaction t,string op,bool requireDispatch=false)
     {
         using var cmd=c.CreateCommand();cmd.Transaction=t;
         // Bound text projection validates full bytes/NUL before GetString; no truncation/coercion.
@@ -143,9 +176,12 @@ internal sealed class DeletionLedger(SqliteOperationalStore store,string sid,str
         if(primary is not null&&!Enum.IsDefined(typeof(RetentionComposedReason),primary.Value))throw new InvalidDataException();
         if(phase=="settled"&&(progress==2&&(reason!=0||error is not null)||progress==3&&(reason!=3||error is null)||progress==4&&reason!=4||progress==0&&reason is not(1 or 2)))throw new InvalidDataException();
         if(rd.Read())throw new InvalidDataException();
+        rd.Close();var policy=RetentionDeletionPolicy.Read(c,t,"operation",op,out var policyReason);b=b with {Policy=policy};ValidateBinding(b);
+        if(policyReason is not null && (phase!="settled" || progress!=0 || reason!=2))throw new InvalidDataException("Invalid policy settlement.");
+        b = b with { PolicyBatchId = ReadRequestBatchId(c,t,b,requireDispatch) };
         var state=phase=="settled"?DeletionRecoveryState.Settled:b.HostId!=HostId?DeletionRecoveryState.OtherHostUnknown:
             Active.ContainsKey((DatabaseKey(c.DataSource),op))?DeletionRecoveryState.PendingLive:DeletionRecoveryState.UnsettledUnknown;
-        return new(b,state,progress is null?null:(LocalDeletionProgress)progress,reason is null?null:(LocalDeletionReason)reason,error,retired is null?null:retired==1,primary,db,native);
+        return new(b,state,progress is null?null:(LocalDeletionProgress)progress,reason is null?null:(LocalDeletionReason)reason,error,retired is null?null:retired==1,primary,db,native) {PolicyReason=policyReason};
     }
     internal DeletionLedgerEntry? Read(string operationId)=>ReadPage(operationId,null,1).SingleOrDefault();
     internal IReadOnlyList<DeletionLedgerEntry> Page(string? after=null,int limit=100)=>ReadPage(null,after,limit);

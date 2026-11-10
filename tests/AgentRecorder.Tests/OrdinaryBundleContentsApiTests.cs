@@ -102,40 +102,9 @@ public sealed class OrdinaryBundleContentsApiTests(ITestOutputHelper output) : I
     private sealed class Generator(Func<RecordingBundleRequest,Task<RecordingBundleGenerationResult>> generate) : IRecordingBundleGenerator
     { public Task<RecordingBundleGenerationResult> GenerateAsync(RecordingBundleRequest r,CancellationToken token=default)=>generate(r); }
 
-    [Theory]
-    [InlineData(false)] [InlineData(true)]
-    public async Task ActualLavfiCoreGeneratorWriterAllApisAndReopenKeepRecordedLengths(bool headless)
-    {
-        RecordingBundleGenerationResult? result=null;var real=new FfmpegRecordingBundleGenerator();
-        var rec=await Capture(new Generator(async r=>result=await real.GenerateAsync(r)));Assert.NotNull(result!.ContentsEvidence);
-        var row=_f.Writer.Read(rec.Id)!;Assert.Equal("ready",rec.BundleSnapshot.Status);Assert.Equal(result.ContentsEvidence,row.Bundle!.ContentsEvidence);
-        foreach(var item in result.ContentsEvidence.Contents)Assert.Equal(new FileInfo(Path.Combine(row.Bundle.Path!,item.Name)).Length,item.SizeBytes);
-        // Later attachment changes do not rewrite recorded generation bytes. Keep the owned files.
-        await File.AppendAllTextAsync(Path.Combine(row.Bundle.Path!,"metadata.json"),"\nchanged-after-generation");
-        using(var client=Start(headless))
-        {
-            Auth(client);
-            foreach(var path in new[]{"/api/v1/recording-history","/api/v1/recording-history/"+rec.Id,"/api/v1/history?source=ordinary&target_key="+row.TargetKey})
-            { var d=await Get(client,path);var item=path.Contains("/recording-history/")?d.GetProperty("recording"):Assert.Single(d.GetProperty("items").EnumerateArray());Contents(item.GetProperty("bundle"),result.ContentsEvidence,result.PublicationReceipt!.ContentHashes); }
-        }
-        _api!.Stop();_api=null;_engine!.Dispose();_engine=null;_f.Reopen();_f.Writer.RecoverIncomplete(At.AddHours(1));Assert.Equal(row,_f.Writer.Read(rec.Id));
-        using(var client=Start(headless)){Auth(client);Contents((await Get(client,"/api/v1/recording-history/"+rec.Id)).GetProperty("recording").GetProperty("bundle"),result.ContentsEvidence,result.PublicationReceipt!.ContentHashes);}
-        output.WriteLine("Formal authorized Core + synthetic lavfi MP4 + real Ffmpeg generator five positive file lengths -> atomic writer -> three APIs -> reopen; altered metadata is not reread.");
-    }
 
-    [Theory]
-    [InlineData("compat")] [InlineData("path")] [InlineData("missing")] [InlineData("duplicate")]
-    [InlineData("type")] [InlineData("zero")] [InlineData("negative")] [InlineData("extra")] [InlineData("traversal")]
-    public async Task CompatibilityUnknownAndMalformedProducerNeverPublishFalseReadyEvidence(string fault)
-    {
-        var rec=await Capture(new Generator(r=>Task.FromResult(fault switch {
-            "compat"=>RecordingBundleGenerationResult.Ready(OrdinaryRecordingBundleOperation.DerivePath(r.MediaPath)),
-            "path"=>RecordingBundleGenerationResult.Ready(Path.Combine(_f.Root,"unapproved.bundle"),BundleContentsGenerationTests.Items()),
-            _=>RecordingBundleGenerationResult.Ready(OrdinaryRecordingBundleOperation.DerivePath(r.MediaPath),BundleContentsGenerationTests.BadItems(fault)) })));
-        var row=_f.Writer.Read(rec.Id)!;Assert.Equal("completed",row.Status);Assert.Equal(fault=="compat"?"ready":"failed",row.Bundle!.Status);Assert.Equal(row.Bundle.Status,rec.BundleSnapshot.Status);Assert.Null(row.Bundle.ContentsEvidence);
-        if(fault!="compat")Assert.Equal(RecordingBundleErrorCodes.GenerationFailed,row.Bundle.ErrorCode);
-        _f.Reopen();Assert.Equal(row,_f.Writer.Read(rec.Id));
-    }
+
+
 
     private sealed class Tray : ITrayContext
     {

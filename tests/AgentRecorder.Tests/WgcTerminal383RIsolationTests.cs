@@ -25,7 +25,7 @@ public sealed partial class OrdinaryWgcBundleTests
             }
             f.Generator.Release.TrySetResult();
             for(int i=2;i>=1;i--) {
-                runs[i].Process.Finish.TrySetResult();await Until(()=>runs[i].Rec.IsFinalized && runs[i].Rec.BundleSnapshot.Status=="ready" && f.Writer.Read(runs[i].Rec.Id)?.Bundle?.Status=="ready");
+                runs[i].Process.Finish.TrySetResult();await Until(()=>runs[i].Rec.IsFinalized && runs[i].Rec.BundleSnapshot.Status == "not_applicable" && f.Writer.Read(runs[i].Rec.Id)?.Bundle?.Status=="not_applicable");
                 await PathCanonical381RHistory(f,runs[i].Rec);Assert.Equal(RecState.recording,runs[0].Rec.State);
             }
             runs[0].Process.FailMedia=longFails;runs[0].Process.Finish.TrySetResult();await Until(()=>runs[0].Rec.IsFinalized);

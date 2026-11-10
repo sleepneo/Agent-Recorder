@@ -28,6 +28,7 @@ internal sealed class WindowsOriginalFileHoldNative : IOriginalFileHoldNative
     public bool Standard(SafeFileHandle handle, out FileStandardInformation value, out int error) => _metadata.Standard(handle, out value, out error);
     public bool Identity(SafeFileHandle handle, out FileIdentityInformation value, out int error) => _metadata.Identity(handle, out value, out error);
     public uint FinalPath(SafeFileHandle handle, StringBuilder buffer, int capacity, out int error) => _metadata.FinalPath(handle, buffer, capacity, out error);
+    public string? ReadShortLeaf(SafeFileHandle handle) => WindowsShortFileName.Read(handle);
     public OriginalFileDispositionResult RequestDisposition(SafeFileHandle handle)
     {
         if (!Supported) return new(OriginalFileDispositionOutcome.Rejected, 50);

@@ -117,7 +117,8 @@ sealed class Native(string media):IOriginalFileHoldNative
 {
  private readonly IOriginalFileHoldNative n=WindowsOriginalFileHoldNative.Instance;internal int Calls;internal bool Accepted;
  public bool Supported=>n.Supported;public uint DriveType(string r)=>n.DriveType(r);public SafeFileHandle Open(string p,uint a,uint s,uint d,uint f,out int e)=>n.Open(p,a,s,d,f,out e);
- public bool Basic(SafeFileHandle h,out FileBasicInformation v,out int e)=>n.Basic(h,out v,out e);public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>n.Standard(h,out v,out e);public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>n.Identity(h,out v,out e);public uint FinalPath(SafeFileHandle h,StringBuilder b,int c,out int e)=>n.FinalPath(h,b,c,out e);public OriginalFileCloseOutcome Close(SafeFileHandle h)=>n.Close(h);
+ public bool Basic(SafeFileHandle h,out FileBasicInformation v,out int e)=>n.Basic(h,out v,out e);public bool Standard(SafeFileHandle h,out FileStandardInformation v,out int e)=>n.Standard(h,out v,out e);public bool Identity(SafeFileHandle h,out FileIdentityInformation v,out int e)=>n.Identity(h,out v,out e);public string? ReadShortLeaf(SafeFileHandle h) => n.ReadShortLeaf(h);
+ public uint FinalPath(SafeFileHandle h,StringBuilder b,int c,out int e)=>n.FinalPath(h,b,c,out e);public OriginalFileCloseOutcome Close(SafeFileHandle h)=>n.Close(h);
  public OriginalFileDispositionResult RequestDisposition(SafeFileHandle h){var b=new StringBuilder(2048);if(n.FinalPath(h,b,2048,out _)==0||b.ToString()!=@"\\?\"+media)throw new Exception("Wrong original target");Calls++;var r=n.RequestDisposition(h);Accepted=r.Outcome==OriginalFileDispositionOutcome.Accepted;return r;}
 }
 """;

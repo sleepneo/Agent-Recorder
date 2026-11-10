@@ -63,10 +63,10 @@ internal sealed class OriginalFileBorrowContext
         private protected DispositionAuthorization() { }
         internal abstract bool TryBegin(OriginalFileBorrowContext current);
         internal abstract void Complete(OriginalFileDispositionResult result);
-        internal void Submit(OriginalFileBorrowContext current)
+        internal void Submit(OriginalFileBorrowContext current, Func<IReadOnlyList<string>, bool> hasShortNameReference)
         {
             current.RequireActive();
-            current._session.SubmitDisposition(current, this);
+            current._session.SubmitDisposition(current, this, hasShortNameReference);
         }
     }
 }
@@ -120,7 +120,9 @@ internal sealed class OriginalFileHoldService
         => AcquireCore(anchor, scope, cancellation, started);
 
     internal static bool ValidScopeInput(string root, PublicationIdentityAnchor anchor)
-        => anchor is not null && anchor.Valid && Scoped(root, anchor.Path, out _);
+        => anchor is not null && anchor.Valid && ValidScopePath(root, anchor.Path);
+
+    internal static bool ValidScopePath(string root, string path) => Scoped(root, path, out _);
 
     private Task<OriginalFileHoldResult> AcquireCore(PublicationIdentityAnchor anchor,
         OriginalFileScopeResources? scope, CancellationToken cancellation, long? absoluteStarted = null)
@@ -369,12 +371,24 @@ internal sealed class OriginalFileHoldService
                 if (close) RequestDispose(); // Actual synchronous use has now ended.
             }
         }
-        internal void SubmitDisposition(OriginalFileBorrowContext current, OriginalFileBorrowContext.DispositionAuthorization authorization)
+        internal void SubmitDisposition(OriginalFileBorrowContext current, OriginalFileBorrowContext.DispositionAuthorization authorization,
+            Func<IReadOnlyList<string>, bool> hasShortNameReference)
         {
             CheckBorrowUse();
             var observed = ReadSample(); // Fresh original leaf AND directory chain, on this borrow thread.
             if (observed.Reason != OriginalFileHoldReason.Observed)
             { SetPrimary(observed.Reason); throw new InvalidOperationException("Original-object recheck failed."); }
+            current.RequireActive();
+            // The original handle denies competing DELETE access, and the
+            // directory chain and database writer exclusion are still held.
+            var shortLeaf = _service._native.ReadShortLeaf(_handle!);
+            var rootLeaf = _scope?.ReadDataRootShortLeaf(CheckStop);
+            if (!WindowsShortFileName.TryGetAliasPaths(_anchor.Path, shortLeaf, rootLeaf, out var aliases) ||
+                hasShortNameReference(aliases))
+                throw new InvalidOperationException("Original-object short-name reference check failed.");
+            current.RequireActive();
+            if (shortLeaf != _service._native.ReadShortLeaf(_handle!) || rootLeaf != _scope?.ReadDataRootShortLeaf(CheckStop))
+                throw new InvalidOperationException("Original-object short-name reference check failed.");
             current.RequireActive();
             if (Interlocked.CompareExchange(ref _dispositionStarted, 1, 0) != 0 || !authorization.TryBegin(current)) return;
             // No cancellation/metadata test between a successful native return
