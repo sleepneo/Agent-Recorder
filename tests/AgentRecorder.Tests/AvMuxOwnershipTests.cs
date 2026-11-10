@@ -38,10 +38,10 @@ public sealed class AvMuxOwnershipTests
         // This asserts absence; it never selects a partial for a test to use.
         Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(output)!,Path.GetFileName(output)+"."+new string('?',32)+".muxing.partial.mp4"));
     }
-    internal static async Task Generate(string path,string source,bool audio)
+    internal static async Task Generate(string path,string source,bool audio,string? duration = null)
     {
         Assert.True(File.Exists(Ffmpeg));
-        var args=new List<string>{"-y","-f","lavfi","-i",source,"-t",audio ? "4" : "1"};
+        var args=new List<string>{"-y","-f","lavfi","-i",source,"-t",duration ?? (audio ? "4" : "1")};
         args.AddRange(audio ? new[]{"-c:a","pcm_s16le"} : new[]{"-c:v","libx264","-pix_fmt","yuv420p"});args.Add(path);
         var result=await new ExternalProcessRunner().RunAsync(Ffmpeg,args,TimeSpan.FromSeconds(30));Assert.True(result.ExitCode==0,result.Stderr);
     }

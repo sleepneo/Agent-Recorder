@@ -1,6 +1,6 @@
 # Quick Start - Agent Recorder
 
-> This guide describes v0.1.21. New video requests deliver video only; no extra instruction is needed. Explicit artifacts.bundle=true is rejected. Legacy Bundle history remains protected. Screenshot-series images and their manifest are unchanged.
+> This guide describes v0.1.22. New video requests deliver video only; no extra instruction is needed. Legacy Bundle history remains protected.
 
 Agent Recorder is an **AI agent-native local screen recording capability layer**.
 The normal path is: human speaks, local AI agent calls the quick API, Agent
@@ -8,11 +8,12 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
-1. Extract the v0.1.21 Windows x64 portable ZIP. When reusing data from an earlier version, back it up before first launch; the database upgrades to SQLite V51.
-2. Ask your local AI agent to read:
-   - `AGENT-INSTRUCTIONS.zh-CN.md`
-   - `AGENT-API-REFERENCE.zh-CN.md`
-3. Tell the agent what to record:
+1. Extract the v0.1.22 Windows x64 portable ZIP. Before reusing data from an earlier version, back up the data directory. This package uses SQLite schema V51.
+2. Open the extracted folder as your local AI agent's working directory, or give the agent its full path. For a first recording, say:
+
+   > Use Agent Recorder from this extracted folder. Read AGENT-INSTRUCTIONS.zh-CN.md, look up request fields in docs/api.md as needed, and record a selected region for 10 seconds.
+
+3. After that, just tell the agent what to record:
 
 ```text
 Record a selected region for 30 seconds.
@@ -24,8 +25,8 @@ or:
 Record the current conversation window for 5 minutes.
 ```
 
-4. The AI agent should:
-   - run `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
+4. If the package CLI lists `record-quick`, prefer [one invocation](#short-recordings-in-one-invocation) for an ordinary 1–30 second video. Do not start the host separately first. For other recordings or older packages without the command, use the HTTP workflow below.
+   - run `.\AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json` from the specified package root, or use that CLI's full path from another directory
    - read the API key from the returned `api_key_file`
    - call `POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000`
    - treat `wait.goal_reached=true` as the trusted start signal
@@ -37,6 +38,29 @@ Record the current conversation window for 5 minutes.
    the returned MP4. In the selection UI, drag a custom rectangle or click a
    highlighted window; edges snap automatically, and holding `Alt` temporarily
    disables snapping for precise adjustment.
+
+## Short Recordings in One Invocation
+
+On the same unlocked Windows desktop, the agent runs the package's
+`AgentRecorder.Cli.exe record-quick --json` once and sends the ordinary quick
+request as UTF-8 JSON on stdin. The agent can also supply `--request-file` with
+a local JSON file. Set an explicit duration of 1–30 seconds. For a silent
+10-second region recording, use `target.type=selected_region` and
+`duration_seconds=10`, with the audio fields omitted. The user still selects
+the region and approves locally.
+
+The default budget is 240 seconds. `--timeout-ms` accepts 1000–300000 and
+covers input, startup, selection, approval, recording, publication checks and
+any owned-host shutdown. Set the command runner's own deadline long enough for
+the invocation. Forced process cleanup can interrupt the recording.
+
+Read the one JSON result. `ok=true` confirms a completed recording with a
+published MP4 and a matching durable history entry. Report its `output_path`.
+If the result is `submission_unknown` or `outcome_unknown`, preserve any
+`recording_id` and do not automatically submit again. `host_shutdown`, when
+present, reports the separately checked exit of a host this invocation started.
+The agent handles startup and credentials. The user's only recording actions
+are local selection and approval where required.
 
 ## Recording Audio
 

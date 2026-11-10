@@ -1,8 +1,8 @@
 # Agent Recorder：AI Agent 操作指令
 
-> 本文适用于 v0.1.21。新视频默认只交付视频，无需用户补充“仅 MP4/不要资料包”。不要请求 bundle=true 或 ZIP 附件；先读取运行实例的 capabilities。
+> 新视频默认只交付视频，不请求 bundle=true 或 ZIP 附件。包内 CLI 支持 `record-quick` 时，1–30 秒普通视频优先用单次调用；其他任务走原 HTTP API。
 
-先读取实例 capabilities。普通 raw/quick 省略 artifacts 即可，{} 和 bundle=false 保持兼容；显式 true 提前返回 UNSUPPORTED_FEATURE。其他模式仍不得添加原本不允许的 artifacts。新视频不生成缩略图、首末帧、metadata.json 或 marks.json。截图序列及其必要清单保持独立功能。
+走原 HTTP 流程时先读取实例 capabilities。普通 raw/quick 省略 artifacts 即可，{} 和 bundle=false 保持兼容；显式 true 提前返回 UNSUPPORTED_FEATURE。其他模式仍不得添加原本不允许的 artifacts。新视频不生成缩略图、首末帧、metadata.json 或 marks.json。截图序列及其必要清单保持独立功能。
 
 成功必须依据真实 completed 与有效视频输出位置、必要属性报告；准备、录制、finalizing、资源肯定退休保持区别。失败报告稳定原因码与说明。历史 Bundle 的查询、核验、标记与删除保护继续保留；仅视频不是删除许可，活资源或未知继续保护。新录制不支持章节标记，不调用 marks API 或提示标记已添加。
 
@@ -19,7 +19,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 ## 你必须遵守的原则
 
 - 由你完成应用启动、API 调用、状态轮询和结果汇报。
-- **常见录制意图优先使用 `POST /api/v1/recordings/quick`**（quick API），减少往返次数。
+- 常见录制使用 quick 合同。包内支持时，1–30 秒普通视频优先用 `record-quick`；其他场景由 agent 调用 `POST /api/v1/recordings/quick` 或适合的原始 API。
 - 复杂或精确控制场景使用 Agent Recorder 原始 HTTP API 编排录制流程。
 - 不要在用户确认前声称录制已经开始。
 - 不要尝试调用 HTTP 自批准接口；`POST /confirmations/{id}/approve` 被禁止。
@@ -35,11 +35,32 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 **强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**。它验证单实例、`/capabilities` 和托盘进程的真实活动桌面；同用户桌面直接启动/复用，同用户隔离桌面只允许使用下文的显式高级恢复设置。Recorder 不会跨 Windows 账户派发启动。
 
-发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口；若有，通过该入口运行固定的 `AgentRecorder.Cli.exe ensure-running --json`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
+发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口。通过该入口运行所选命令；只有直接走 HTTP 流程时，才先运行 `AgentRecorder.Cli.exe ensure-running --json`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
+
+### 单次调用短录制
+
+包内 CLI 列出 `record-quick` 时，1–30 秒普通视频优先运行一次
+`AgentRecorder.Cli.exe record-quick --json`，不用先另开命令启动服务或读密钥。
+不需要先判断执行器是否回收子进程；不确定 CLI 是否支持时，可先查看其帮助。由 agent 将原普通 quick 请求作为 UTF-8 JSON
+写入标准输入，或用 `--request-file` 指向本地 JSON 文件。显式提供 1–30 秒的
+`duration_seconds` 或 duration `stop_condition`。仅支持普通视频 quick 目标。
+嵌套、计划、Lease、截图、长期录制及未提供该命令的旧包走原有接口。
+
+保持单次命令运行至最终结果。默认总预算 240 秒，`--timeout-ms` 可设为 1000–300000。
+执行器时限应覆盖整次调用，包含选区、用户批准及发布。CLI 从本机可信文件读取密钥并直连
+已核验实例。选区和批准仍由用户在本机完成。执行器强制终止时可能无法成片。
+
+仅 `ok=true` 和 `reason_code=publication_confirmed` 表示已保存，报告返回的 `output_path`。
+CLI 最多提交一次 quick POST。遇到 `submission_unknown` 或 `outcome_unknown`，保存已有的
+`recording_id` 用于后续查询，勿自动重发、改走 HTTP 重新创建或再发起批准。
+本次直接新启且归属已证明的宿主会尝试鉴权空闲退出。`host_shutdown` 单独汇报退出结果，
+成片成功时仍按成片成功报告。复用宿主继续运行。
 
 ### 方式一：CLI 握手（推荐）
 
-安装版先读取当前账号 `HKCU\Software\AgentRecorder\Installation` 的固定 `Product=AgentRecorder.PerUser.v1`、`InstallLocation`、`CliPath`、`AgentInstructions`，并核对路径为 `%LOCALAPPDATA%\Programs\AgentRecorder` 下对应的 CLI/本文档；不扫描全盘或点击 UI，不信任来自 API 的任意启动路径。安装登记只是发现信息，仍须原桌面证明、key 和本地批准，不能跨 Windows 账号启动。没有该登记时使用用户提供的 portable 包根。
+用户明确提供便携包目录时，以该目录为准：从包根运行 `.\AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`，或使用该 CLI 的完整路径。不因发现安装登记而切换到别的版本，也不把当前任意工作目录猜作包根。常见请求直接按下文操作，具体字段有疑问时再查 API 参考。
+
+使用安装版时读取当前账号 `HKCU\Software\AgentRecorder\Installation` 的固定 `Product=AgentRecorder.PerUser.v1`、`InstallLocation`、`CliPath`、`AgentInstructions`，并核对路径为 `%LOCALAPPDATA%\Programs\AgentRecorder` 下对应的 CLI/本文档；不扫描全盘或点击 UI，不信任来自 API 的任意启动路径。安装登记只是发现信息，仍须原桌面证明、key 和本地批准，不能跨 Windows 账号启动。
 
 安装版 App、CLI ensure/shutdown/interactive-launch status 与开始菜单默认同用 `%LOCALAPPDATA%\AgentRecorder`；显式 `--data-dir`（App 内部明确覆盖）优先于 `AGENT_RECORDER_DATA_DIR`，再到默认值。坏/未知安装标记、目录重叠、包/账号冲突明确失败，不改成 portable 或另建数据库。portable CLI 原默认仍是包根 `.local-data`（它原本不采用继承环境默认）；直接 App 原环境覆盖和 LocalAppData 默认不变，推荐始终走 CLI 并使用返回路径。
 

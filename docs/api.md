@@ -1,6 +1,6 @@
 # Agent Recorder API
 
-This reference describes v0.1.21 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
+This reference describes v0.1.22 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
 
 All new video recordings deliver video only. Ordinary raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` requests may omit `artifacts`, use `{}`, or send `{"artifacts":{"bundle":false}}`. Explicit true returns `400 UNSUPPORTED_FEATURE`, with `details.field=artifacts.bundle` and `details.reason=bundle_generation_disabled`, before device/source/selection/confirmation or file work. No additional natural-language instruction is needed to obtain this default. The effective false value appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a locally approved output-directory change.
 
@@ -15,6 +15,14 @@ Base URL: `http://127.0.0.1:37891/api/v1`
 Agent Recorder exposes a localhost HTTP API for local AI agents. Common natural
 language recording intents should use the quick recording endpoint. Lower-level
 endpoints remain available for precise control.
+
+When a local agent's command runner reaps child processes after each command,
+use the package CLI's `record-quick` command if available for ordinary
+1–30-second video requests. It sends the same quick JSON to this API, keeps the
+local selection and approval flow, and waits within one invocation for evidence
+of publication and durable history. The CLI handles readiness and credentials.
+Use the HTTP workflow in persistent execution environments. For invocation and
+result handling, see [Quick Start](../QUICKSTART.md#short-recordings-in-one-invocation).
 
 ## Response Envelope
 

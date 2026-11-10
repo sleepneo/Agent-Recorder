@@ -28,6 +28,8 @@ internal static partial class Program
         }
         catch (Exception ex)
         {
+            if (args.Length != 0 && args[0].Equals("record-quick", StringComparison.OrdinalIgnoreCase))
+                return WriteQuickResult(new(false, "not_submitted", "cli_context_failed"));
             Console.Error.WriteLine("CLI_CONTEXT_FAILED: " + ex.Message);
             return 1;
         }
@@ -59,6 +61,7 @@ internal static partial class Program
             return RunEnsureRunning(opts);
         }
         if (command == "shutdown") return RunShutdown(args);
+        if (command == "record-quick") return RunQuickRecording(args);
         if (command == "interactive-launch")
             return RunInteractiveLaunchCommand(args);
         if (command == "autostart")
@@ -1569,6 +1572,7 @@ internal static partial class Program
         Console.WriteLine("Commands:");
         Console.WriteLine("  shutdown         Gracefully exit the exact idle host; never force or launch");
         Console.WriteLine("  ensure-running   Ensure Agent Recorder is running and return readiness info");
+        Console.WriteLine("  record-quick     Submit one short quick request and report confirmed output");
         Console.WriteLine("  autostart        Manage per-user autostart (login startup) setting");
         Console.WriteLine("  help             Show this help");
         Console.WriteLine();

@@ -88,7 +88,8 @@ internal static partial class Program
     }
 
     internal static async Task<ShutdownResult> ShutdownCoreAsync(string directory, int timeoutMs, HttpClient http,
-        Func<int, IShutdownProcess?> openProcess, string currentUserSid, Func<bool> instanceHeld)
+        Func<int, IShutdownProcess?> openProcess, string currentUserSid, Func<bool> instanceHeld, ReadySnapshot? expected = null,
+        string? boundKey = null)
     {
         int? pid = null;
         bool accepted = false;
@@ -97,9 +98,11 @@ internal static partial class Program
         {
             var root = Path.GetFullPath(directory);
             var readyPath = Path.Combine(root, "runtime", "ready.json");
-            if (!File.Exists(readyPath)) return instanceHeld()
+            if (expected is null && !File.Exists(readyPath)) return instanceHeld()
                 ? new(false, "unknown", "wrong_data_dir_or_unready") : new(true, "not_running", "ready_absent");
             var ready = ReadReadySnapshot(readyPath);
+            if (expected is not null && !SameQuickReady(ready, expected))
+                return new(false, "unknown", "ready_changed", expected.Pid);
             if (ready is null || !ready.Ready || ready.Pid <= 0 || ready.Port is < 1 or > 65535 ||
                 !PathsEqual(ready.DataDir, root) || !PathsEqual(ready.ReadyFile, readyPath) ||
                 !PathsEqual(ready.ApiKeyFile, Path.Combine(root, "config", "api-key.txt")))
@@ -138,7 +141,7 @@ internal static partial class Program
             var latest = ReadReadySnapshot(readyPath);
             if (latest?.InstanceId != ready.InstanceId || latest.Pid != ready.Pid || process.HasExited)
                 return new(false, "unknown", "ready_changed", pid);
-            var key = (await File.ReadAllTextAsync(ready.ApiKeyFile, budget.Token)).Trim();
+            var key = boundKey ?? (await File.ReadAllTextAsync(ready.ApiKeyFile, budget.Token)).Trim();
             if (string.IsNullOrEmpty(key)) return new(false, "unknown", "key_unavailable", pid);
             using var request = new HttpRequestMessage(HttpMethod.Post, endpoint + "host/shutdown");
             request.Headers.Add("X-Agent-Recorder-Key", key);

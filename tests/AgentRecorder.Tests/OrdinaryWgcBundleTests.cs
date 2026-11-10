@@ -141,10 +141,16 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
         internal readonly System.Collections.Concurrent.ConcurrentDictionary<string, Action<ConfirmationDecision>> Confirmations = new();
         internal readonly System.Collections.Concurrent.ConcurrentDictionary<string, RecordingConfirmationPresentation> Presentations = new();
         internal readonly System.Collections.Concurrent.ConcurrentQueue<RecordingUiPresentation> UiEvents = new();
+        internal int SelectionRequests;
+        internal string SelectionOutcome = "selected";
         public string HostMode => "tray"; public bool SupportsRegionSelectionUi => true;
         public void RequestConfirmation(RecordingConfirmationPresentation p, Action<ConfirmationDecision> c)
         { Confirm = c; Confirmations[p.RecordingId] = c; Presentations[p.RecordingId] = p; }
-        public void RequestRegionSelection(int t, Action<string, int, int, int, int, string, string> c) => c("selected", 0, 0, 64, 64, "display_1", "virtual_screen");
+        public void RequestRegionSelection(int t, Action<string, int, int, int, int, string, string> c)
+        {
+            Interlocked.Increment(ref SelectionRequests);
+            c(SelectionOutcome, 0, 0, 64, 64, "display_1", "virtual_screen");
+        }
         public void SetRecording(RecordingUiPresentation r) => UiEvents.Enqueue(r);
         public void SetIdle(RecordingUiPresentation r) => UiEvents.Enqueue(r);
         public void SetPreparing(RecordingUiPresentation r) => UiEvents.Enqueue(r);
@@ -317,11 +323,12 @@ public sealed partial class OrdinaryWgcBundleTests(ITestOutputHelper output)
             await Until(() => rec.IsFinalized); Assert.Equal(RecState.completed, rec.State);
             Assert.True(File.Exists(rec.OutputPath)); Assert.Equal(64, rec.LastMeta!.Width); Assert.Equal(64, rec.LastMeta.Height); Assert.InRange(rec.LastMeta.DurationSeconds, .9, 1.2);
         }
-        internal void StartApi()
+        internal void StartApi(bool artifactCheck = false)
         {
             ApiKeyAuth.InitializeForTesting(Root);
             Api = new(Engine, new RetentionSharedOutputPathTests.QuietAudit(), Tray, null, null, null, null, null, null, null, null, null, 0,
-                unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(new(Store, Writer), () => (UnifiedHistoryTestDatabase.Sid, UnifiedHistoryTestDatabase.Session))); Api.Start();
+                unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(new(Store, Writer), () => (UnifiedHistoryTestDatabase.Sid, UnifiedHistoryTestDatabase.Session)),
+                artifactCheckGateway: artifactCheck ? new SqliteOrdinaryArtifactCheckGateway(new OrdinaryArtifactCheckService(Writer)) : null); Api.Start();
         }
         internal HttpClient Client()
         {

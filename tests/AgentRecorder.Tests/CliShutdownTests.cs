@@ -22,6 +22,18 @@ public sealed class CliShutdownTests
         Assert.Equal(0, test.Opens);
     }
 
+    [Fact]
+    public async Task MissingReadyCannotConfirmExitForAnExpectedHost()
+    {
+        using var test = new Scenario();
+        File.Delete(test.ReadyPath);
+        var result = await test.Run(expected: test.Ready);
+        Assert.False(result.Ok);
+        Assert.Equal("ready_changed", result.ReasonCode);
+        Assert.Equal(0, test.Posts);
+        Assert.Equal(0, test.Opens);
+    }
+
     [Theory]
     [InlineData("pid_reused")]
     [InlineData("wrong_executable")]
@@ -116,11 +128,11 @@ public sealed class CliShutdownTests
             Save();
         }
         internal void Save() => File.WriteAllText(ReadyPath, JsonSerializer.Serialize(Ready, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower }));
-        internal async Task<CliProgram.ShutdownResult> Run(bool held = false)
+        internal async Task<CliProgram.ShutdownResult> Run(bool held = false, ReadySnapshot? expected = null)
         {
             using var http = new HttpClient(this, disposeHandler: false);
             Process.ExitOnWait = Mode != "timeout";
-            return await CliProgram.ShutdownCoreAsync(Root, 300, http, _ => { Opens++; return MissingProcess ? null : Process; }, "test-sid", () => held);
+            return await CliProgram.ShutdownCoreAsync(Root, 300, http, _ => { Opens++; return MissingProcess ? null : Process; }, "test-sid", () => held, expected);
         }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
         {

@@ -1,6 +1,6 @@
 # Agent Recorder
 
-> This guide describes v0.1.21. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
+> This guide describes v0.1.22. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
 
 Agent Recorder is an **AI agent-native local screen recording capability layer**
 for Windows. A human describes what to record, a local AI agent calls the
@@ -28,12 +28,11 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-The v0.1.21 prerelease is a Windows x64 self-contained portable package.
-It adds storage diagnostics, optional managed-video quota admission, and
-read-only reconciliation of files against recording history. A blank storage
-reserve setting keeps the default 256 MiB protection. Independent silent
-window recording has been tested with four 644×420 windows at 15 fps; this
-does not guarantee higher concurrency on other hardware.
+The v0.1.22 prerelease is a Windows x64 self-contained portable package.
+For ordinary 1–30 second recordings, the package CLI can start Recorder,
+submit one quick API request, and wait for a verified MP4 in a single call.
+The user still selects the region when needed and approves recording locally.
+Longer and advanced recordings continue to use the existing HTTP API.
 See [QUICKSTART](QUICKSTART.md) for practical recording requests.
 
 Existing capabilities include durable
@@ -54,8 +53,8 @@ Inspect `/capabilities` for the running host's
 actual scope and use [the API reference](docs/api.md) for contracts.
 
 When upgrading an existing installation, back up its data directory first.
-This version upgrades the history database to SQLite schema V51; keep upgraded
-data with the new binaries rather than reopening it with an older release.
+The database remains at SQLite schema V51. If upgrading from a pre-V51 build,
+keep migrated data with V51-compatible binaries.
 
 ## Recording Audio
 
@@ -315,14 +314,6 @@ across Windows accounts; without an appropriate execution channel, fail closed.
   non-capturing capability probe succeeds.
 - Local audit log and MP4 output.
 
-## Documentation
-
-- Human setup: `QUICKSTART.md` / `QUICKSTART.zh-CN.md`
-- Agent workflow: `AGENT-INSTRUCTIONS.zh-CN.md`
-- Agent API reference: `AGENT-API-REFERENCE.zh-CN.md`
-- Developer API reference: `docs/api.md`
-- Security model: `docs/safety.md`
-
 ### Per-recording pre-capture countdown
 
 Both raw and quick recording requests accept the optional top-level
@@ -360,7 +351,7 @@ real-time guarantee.
 
 ## Documentation
 
-- [Quick start](QUICKSTART.md): getting started with a local AI agent.
+- [Quick start](QUICKSTART.md) ([简体中文](QUICKSTART.zh-CN.md)): getting started with a local AI agent.
 - [Agent instructions](AGENT-INSTRUCTIONS.zh-CN.md): startup, API workflow and safety (Chinese).
 - [API reference](docs/api.md): contracts and limits; [Chinese reference](AGENT-API-REFERENCE.zh-CN.md).
 - [Safety](docs/safety.md): authorization and evidence boundaries.

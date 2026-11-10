@@ -1,16 +1,17 @@
 # Agent Recorder 快速开始
 
-> 本文适用于 v0.1.21。新视频默认仅交付视频，无需额外声明不要资料包。显式 artifacts.bundle=true 会被拒绝。旧 Bundle 历史仍可读并受保护，截图序列图像和必要清单不变。
+> 本文适用于 v0.1.22。新视频默认仅交付视频，无需额外声明不要资料包。旧 Bundle 历史仍可读并受保护。
 
 Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：人类用户说出录屏需求，本地 AI agent 调用 quick API，Agent Recorder 弹出本地选区/确认 UI，最后输出 MP4。
 
 ## 如何使用
 
-1. 解压 v0.1.21 Windows x64 便携 ZIP。复用旧版数据时，请先备份；新版会将数据库升级到 SQLite V51。
-2. 让本地 AI agent 阅读：
-   - `AGENT-INSTRUCTIONS.zh-CN.md`
-   - `AGENT-API-REFERENCE.zh-CN.md`
-3. 对 AI agent 说一句自然语言指令，例如：
+1. 解压 v0.1.22 Windows x64 便携 ZIP。复用旧版数据时，请先备份；本版使用 SQLite V51。
+2. 在本地 AI agent 中选择解压目录作为工作目录，或者把该目录的完整路径交给它。首次使用可以直接说：
+
+   > 使用这个解压目录中的 Agent Recorder。先读 AGENT-INSTRUCTIONS.zh-CN.md，需要查 API 字段时再读 AGENT-API-REFERENCE.zh-CN.md，然后帮我选区录屏 10 秒。
+
+3. 后续直接说要录什么，例如：
 
 ```text
 帮我选区录屏 30 秒。
@@ -22,8 +23,8 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
 帮我录制当前对话窗口 5 分钟。
 ```
 
-4. AI agent 应该负责：
-   - 运行 `AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`
+4. 如果包内 CLI 提供 `record-quick`，1–30 秒普通视频优先[单次调用](#单次调用短录制)，不先另行启动。其他录制或没有该命令的旧包使用以下 HTTP 流程。
+   - 从指定的包根运行 `.\AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json`；不在该目录时使用这个 CLI 的完整路径
    - 从返回的 `api_key_file` 读取 API key
    - 优先调用 `POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000`
    - 以 `wait.goal_reached=true` 作为可信开始信号
@@ -36,6 +37,23 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**。常规路径是：
    - 根据需要移动、缩放或输入精确坐标；边缘默认自动吸附，按住 `Alt` 可临时关闭吸附
    - 在本地确认窗口中检查录制信息，可按需更改保存目录，然后明确点击「确认」批准录制
    - 播放 AI agent 返回的视频文件
+
+## 单次调用短录制
+
+agent 在当前用户已解锁的 Windows 桌面上调用一次包内
+`AgentRecorder.Cli.exe record-quick --json`，从标准输入传入 UTF-8 普通 quick JSON，
+也可用 `--request-file` 指定本地 JSON 文件。显式指定 1–30 秒时长。录制 10 秒无声选区时，
+将 `target.type` 设为 `selected_region`，将 `duration_seconds` 设为 `10`，省略音频字段。
+用户仍在本机完成选区和批准。
+
+默认总预算 240 秒。`--timeout-ms` 接受 1000–300000 毫秒，涵盖读取请求、启动、
+选区、批准、录制、发布核验和本次新启宿主的退出。执行器自身的超时也应容纳整次调用。
+执行器强制回收进程时，录制可能中断。
+
+agent 读取唯一一条 JSON 结果。`ok=true` 表示录制完成、MP4 已发布且持久历史记录匹配，
+此时报告 `output_path`。遇到 `submission_unknown` 或 `outcome_unknown`，保留已有的
+`recording_id`，不要自动重发。`host_shutdown` 单独报告本次新启宿主的退出结果。
+启动和密钥由工具处理，用户只需完成必要的本地交互。
 
 ## 如何录制声音
 
