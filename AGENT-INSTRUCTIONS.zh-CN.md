@@ -834,27 +834,9 @@ AgentRecorder.Cli\AgentRecorder.Cli.exe shutdown --json --data-dir "<ensure-runn
 完整字段、错误与持久化语义见 [API说明](docs/api.md#quick-recording-from-a-saved-region-profile_region)。
 
 
-### 独立窗口启动预算
+### 独立窗口并行
 
-宿主启动环境可选 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOWS`：缺省2，严格十进制整数1–10合法，软件硬上限10。Engine初始化时读取并冻结；运行中修改环境或请求字段不改变实例，不提供HTTP改限额接口。非法、溢出或越界使该独立能力不可用，raw请求在新增确认/worker前返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，不截断或按成功默认值忽略。无需修改本机持久环境。
-
-能力分支 `recording.window_surface.independent_windows` 公布 `configured_limit/max_concurrent`、`default_limit=2`、`hard_limit=10`、`policy_source/configuration_valid/budget_scope` 及 `budget.reserved/finalizing_or_unknown/remaining`。无效路数配置的路数上限为null；任一预算配置无效时余量为null、available=false。快照只反映观察时点，不保证未来预留。待确认至finalizing每条只占一份；completed/failed/cancelled后，仍有自身WGC/输出收尾或未知退休则继续占同一份。预算满返回 `409 TOO_MANY_CONCURRENT_RECORDINGS`，details含 `reason_code=independent_window_budget_exhausted`、有效configured_limit、reserved、finalizing_or_unknown、remaining。
-
-预算只覆盖本Engine普通raw无声独立窗口及其未退休交付，不是全机worker、GPU/编码器/磁盘容量保证。顶层并发值只是各合同描述性上界；旧nested/区域仍最多两路，quick/Profile/截图序列/Plan/Lease/未来窗口/声音和混合目标不扩展。每条仍需独立本地确认。stress_tested=false，不自动降画质、换后端/目标或回退桌面区域，也不自动合成画中画。WIN1…WIN10/窗口1…窗口10只供显示，API仍按Recording ID启停。
-
-
-### 总像素率准入预算
-
-独立普通 raw、无声、严格 WGC 窗口还受 `AGENT_RECORDER_MAX_INDEPENDENT_WINDOW_PIXELS_PER_SECOND` 限制。Engine 启动冻结此配置，缺省 `497664000` 像素/秒，即两个 3840×2160×30 的算术值；这是初始软件政策，不是双4K或十路硬件验收、性能保证。显式值只接受 ASCII 十进制正 Int64（最大 9223372036854775807）；空值、空白、符号、分数或溢出均无效。任一预算配置无效时该分支 available=false，返回 `503 INDEPENDENT_WINDOW_CONFIGURATION_INVALID`，details.environment_variable 指明配置项；其他合同不因此停用。HTTP 字段、确认回调或运行中改环境均不能改预算。
-
-每路冻结成本为可信捕获计划的物理窗口表面宽×高×实际配置 FPS（15/24/30/60），包括被遮挡或超出显示器可见范围的表面，不取 DIP、裁剪矩形或请求自报成本。所有乘法、汇总、剩余量为 checked Int64；缺失/非法计划或成本溢出返回 `400 INDEPENDENT_WINDOW_CAPTURE_PLAN_INVALID`。不缩放、降帧、换目标或回退桌面；确认等待时几何变化仍按原计划重验失败。
-
-路数与像素率必须同时满足，等于上限允许。可信计划解析后的检查及最终锁内原子注册都检查像素率；超限不新建确认、输出 claim、录制或后端。准入检查内部错误顺序为：无效配置、混合合同、路数满、同窗、像素率满；计划事实非法在计算成本时提前拒绝。原有请求解析/能力/输出检查仍有效。新超限返回 `409 INDEPENDENT_WINDOW_PIXEL_BUDGET_EXCEEDED`，details 包含 `reason_code=independent_window_pixel_budget_exceeded` 及 `requested_pixels_per_second`、`reserved_pixels_per_second`、`configured_pixels_per_second`、`remaining_pixels_per_second`，不包含路径、HWND或授权材料。
-
-`recording.window_surface.independent_windows.pixel_rate_budget` 增补 `unit=pixels_per_second`、`policy_source`、`environment_variable`、`default_pixels_per_second`、`configured_pixels_per_second`、`configuration_valid`、`reserved_pixels_per_second`、`finalizing_or_unknown_pixels_per_second`、`remaining_pixels_per_second`。路数与像素字段来自同一锁内快照；无效配置对应配置值为 null，任一配置无效时剩余量为 null。快照不预留名额。预留绑定确切 Recording 和冻结成本，待确认、准备、倒计时、录制、停止/收尾及未肯定退休终态均占用；初始目录/历史登记未完成也不早退。拒绝、超时、登记失败和肯定退休只退回自身份额。
-
-作用域仅为当前 Engine 的独立窗口及未退休交付，不是全机 GPU/编码器/CPU/磁盘预算。`snapshot_is_reservation=false`、`performance_guaranteed=false`、`hardware_capacity_measured=false`，`stress_tested=false` 保持不变。默认路数2、显式路数1–10不变；quick/Profile/nested、音频、区域分层、混合目标、截图序列、计划/Lease/未来窗口不扩展。新视频仍仅交付视频，不生成 Bundle 或章节资料；旧 Bundle 历史保护不变。
-
+先读取 `recording.window_surface.independent_windows` 的路数及像素率余量。每个窗口独立本地批准；超额时报告原因，不擅自降帧、改目标或回退桌面。字段、错误码和预留生命周期见 [API 参考](AGENT-API-REFERENCE.zh-CN.md#总像素率准入预算)。
 
 ### 保留最近 N 段的只读评估
 
