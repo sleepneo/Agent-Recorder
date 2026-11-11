@@ -28,7 +28,7 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-The v0.1.23 prerelease is a Windows x64 self-contained portable package.
+The v0.1.23 release is a Windows x64 self-contained portable package.
 For ordinary 1–30 second recordings, the package CLI can start Recorder,
 submit one quick API request, and wait for a verified MP4 in a single call.
 The user still selects the region when needed and approves recording locally.

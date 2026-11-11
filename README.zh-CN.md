@@ -24,7 +24,7 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 ## 人类用户如何使用
 
-v0.1.23 是 Windows x64 自包含便携预发布版。1–30 秒普通录制可由包内 CLI 一次完成启动、提交 quick 请求和等待成片；选区及录制批准仍由用户在本地操作。长录制和高级场景继续使用现有 HTTP API。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
+v0.1.23 是 Windows x64 自包含便携正式版。1–30 秒普通录制可由包内 CLI 一次完成启动、提交 quick 请求和等待成片；选区及录制批准仍由用户在本地操作。长录制和高级场景继续使用现有 HTTP API。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
 
 所有新视频仅交付视频，普通 raw/quick 请求省略 artifacts 即可，空对象或 bundle=false 兼容，显式 true 在录制准备前拒绝。声音选项与截图序列不变。已有 Bundle 的历史读取、五附件核验和删除保护继续兼容，不改写旧数据。成功视频仍需主文件锚点与真实资源退休；未知保持保护。运行能力以 /capabilities 为准。
 
