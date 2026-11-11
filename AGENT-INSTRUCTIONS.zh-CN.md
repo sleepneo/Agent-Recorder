@@ -1,6 +1,28 @@
 # Agent Recorder：AI Agent 操作指令
 
-> 新视频默认只交付视频，不请求 bundle=true 或 ZIP 附件。包内 CLI 支持 `record-quick` 时，1–30 秒普通视频优先用单次调用；其他任务走原 HTTP API。
+## 单次调用短录制
+
+本包的 1–30 秒普通视频直接使用 `record-quick`。由 agent 在当前用户已解锁的 Windows 桌面上，通过宿主获准的命令执行入口，从指定包根调用一次：
+
+```text
+.\AgentRecorder.Cli\AgentRecorder.Cli.exe record-quick --json
+```
+
+以 UTF-8 JSON 写入标准输入，也可用 `--request-file` 提供本地 JSON 文件。10 秒无声选区请求：
+
+```json
+{"target":{"type":"selected_region"},"duration_seconds":10}
+```
+
+不先运行 `ensure-running`、读 API key 或探测 API。CLI 负责启动或复用、读取密钥、提交一次 quick 请求和核验成片。已知包支持此命令时无需查帮助；包版本不明时才检查命令是否存在。嵌套、计划、Lease、截图、长录制和无此命令的旧包走[原 HTTP 流程](#启动与就绪检查推荐使用-cli-握手)。
+
+先说明录制范围和时长，再让用户在本地选区和批准。保持同一调用直到返回；默认总预算 240 秒，`--timeout-ms` 接受 1000–300000 毫秒。执行器的超时也应覆盖选区、批准、录制、发布和退出；强制回收进程可能中断录制。
+
+仅 `ok=true` 且 `reason_code=publication_confirmed` 时报告 `output_path`。取消选区、拒绝确认或超时后，只有用户再次明确要求才发起新请求。遇到 `submission_unknown` 或 `outcome_unknown`，保留已有 `recording_id` 供后续查询，不自动重发或改走 HTTP 创建。`host_shutdown` 单独报告本次直接新启且归属已确认的宿主的空闲退出结果；复用宿主继续运行。
+
+## 录制结果与交付
+
+新视频默认只交付视频，不请求 bundle=true 或 ZIP 附件。
 
 走原 HTTP 流程时先读取实例 capabilities。普通 raw/quick 省略 artifacts 即可，{} 和 bundle=false 保持兼容；显式 true 提前返回 UNSUPPORTED_FEATURE。其他模式仍不得添加原本不允许的 artifacts。新视频不生成缩略图、首末帧、metadata.json 或 marks.json。截图序列及其必要清单保持独立功能。
 
@@ -19,8 +41,7 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 ## 你必须遵守的原则
 
 - 由你完成应用启动、API 调用、状态轮询和结果汇报。
-- 常见录制使用 quick 合同。包内支持时，1–30 秒普通视频优先用 `record-quick`；其他场景由 agent 调用 `POST /api/v1/recordings/quick` 或适合的原始 API。
-- 复杂或精确控制场景使用 Agent Recorder 原始 HTTP API 编排录制流程。
+- 短录制按[单次调用](#单次调用短录制)执行。其他场景按需调用 `POST /api/v1/recordings/quick` 或适合的原始 API。
 - 不要在用户确认前声称录制已经开始。
 - 不要尝试调用 HTTP 自批准接口；`POST /confirmations/{id}/approve` 被禁止。
 - 每条新录制指令独立解析；上一条的显式参数不自动成为后续默认设置。用户未要求声音时默认关闭麦克风和系统声音，未指定倒计时时使用服务默认值（当前3秒）。不得因上次开启系统声音或设置5秒倒计时就在本次请求中继续显式传入这些值。“更改保存目录”只改变本次输出选择，不表示沿用音频或倒计时。只有用户明确要求沿用、保存配置或建立持续偏好时才按其准确范围复用；“上一次选区”也只复用选区，不隐含复用其他参数。
@@ -33,28 +54,9 @@ Agent Recorder 是一款 **AI agent 原生录屏能力层**：
 
 ## 启动与就绪检查（推荐使用 CLI 握手）
 
-**强烈推荐使用 `AgentRecorder.Cli` 进行启动握手**。它验证单实例、`/capabilities` 和托盘进程的真实活动桌面；同用户桌面直接启动/复用，同用户隔离桌面只允许使用下文的显式高级恢复设置。Recorder 不会跨 Windows 账户派发启动。
+直接调用 HTTP 前，使用 `AgentRecorder.Cli` 进行启动握手。它验证单实例、`/capabilities` 和托盘进程的真实活动桌面；同用户桌面直接启动/复用，同用户隔离桌面只允许使用下文的显式高级恢复设置。Recorder 不会跨 Windows 账户派发启动。
 
 发起 CLI 前，先检查宿主是否提供面向当前用户桌面的命令执行/授权入口。通过该入口运行所选命令；只有直接走 HTTP 流程时，才先运行 `AgentRecorder.Cli.exe ensure-running --json`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主提供的调用方式，不是 Recorder CLI 参数，也不代表其他 agent/宿主拥有同样能力。Recorder 不会自行跳出沙盒或取得另一账户权限。若没有合适授权执行面，或当前进程 SID 与活动桌面 SID 不同，必须保持 fail-closed，不要把 API 200、`ready.json`、进程存在或 `host.supports_region_selection_ui` 当作本地 UI 可见证明，也不要指导用户每次启动或录制前运行命令。
-
-### 单次调用短录制
-
-包内 CLI 列出 `record-quick` 时，1–30 秒普通视频优先运行一次
-`AgentRecorder.Cli.exe record-quick --json`，不用先另开命令启动服务或读密钥。
-不需要先判断执行器是否回收子进程；不确定 CLI 是否支持时，可先查看其帮助。由 agent 将原普通 quick 请求作为 UTF-8 JSON
-写入标准输入，或用 `--request-file` 指向本地 JSON 文件。显式提供 1–30 秒的
-`duration_seconds` 或 duration `stop_condition`。仅支持普通视频 quick 目标。
-嵌套、计划、Lease、截图、长期录制及未提供该命令的旧包走原有接口。
-
-保持单次命令运行至最终结果。默认总预算 240 秒，`--timeout-ms` 可设为 1000–300000。
-执行器时限应覆盖整次调用，包含选区、用户批准及发布。CLI 从本机可信文件读取密钥并直连
-已核验实例。选区和批准仍由用户在本机完成。执行器强制终止时可能无法成片。
-
-仅 `ok=true` 和 `reason_code=publication_confirmed` 表示已保存，报告返回的 `output_path`。
-CLI 最多提交一次 quick POST。遇到 `submission_unknown` 或 `outcome_unknown`，保存已有的
-`recording_id` 用于后续查询，勿自动重发、改走 HTTP 重新创建或再发起批准。
-本次直接新启且归属已证明的宿主会尝试鉴权空闲退出。`host_shutdown` 单独汇报退出结果，
-成片成功时仍按成片成功报告。复用宿主继续运行。
 
 ### 方式一：CLI 握手（推荐）
 
@@ -314,7 +316,7 @@ AgentRecorder.Cli.exe autostart disable --json
 
 **注意事项：**
 
-- `ensure-running` 仍是录制前的推荐入口，autostart 只是减少冷启动概率
+- 直接使用 HTTP 时仍走 `ensure-running`；短录制走 `record-quick`。autostart 只是减少冷启动概率
 - 启用/禁用自启需要用户明确同意，不要自动启用
 - 自启仅对当前用户生效，不影响其他用户
 - 不要通过 HTTP API 启用/禁用自启，只能通过 CLI 显式操作

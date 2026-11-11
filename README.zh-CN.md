@@ -31,13 +31,13 @@ v0.1.22 是 Windows x64 自包含便携预发布版。1–30 秒普通录制可�
 升级时请先备份数据目录。本版继续使用 SQLite V51；从更早的数据库版本迁移后，不要用不支持 V51 的程序打开。
 
 1. 解压 Windows 便携 ZIP，将解压目录作为本地 AI agent 的工作目录，或把完整路径交给它。
-2. 按[快速开始](QUICKSTART.zh-CN.md#如何使用)的首次使用指令让 agent 接入。之后只需说要录什么，例如：
+2. 直接说要录什么，例如：
 
 ```text
-帮我选区录屏 30 秒。
+帮我选区录屏 10 秒。
 ```
 
-3. 在弹出的选区 UI 中框选区域，再核对并批准本地录制确认。完成后由 agent 返回 MP4。
+3. 在弹出的选区 UI 中框选区域，再核对并批准本地录制确认。完成后由 agent 返回 MP4。更多指令见[快速开始](QUICKSTART.zh-CN.md#如何使用)。
 
 ### 声音录制规则
 
@@ -72,7 +72,9 @@ v0.1.22 是 Windows x64 自包含便携预发布版。1–30 秒普通录制可�
 
 ## AI agent 如何接入
 
-推荐启动入口：
+本包的 1–30 秒普通视频走[单次调用 `record-quick`](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)。不先手动启动、不读密钥、不额外请求 API。
+
+长录制、高级场景或不支持 `record-quick` 的旧包使用 HTTP 流程，先启动或复用服务：
 
 ```text
 AgentRecorder.Cli\AgentRecorder.Cli.exe ensure-running --json
@@ -98,7 +100,7 @@ POST /api/v1/recordings/quick?wait_for=recording&wait_ms=25000
 - 直接运行 `AgentRecorder.App.exe` 或 `AgentRecorder.Headless.exe` 且未设置 `AGENT_RECORDER_DATA_DIR` 时，默认 data-dir 是 `%LOCALAPPDATA%\AgentRecorder`。
 - AI agent 应优先使用 `ensure-running` 或 `/api/v1/capabilities` 返回的 `data_dir`、`ready_file`、`api_key_file`，不要硬编码 API key 或 ready 文件路径。
 
-需要托盘、本地选区或确认 UI 时，agent 应先检查宿主是否提供获准的用户桌面命令执行入口，并经该入口调用 `ensure-running`。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主调用能力，不是 Recorder CLI 参数，也不代表其他 agent/宿主均支持。Recorder 不会跳出沙盒或跨 Windows 账户派发；没有适当执行面时保持 fail-closed。`host.supports_region_selection_ui` 只表示宿主具备选区 UI，不是托盘可见性的证明。
+需要托盘、本地选区或确认 UI 时，agent 应先检查宿主是否提供获准的用户桌面命令执行入口，并经该入口调用所选 CLI 命令。部分 agent 宿主可对具体命令使用工具授权执行入口；这是宿主调用能力，不是 Recorder CLI 参数，也不代表其他 agent/宿主均支持。Recorder 不会跳出沙盒或跨 Windows 账户派发；没有适当执行面时保持 fail-closed。`host.supports_region_selection_ui` 只表示宿主具备选区 UI，不是托盘可见性的证明。
 
 `target.type` 支持：
 

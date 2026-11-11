@@ -16,13 +16,22 @@ Agent Recorder exposes a localhost HTTP API for local AI agents. Common natural
 language recording intents should use the quick recording endpoint. Lower-level
 endpoints remain available for precise control.
 
-When a local agent's command runner reaps child processes after each command,
-use the package CLI's `record-quick` command if available for ordinary
-1–30-second video requests. It sends the same quick JSON to this API, keeps the
-local selection and approval flow, and waits within one invocation for evidence
-of publication and durable history. The CLI handles readiness and credentials.
-Use the HTTP workflow in persistent execution environments. For invocation and
-result handling, see [Quick Start](../QUICKSTART.md#short-recordings-in-one-invocation).
+For ordinary 1–30-second video requests in this package, use
+[`record-quick`](../QUICKSTART.md#short-recordings-in-one-invocation). It sends
+the same quick JSON to this API, preserves local selection and approval, and
+waits in one call for verified publication and durable history. Do not start
+the host or fetch credentials separately. Use the HTTP workflow for longer or
+advanced recordings, or for older packages without this command.
+
+CLI results may include `api_error_code` with `not_submitted` and
+`reason_code=quick_rejected` when the service explicitly refuses the quick
+request (for example, `INVALID_ARGUMENT`). With `recording_failed`, a verified
+terminal status for the same recording ID may include `recording_stop_reason`
+from its `stop_reason` field (for example, `backend_creation_failed`). Only
+recognized, exact codes are included. Both fields are optional. Error messages,
+details and stderr are excluded. `submission_unknown` and `outcome_unknown`
+mean the available evidence cannot confirm the result. Keep any `recording_id`
+for later lookup and avoid automatically submitting again.
 
 ## Response Envelope
 

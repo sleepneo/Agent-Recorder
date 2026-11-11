@@ -14,7 +14,8 @@ internal static partial class Program
 
     internal sealed record QuickResult(bool Ok, string Status, string ReasonCode, string? RecordingId = null,
         string? RecordingStatus = null, string? OutputPath = null, long? OutputSizeBytes = null,
-        string? HostOwnership = null, ShutdownResult? HostShutdown = null);
+        string? HostOwnership = null, ShutdownResult? HostShutdown = null,
+        string? ApiErrorCode = null, string? RecordingStopReason = null);
 
     private static int RunQuickRecording(string[] args)
     {
@@ -61,9 +62,9 @@ internal static partial class Program
         return WriteQuickResult(result);
     }
 
-    private static int WriteQuickResult(QuickResult result)
+    internal static int WriteQuickResult(QuickResult result, TextWriter? output = null)
     {
-        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
+        (output ?? Console.Out).WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -195,7 +196,8 @@ internal static partial class Program
                 using var rejected = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token).ConfigureAwait(false));
                 if (rejected.RootElement.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False &&
                     rejected.RootElement.TryGetProperty("error", out var error) && Text(error, "code") is not null)
-                    return new(false, "not_submitted", "quick_rejected");
+                    return new(false, "not_submitted", "quick_rejected",
+                        ApiErrorCode: ReadQuickDiagnostic(rejected.RootElement, error, "code", IsQuickApiErrorCode));
             }
             return new(false, "submission_unknown", "quick_response_unconfirmed");
         }
@@ -221,9 +223,11 @@ internal static partial class Program
             observed(id!, status);
             if (status == "completed")
                 return await ConfirmSavedAsync(host, id!, state, token).ConfigureAwait(false);
-            if (status is "failed" or "cancelled" or "rejected" or "expired" or "interrupted_unknown")
-                return new(false, status == "interrupted_unknown" ? "outcome_unknown" : "recording_failed",
-                    status == "expired" ? "approval_expired" : "recording_terminal_failure", id, status);
+            if (status == "interrupted_unknown")
+                return new(false, "outcome_unknown", "recording_terminal_failure", id, status);
+            if (status is "failed" or "cancelled" or "rejected" or "expired")
+                return new(false, "recording_failed", status == "expired" ? "approval_expired" : "recording_terminal_failure",
+                    id, status, RecordingStopReason: ReadQuickDiagnostic(state, state, "stop_reason", IsQuickStopReason));
             since = status;
         }
     }
@@ -319,6 +323,28 @@ internal static partial class Program
         item.ValueKind == JsonValueKind.Number && item.TryGetInt64(out var number) && number > 0 ? number : null;
     private static bool IsQuickRecordingId(string? id) => id is { Length: 16 } && id.StartsWith("rec_", StringComparison.Ordinal) &&
         id[4..].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static string? ReadQuickDiagnostic(JsonElement context, JsonElement owner, string field, Func<string, bool> isKnown)
+    {
+        try
+        {
+            return Text(owner, field) is { } code && isKnown(code) && !HasDuplicateProperties(context) ? code : null;
+        }
+        catch (InvalidOperationException)
+        {
+            // An optional JSON string can fail to decode even after parsing its document.
+            return null;
+        }
+    }
+
+    // Keep the projected diagnostics finite. The API also carries free text in recording state.
+    private static bool IsQuickApiErrorCode(string code) => code is
+        "INVALID_ARGUMENT" or "SOURCE_NOT_FOUND" or "UNAUTHORIZED" or "FORBIDDEN" or "UNSUPPORTED_FEATURE" or
+        "storage_space_low" or "storage_capacity_unavailable" or "OUTPUT_PATH_IN_USE";
+    private static bool IsQuickStopReason(string reason) => reason is
+        "encoder_start_failed" or "backend_creation_failed" or "unexpected_exit" or "storage_space_low" or
+        "storage_capacity_unavailable" or "user_rejected" or "confirmation_expired" or "OUTPUT_PATH_IN_USE";
+
     private static bool KnownStatus(string? status) => status is "requires_user_confirmation" or "created" or "pending_confirmation"
         or "preparing" or "countdown" or "recording" or "stopping" or "finalizing" or "completed" or "failed" or "rejected"
         or "cancelled" or "expired" or "interrupted_unknown";

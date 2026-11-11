@@ -33,7 +33,8 @@ For ordinary 1–30 second recordings, the package CLI can start Recorder,
 submit one quick API request, and wait for a verified MP4 in a single call.
 The user still selects the region when needed and approves recording locally.
 Longer and advanced recordings continue to use the existing HTTP API.
-See [QUICKSTART](QUICKSTART.md) for practical recording requests.
+Set the extracted folder as the agent's working directory and say "Record a
+selected region for 10 seconds." See [Quick Start](QUICKSTART.md) for details.
 
 Existing capabilities include durable
 ordinary recording history, unified indexed history, on-demand health and
@@ -94,6 +95,12 @@ is unchanged. Fixed-region unattended plans and screenshot sequences remain
 silent. Inspect live capabilities before recording.
 
 ## Recommended Agent Path
+
+For ordinary 1–30 second videos, use the package's
+[`record-quick` single call](QUICKSTART.md#short-recordings-in-one-invocation).
+Do not start Recorder or read its API key separately first.
+
+For longer and advanced workflows, or an older package without `record-quick`:
 
 1. Start or reuse the app:
 
@@ -175,7 +182,7 @@ Agents should use the paths returned by `ensure-running` or
 `GET /api/v1/capabilities`, especially `data_dir`, `ready_file`, and
 `api_key_file`.
 
-For tray, selection, and approval UI, the agent should invoke `ensure-running`
+For tray, selection, and approval UI, the agent should invoke the selected CLI command
 through its host's approved command-execution channel for the current user's
 interactive desktop. Starting a process on an isolated desktop is not proof
 that its dialogs are visible. Recorder does not escape a sandbox or dispatch

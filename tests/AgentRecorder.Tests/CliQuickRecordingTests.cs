@@ -14,6 +14,7 @@ public sealed class CliQuickRecordingTests
     private const string Id = "rec_123456abcdef";
     private const string Media = @"D:\owned\clip.mp4";
     private const string Secret = "synthetic-secret-never-echo";
+    private const string PrivatePath = @"D:\private\backend-stderr.txt";
 
     [Theory]
     [InlineData("""{"target":{"type":"selected_region"},"duration_seconds":31}""")]
@@ -86,7 +87,7 @@ public sealed class CliQuickRecordingTests
     [Fact]
     public async Task LocalApprovalExpiryPreservesIdAndDoesNotReadPublicationOrExitReusedHost()
     {
-        var wire = new Wire { State = _ => Live("expired") };
+        var wire = new Wire { State = _ => Live("expired", "confirmation_expired") };
         var result = await wire.Run();
         Assert.Equal("recording_failed", result.Status);
         Assert.Equal("approval_expired", result.ReasonCode);
@@ -94,6 +95,115 @@ public sealed class CliQuickRecordingTests
         Assert.Equal("reused", result.HostOwnership);
         Assert.Null(result.HostShutdown);
         Assert.Single(wire.Reads);
+        Assert.Equal(1, wire.Posts);
+        Assert.Equal("confirmation_expired", Output(result).GetProperty("recording_stop_reason").GetString());
+    }
+
+    [Theory]
+    [InlineData(400, "INVALID_ARGUMENT", "INVALID_ARGUMENT")]
+    [InlineData(400, "UNSUPPORTED_FEATURE", "UNSUPPORTED_FEATURE")]
+    [InlineData(401, "UNAUTHORIZED", "UNAUTHORIZED")]
+    [InlineData(401, "FORBIDDEN", "FORBIDDEN")]
+    [InlineData(404, "SOURCE_NOT_FOUND", "SOURCE_NOT_FOUND")]
+    [InlineData(400, "storage_space_low", "storage_space_low")]
+    [InlineData(400, "storage_capacity_unavailable", "storage_capacity_unavailable")]
+    [InlineData(409, "OUTPUT_PATH_IN_USE", "OUTPUT_PATH_IN_USE")]
+    [InlineData(400, "STORAGE_SPACE_LOW", null)]
+    [InlineData(400, "STORAGE_CAPACITY_UNAVAILABLE", null)]
+    [InlineData(409, "output_path_in_use", null)]
+    [InlineData(400, "UNRECOGNIZED_UPSTREAM_CODE", null)]
+    [InlineData(400, "invalid_argument", null)]
+    [InlineData(400, " INVALID_ARGUMENT", null)]
+    [InlineData(400, PrivatePath, null)]
+    [InlineData(400, Secret, null)]
+    public async Task ConfirmedRejectionOnlyProjectsExactKnownApiCode(int status, string upstream, string? expected)
+    {
+        var wire = new Wire { Create = _ => Reply(status, new
+        {
+            ok = false, error = new { code = upstream, message = Secret, details = new { path = PrivatePath, request = Input } }
+        }) };
+        var result = await wire.Run();
+        var json = Output(result);
+        Assert.Equal("not_submitted", json.GetProperty("status").GetString());
+        Assert.Equal("quick_rejected", json.GetProperty("reason_code").GetString());
+        Assert.Equal("reused", json.GetProperty("host_ownership").GetString());
+        Assert.False(json.TryGetProperty("recording_id", out _));
+        if (expected is null) Assert.False(json.TryGetProperty("api_error_code", out _));
+        else Assert.Equal(expected, json.GetProperty("api_error_code").GetString());
+        Assert.False(json.TryGetProperty("recording_stop_reason", out _));
+        Assert.Equal(1, wire.Posts);
+        Assert.Empty(wire.Reads);
+    }
+
+    [Theory]
+    [InlineData("failed", "encoder_start_failed", "encoder_start_failed")]
+    [InlineData("failed", "backend_creation_failed", "backend_creation_failed")]
+    [InlineData("failed", "unexpected_exit", "unexpected_exit")]
+    [InlineData("failed", "storage_space_low", "storage_space_low")]
+    [InlineData("failed", "storage_capacity_unavailable", "storage_capacity_unavailable")]
+    [InlineData("rejected", "user_rejected", "user_rejected")]
+    [InlineData("rejected", "OUTPUT_PATH_IN_USE", "OUTPUT_PATH_IN_USE")]
+    [InlineData("rejected", "output_path_in_use", null)]
+    [InlineData("cancelled", null, null)]
+    [InlineData("failed", 42, null)]
+    [InlineData("failed", "ENCODER_START_FAILED", null)]
+    [InlineData("failed", "encoder_start_failed ", null)]
+    [InlineData("failed", "arbitrary_upstream_reason", null)]
+    [InlineData("failed", PrivatePath, null)]
+    [InlineData("failed", Secret, null)]
+    public async Task ConfirmedTerminalFailureOnlyProjectsExactKnownStopReason(string status, object? upstream, string? expected)
+    {
+        var wire = new Wire { State = _ => upstream is null ? Ok(new { recording_id = Id, status, error = "encoder_start_failed" })
+            : Live(status, upstream) };
+        var result = await wire.Run();
+        var json = Output(result);
+        Assert.Equal("recording_failed", json.GetProperty("status").GetString());
+        Assert.Equal("recording_terminal_failure", json.GetProperty("reason_code").GetString());
+        Assert.Equal(Id, json.GetProperty("recording_id").GetString());
+        Assert.Equal(status, json.GetProperty("recording_status").GetString());
+        Assert.False(json.TryGetProperty("output_path", out _));
+        Assert.False(json.TryGetProperty("api_error_code", out _));
+        if (expected is null) Assert.False(json.TryGetProperty("recording_stop_reason", out _));
+        else Assert.Equal(expected, json.GetProperty("recording_stop_reason").GetString());
+        Assert.Single(wire.Reads);
+        Assert.Equal(1, wire.Posts);
+    }
+
+    [Theory]
+    [InlineData("wrong_id", "recording_status_unconfirmed")]
+    [InlineData("unknown_terminal", "recording_terminal_failure")]
+    [InlineData("bad_envelope", "api_evidence_unavailable")]
+    public async Task StopReasonDoesNotTurnUncertainStateIntoFailure(string issue, string reason)
+    {
+        var wire = new Wire { State = _ => issue switch
+        {
+            "wrong_id" => Live("failed", "encoder_start_failed", "rec_abcdef123456"),
+            "unknown_terminal" => Live("interrupted_unknown", "encoder_start_failed"),
+            _ => Reply(200, new { ok = false, data = new { recording_id = Id, status = "failed", stop_reason = "encoder_start_failed" } })
+        } };
+        var result = await wire.Run();
+        var json = Output(result);
+        Assert.Equal("outcome_unknown", result.Status);
+        Assert.Equal(reason, result.ReasonCode);
+        Assert.Equal(Id, result.RecordingId);
+        AssertNoFailureDetails(json);
+        Assert.Equal(1, wire.Posts);
+    }
+
+    [Theory]
+    [InlineData(true, """{"ok":false,"error":{"code":"not-public","code":"INVALID_ARGUMENT"}}""")]
+    [InlineData(false, """{"ok":true,"data":{"recording_id":"rec_123456abcdef","status":"failed","stop_reason":"not-public","stop_reason":"encoder_start_failed"}}""")]
+    [InlineData(false, """{"ok":true,"data":{"recording_id":"rec_123456abcdef","status":"failed","stop_reason":"\ud800"}}""")]
+    public async Task AmbiguousOrUndecodableOptionalFieldIsOmittedWithoutChangingLegacyResult(bool apiRejection, string response)
+    {
+        var wire = new Wire();
+        if (apiRejection)
+            wire.Create = _ => RawReply(400, response);
+        else
+            wire.State = _ => RawReply(200, response);
+        var result = await wire.Run();
+        Assert.Equal(apiRejection ? "not_submitted" : "recording_failed", result.Status);
+        AssertNoFailureDetails(Output(result));
         Assert.Equal(1, wire.Posts);
     }
 
@@ -125,6 +235,10 @@ public sealed class CliQuickRecordingTests
         Assert.Equal(2, artifacts);
         Assert.Equal(2, exits);
         Assert.Equal(1, wire.Posts);
+        var json = Output(result);
+        AssertNoFailureDetails(json);
+        Assert.Equal(Media, json.GetProperty("output_path").GetString());
+        Assert.Equal("exited", json.GetProperty("host_shutdown").GetProperty("status").GetString());
     }
 
     [Fact]
@@ -140,6 +254,7 @@ public sealed class CliQuickRecordingTests
         Assert.Equal(Media, result.OutputPath);
         Assert.Equal("accepted_exit_unconfirmed", result.HostShutdown!.ReasonCode);
         Assert.Equal(1, wire.Posts);
+        AssertNoFailureDetails(Output(result));
     }
 
     [Theory]
@@ -159,20 +274,27 @@ public sealed class CliQuickRecordingTests
         Assert.Equal("outcome_unknown", result.Status);
         Assert.Equal(Id, result.RecordingId);
         Assert.Null(result.OutputPath);
+        if (issue == "history_pending") Assert.Equal("deadline", result.ReasonCode);
         Assert.Equal(1, wire.Posts);
-        Assert.DoesNotContain(Secret, JsonSerializer.Serialize(result));
+        AssertNoFailureDetails(Output(result));
     }
 
     [Theory]
     [InlineData("disconnect")]
     [InlineData("server_error")]
     [InlineData("no_id")]
+    [InlineData("invalid_rejection")]
+    [InlineData("missing_code")]
+    [InlineData("malformed_json")]
     public async Task AmbiguousPostIsUnknownAndNeverReplayed(string issue)
     {
         var wire = new Wire { Create = _ => issue switch
         {
-            "server_error" => Reply(500, new { ok = false, error = new { message = Secret } }),
+            "server_error" => Reply(500, new { ok = false, error = new { code = "INVALID_ARGUMENT", message = Secret } }),
             "no_id" => Ok(new { status = "recording" }),
+            "invalid_rejection" => Reply(400, new { ok = true, error = new { code = "INVALID_ARGUMENT" } }),
+            "missing_code" => Reply(400, new { ok = false, error = new { message = "INVALID_ARGUMENT" } }),
+            "malformed_json" => RawReply(400, "INVALID_ARGUMENT"),
             _ => throw new HttpRequestException(Secret)
         } };
         var result = await wire.Run();
@@ -180,7 +302,7 @@ public sealed class CliQuickRecordingTests
         Assert.Null(result.RecordingId);
         Assert.Equal(1, wire.Posts);
         Assert.Empty(wire.Reads);
-        Assert.DoesNotContain(Secret, JsonSerializer.Serialize(result));
+        AssertNoFailureDetails(Output(result));
     }
 
     [Theory]
@@ -287,10 +409,37 @@ public sealed class CliQuickRecordingTests
     }
 
     private static HttpResponseMessage Ok(object data) => Reply(200, new { ok = true, data });
-    private static HttpResponseMessage Reply(int code, object body) =>
-        new((HttpStatusCode)code) { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
-    private static HttpResponseMessage Live(string status) =>
-        Ok(new { recording_id = Id, status, output = new { path = Media, bytes_written = 73 } });
+    private static HttpResponseMessage Reply(int code, object body) => RawReply(code, JsonSerializer.Serialize(body));
+    private static HttpResponseMessage RawReply(int code, string body) =>
+        new((HttpStatusCode)code) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+    private static HttpResponseMessage Live(string status, object? stopReason = null, string id = Id) =>
+        Ok(new { recording_id = id, status, stop_reason = stopReason, error = Secret, stderr_excerpt = PrivatePath,
+            output = new { path = Media, bytes_written = 73 } });
+
+    internal static JsonElement Output(CliProgram.QuickResult result)
+    {
+        using var writer = new StringWriter();
+        Assert.Equal(result.Ok ? 0 : 1, CliProgram.WriteQuickResult(result, writer));
+        using var lines = new StringReader(writer.ToString());
+        var line = Assert.IsType<string>(lines.ReadLine());
+        Assert.Null(lines.ReadLine());
+        var json = JsonSerializer.Deserialize<JsonElement>(line);
+        Assert.Equal(result.Ok, json.GetProperty("ok").GetBoolean());
+        Assert.DoesNotContain(Secret, line);
+        Assert.DoesNotContain(PrivatePath, line, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("backend-stderr.txt", line);
+        Assert.DoesNotContain("selected_region", line);
+        Assert.False(json.TryGetProperty("error", out _));
+        Assert.False(json.TryGetProperty("stderr_excerpt", out _));
+        Assert.False(json.TryGetProperty("details", out _));
+        return json;
+    }
+
+    private static void AssertNoFailureDetails(JsonElement json)
+    {
+        Assert.False(json.TryGetProperty("api_error_code", out _));
+        Assert.False(json.TryGetProperty("recording_stop_reason", out _));
+    }
     private static HttpResponseMessage Saved(string path = Media) =>
         Ok(new { recording = new { recording_id = Id, status = "completed", output_path = path, output_size_bytes = 73,
             completed_at = "2026-11-10T08:00:00Z" } });

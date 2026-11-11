@@ -12,9 +12,11 @@ capabilities.recording_artifacts 为 modes=[mp4_only]、default_bundle=false、b
 
 Bundle附件身份保护（V45引入）：原 `shared_publication_identity` 批量查询增加 Bundle 附件持久身份，完整二进制 tuple 命中即保护，不排除同 recording_id 的不同产物角色，不按父状态、日期、session 或页水位过滤，不返回外来字段。SQLite V45 只增附件反向索引及回执，旧迁移不变；缺坏结构失败关闭。预览命中不做文件探针，删除前 Guard 在自己的事务重新查询；不扩大本地批准或删除权限，不代表完整引用图。
 
-本文描述 v0.1.22（SQLite V51）的 HTTP 合同。普通 1–30 秒视频可用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。直接调用 HTTP 前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
+本文描述 v0.1.22（SQLite V51）的 HTTP 合同。本包的 1–30 秒普通视频用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。长录制、高级场景或不支持该命令的旧包走 HTTP，直接调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
+
+`record-quick` 的 `not_submitted` 和 `reason_code=quick_rejected` 表示服务明确拒绝请求，可附带 `api_error_code`，例如 `INVALID_ARGUMENT`。`recording_failed` 表示已知录制的失败类终态，可附带同一录制 ID 状态中的 `recording_stop_reason`，例如 `backend_creation_failed`。两项均为可选字段，仅输出精确匹配的已知代码。错误正文、详情和 stderr 不进入这些诊断。`submission_unknown` 和 `outcome_unknown` 表示现有证据不足以确认结果，保留已有 `recording_id` 供后续查询，避免自动重发。
 
 ## 基本信息
 
