@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -158,6 +159,28 @@ public class ConsentInvariantTests : IDisposable
     private CaptureAuditLogger? _audit;
     private RecordingEngine? _engine;
     private readonly FakeCaptureBackend _backend = new();
+    private readonly RecordingPreflightChecker.TryResolveAudioHelper _originalHelperPath = RecordingPreflightChecker.AudioHelperPathResolver;
+    private readonly RecordingPreflightChecker.RunAudioHelperProbe _originalHelperProbe = RecordingPreflightChecker.AudioHelperProbeRunner;
+    private readonly string? _originalDataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
+    private bool _disposed;
+    private int _helperProbeCalls;
+
+    public ConsentInvariantTests()
+    {
+        // The helper is never executed. Only its preflight protocol is simulated.
+        RecordingPreflightChecker.AudioHelperPathResolver = () => Path.Combine(Path.GetTempPath(), "consent-test-helper.exe");
+        RecordingPreflightChecker.AudioHelperProbeRunner = (_, _) =>
+        {
+            Interlocked.Increment(ref _helperProbeCalls);
+            return new AudioHelperProbeResult
+            {
+                Success = true,
+                ProtocolVersion = "audio-helper-v1",
+                OwnedWavCapability = "file-id-v1",
+                TimestampFrequency = Stopwatch.Frequency
+            };
+        };
+    }
 
     private ApiServer CreateServer(
         ControllableTray tray,
@@ -189,18 +212,36 @@ public class ConsentInvariantTests : IDisposable
     private static StringContent JsonContent(string json) =>
         new(json, Encoding.UTF8, "application/json");
 
+    private static async Task AssertStatusAsync(HttpResponseMessage response, int expected)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True((int)response.StatusCode == expected,
+            $"Expected HTTP {expected}, got {(int)response.StatusCode}. Response body: {body}");
+    }
+
     public void Dispose()
     {
-        try { _server?.Stop(); } catch { }
-        SystemQuery.SetDisplayProvider(null);
-        SystemQuery.SetActiveWindowProvider(null);
-        SystemQuery.SetWindowProvider(null);
-        if (_dataDir != null)
+        if (_disposed) return;
+        _disposed = true;
+        try
         {
-            try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); } catch { }
+            try { _server?.Stop(); } catch { }
+            _engine?.Dispose();
         }
-        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null, EnvironmentVariableTarget.Process);
-        ApiKeyAuth.ResetForTesting(null);
+        finally
+        {
+            RecordingPreflightChecker.AudioHelperPathResolver = _originalHelperPath;
+            RecordingPreflightChecker.AudioHelperProbeRunner = _originalHelperProbe;
+            SystemQuery.SetDisplayProvider(null);
+            SystemQuery.SetActiveWindowProvider(null);
+            SystemQuery.SetWindowProvider(null);
+            if (_dataDir != null)
+            {
+                try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); } catch { }
+            }
+            Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _originalDataDir, EnvironmentVariableTarget.Process);
+            ApiKeyAuth.ResetForTesting(null);
+        }
     }
 
     [Fact]
@@ -221,7 +262,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -253,7 +294,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"duration_seconds\":60}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -285,7 +326,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             Assert.True(_backend.StartCalled, "Backend.Start must be called after local approval.");
 
@@ -322,7 +363,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             Assert.False(_backend.StartCalled, "Backend.Start must not be called when confirmation is rejected.");
 
@@ -363,7 +404,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -403,7 +444,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(503, (int)response.StatusCode);
+            await AssertStatusAsync(response, 503);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -442,7 +483,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             Assert.True(_backend.StartCalled, "Backend.Start must be called after local approval for microphone request.");
             Assert.NotNull(_backend.LastConfig);
@@ -475,7 +516,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent(bodyJson));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -513,7 +554,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -528,7 +569,7 @@ public class ConsentInvariantTests : IDisposable
     }
 
     [Fact]
-    public async Task QuickRecording_ActiveWindow_MicrophoneEnabled_ValidDevice_GoesPending()
+    public async Task QuickRecording_ActiveWindow_MicrophoneEnabled_RejectsBeforeTargetResolutionOrConsent()
     {
         var tray = new ControllableTray { Mode = ControllableTray.DecisionMode.Timeout };
         var provider = new FakeMicrophoneProvider(
@@ -555,12 +596,22 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"active_window\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 400);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
-            Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
-            Assert.Equal(1, activeWindowCallCount);
+            Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
+            var error = doc.RootElement.GetProperty("error");
+            Assert.Equal("INVALID_ARGUMENT", error.GetProperty("code").GetString());
+            Assert.Equal("audio.microphone.enabled", error.GetProperty("details").GetProperty("field").GetString());
+            Assert.False(error.GetProperty("details").GetProperty("allowed").GetBoolean());
+            Assert.Equal(0, activeWindowCallCount);
+            Assert.Equal(0, provider.CallCount);
+            Assert.Equal(0, tray.RequestConfirmationCallCount);
+            Assert.Equal(0, tray.RequestRegionSelectionCallCount);
+            Assert.Empty(_engine!._recs);
+            Assert.Empty(_engine._confs);
+            Assert.DoesNotContain(_audit!.Events, e => e.Event == "confirmation.created");
             Assert.False(_backend.StartCalled);
         }
         finally
@@ -584,7 +635,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"selected_region\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -613,7 +664,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"last_region\"},\"audio\":{\"microphone\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(404, (int)response.StatusCode);
+            await AssertStatusAsync(response, 404);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -644,7 +695,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(503, (int)response.StatusCode);
+            await AssertStatusAsync(response, 503);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -677,13 +728,15 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
             Assert.Equal("requires_user_confirmation", doc.RootElement.GetProperty("data").GetProperty("status").GetString());
             Assert.False(_backend.StartCalled);
             Assert.Contains(_audit!.Events, e => e.Event == "confirmation.created");
+            Assert.Equal(1, _helperProbeCalls);
+            Assert.Equal(1, tray.RequestConfirmationCallCount);
         }
         finally
         {
@@ -709,7 +762,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings/quick",
                 JsonContent("{\"target\":{\"type\":\"primary_display\"},\"audio\":{\"system_audio\":{\"enabled\":true}},\"duration_seconds\":60}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);
@@ -718,6 +771,8 @@ public class ConsentInvariantTests : IDisposable
             Assert.False(_backend.StartCalled);
             Assert.Contains(_audit!.Events, e => e.Event == "confirmation.created");
             Assert.Equal(0, tray.RequestRegionSelectionCallCount);
+            Assert.Equal(1, _helperProbeCalls);
+            Assert.Equal(1, tray.RequestConfirmationCallCount);
         }
         finally
         {
@@ -744,7 +799,7 @@ public class ConsentInvariantTests : IDisposable
             var response = await client.PostAsync(
                 $"http://127.0.0.1:{ApiServer.Port}/api/v1/recordings",
                 JsonContent("{\"source\":{\"type\":\"display\",\"display_id\":\"display_1\"},\"stop_condition\":{\"type\":\"duration\",\"seconds\":60}}"));
-            Assert.Equal(200, (int)response.StatusCode);
+            await AssertStatusAsync(response, 200);
 
             var body = await response.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(body);

@@ -1,6 +1,6 @@
 # Agent Recorder API 手册
 
-> 本文适用于 v0.1.22。所有新视频仅交付视频；使用旧版时，以运行实例的 capabilities 为准。
+> 本文适用于 v0.1.23。所有新视频仅交付视频；使用旧版时，以运行实例的 capabilities 为准。
 
 普通 raw/quick 请求省略 artifacts、artifacts={} 或 artifacts.bundle=false 均交付视频。显式 true 在来源/设备解析、选区、确认和文件动作前返回 400 UNSUPPORTED_FEATURE，details.field=artifacts.bundle、reason=bundle_generation_disabled。其他模式原本不允许 artifacts 的限制不变。
 
@@ -12,7 +12,7 @@ capabilities.recording_artifacts 为 modes=[mp4_only]、default_bundle=false、b
 
 Bundle附件身份保护（V45引入）：原 `shared_publication_identity` 批量查询增加 Bundle 附件持久身份，完整二进制 tuple 命中即保护，不排除同 recording_id 的不同产物角色，不按父状态、日期、session 或页水位过滤，不返回外来字段。SQLite V45 只增附件反向索引及回执，旧迁移不变；缺坏结构失败关闭。预览命中不做文件探针，删除前 Guard 在自己的事务重新查询；不扩大本地批准或删除权限，不代表完整引用图。
 
-本文描述 v0.1.22（SQLite V51）的 HTTP 合同。本包的 1–30 秒普通视频用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。长录制、高级场景或不支持该命令的旧包走 HTTP，直接调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
+本文描述 v0.1.23（SQLite V51）的 HTTP 合同。本包的 1–30 秒普通视频用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。长录制、高级场景或不支持该命令的旧包走 HTTP，直接调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 

@@ -1,6 +1,6 @@
 # Agent Recorder API
 
-This reference describes v0.1.22 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
+This reference describes v0.1.23 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
 
 All new video recordings deliver video only. Ordinary raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` requests may omit `artifacts`, use `{}`, or send `{"artifacts":{"bundle":false}}`. Explicit true returns `400 UNSUPPORTED_FEATURE`, with `details.field=artifacts.bundle` and `details.reason=bundle_generation_disabled`, before device/source/selection/confirmation or file work. No additional natural-language instruction is needed to obtain this default. The effective false value appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a locally approved output-directory change.
 
