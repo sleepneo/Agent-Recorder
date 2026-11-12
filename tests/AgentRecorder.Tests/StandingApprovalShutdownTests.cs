@@ -11,9 +11,9 @@ public sealed class StandingApprovalShutdownTests
     [Fact]
     public async Task RealCliStaysBusyAfterExpiryUntilNativeOwnerActuallyRetiresThenExitsBoundPrivateHost()
     {
-        var flavor = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Parent!.Name;
-        var source = Path.Combine(TestHelper.ProjectRoot, "tests", "AgentRecorder.FutureWindowUiTestHost", "bin", flavor, "Release", "net8.0-windows10.0.19041.0");
-        var cli = Path.Combine(TestHelper.ProjectRoot, "tools", "AgentRecorder.Cli", "bin", flavor, "Release", "net8.0-windows10.0.19041.0", "AgentRecorder.Cli.exe");
+        var executables = ShutdownTestExecutables.Current();
+        var source = executables.OutputDirectory;
+        var cli = executables.Cli;
         var root = Path.Combine(Path.GetTempPath(), "standing-shutdown-" + Guid.NewGuid().ToString("N"));
         var files = Path.Combine(root, "private-bin"); Directory.CreateDirectory(files);
         foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
@@ -21,7 +21,7 @@ public sealed class StandingApprovalShutdownTests
             var target = Path.Combine(files, Path.GetRelativePath(source, file)); Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             File.Copy(file, target);
         }
-        var app = Path.Combine(files, "AgentRecorder.Headless.exe"); File.Copy(Path.Combine(source, "AgentRecorder.FutureWindowUiTestHost.exe"), app);
+        var app = Path.Combine(files, "AgentRecorder.Headless.exe"); File.Copy(executables.Host, app, overwrite: true);
         using var child = Process.Start(new ProcessStartInfo(app) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
             ArgumentList = { root, "standing-shutdown" } })!;
         _ = child.Handle;

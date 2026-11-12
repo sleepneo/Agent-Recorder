@@ -382,6 +382,7 @@ public sealed partial class ApiServer
     private async Task HandleClient(TcpClient client)
     {
         var reqId = "req_" + Guid.NewGuid().ToString("N")[..12];
+        LongWaitLease? longWait = null;
         try
         {
             using var stream = ClientStreamForTests?.Invoke(client.GetStream()) ?? client.GetStream();
@@ -423,6 +424,7 @@ public sealed partial class ApiServer
                     _engine.HostAdmission.TryEnter("request_in_flight");
                 if (!shutdown && admission is null)
                     throw new ApiException(503, "HOST_SHUTTING_DOWN", "Host work admission is closed.");
+                longWait = AdmitLongWait(request);
                 using var requestCancellation=CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
                 var disconnect=(path==Prefix+"/retention/preview" && request.Query.ContainsKey("keep_latest_count") || IsRetentionEvaluationPath(path)||IsBatchDeletionPath(path)||IsDeletionPath(path)||IsRetentionStoragePath(path)||retentionStaging||retentionUsage||retentionReconciliation||method=="GET" && IsArtifactCheckPath(path) || method=="POST" && IsMediaVerificationPath(path))?MonitorArtifactDisconnect(client,requestCancellation):Task.CompletedTask;
                 string responseBody; int status; Dictionary<string,string> responseHeaders;
@@ -451,6 +453,17 @@ public sealed partial class ApiServer
                         responseBody = await ReadRetentionReconciliationAsync(request, reqId, requestCancellation.Token);
                         status = 200;
                         responseHeaders = new(StringComparer.OrdinalIgnoreCase);
+                    }
+                    else if (longWait is not null)
+                    {
+                        // Existing waits are synchronous. At most 24 dedicated workers
+                        // keep them off the shared pool used by short control requests.
+                        // Await real completion, including cancellation-ignoring work.
+                        (responseBody, status, responseHeaders) = await Task.Factory.StartNew(() =>
+                        {
+                            var response = Route(method, path, request, body, reqId, out var code, out var headers, requestCancellation.Token);
+                            return (response, code, headers);
+                        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                     }
                     else responseBody = Route(method, path, request, body, reqId, out status, out responseHeaders, requestCancellation.Token);
                 }
@@ -482,6 +495,7 @@ public sealed partial class ApiServer
         finally
         {
             try { client.Dispose(); } catch { }
+            longWait?.Dispose();
         }
     }
 

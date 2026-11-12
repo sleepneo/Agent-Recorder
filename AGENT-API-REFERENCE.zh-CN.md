@@ -1,6 +1,6 @@
 # Agent Recorder API 手册
 
-> 本文适用于 v0.1.24。所有新视频仅交付视频；使用旧版时，以运行实例的 capabilities 为准。
+> 本文适用于 v0.1.25。所有新视频仅交付视频；使用旧版时，以运行实例的 capabilities 为准。
 
 普通 raw/quick 请求省略 artifacts、artifacts={} 或 artifacts.bundle=false 均交付视频。显式 true 在来源/设备解析、选区、确认和文件动作前返回 400 UNSUPPORTED_FEATURE，details.field=artifacts.bundle、reason=bundle_generation_disabled。其他模式原本不允许 artifacts 的限制不变。
 
@@ -12,7 +12,7 @@ capabilities.recording_artifacts 为 modes=[mp4_only]、default_bundle=false、b
 
 Bundle附件身份保护（V45引入）：原 `shared_publication_identity` 批量查询增加 Bundle 附件持久身份，完整二进制 tuple 命中即保护，不排除同 recording_id 的不同产物角色，不按父状态、日期、session 或页水位过滤，不返回外来字段。SQLite V45 只增附件反向索引及回执，旧迁移不变；缺坏结构失败关闭。预览命中不做文件探针，删除前 Guard 在自己的事务重新查询；不扩大本地批准或删除权限，不代表完整引用图。
 
-本文描述 v0.1.24（SQLite V51）的 HTTP 合同。本包的 1–30 秒普通视频用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。长录制、高级场景或不支持该命令的旧包走 HTTP，直接调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
+本文描述 v0.1.25（SQLite V51）的 HTTP 合同。本包的 1–30 秒普通视频用[单次调用 CLI](AGENT-INSTRUCTIONS.zh-CN.md#单次调用短录制)，仍走相同 quick API 和本地批准。长录制、高级场景或不支持该命令的旧包走 HTTP，直接调用前读取当前实例 `/capabilities`；主视频与附件核验共享宿主单 worker，单项删除使用独立本机授权合同。
 
 本文档给本地 AI agent 使用。**常见录制意图优先使用 quick API**（`POST /recordings/quick`），复杂或精确控制场景使用原始 HTTP API 编排。
 
@@ -55,6 +55,12 @@ Bundle附件身份保护（V45引入）：原 `shared_publication_identity` 批�
   "request_id": "req_xxx"
 }
 ```
+
+## 长等待容量
+
+自 v0.1.25 起，总连接上限保持为 32，其中最多 24 个连接用于可能长等待的请求，其余 8 个不被该类等待占用。共享覆盖确认/录制 GET 的正数 `wait_ms` + 非空 `since_status`，以及 standing、recurring、required-once 三类 setup GET 的正数 `wait_ms` + `since_status`、`since_status_version` 或 `since_version`。普通不等待 GET 不占此额度。
+
+`POST /recordings`、`POST /recordings/quick`（含 `wait_for=recording`）及 `POST /region-selections`、`POST /regions/select` 也共享额度，因为未指定 `wait_for` 时仍可能等待交互选区。鉴权后、创建/选区副作用前非阻塞准入；满额立即用现有 JSON 错误格式返回 `429 WAIT_CAPACITY_EXCEEDED`，不排队、不开始操作。**仅只读轮询可延迟重试**；带副作用请求继续遵循各自幂等和未知提交合同，不自动重新提交。名额保留到请求/响应写实际退休，不因外层超时冒充释放。该有界保护针对合法等待挤占，不保证任意连接洪泛下停止绝对可达。
 
 ## 按需只读健康快照
 

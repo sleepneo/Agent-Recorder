@@ -12,19 +12,16 @@ public sealed class PrivateHostShutdownTests
     [Fact]
     public async Task RealCliWaitsForPrivateProcessReadyAndMutexRetirementThenEnsureDecisionAllowsRestart()
     {
-        var repo = new DirectoryInfo(AppContext.BaseDirectory);
-        while (repo is not null && !File.Exists(Path.Combine(repo.FullName, "AgentRecorder.sln"))) repo = repo.Parent;
-        Assert.NotNull(repo);
-        var outputFlavor = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Parent!.Name;
-        var root = Path.Combine(repo.FullName, ".local-data", "temp", outputFlavor.ToLowerInvariant(), "child-" + Guid.NewGuid().ToString("N"));
+        var executables = ShutdownTestExecutables.Current();
+        var root = Path.Combine(Path.GetTempPath(), "private-host-" + Guid.NewGuid().ToString("N"));
         var files = Path.Combine(root, "private-bin");
         Directory.CreateDirectory(files);
-        var source = Path.Combine(repo.FullName, "tests", "AgentRecorder.FutureWindowUiTestHost", "bin", outputFlavor, "Release", "net8.0-windows10.0.19041.0");
+        var source = executables.OutputDirectory;
         foreach (var file in Directory.GetFiles(source)) File.Copy(file, Path.Combine(files, Path.GetFileName(file)), true);
         var app = Path.Combine(files, "AgentRecorder.Headless.exe");
         File.Copy(Path.Combine(source, "AgentRecorder.FutureWindowUiTestHost.exe"), app, true);
         var readyPath = Path.Combine(root, "runtime", "ready.json");
-        var cli = Path.Combine(repo.FullName, "tools", "AgentRecorder.Cli", "bin", outputFlavor, "Release", "net8.0-windows10.0.19041.0", "AgentRecorder.Cli.exe");
+        var cli = executables.Cli;
         string? previousNonce = null;
         for (int run = 0; run < 2; run++)
         {

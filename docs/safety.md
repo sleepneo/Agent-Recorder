@@ -1,6 +1,6 @@
 # Agent Recorder Safety Model
 
-This document describes v0.1.24 (SQLite V51). See [the API reference](api.md)
+This document describes v0.1.25 (SQLite V51). See [the API reference](api.md)
 for endpoint contracts. Inspect live capabilities when using an older package.
 
 ## Current delivery and legacy compatibility

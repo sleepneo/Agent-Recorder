@@ -98,6 +98,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
     }
 
     private string? _dataDir;
+    private readonly string? _previousDataDir = Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR");
     private ApiServer? _server;
     private RecordingEngine? _engine;
 
@@ -437,7 +438,7 @@ public sealed class CreationRecordingWaitTests : IDisposable
                 Directory.Delete(_dataDir, recursive: true);
         }
         catch { }
-        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", null);
+        Environment.SetEnvironmentVariable("AGENT_RECORDER_DATA_DIR", _previousDataDir);
         ApiKeyAuth.ResetForTesting(null);
     }
 }

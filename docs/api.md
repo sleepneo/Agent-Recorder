@@ -1,6 +1,6 @@
 # Agent Recorder API
 
-This reference describes v0.1.24 (SQLite V51), including bounded HTTP ingress and authorization-recovery hardening. Inspect `/capabilities` before using an older package. Recovery boundaries and validation scope are documented in [the safety model](safety.md#authorization-durability-and-recovery-boundaries).
+This reference describes v0.1.25 (SQLite V51), including bounded HTTP ingress, shared long-wait capacity and authorization-recovery hardening. Inspect `/capabilities` before using an older package. Recovery boundaries and validation scope are documented in [the safety model](safety.md#authorization-durability-and-recovery-boundaries).
 
 All new video recordings deliver video only. Ordinary raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` requests may omit `artifacts`, use `{}`, or send `{"artifacts":{"bundle":false}}`. Explicit true returns `400 UNSUPPORTED_FEATURE`, with `details.field=artifacts.bundle` and `details.reason=bundle_generation_disabled`, before device/source/selection/confirmation or file work. No additional natural-language instruction is needed to obtain this default. The effective false value appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a locally approved output-directory change.
 
@@ -55,6 +55,24 @@ return `413 PAYLOAD_TOO_LARGE`, and reads exceeding the deadline return
 `408 REQUEST_TIMEOUT`. Strict retention endpoints retain their structured
 `400 INVALID_ARGUMENT` contracts once their request path is identified. A failed
 send, disconnected peer or stopping service may close the connection directly.
+
+**Since v0.1.25:** up to 24 of the
+32 connections may hold wait-capable requests, leaving eight outside that class.
+The shared allowance covers confirmation/recording GETs with positive `wait_ms`
+and nonempty `since_status`, and all three plan-setup GET kinds with positive
+`wait_ms` plus `since_status`, `since_status_version` or `since_version`.
+Recording creation (`POST /recordings` and `/recordings/quick`, including
+`wait_for=recording`) and the two selection routes (`POST /region-selections`,
+`POST /regions/select`) also share it because interactive selection can block
+even without `wait_for`. Ordinary non-waiting GETs do not consume this allowance.
+Admission follows authentication and precedes creation/selection side effects.
+An excess request promptly receives `429 WAIT_CAPACITY_EXCEEDED` in the normal
+error envelope, without starting an operation or queueing for a slot. Only
+read-only polling may delay and retry; mutating requests must continue to follow
+their existing idempotency and unknown-submission rules, with no automatic
+resubmission. A slot remains held until actual request/write retirement. This
+bounded protection prevents legitimate waits from exhausting the connection
+limit; it does not guarantee stop availability under arbitrary connection floods.
 
 Success:
 

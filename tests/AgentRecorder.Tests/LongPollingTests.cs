@@ -576,17 +576,17 @@ public class LongPollingTests : IDisposable
     {
         using var server = new TestApiServer(_engine, _audit, _tray);
         server.Start();
-        await Task.Delay(100);
 
         var conf = new Confirmation { RecordingId = "test_rec_api_001" };
         conf.Status = "approved";
         _engine._confs[conf.Id] = conf;
 
-        var url = $"http://localhost:37891/api/v1/confirmations/{conf.Id}?wait_ms=1000&since_status=pending";
+        var url = $"http://127.0.0.1:{server.Port}/api/v1/confirmations/{conf.Id}?wait_ms=1000&since_status=pending";
         var apiKey = ApiKeyAuth.CurrentApiKey;
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("X-Agent-Recorder-Key", apiKey);
-        var response = await new HttpClient().SendAsync(request);
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false });
+        using var response = await client.SendAsync(request);
 
         var body = await response.Content.ReadAsStringAsync();
         var json = JsonNode.Parse(body)!["data"]!;
@@ -603,16 +603,16 @@ public class LongPollingTests : IDisposable
     {
         using var server = new TestApiServer(_engine, _audit, _tray);
         server.Start();
-        await Task.Delay(100);
 
         var rec = CreateRecording(RecState.completed);
         _engine._recs[rec.Id] = rec;
 
-        var url = $"http://localhost:37891/api/v1/recordings/{rec.Id}?wait_ms=1000&since_status=recording";
+        var url = $"http://127.0.0.1:{server.Port}/api/v1/recordings/{rec.Id}?wait_ms=1000&since_status=recording";
         var apiKey = ApiKeyAuth.CurrentApiKey;
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("X-Agent-Recorder-Key", apiKey);
-        var response = await new HttpClient().SendAsync(request);
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false });
+        using var response = await client.SendAsync(request);
 
         var body = await response.Content.ReadAsStringAsync();
         var json = JsonNode.Parse(body)!["data"]!;
@@ -629,17 +629,17 @@ public class LongPollingTests : IDisposable
     {
         using var server = new TestApiServer(_engine, _audit, _tray);
         server.Start();
-        await Task.Delay(100);
 
         var conf = new Confirmation { RecordingId = "test_rec_api_002" };
         conf.Status = "pending";
         _engine._confs[conf.Id] = conf;
 
-        var url = $"http://localhost:37891/api/v1/confirmations/{conf.Id}?wait_ms=200&since_status=pending";
+        var url = $"http://127.0.0.1:{server.Port}/api/v1/confirmations/{conf.Id}?wait_ms=200&since_status=pending";
         var apiKey = ApiKeyAuth.CurrentApiKey;
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("X-Agent-Recorder-Key", apiKey);
-        var response = await new HttpClient().SendAsync(request);
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false });
+        using var response = await client.SendAsync(request);
 
         var body = await response.Content.ReadAsStringAsync();
         var json = JsonNode.Parse(body)!["data"]!;
@@ -656,16 +656,16 @@ public class LongPollingTests : IDisposable
     {
         using var server = new TestApiServer(_engine, _audit, _tray);
         server.Start();
-        await Task.Delay(100);
 
         var rec = CreateRecording(RecState.recording);
         _engine._recs[rec.Id] = rec;
 
-        var url = $"http://localhost:37891/api/v1/recordings/{rec.Id}?wait_ms=200&since_status=recording";
+        var url = $"http://127.0.0.1:{server.Port}/api/v1/recordings/{rec.Id}?wait_ms=200&since_status=recording";
         var apiKey = ApiKeyAuth.CurrentApiKey;
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("X-Agent-Recorder-Key", apiKey);
-        var response = await new HttpClient().SendAsync(request);
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false });
+        using var response = await client.SendAsync(request);
 
         var body = await response.Content.ReadAsStringAsync();
         var json = JsonNode.Parse(body)!["data"]!;
@@ -736,10 +736,11 @@ internal class TestApiServer : IDisposable
 
     public TestApiServer(RecordingEngine engine, AuditLogger audit, ITrayContext tray)
     {
-        _server = new AgentRecorder.Api.ApiServer(engine, audit, tray);
+        _server = new AgentRecorder.Api.ApiServer(engine, audit, tray, null, null, null, null, null, null, null, null, null, 0);
     }
 
     public void Start() => _server.Start();
+    public int Port => _server.BoundPort;
     public void Stop() => _server.Stop();
     public void Dispose() => Stop();
 }

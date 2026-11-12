@@ -10,6 +10,9 @@ public sealed partial class ApiServer
     internal const int MaximumHeaderBytes = 64 * 1024; // Includes CRLF CRLF.
     internal const int MaximumBodyBytes = 1024 * 1024;
     internal const int MaximumAdmittedClients = 32;
+    internal const int MaximumLongWaitClients = 24;
+    private int _activeLongWaitClients;
+    internal int ActiveLongWaitCountForTests => Volatile.Read(ref _activeLongWaitClients);
     internal static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan ResponseWriteTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan StrictBodyReadTimeout = TimeSpan.FromSeconds(3);
@@ -23,6 +26,68 @@ public sealed partial class ApiServer
     internal Func<Stream, Stream>? ClientStreamForTests { get; set; }
     internal int ActiveClientCountForTests { get { lock (_clientTaskGate) return _activeClients.Count; } }
     internal int ClientTaskCountForTests { get { lock (_clientTaskGate) return _clientTasks.Count; } }
+
+    // Only restrict routes which can synchronously hold a request. This is not
+    // a privileged control lane: every connection still uses the global quota,
+    // parser, authentication, host admission, and normal business validation.
+    private LongWaitLease? AdmitLongWait(HttpRequest request)
+    {
+        if (!MayHoldLongWait(request)) return null;
+        while (true)
+        {
+            var count = Volatile.Read(ref _activeLongWaitClients);
+            if (count >= MaximumLongWaitClients)
+                throw new ApiException(429, "WAIT_CAPACITY_EXCEEDED", "Concurrent wait capacity is exhausted; no operation was started.",
+                    new { maximum_wait_requests = MaximumLongWaitClients });
+            if (Interlocked.CompareExchange(ref _activeLongWaitClients, count + 1, count) == count)
+                return new LongWaitLease(this);
+        }
+    }
+
+    private static bool MayHoldLongWait(HttpRequest request)
+    {
+        if (!request.Path.StartsWith(Prefix, StringComparison.Ordinal)) return false;
+        var sub = request.Path[Prefix.Length..];
+        if (request.Method == "POST")
+        {
+            // Creation may wait for interactive selection even without wait_for.
+            // Reserve before any creation/selection side effects, not in ApplyCreationWait.
+            if (sub is "/recordings" or "/recordings/quick")
+            {
+                _ = ParseCreationWaitMs(request.Query);
+                return true;
+            }
+            return sub is "/region-selections" or "/regions/select";
+        }
+        if (request.Method != "GET") return false;
+        var segments = sub.Trim('/').Split('/'); // Same route shape as Route.
+        if ((segments.Length >= 2 && segments[0] == "confirmations") ||
+            (segments.Length == 2 && segments[0] == "recordings"))
+            return ParseWaitMs(request.Query.GetValueOrDefault("wait_ms")) > 0 &&
+                !string.IsNullOrEmpty(request.Query.GetValueOrDefault("since_status"));
+        if (segments.Length == 2 && segments[0] == "plan-setups")
+        {
+            var id = segments[1];
+            var recurring = id.StartsWith("recurring-setup-", StringComparison.Ordinal);
+            var required = id.StartsWith("required-once-setup-", StringComparison.Ordinal);
+            if (!recurring && !required && !id.StartsWith("standing-setup-", StringComparison.Ordinal)) return false;
+            var wait = ParsePlanSetupWaitMs(request.Query.GetValueOrDefault("wait_ms"));
+            var version = ParsePlanSetupSinceVersion(request.Query.GetValueOrDefault("since_status_version") ??
+                request.Query.GetValueOrDefault("since_version"), recurring, required);
+            return wait > 0 && (request.Query.GetValueOrDefault("since_status") is not null || version is not null);
+        }
+        return false;
+    }
+
+    private sealed class LongWaitLease(ApiServer owner) : IDisposable
+    {
+        private ApiServer? _owner = owner;
+        public void Dispose()
+        {
+            var server = Interlocked.Exchange(ref _owner, null);
+            if (server is not null) Interlocked.Decrement(ref server._activeLongWaitClients);
+        }
+    }
 
     private static TimeSpan IoBudget(TimeSpan requested, TimeSpan maximum) =>
         requested > TimeSpan.Zero && requested < maximum ? requested : maximum;
