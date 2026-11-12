@@ -220,7 +220,7 @@ internal sealed class SystemQueryRecurringOccurrenceEnvironmentProvider : IRecur
         return new StandingLeaseExecutionEnvironment(
             request.TrustedNowUtc,
             ReadCurrentUserSid(),
-            CaptureAuthorizationSessionBinding.Current,
+            CaptureAuthorizationSessionBinding.Persistent,
             IsCurrentProcessOnInteractiveDesktop(),
             displays,
             topologyDigest,
@@ -291,7 +291,7 @@ internal sealed class SystemQueryStandingLeaseExecutionEnvironmentProvider : ISt
         return new StandingLeaseExecutionEnvironment(
             DateTimeOffset.UtcNow,
             ReadCurrentUserSid(),
-            CaptureAuthorizationSessionBinding.Current,
+            CaptureAuthorizationSessionBinding.Persistent,
             IsCurrentProcessOnInteractiveDesktop(),
             displays,
             topologyDigest,

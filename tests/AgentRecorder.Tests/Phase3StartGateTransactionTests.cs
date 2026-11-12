@@ -16,6 +16,58 @@ namespace AgentRecorder.Tests;
 public sealed class Phase3StartGateTransactionTests
 {
     [Fact]
+    public void FullIsVerifiedBeforeBeginAndCommittedReceiptLossNeverReissuesProofAfterReopen()
+    {
+        using var database = new TemporaryDatabase();
+        var request = database.CreateRequest();
+        var policyChecks = 0;
+        database.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA synchronous=FULL; PRAGMA synchronous;";
+            Assert.Equal(2L, command.ExecuteScalar()); // setting it inside BEGIN would fail
+            policyChecks++;
+        };
+        database.Gate.BeforeCommitForTests = (connection, transaction) =>
+        {
+            using var command = connection.CreateCommand(); command.Transaction = transaction;
+            command.CommandText = "PRAGMA synchronous;";
+            Assert.Equal(2L, command.ExecuteScalar());
+            using var read = database.Store.OpenReadOnlyConnection();
+            using var before = read.CreateCommand(); before.CommandText = "SELECT COUNT(*) FROM recording_runs;";
+            Assert.Equal(0L, before.ExecuteScalar());
+        };
+        database.Gate.AfterCommitForTests = () => throw new IOException("receipt lost after commit");
+        Assert.Throws<Phase3PersistenceException>(() => database.Gate.Commit(request));
+        var reopened = new SqliteOperationalStore(database.Store.DatabasePath);
+        Assert.Equal(RecordingRunStatus.StartCommitted, new SqliteRecordingRunRepository(reopened).Get(request.RunId).Status);
+        var replay = new SqlitePhase3StartGateTransaction(reopened).Commit(request);
+        Assert.Equal(Phase3StartGateCommitStatus.AlreadyCommitted, replay.Status);
+        Assert.Null(replay.FirstCommitProof);
+        Assert.Equal(1, policyChecks);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void PolicyFailureOrCommitOnRolledBackTransactionCannotPublishProof(bool policyFailure)
+    {
+        using var database = new TemporaryDatabase();
+        var request = database.CreateRequest();
+        if (policyFailure) database.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            using var command = connection.CreateCommand(); command.CommandText = "PRAGMA synchronous=NORMAL;"; command.ExecuteNonQuery();
+        };
+        else database.Gate.BeforeCommitForTests = (_, transaction) => transaction.Rollback();
+        Assert.ThrowsAny<Exception>(() => database.Gate.Commit(request));
+        var reopened = new SqliteOperationalStore(database.Store.DatabasePath);
+        using var read = reopened.OpenReadOnlyConnection();
+        using var count = read.CreateCommand(); count.CommandText = "SELECT COUNT(*) FROM recording_runs;";
+        Assert.Equal(0L, count.ExecuteScalar());
+        Assert.Equal(ConsentLeaseStatus.Active, new SqliteConsentLeaseRepository(reopened).Get(request.LeaseId).Status);
+    }
+
+    [Fact]
     public void HappyPathCommitsAllFourPiecesOfEvidenceAtomically()
     {
         using var database = new TemporaryDatabase();
@@ -1326,7 +1378,7 @@ public sealed class Phase3StartGateTransactionTests
     {
         using var database = new TemporaryDatabase(
             scopeDuration: TimeSpan.FromSeconds(20),
-            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
         Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
 
@@ -1392,7 +1444,7 @@ public sealed class Phase3StartGateTransactionTests
     {
         using var database = new TemporaryDatabase(
             scopeDuration: TimeSpan.FromSeconds(20),
-            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
         Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
 
@@ -1452,7 +1504,7 @@ public sealed class Phase3StartGateTransactionTests
     {
         using var database = new TemporaryDatabase(
             scopeDuration: TimeSpan.FromSeconds(20),
-            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
         Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
 
@@ -1509,7 +1561,7 @@ public sealed class Phase3StartGateTransactionTests
     {
         using var database = new TemporaryDatabase(
             scopeDuration: TimeSpan.FromSeconds(20),
-            scopeSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            scopeSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var (_, _, specification, ticket) = CreateStandingAuthorizationAndSpecification(database);
         Assert.True(ticket.TryClaim(out var claimFailure), claimFailure);
 

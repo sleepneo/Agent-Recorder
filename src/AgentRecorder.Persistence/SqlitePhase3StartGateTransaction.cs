@@ -11,6 +11,8 @@ namespace AgentRecorder.Persistence;
 /// </summary>
 public sealed class SqlitePhase3StartGateTransaction : SqliteRepositoryBase, IPhase3StartGateTransaction
 {
+    internal Action<SqliteConnection, SqliteTransaction>? BeforeCommitForTests { get; set; }
+    internal Action? AfterCommitForTests { get; set; }
     private const string PlanColumns = "id, is_one_time, status_code, created_at_utc, updated_at_utc, version";
     private const string OccurrenceColumns = "id, plan_id, status_code, window_start_utc, window_end_utc, run_id, terminal_reason_code, created_at_utc, updated_at_utc, version";
     private const string RunColumns = "id, occurrence_id, status_code, has_crossed_start_commit, media_artifact_id, bundle_id, terminal_reason_code, created_at_utc, updated_at_utc, version";
@@ -27,6 +29,7 @@ public sealed class SqlitePhase3StartGateTransaction : SqliteRepositoryBase, IPh
         var input = ValidateRequest(request);
         using var connection = OpenBusinessConnection();
         SqliteTransaction? transaction = null;
+        var commitAttempted = false;
 
         try
         {
@@ -137,7 +140,10 @@ public sealed class SqlitePhase3StartGateTransaction : SqliteRepositoryBase, IPh
             UpdateLease(connection, transaction, lease, input.ExpectedLeaseVersion);
             InsertUse(connection, transaction, use);
 
+            BeforeCommitForTests?.Invoke(connection, transaction);
+            commitAttempted = true;
             transaction.Commit();
+            AfterCommitForTests?.Invoke();
             var firstCommitProof = CaptureAuthorizationProofIssuer.IssueStandingLeaseUse(
                 new StandingLeaseUseProofIssuanceReceipt(
                     plan,
@@ -154,6 +160,26 @@ public sealed class SqlitePhase3StartGateTransaction : SqliteRepositoryBase, IPh
             {
                 FirstCommitProof = firstCommitProof,
             };
+        }
+        catch (Exception exception) when (commitAttempted)
+        {
+            // A missing receipt is not evidence of rollback. Close the original
+            // transaction before observing durable state through a fresh reader.
+            try { transaction?.Dispose(); } catch { }
+            transaction = null;
+            var observedCommitted = false;
+            try
+            {
+                using var read = Store.OpenReadOnlyConnection();
+                using var check = read.CreateCommand();
+                check.CommandText = "SELECT has_crossed_start_commit FROM recording_runs WHERE id=$run AND occurrence_id=$occurrence;";
+                Add(check, "$run", input.RunId); Add(check, "$occurrence", input.OccurrenceId);
+                observedCommitted = check.ExecuteScalar() is long crossed && crossed == 1;
+            }
+            catch { /* No proof and no retry when durable state is unavailable. */ }
+            throw new Phase3PersistenceException(observedCommitted
+                ? "start_committed_proof_unavailable" : "start_commit_outcome_unknown",
+                "The start receipt could not be delivered; capture remains closed.", exception);
         }
         catch (Phase3PersistenceException)
         {

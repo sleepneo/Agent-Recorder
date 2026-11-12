@@ -90,7 +90,9 @@ internal sealed class RequiredOncePlanSetupCoordinator : IRequiredOncePlanSetupG
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposeRequested) != 0, this);
         ArgumentNullException.ThrowIfNull(request);
         var principal = ReadPrincipal();
-        if (principal is null || !SafeUiAvailable())
+        if (principal is null)
+            return Result(RequiredOncePlanSetupWriteStatus.Rejected, null, "authorization_identity_unavailable");
+        if (!SafeUiAvailable())
             return Result(RequiredOncePlanSetupWriteStatus.Rejected, null, "interactive_desktop_unavailable");
 
         var now = TrustedNow();
@@ -535,7 +537,7 @@ internal sealed class RequiredOncePlanSetupCoordinator : IRequiredOncePlanSetupG
         {
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User?.Value;
-            var session = CaptureAuthorizationSessionBinding.Current;
+            var session = CaptureAuthorizationSessionBinding.Persistent;
             return string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session) ? null : new(sid, session);
         }
         catch { return null; }

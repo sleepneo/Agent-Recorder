@@ -358,7 +358,7 @@ internal static class Program
         var perfSummaryProvider = new RollingJsonlPerformanceSummaryProvider(_dataDir);
         var unifiedHistoryQuery = new UnifiedHistoryQueryService(operationalStore, ordinaryRecordingHistory, ordinaryOnly: true);
         Func<(string Sid, string Session)> historyIdentity = () => (System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty,
-            CaptureAuthorizationSessionBinding.Current);
+            CaptureAuthorizationSessionBinding.History);
         var server = new ApiServer(engine, audit, tray, _readiness, autoStart, ffmpegPrewarmer, perfTracer, ensureContextStore, perfSummaryProvider,
             unifiedHistoryGateway: new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity),
             retentionEvaluationGateway: CreateRetentionEvaluationGateway(unifiedHistoryQuery,_dataDir,engine,historyIdentity),

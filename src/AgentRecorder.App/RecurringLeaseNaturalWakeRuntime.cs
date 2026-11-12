@@ -74,7 +74,7 @@ internal sealed class RecurringLeaseNaturalWakeRuntime : IDisposable
         _utcNow = utcNowForTest ?? (() => DateTimeOffset.UtcNow);
         _currentUserSid = currentUserSidForTest ?? (() => CurrentUserSid());
         _sessionBinding = sessionBindingForTest ??
-            new Func<string?>(() => CaptureAuthorizationSessionBinding.Current);
+            new Func<string?>(() => CaptureAuthorizationSessionBinding.Persistent);
         _registerSystemLifecycleSignalsForTest = registerSystemLifecycleSignalsForTest;
         _advancement = advancementRuntimeForTest ??
             new RecurringScheduleAdvancementRuntime(_store, _audit.Log);

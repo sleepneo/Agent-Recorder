@@ -17,6 +17,7 @@
     <InternalsVisibleTo Include="AgentRecorder.App" />
     <InternalsVisibleTo Include="AgentRecorder.Cli" />
     <InternalsVisibleTo Include="AgentRecorder.Tests" />
+    <InternalsVisibleTo Include="AgentRecorder.FutureWindowUiTestHost" />
     <InternalsVisibleTo Include="AgentRecorder.Persistence" />
   </ItemGroup>
 

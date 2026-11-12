@@ -1,10 +1,56 @@
 # Agent Recorder Safety Model
 
-New ordinary non-nested video requests can explicitly choose `artifacts.bundle=false` (raw and quick only); the default is true. The immutable creation policy is shown by the local confirmation and API configuration. Unsupported entry points and malformed policy fields reject before provider/UI/file work. Policy selection neither authorizes capture nor grants deletion.
+This document describes v0.1.24 (SQLite V51). See [the API reference](api.md)
+for endpoint contracts. Inspect live capabilities when using an older package.
 
-Media-only recordings retain formal main-MP4 validation, original publication identity, winner and durable not-applicable Bundle registration. They skip preparation/generation rather than deleting a newly generated Bundle, and do not manufacture a generation hash. The actual App generator and default five-file Bundle path stay installed. Existing Bundle protection and V1–44 schema definitions remain unchanged.
+## Current delivery and legacy compatibility
 
-Only a known production backend's actual output-settlement boundary can retire a completed media-only main-output claim. Read-only snapshots and deletion preparation never prune claims; unknown backends, active cleanup and unproven settlement stay protected. This closes the new path without treating completion as resource retirement. Existing default Bundle recordings remain protected. Synthetic-input formal publishing/native tests do not establish real desktop capture or human approval acceptance.
+New video recordings deliver one MP4 by default. Ordinary raw and quick requests
+may omit `artifacts` or explicitly set `artifacts.bundle=false`; explicit true
+is rejected with `400 UNSUPPORTED_FEATURE` before selection, confirmation or
+capture. Other video entry points also deliver video only under their existing
+request schemas. App and Headless do not construct a Bundle generator for new
+recordings. New-recording chapter marks and the mark hotkey are unavailable;
+the marks endpoint returns `UNSUPPORTED_FEATURE`, not an accepted mark.
+Screenshot-series PNGs and their required manifest remain a separate contract.
+
+Historical Bundle files, marks, hashes, publication identities and reference
+protections remain readable and protected. The historical five-file format and
+its publishing implementation describe older results, not a selectable delivery
+mode for new requests. Do not rewrite those facts or delete attachments merely
+because new videos no longer generate them.
+
+MP4-only delivery retains formal main-media validation, original publication
+identity, terminal winner and durable `not_applicable` Bundle registration.
+Only a known production backend's actual output-settlement boundary can retire
+its main-output claim. Read-only snapshots and deletion preparation cannot
+prune claims; live or unknown work and historical Bundle references stay
+protected. Video delivery itself never grants deletion permission.
+
+## Authorization durability and recovery boundaries
+
+The operational store keeps WAL mode and verifies `synchronous=FULL` (2) on every writable connection before beginning a transaction, including approval, start consumption, revocation, Stop All, lifecycle and recovery writes. Read-only connections cannot initialize or write the store. Capture proofs are delivered only after a successful start commit; an existing or uncertain committed start never receives a replacement proof or automatic recording retry. A failed durable revocation is reported separately from physical stopping and never resumes capture to compensate for a database error.
+
+Persistent automatic grants use a versioned Windows login binding containing the process token's user SID, `TOKEN_STATISTICS.AuthenticationId`, token SessionId, and the Windows loader's `KUSER_SHARED_DATA.BootId` boot sequence. The native reader uses the Windows x64 shared-data layout and checks architecture, NT version, build and required fields. Unsupported platforms, failed checks, query failure, timeout or a busy prior query reject automatic authorization. Native cross-process identity reads have been validated on Windows build 26300 x64; other builds have not received a real-device matrix validation. Queries have one owner and a 250 ms caller deadline; successful identities are not cached across later failures. Ordinary interactive proofs have a separate process-local identity and do not grant persistent automatic permission.
+
+Within the same Windows login, restarting Recorder preserves the binding: unconsumed grants may recover only with their original complete authorization chain, window and safety checks. A different boot/login/user, an unavailable identity, or a legacy/unknown binding cannot resume an old automatic grant; fresh local approval is required. Persisted scopes and digests are not silently upgraded. Current-user safety diagnostics retain old grants with a binding-failure reason and permit revocation even when automatic recovery is unavailable. History and media are retained. Lock, sleep and wake retain their existing interruption and window-recheck rules; this adds no active wake or sleep-resume recording.
+
+FULL durability assumes the OS, filesystem and storage honor synchronous writes. It does not guarantee at-most-once capture after damaged storage, malicious database rollback, restoring an old backup, VM snapshots, or exhaustion/reset of the finite OS boot sequence. Validation uses isolated databases, fake capture backends, simulated boot/login changes and read-only native identity comparisons across processes. No power-loss or physical reboot experiment was performed.
+
+Sources: [SQLite synchronous](https://www.sqlite.org/pragma.html#pragma_synchronous), [Windows token statistics](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_statistics), [LUID lifetime](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-allocatelocallyuniqueid), [Windows shared boot sequence](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data).
+
+One-shot lease approval shows its text and actions before optional preview work.
+Display, decision and actual worker retirement are tracked separately; expiry
+or cancellation cannot approve a late result or release a still-owned worker.
+Plan status/history are same-user diagnostics, not execution authorization.
+They support both legacy diagnostic bindings and canonical login bindings;
+recurring history cursors accept only the defined occurrence-ID format.
+
+Independent validation covered bounded HTTP reads/writes, authorization
+transactions, simulated boot/login changes, approval retirement and real API
+pagination. A real silent fixed-region plan survived an application restart
+within the same Windows login and completed once. These results do not replace
+the storage assumptions above or establish every device/backend combination.
 
 Agent Recorder is designed for local AI-agent use. The agent may request a
 recording, but the local user remains in control of what is selected and which
@@ -15,6 +61,7 @@ bounded authorization permits recording to start.
 | Boundary | Implementation |
 | --- | --- |
 | Local-only API | Server binds to `127.0.0.1:37891` |
+| HTTP resources | Shared header/body byte limits, total read and separate write deadlines, and bounded admitted clients; see the API response-envelope section |
 | API key | State-changing and sensitive endpoints require `X-Agent-Recorder-Key` |
 | Local authorization | Ordinary recordings require per-run confirmation; one-shot and daily/weekly unattended plans each require local fixed-region selection and bounded lease approval |
 | Required one-time plans | Local fixed-region selection and creation approval do not authorize capture; a second local per-run confirmation is required when the plan is due |
@@ -106,7 +153,9 @@ Typical event categories:
 - confirmation created/approved/rejected/expired
 - region selection unavailable/cancelled/selected
 - FFmpeg prewarm status
-- chapter marks accepted during active recording; audit metadata excludes the label text
+
+Older logs may contain chapter-mark events; those are historical records and do
+not advertise a current marking capability.
 
 ## Performance Diagnostics
 
@@ -137,9 +186,8 @@ Context files are written using a random temp file in the same directory and ato
 - Let the user complete selection and confirmation locally.
 - Never call blocked HTTP approval/rejection endpoints.
 - Stop polling and report clearly if the user rejects or confirmation expires.
-- Report a chapter mark only after the marks API accepts it. The local
-  `Ctrl+Shift+F11` hotkey is registered only during active capture and does not
-  start, stop, approve, extend, or shorten a recording.
+- Do not request new chapter marks or use a mark hotkey; they are unsupported
+  for new recordings. Existing historical mark data is not recording permission.
 
 ## Known Limitations
 
@@ -224,8 +272,8 @@ or size changes therefore fail closed without creating capture output.
 
 The pre-capture countdown is per recording: `countdown_seconds` is an integer
 from `0` to `10` and defaults to `3`. During a positive countdown there is no
-screen capture, REC state, elapsed time, chapter-mark timeline, or global mark
-hotkey. The overlay is cleared before authorization/backend start, and the
+screen capture, REC state or elapsed time. The overlay is cleared before
+authorization/backend start, and the
 public start time is anchored to credible first-frame evidence. A zero value
 removes only the visible countdown phase; it does not bypass confirmation,
 preparation, preflight, authorization, or first-frame safety gates.
@@ -280,7 +328,9 @@ schedule, microphone, machine wake, concurrent unattended capture, or
 screen-rectangle fallback in this slice.
 
 The safety center's Stop All transaction revokes every pending, active, or
-consumed future-window grant scoped to the current Windows SID and session.
+consumed future-window grant owned by the current Windows SID, including grants
+from an older login binding. Ownership-only revocation never permits a start
+under that old binding.
 Disabling unattended mode likewise revokes those grants and stops an active
 future-window Run; reenabling does not restore a revoked grant. The durable
 global safety state is checked at one-use consumption and again under the same
@@ -323,8 +373,9 @@ Capacity accounting covers remaining writes, not bytes already copied. Ordinary
 audio mux inputs and output staging are Run-owned. Current engine output-path
 arbitration is not a cross-process filesystem lock or a disk quota.
 
-Successful media and Bundle generation are independent. The five-file Bundle
-producer publishes a held original-object set through a bounded NTFS/TxF
+For legacy Bundle-producing recordings, successful media publication and Bundle
+generation were independent. The retained five-file Bundle publishing implementation
+uses a held original-object set through a bounded NTFS/TxF
 directory transaction and does not change user ACLs. Unsupported transaction
 semantics fail the Bundle explicitly without weakening evidence or rolling back
 successful MP4 publication. This has been tested on local NTFS with process
@@ -388,7 +439,7 @@ BLOB batch in the original SQLite snapshot protects other saved references even
 at different paths/lengths. Only the candidate's own ordinary BINARY ID is excluded.
 V42 adds three indexes and a receipt; missing/invalid schema or relation facts
 fail the entire page before filesystem probes, without GET migration/repair.
-The current implementation adds persisted Bundle attachment tuples to the same reference check, including the same recording ID in a different artifact role. V45 supplies one covering binary identity index and receipt. Matching orphan/corrupt foreign business facts still protect; unmatched missing/malformed identity keys are only an index non-match. Preview probes nothing on a match; deletion rechecks in its own Guard transaction before continuation. Approval, original-handle and single-consumption limits are unchanged. This is not a complete reference graph or external-reader guarantee; the current schema is V48.
+Persisted legacy Bundle attachment tuples participate in the same reference check, including the same recording ID in a different artifact role. Migration V45 introduced one covering binary identity index and receipt; the current schema is V51. Matching orphan/corrupt foreign business facts still protect; unmatched missing/malformed identity keys are only an index non-match. Preview probes nothing on a match; deletion rechecks in its own Guard transaction before continuation. Approval, original-handle and single-consumption limits are unchanged. This is not a complete reference graph or external-reader guarantee.
 
 The `shared_publication_identity` reason follows Bundle and precedes runtime/FS;
 missing candidate anchors remain unchecked. No foreign identity material is exposed.
@@ -410,22 +461,24 @@ an unmatched path grants no absence-of-reference or deletion authority. Other
 artifacts, hash readers, temporary paths and other processes remain outside this
 runtime observation. No pin, future exclusion or deletion gate is introduced.
 
-## Locally confirmed single deletion requests (SQLite V44)
+## Locally confirmed deletion
 
 The restricted implementation has passed independent checks and one real
 5-second silent FFmpeg selected-region flow with local cancellation, approval
 and idempotent replay. This does not establish every backend or general retention
-execution. Default App outputs have a Bundle and remain protected. New ordinary
-video requests may explicitly select the MP4-only policy. Never rewrite
-old Bundle facts or bypass reference guards to make a file eligible.
+execution. New videos default to MP4-only; legacy outputs with Bundle facts
+remain protected. Never rewrite old Bundle facts or bypass reference guards to
+make a file eligible. The single-item request schema was introduced in SQLite
+V44; the current store is V51.
 
 The interactive App now owns a separate deletion-request coordinator and the
 original local approval UI. The configured API key and ready host are required
 before persistent facts or UI are accessed. Headless has no local deletion
 gateway. POST accepts only a single recording ID and a durable idempotency key;
-GET reads one exact request. There is no remote approval, batch, path-input,
-automatic quota or cleanup endpoint. A 202 response means an application was
-persisted, not approved or deleted.
+GET reads one exact request. This single-item endpoint accepts no remote
+approval or path input. Separate bounded per-item batch orchestration is
+described below; it never authorizes a whole batch with one approval. A 202
+response means an application was persisted, not approved or deleted.
 
 CreateOrGet commits before any window and retires its SQLite objects before
 waiting for local approval. Actual UI approval and retirement precede a unique
@@ -462,9 +515,11 @@ The reference protection introduced in V46 adds two saved Bundle identity source
 
 The reference protection introduced in V47 adds five saved Bundle directory scopes to shared_output_path protection. Exact versioned-collation ancestor keys include the directory itself and separator-boundary descendants, without foreign normalization, self-ID exclusion, parent/status/identity/date/page filters or filesystem scanning. 100 candidates, 65 keys each, 6500 total; at most 26 batches of 256 keys/512 parameters share the original transaction. Unchecked candidates remain conservative and retain earlier lexical reasons; invalid schema/results fail closed. Preview precedes file probes; the approved execution-time Guard rechecks and blocks native disposition. This does not prove physical aliases, directory existence, arbitrary reader retirement or all future references frozen. The existing local one-shot approval, original handle and transaction protections remain; no Bundle or background deletion or complete graph is opened.
 
-The current implementation adds only POST /api/v1/retention/evaluations for 1–20 explicit ordinary recording IDs. It accepts no path, principal, force, Lease or authorization input. Strict16 KiB UTF-8/depth4 JSON and ordinal IDs are validated before business reads. One original DB snapshot plus bounded point projections and existing reference batches feeds the original preview kernel; complete evidence/runtime validation precedes sequential metadata observations. Snapshot times differ and bytes are not reclaimable-space guarantees. Missing/invisible share one protected mapping; unknown observations remain null, with explicit counts. No delete, rename, content/hash/FFmpeg/capture or approval UI is invoked, no proposal/permission survives a request, and no schema migration is added. The actual shared metadata worker and outer API use the existing three-second budget; cancellation cannot return its lease or close native/DB resources on another thread. Idle exit stays busy until real retirement. Capabilities/readiness/auth remain explicit; unavailable/corrupt/overflow cases cannot return partial success. The host uses SQLite V48. Bundle deletion, unattended retention, background cleanup and a complete reference graph remain unsupported.
+POST /api/v1/retention/evaluations evaluates 1–20 explicit ordinary recording IDs. It accepts no path, principal, force, Lease or authorization input. Strict 16 KiB UTF-8/depth-4 JSON and ordinal IDs are validated before business reads. One original DB snapshot plus bounded point projections and existing reference batches feeds the preview kernel; complete evidence/runtime validation precedes sequential metadata observations. Snapshot times differ and bytes are not reclaimable-space guarantees. Missing/invisible share one protected mapping; unknown observations remain null, with explicit counts. No delete, rename, content/hash/FFmpeg/capture or approval UI is invoked, and no permission survives a request. The actual shared metadata worker and outer API use the existing three-second budget; cancellation cannot return its lease or close native/DB resources on another thread. Idle exit stays busy until real retirement. Capabilities/readiness/auth remain explicit; unavailable/corrupt/overflow cases cannot return partial success. The host uses SQLite V51. Bundle deletion, unattended retention, background cleanup and a complete reference graph remain unsupported.
 
 
-Bounded batch deletion (SQLite V48) adds only bounded orchestration of1–5 original single-item deletion requests. A full ordered parent and private child bindings commit before UI; each item requires its own original local confirmation and consumed Permit. No approval material comes from the agent/API/evaluation or carries across files. Positive actual retirement plus usable original request/ledger settlement gates the next item; after-commit faults, refusal, protection, busy and unknown stop remaining dispatch. Accepted OS dispositions are retained as partial results without rollback or space-reclamation claims. One original host deletion admission is held across the batch; native/DB/UI unknowns keep it busy and block idle exit. Three-second creation/query budgets and60-second item limits remain; ten-minute batch expiry only cancels future work, never releases unknown resources. HTTP lifetime does not own an established batch. Restart/GET/same-key replay observes exact saved relationships but never recreates UI, approval, native execution or remaining dispatch. Headless has no execution wiring. V48 adds only immutable parent/item relationships and receipt; V1–V47 remain unchanged, the host uses SQLite V48. Bundle/directory/series/plan/future-window deletion, one-approval-for-all, unattended retention, force/retry endpoints and complete reference-graph guarantees remain unsupported.
+### Bounded per-item batch deletion
+
+Bounded batch deletion orchestrates 1–5 original single-item deletion requests. A full ordered parent and private child bindings commit before UI; each item requires its own original local confirmation and consumed Permit. No approval material comes from the agent/API/evaluation or carries across files. Positive actual retirement plus usable original request/ledger settlement gates the next item; after-commit faults, refusal, protection, busy and unknown stop remaining dispatch. Accepted OS dispositions are retained as partial results without rollback or space-reclamation claims. One original host deletion admission is held across the batch; native/DB/UI unknowns keep it busy and block idle exit. Three-second creation/query budgets and 60-second item limits remain; ten-minute batch expiry only cancels future work, never releases unknown resources. HTTP lifetime does not own an established batch. Restart/GET/same-key replay observes exact saved relationships but never recreates UI, approval, native execution or remaining dispatch. Headless has no execution wiring. Migration V48 introduced immutable parent/item relationships and a receipt without rewriting V1–V47; the current store is V51. Bundle/directory/series/plan/future-window deletion, one-approval-for-all, unattended retention, force/retry endpoints and complete reference-graph guarantees remain unsupported.
 
 The original deletion admission/query quota retains the actual owner across in-process gateway recreation. A fresh coordinator cannot infer idle from empty instance fields while an old flow/query is pending or unknown; drain observes the original retirement evidence and preserves the original single-flow busy reason. This adds no queue or release/approval interface.

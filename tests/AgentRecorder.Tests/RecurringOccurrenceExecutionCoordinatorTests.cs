@@ -20,7 +20,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "scheduled",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var now = context.Slot.ScheduledStartUtc!.Value;
         var backend = new CoordinatorBackend();
         var environmentProvider = new CountingEnvironmentProvider(
@@ -110,7 +110,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "due",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var backend = new CoordinatorBackend();
         var stages = new List<RecurringOccurrenceExecutionStage>();
 
@@ -137,7 +137,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var backend = new CoordinatorBackend();
 
         var result = await CreateCoordinator(
@@ -159,7 +159,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var reservation = new RecurringOccurrenceReservationService(
             context.Fixture.Store,
             () => context.Slot.ScheduledStartUtc!.Value,
@@ -190,7 +190,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var reservation = new RecurringOccurrenceReservationService(
             context.Fixture.Store,
             () => context.Slot.ScheduledStartUtc!.Value,
@@ -234,7 +234,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var planRepository = new SqlitePlanDefinitionRepository(context.Fixture.Store);
         var pausedPlan = planRepository.Get(context.Fixture.PlanId);
         Assert.True(pausedPlan.TryTransition(PlanDefinitionStatus.Paused, context.Slot.ScheduledStartUtc!.Value).Succeeded);
@@ -264,7 +264,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "scheduled",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         if (boundary == "before_window")
         {
             context.Fixture.Execute(
@@ -311,7 +311,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "scheduled",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var supersedingSchedule = RecurringPlanSchedule.CreateDaily(
             TimeZoneInfo.Utc.Id,
             new DateOnly(2026, 9, 11),
@@ -355,7 +355,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
                    disableSafetyBeforeReservation: true,
                    countdownSeconds: 0,
                    approvalUserSid: "S-1-5-21-task276",
-                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Current))
+                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent))
         {
             var backend = new CoordinatorBackend();
             var result = await CreateCoordinator(
@@ -376,7 +376,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
                    targetStatus: "scheduled",
                    countdownSeconds: 0,
                    approvalUserSid: "S-1-5-21-task276",
-                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Current))
+                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent))
         {
             var backend = new CoordinatorBackend();
             var result = await CreateCoordinator(
@@ -403,7 +403,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "scheduled",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var conflictBackend = new CoordinatorBackend();
         var conflictResult = await CreateCoordinator(
             conflict,
@@ -434,7 +434,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using (var rejected = RecurringOccurrenceReservationTests.ReservationContext.Create(
                    countdownSeconds: 0,
                    approvalUserSid: "S-1-5-21-task276",
-                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Current))
+                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent))
         {
             var backend = new CoordinatorBackend();
             var result = await CreateCoordinator(
@@ -459,7 +459,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var conflict = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var conflictBackend = new CoordinatorBackend();
         var conflictResult = await CreateCoordinator(
             conflict,
@@ -491,7 +491,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             targetStatus: "scheduled",
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var now = context.Slot.LatestStartUtc!.Value.AddTicks(1);
         var coordinator = CreateCoordinator(context, now, new CoordinatorBackend());
         var first = await coordinator.ExecuteAsync(CreateRequest(context));
@@ -513,7 +513,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var backend = new CoordinatorBackend();
         var coordinator = CreateCoordinator(
             context,
@@ -552,7 +552,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var factoryCalls = 0;
         var coordinator = CreateCoordinator(
             context,
@@ -579,7 +579,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var path = context.Fixture.Store.DatabasePath;
         var firstBackend = new CoordinatorBackend();
         var secondBackend = new CoordinatorBackend();
@@ -619,7 +619,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var backend = new CoordinatorBackend { CompleteNaturallyDuringStart = true };
         var coordinator = CreateCoordinator(
             context,
@@ -651,7 +651,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var candidate = CreateRequest(context).Candidate!;
         candidate = field switch
         {
@@ -688,7 +688,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var currentVersion = new SqlitePlanOccurrenceRepository(context.Fixture.Store)
             .Get(context.Slot.OccurrenceId!).Version;
         var candidate = CreateRequest(context).Candidate! with
@@ -712,7 +712,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var result = await CreateCoordinator(
             context,
             context.Slot.ScheduledStartUtc!.Value,
@@ -732,7 +732,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var first = await CreateCoordinator(
             context,
@@ -771,7 +771,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 3,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var delayCalls = 0;
         var backend = new CoordinatorBackend();
@@ -809,7 +809,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: true);
         if (sourceType == "ticket")
             Assert.True(sources.Ticket!.TryClaim(out var ticketReason), ticketReason);
@@ -838,7 +838,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: false);
         TamperRecoveryEvidence(context, mismatch);
         var before = CaptureRecoveryVersions(context);
@@ -864,7 +864,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: false);
         var proof = sources.Proof;
         var tamperedProof = new RecurringLeaseUseProof(
@@ -888,7 +888,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         var result = new RecurringLeaseImmediateRecoveryService(
             context.Fixture.Store,
             () => "S-1-5-21-task276",
-            () => CaptureAuthorizationSessionBinding.Current)
+            () => CaptureAuthorizationSessionBinding.Persistent)
             .Recover(tamperedProof, context.Slot.ScheduledStartUtc!.Value);
 
         Assert.Equal(RecurringLeaseRestartRecoveryStatus.Rejected, result.Status);
@@ -901,7 +901,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: true);
         TamperRecoveryEvidence(context, "specification");
         var before = CaptureRecoveryVersions(context);
@@ -918,7 +918,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: true);
         Assert.True(sources.Ticket!.TryClaim(out var ticketReason), ticketReason);
         TamperRecoveryEvidence(context, "specification");
@@ -936,14 +936,14 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using (var sidMismatch = RecurringOccurrenceReservationTests.ReservationContext.Create(
                    countdownSeconds: 0,
                    approvalUserSid: "S-1-5-21-task276",
-                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Current))
+                   approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent))
         {
             var sources = CreateRecoverySources(sidMismatch, createAuthorizationAndTicket: false);
             var before = CaptureRecoveryVersions(sidMismatch);
             var result = new RecurringLeaseImmediateRecoveryService(
                 sidMismatch.Fixture.Store,
                 () => "S-1-5-21-other",
-                () => CaptureAuthorizationSessionBinding.Current)
+                () => CaptureAuthorizationSessionBinding.Persistent)
                 .Recover(sources.Receipt, sidMismatch.Slot.ScheduledStartUtc!.Value);
             Assert.Equal(RecurringLeaseRestartRecoveryStatus.Rejected, result.Status);
             Assert.Equal(before, CaptureRecoveryVersions(sidMismatch));
@@ -952,7 +952,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var sessionMismatch = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sessionSources = CreateRecoverySources(sessionMismatch, createAuthorizationAndTicket: false);
         var sessionBefore = CaptureRecoveryVersions(sessionMismatch);
         var sessionResult = new RecurringLeaseImmediateRecoveryService(
@@ -974,7 +974,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var selectedStage = Enum.Parse<RecurringOccurrenceExecutionStage>(cancellationStage);
         var backend = new CoordinatorBackend();
@@ -1011,7 +1011,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var result = await CreateCoordinator(
             context,
@@ -1046,7 +1046,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var result = await CreateCoordinator(
             context,
@@ -1081,7 +1081,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var result = await CreateCoordinator(
             context,
@@ -1114,7 +1114,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         RecurringLeaseUseProof? proof = null;
         var result = await CreateCoordinator(
@@ -1147,7 +1147,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         var second = new RecurringLeaseImmediateRecoveryService(
             context.Fixture.Store,
             () => "S-1-5-21-task276",
-            () => CaptureAuthorizationSessionBinding.Current)
+            () => CaptureAuthorizationSessionBinding.Persistent)
             .Recover(proof, context.Slot.ScheduledStartUtc!.Value);
 
         Assert.Equal(RecurringLeaseRestartRecoveryStatus.AlreadyReconciled, second.Status);
@@ -1165,7 +1165,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var backend = new CoordinatorBackend();
         var interlock = new StandingLeaseStartSafetyInterlock();
         var result = await CreateCoordinator(
@@ -1192,7 +1192,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         using var cancellation = new CancellationTokenSource();
         var backend = new CoordinatorBackend();
         var result = await CreateCoordinator(
@@ -1249,13 +1249,13 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         var sources = CreateRecoverySources(context, createAuthorizationAndTicket: false);
         var now = context.Slot.ScheduledStartUtc!.Value;
         var recovery = new RecurringLeaseImmediateRecoveryService(
             context.Fixture.Store,
             () => "S-1-5-21-task276",
-            () => CaptureAuthorizationSessionBinding.Current);
+            () => CaptureAuthorizationSessionBinding.Persistent);
         if (terminal == "settled")
         {
             var lifecycle = new SqliteRecurringLeaseLifecycleTransaction(
@@ -1300,7 +1300,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             maxCumulativeDuration: TimeSpan.FromMinutes(400),
             countdownSeconds: 0,
             approvalUserSid: "S-1-5-21-task276",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current);
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent);
         for (var index = 0; index < historicalTerminalCount; index++)
         {
             SeedAbnormalTerminal(
@@ -1316,7 +1316,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         var recovery = new RecurringLeaseImmediateRecoveryService(
             context.Fixture.Store,
             () => "S-1-5-21-task276",
-            () => CaptureAuthorizationSessionBinding.Current);
+            () => CaptureAuthorizationSessionBinding.Persistent);
 
         var result = recovery.Recover(sources.Receipt, target.ScheduledStartUtc!.Value);
 
@@ -1388,7 +1388,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
         var recovery = new RecurringLeaseImmediateRecoveryService(
             context.Fixture.Store,
             () => "S-1-5-21-task276",
-            () => CaptureAuthorizationSessionBinding.Current);
+            () => CaptureAuthorizationSessionBinding.Persistent);
         var now = sources.Receipt.Specification.ScheduledStartUtc;
         return sourceType switch
         {
@@ -1541,7 +1541,7 @@ public sealed class RecurringOccurrenceExecutionCoordinatorTests
             startSafetyInterlockForTest: startSafetyInterlock,
             currentSafetyValidatorForTest: currentSafetyValidator,
             currentUserSidForTest: () => "S-1-5-21-task276",
-            sessionBindingForTest: () => CaptureAuthorizationSessionBinding.Current,
+            sessionBindingForTest: () => CaptureAuthorizationSessionBinding.Persistent,
             recurringProofIssuerForTest: recurringProofIssuer,
             lifecycleSessionFactoryForTest: lifecycleSessionFactory,
             recheckFailureHookForTest: recheckFailureHook,

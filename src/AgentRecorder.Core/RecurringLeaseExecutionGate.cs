@@ -691,7 +691,7 @@ internal static class RecurringLeaseExecutionGate
             !string.Equals(recurringProof.UserSessionBinding, recurringProof.CurrentUserSid + "|" + recurringProof.SessionBinding, StringComparison.Ordinal) ||
             !string.Equals(recurringProof.CurrentUserSid, snapshot.Specification.ApprovedCurrentUserSid, StringComparison.Ordinal) ||
             !string.Equals(recurringProof.SessionBinding, snapshot.Specification.ApprovedSessionBinding, StringComparison.Ordinal) ||
-            !string.Equals(CaptureAuthorizationSessionBinding.Current, snapshot.Approval.SessionBinding, StringComparison.Ordinal) ||
+            !string.Equals(CaptureAuthorizationSessionBinding.Persistent, snapshot.Approval.SessionBinding, StringComparison.Ordinal) ||
             recurringProof.MaxDuration != snapshot.Specification.Duration ||
             recurringProof.MaxDuration != snapshot.Use.ReservedDuration ||
             recurringProof.MaxDuration != snapshot.Lease.PerRunDuration ||

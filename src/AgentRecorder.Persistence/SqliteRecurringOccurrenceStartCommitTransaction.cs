@@ -29,6 +29,7 @@ internal enum RecurringOccurrenceStartCommitFailurePoint
     AfterBlockedOccurrenceUpdate,
     BeforeFinalReadback,
     BeforeCommit,
+    AfterCommit,
 }
 
 internal static class RecurringOccurrenceStartCommitReasonCodes
@@ -365,7 +366,29 @@ internal sealed class SqliteRecurringOccurrenceStartCommitTransaction : SqlitePe
                 connection, transaction, snapshot, trustedNowUtc, committed, environment);
             _beforeCommitHookForTest?.Invoke(connection, transaction);
             _failureHookForTest?.Invoke(RecurringOccurrenceStartCommitFailurePoint.BeforeCommit);
-            transaction.Commit();
+            try
+            {
+                transaction.Commit();
+                _failureHookForTest?.Invoke(RecurringOccurrenceStartCommitFailurePoint.AfterCommit);
+            }
+            catch
+            {
+                try { transaction.Dispose(); } catch { }
+                transaction = null;
+                try
+                {
+                    using var read = Store.OpenReadOnlyConnection();
+                    using var readTransaction = BeginReadTransaction(read);
+                    var observed = ReadSnapshot(read, readTransaction, leaseId, occurrenceIdentity);
+                    ValidateSpecification(observed);
+                    var observedResult = EvaluateReplay(observed, occurrenceIdentity);
+                    readTransaction.Commit();
+                    if (observedResult is not null) return observedResult; // never a first-commit proof
+                }
+                catch { }
+                return Result(RecurringOccurrenceStartCommitStatus.Rejected,
+                    "recurring_start_commit_outcome_unknown", occurrenceIdentity);
+            }
 
             // The database commit is the linearization point. Receipt and
             // proof construction happen only after it; an issuer failure

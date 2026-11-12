@@ -63,6 +63,26 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
 
     public PlanExecutionStatusQueryService(SqliteOperationalStore store) : base(store) { }
 
+    // Diagnostic ownership lookup only. The returned persisted binding is never
+    // supplied to an execution gate or used to renew an authorization.
+    internal string? GetOwnedSessionBinding(string planId, string? currentUserSid)
+    {
+        if (!Canonical(planId, 128) || !Canonical(currentUserSid, 256)) return null;
+        using var connection = Store.OpenReadOnlyConnection();
+        using var command = connection.CreateCommand();
+        // SQLite text readers can truncate at NUL. Reject that evidence in SQL
+        // before a valid-looking prefix can become a diagnostic identity.
+        command.CommandText = $"SELECT DISTINCT CASE WHEN instr(session_binding,char(0))=0 THEN session_binding END FROM ({SqliteSchemaV23.Owners}) WHERE plan_id=$plan AND current_user_sid=$sid LIMIT 2;";
+        Add(command, "$plan", planId); Add(command, "$sid", currentUserSid);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        if (reader.IsDBNull(0)) throw InvalidPersistedData("The plan owner binding is invalid.");
+        var session = reader.GetString(0);
+        if (!CanonicalDiagnosticBinding(session)) throw InvalidPersistedData("The plan owner binding is invalid.");
+        if (reader.Read()) throw InvalidPersistedData("The plan has ambiguous owner bindings.");
+        return session;
+    }
+
     internal Action<int>? HistoryCandidateRowsSelectedForTests { get; set; }
     internal Action<int>? HistoryEvidenceRowsValidatedForTests { get; set; }
 
@@ -70,7 +90,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
     {
         if (!Canonical(planId, 128))
             throw new Phase3PersistenceException("invalid_argument", "The plan identifier is invalid.");
-        if (!Canonical(currentUserSid, 256) || !Canonical(sessionBinding, 256))
+        if (!Canonical(currentUserSid, 256) || !CanonicalDiagnosticBinding(sessionBinding))
             return null;
 
         using var connection = OpenBusinessConnection();
@@ -176,7 +196,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
             throw new Phase3PersistenceException("invalid_argument", "The plan identifier is invalid.");
         if (limit is < 1 or > MaximumHistoryPageSize)
             throw new Phase3PersistenceException("invalid_argument", "The history page limit is invalid.");
-        if (!Canonical(currentUserSid, 256) || !Canonical(sessionBinding, 256))
+        if (!Canonical(currentUserSid, 256) || !CanonicalDiagnosticBinding(sessionBinding))
             return null;
         if (cursor is { Length: 0 or > MaximumCursorLength })
             throw new Phase3PersistenceException("invalid_argument", "The history cursor is invalid.");
@@ -238,7 +258,7 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
                     state.IdentityDigest != identityDigest || state.Watermark < 0 ||
                     !long.TryParse(state.LastWindowStart, NumberStyles.None, CultureInfo.InvariantCulture, out var lastWindowTicks) ||
                     lastWindowTicks < 0 || lastWindowTicks > DateTime.MaxValue.Ticks ||
-                    !Canonical(state.LastOccurrenceId, 128))
+                    !CanonicalHistoryOccurrenceId(state.LastOccurrenceId))
                     throw new PlanExecutionHistoryCursorException();
                 watermark = state.Watermark;
                 afterWindow = state.LastWindowStart;
@@ -1000,6 +1020,19 @@ public sealed class PlanExecutionStatusQueryService : SqliteRepositoryBase
     private static bool Canonical(string? value, int maximum) =>
         !string.IsNullOrWhiteSpace(value) && value == value.Trim() && value.Length <= maximum &&
         value.All(character => character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.');
+
+    private static bool CanonicalHistoryOccurrenceId(string? value) =>
+        Canonical(value, 128) ||
+        (value is not null && value.Length == RecurringOccurrenceIdentity.Prefix.Length + 64 &&
+         value.StartsWith(RecurringOccurrenceIdentity.Prefix, StringComparison.Ordinal) &&
+         value[RecurringOccurrenceIdentity.Prefix.Length..].All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+
+    // Persisted owner identities are for same-user diagnostics only. Keep the
+    // legacy base64url/token format, and use the existing durable parser for
+    // pipe-delimited identities without widening plan/occurrence ID syntax.
+    private static bool CanonicalDiagnosticBinding(string? value) =>
+        value is { Length: > 0 and <= 256 } &&
+        (value.Contains('|') ? DurableAuthorizationIdentity.IsCanonical(value) : Canonical(value, 256));
 
     private static void TryRollback(SqliteTransaction transaction)
     {

@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows.Forms;
 using AgentRecorder.Core.Automation;
@@ -34,6 +35,17 @@ internal sealed class StandingLeaseApprovalForm : Form
     private readonly Label _shortcutLabel;
     private readonly IUiTextProvider _text;
     private Bitmap? _previewBitmap;
+    private readonly StandingLeaseApprovalDetails _details;
+    private readonly IScreenPreviewProvider _provider;
+    private StandingLeaseApprovalAudit? _audit;
+    private StandingLeaseApprovalOptions? _options;
+    private IFutureWindowApprovalWindowPlatform _platform = Win32FutureWindowApprovalWindowPlatform.Instance;
+    private StandingLeasePreviewOwner? _previewOwner;
+    private System.Windows.Forms.Timer? _previewTimer;
+    private readonly Stopwatch _previewElapsed = new();
+    private CancellationToken _cancellation;
+    private StandingLeaseApprovalResult _result = new(StandingLeaseApprovalOutcome.Unavailable, "lease_approval_not_shown");
+    private bool _nativeVisible, _visibilityAttempted;
 
     internal StandingLeaseApprovalForm(
         StandingLeaseApprovalDetails details,
@@ -43,12 +55,15 @@ internal sealed class StandingLeaseApprovalForm : Form
         ArgumentNullException.ThrowIfNull(details);
 
         _text = textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault());
-        var provider = previewProvider ?? new GdiScreenPreviewProvider();
+        _details = details;
+        _provider = previewProvider ?? new GdiScreenPreviewProvider();
 
         Text = _text.Get("StandingLeaseApproval_Title");
-        StartPosition = FormStartPosition.CenterScreen;
+        StartPosition = FormStartPosition.Manual;
         FormBorderStyle = FormBorderStyle.Sizable;
         AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
+        ShowInTaskbar = true;
         MinimumSize = new Size(620, 700);
         ClientSize = new Size(820, 820);
         BackColor = Color.FromArgb(30, 33, 38);
@@ -56,22 +71,28 @@ internal sealed class StandingLeaseApprovalForm : Form
         Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
         KeyPreview = true;
 
+        var shell = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(12) };
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        Controls.Add(shell);
+        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+        shell.Controls.Add(scroll, 0, 0);
         var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(24),
+            Dock = DockStyle.Top, AutoSize = true,
+            Padding = new Padding(12),
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 5,
             BackColor = BackColor,
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 230));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 260));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(root);
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        scroll.Controls.Add(root);
 
         var title = new Label
         {
@@ -127,7 +148,8 @@ internal sealed class StandingLeaseApprovalForm : Form
             MaximumSize = new Size(760, 0),
             ForeColor = Color.FromArgb(253, 186, 116),
             Margin = new Padding(0, 6, 0, 0),
-            Visible = false,
+            Visible = true,
+            Text = _text.Get("StandingLeaseApproval_PreviewFallback"),
         };
         previewLayout.Controls.Add(_previewFallbackLabel, 0, 2);
         root.Controls.Add(previewLayout, 0, 2);
@@ -181,7 +203,7 @@ internal sealed class StandingLeaseApprovalForm : Form
             AutoSize = true,
             FlowDirection = FlowDirection.RightToLeft,
             Dock = DockStyle.Fill,
-            WrapContents = false,
+            WrapContents = true,
         };
         _approveButton = new Button
         {
@@ -206,7 +228,14 @@ internal sealed class StandingLeaseApprovalForm : Form
         };
         buttons.Controls.Add(_approveButton);
         buttons.Controls.Add(_rejectButton);
-        root.Controls.Add(buttons, 0, 5);
+        _approveButton.Click += (_, _) => _result = !_cancellation.IsCancellationRequested && _nativeVisible
+            ? new(StandingLeaseApprovalOutcome.Approved, "user_approved") : new(StandingLeaseApprovalOutcome.Cancelled, "lease_approval_cancelled");
+        _rejectButton.Click += (_, _) => _result = new(StandingLeaseApprovalOutcome.Rejected, "lease_rejected_by_user");
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.RowStyles.Add(new RowStyle(SizeType.AutoSize)); footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        shell.Controls.Add(footer, 0, 1);
+        footer.Controls.Add(buttons, 0, 0);
 
         _shortcutLabel = new Label
         {
@@ -216,12 +245,13 @@ internal sealed class StandingLeaseApprovalForm : Form
             ForeColor = Color.Gray,
             Margin = new Padding(0, 10, 0, 0),
         };
-        root.Controls.Add(_shortcutLabel, 0, 6);
+        footer.Controls.Add(_shortcutLabel, 0, 1);
 
         // Enter is deliberately a safe rejection, never an approval shortcut.
         AcceptButton = _rejectButton;
         CancelButton = _rejectButton;
-        BuildPreview(details, provider);
+        var absolute = GetAbsoluteRegion(details);
+        AbsolutePreviewBoundsForTests = new(absolute.X, absolute.Y, absolute.Width, absolute.Height);
         Shown += (_, _) =>
         {
             _rejectButton.Focus();
@@ -247,36 +277,125 @@ internal sealed class StandingLeaseApprovalForm : Form
         IUiTextProvider? textProvider = null,
         CancellationToken cancellationToken = default)
     {
-        using var form = new StandingLeaseApprovalForm(details, previewProvider, textProvider);
-        var cancellationRequested = 0;
-        using var registration = cancellationToken.Register(() =>
-        {
-            Interlocked.Exchange(ref cancellationRequested, 1);
-            try
-            {
-                if (form.IsHandleCreated)
-                    form.BeginInvoke(new Action(form.Close));
-            }
-            catch (InvalidOperationException)
-            {
-                // Shown handler below closes it if cancellation happened early.
-            }
-        });
-        form.Shown += (_, _) =>
-        {
-            if (cancellationToken.IsCancellationRequested)
-                form.Close();
-        };
-        var result = form.ShowDialog();
-        return Volatile.Read(ref cancellationRequested) == 0 &&
-               !cancellationToken.IsCancellationRequested &&
-               result == DialogResult.OK;
+        var operation = StandingLeaseApprovalPresentation.Start("standing_local", details,
+            textProvider ?? new UiTextProvider(UiLanguageStore.LoadOrDefault()), (_, _) => { }, cancellationToken,
+            new() { PreviewProvider = previewProvider });
+        var result = operation.Decision.GetAwaiter().GetResult();
+        operation.Retired.GetAwaiter().GetResult();
+        return result.Outcome == StandingLeaseApprovalOutcome.Approved;
     }
+
+    internal StandingLeaseApprovalResult ShowOwnedModal(StandingLeaseApprovalAudit audit, StandingLeaseApprovalOptions options,
+        CancellationToken cancellation, Action<StandingLeasePreviewOwner> ownPreview, Action visible)
+    {
+        _audit = audit; _options = options; _platform = options.WindowPlatform ?? Win32FutureWindowApprovalWindowPlatform.Instance;
+        _cancellation = cancellation;
+        if (options.DisableApprovalForTests) _approveButton.Enabled = false;
+        using var registration = cancellation.Register(RequestClose);
+        options.BeforeShowForTests?.Invoke(this);
+        if (cancellation.IsCancellationRequested) return new(StandingLeaseApprovalOutcome.Cancelled, "lease_approval_cancelled");
+        Shown += (_, _) =>
+        {
+            Log("shown");
+            if (cancellation.IsCancellationRequested) { Close(); return; }
+            if (!EnsureVisible()) return;
+            if (cancellation.IsCancellationRequested) { Close(); return; }
+            visible();
+            if (cancellation.IsCancellationRequested) { Close(); return; }
+            _previewOwner = new(() => ConfirmationPreviewBuilder.TryBuildPreview(GetAbsoluteRegion(_details), _provider, new Size(760, 260), out _), audit, cancellation);
+            ownPreview(_previewOwner);
+            _previewElapsed.Start();
+            _previewTimer = new() { Interval = 50 };
+            _previewTimer.Tick += (_, _) => ObservePreview();
+            _previewTimer.Start();
+            options.AfterVisibleForTests?.Invoke(this);
+        };
+        Log("show_begin");
+        _ = ShowDialog();
+        Log("modal_closed", _result.Reason);
+        return cancellation.IsCancellationRequested
+            ? new(StandingLeaseApprovalOutcome.Cancelled, "lease_approval_cancelled") : _result;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Log("handle_created");
+        if (_cancellation.IsCancellationRequested) RequestClose();
+        else if (_audit is not null)
+            try { BeginInvoke(new Action(() => EnsureVisible())); } catch (InvalidOperationException) { }
+    }
+    protected override void OnLoad(EventArgs e) { LocalApprovalWindowPresentation.Fit(this, _options?.WorkingAreaForTests); base.OnLoad(e); Log("load"); }
+    protected override void OnDpiChanged(DpiChangedEventArgs e) { base.OnDpiChanged(e); LocalApprovalWindowPresentation.Fit(this, _options?.WorkingAreaForTests); }
+    private bool EnsureVisible()
+    {
+        if (_cancellation.IsCancellationRequested) { Close(); return false; }
+        if (_visibilityAttempted) return _nativeVisible;
+        _visibilityAttempted = true;
+        try
+        {
+            var state = LocalApprovalWindowPresentation.ShowAndInspect(this, _platform);
+            _nativeVisible = LocalApprovalWindowPresentation.Usable(state);
+            _audit?.Log(_nativeVisible ? "native_visible" : "display_failed",
+                _nativeVisible ? null : "lease_approval_native_not_visible", Handle, state);
+            if (!_nativeVisible) { _result = new(StandingLeaseApprovalOutcome.Unavailable, "lease_approval_native_not_visible"); Close(); return false; }
+            var foreground = _platform.Activate(Handle);
+            Log("foreground", foreground.IsForeground ? "foreground_confirmed" : "foreground_denied");
+            return true;
+        }
+        catch { _result = new(StandingLeaseApprovalOutcome.Unavailable, "lease_approval_display_failed"); Log("display_failed", _result.Reason); Close(); return false; }
+    }
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (_cancellation.IsCancellationRequested) _result = new(StandingLeaseApprovalOutcome.Cancelled, "lease_approval_cancelled");
+        else if (_result.Reason == "lease_approval_not_shown" && _nativeVisible)
+            _result = new(StandingLeaseApprovalOutcome.Rejected, "lease_approval_window_closed");
+        _previewTimer?.Stop(); _previewOwner?.Abandon();
+        Log("closing", _result.Reason);
+        base.OnFormClosing(e);
+    }
+    private void RequestClose()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(new Action(Close)); } catch (InvalidOperationException) { }
+    }
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if ((keyData & Keys.KeyCode) is Keys.Enter or Keys.Escape)
+        { _result = new(StandingLeaseApprovalOutcome.Rejected, "lease_rejected_by_user"); DialogResult = DialogResult.Cancel; Close(); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+    private void Log(string stage, string? reason = null)
+    {
+        FutureWindowApprovalNativeState? state = null;
+        var handle = IsHandleCreated ? Handle : nint.Zero;
+        try { if (handle != 0) state = _platform.Inspect(handle); } catch { }
+        _audit?.Log(stage, reason, handle, state);
+    }
+    private void ObservePreview()
+    {
+        if (_previewElapsed.Elapsed >= _options!.PreviewBudget)
+        {
+            _previewTimer!.Stop(); _previewOwner!.Abandon(); Log("preview_fallback", "lease_preview_timeout"); return;
+        }
+        if (!_previewOwner!.TryTake(out var bitmap)) return;
+        _previewTimer!.Stop();
+        _previewBitmap = bitmap; _previewBox.Image = bitmap;
+        _previewFallbackLabel.Visible = bitmap is null;
+        Log(bitmap is null ? "preview_fallback" : "preview_ready", bitmap is null ? "lease_preview_unavailable" : null);
+    }
+    internal void DecideForTests(bool approve) { if (approve) _approveButton.PerformClick(); else _rejectButton.PerformClick(); }
+    internal void KeyForTests(Keys key) { ActiveControl = _approveButton; var message = new Message(); ProcessCmdKey(ref message, key); }
+    internal bool ButtonsReadableForTests => _approveButton.Visible && _rejectButton.Visible &&
+        ClientRectangle.Contains(RectangleToClient(_approveButton.RectangleToScreen(_approveButton.ClientRectangle))) &&
+        ClientRectangle.Contains(RectangleToClient(_rejectButton.RectangleToScreen(_rejectButton.ClientRectangle)));
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            _audit?.Log("dispose_begin");
+            _previewTimer?.Dispose(); _previewOwner?.Abandon();
             if (_previewBox?.Image is not null)
                 _previewBox.Image = null;
             _previewBitmap?.Dispose();
@@ -284,34 +403,7 @@ internal sealed class StandingLeaseApprovalForm : Form
             PreviewBitmapDisposedForTests = true;
         }
         base.Dispose(disposing);
-    }
-
-    private void BuildPreview(StandingLeaseApprovalDetails details, IScreenPreviewProvider provider)
-    {
-        try
-        {
-            var absolute = GetAbsoluteRegion(details);
-            AbsolutePreviewBoundsForTests = new Rectangle(absolute.X, absolute.Y, absolute.Width, absolute.Height);
-            var captureBounds = new ConfirmationCaptureBounds(absolute.X, absolute.Y, absolute.Width, absolute.Height);
-            var preview = ConfirmationPreviewBuilder.TryBuildPreview(
-                captureBounds,
-                provider,
-                new Size(760, 260),
-                out _);
-            if (preview is not null)
-            {
-                _previewBitmap = preview;
-                _previewBox.Image = preview;
-                return;
-            }
-        }
-        catch
-        {
-            // The fallback below is the safe, visible path for any preview failure.
-        }
-
-        _previewFallbackLabel.Text = _text.Get("StandingLeaseApproval_PreviewFallback");
-        _previewFallbackLabel.Visible = true;
+        if (disposing) _audit?.Log("form_disposed");
     }
 
     private string FormatDetails(StandingLeaseApprovalDetails details)

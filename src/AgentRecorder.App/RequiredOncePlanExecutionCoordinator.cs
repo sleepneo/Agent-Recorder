@@ -508,7 +508,7 @@ internal sealed class RequiredOncePlanExecutionCoordinator : IDisposable
         {
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User?.Value;
-            var session = CaptureAuthorizationSessionBinding.Current;
+            var session = CaptureAuthorizationSessionBinding.Persistent;
             return string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session) ? null : new(sid, session);
         }
         catch { return null; }

@@ -115,7 +115,7 @@ public sealed class RecurringLeaseExecutionGateTests
             "scope",
             now,
             now.AddMinutes(1),
-            CaptureAuthorizationSessionBinding.Current,
+            CaptureAuthorizationSessionBinding.Persistent,
             null,
             null);
         var standing = new StandingLeaseUseProof(
@@ -3320,7 +3320,7 @@ public sealed class RecurringLeaseExecutionGateTests
         var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             maxUses: maxUses,
             approvalUserSid: "S-1-5-21-task267",
-            approvalSessionBinding: CaptureAuthorizationSessionBinding.Current,
+            approvalSessionBinding: CaptureAuthorizationSessionBinding.Persistent,
             latestStartGrace: commitOffset > TimeSpan.Zero ? TimeSpan.FromSeconds(10) : null,
             countdownSeconds: countdownSeconds,
             recordingDuration: recordingDuration);

@@ -42,7 +42,7 @@ internal sealed class StandingLeaseSafetyControlGateway : IUnattendedSafetyContr
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _futureWindowGateway = futureWindowGateway;
         _currentUserSid = currentUserSidForTest ?? GetCurrentUserSid;
-        _currentSessionBinding = currentSessionBindingForTest ?? (() => CaptureAuthorizationSessionBinding.Current);
+        _currentSessionBinding = currentSessionBindingForTest ?? (() => CaptureAuthorizationSessionBinding.Persistent);
     }
 
     public StandingLeaseControlCenterQueryResult Query() =>
@@ -85,7 +85,7 @@ internal sealed class StandingLeaseSafetyControlGateway : IUnattendedSafetyContr
     {
         sid = _currentUserSid() ?? string.Empty;
         session = _currentSessionBinding() ?? string.Empty;
-        return !string.IsNullOrWhiteSpace(sid) && !string.IsNullOrWhiteSpace(session);
+        return !string.IsNullOrWhiteSpace(sid);
     }
 
     private void NotifyGlobalRevocationAfterCommit(
@@ -925,7 +925,8 @@ internal sealed class UnattendedSafetyControlForm : Form
             FormatDate(item.LeaseValidUntilUtc),
             item.RemainingUses,
             item.RemainingDuration.ToString("c", System.Globalization.CultureInfo.InvariantCulture),
-            item.ActiveRunPresent ? _text.Get("UnattendedSafety_Yes") : _text.Get("UnattendedSafety_No"));
+            item.ActiveRunPresent ? _text.Get("UnattendedSafety_Yes") : _text.Get("UnattendedSafety_No")) +
+            (item.BlockedReason is null ? "" : Environment.NewLine + item.BlockedReason);
     }
 
     private string FormatWeekday(DayOfWeek weekday) => _text.Get(weekday switch

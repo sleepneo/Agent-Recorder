@@ -1,6 +1,6 @@
 # Quick Start - Agent Recorder
 
-> This guide describes v0.1.23. New video requests deliver video only; no extra instruction is needed. Legacy Bundle history remains protected.
+> This guide describes v0.1.24. New video requests deliver video only; no extra instruction is needed. Legacy Bundle history remains protected.
 
 Agent Recorder is an **AI agent-native local screen recording capability layer**.
 The normal path is: human speaks, local AI agent calls the quick API, Agent
@@ -8,7 +8,7 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
-1. Extract the v0.1.23 Windows x64 portable ZIP. Before reusing data from an earlier version, back up the data directory. This package uses SQLite schema V51.
+1. Extract the v0.1.24 Windows x64 portable ZIP. Before reusing data from an earlier version, back up the data directory. This package uses SQLite schema V51.
 2. Open the extracted folder as your local AI agent's working directory, or give the agent its full path. Say:
 
    > Record a selected region for 10 seconds.

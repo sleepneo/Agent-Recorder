@@ -50,6 +50,8 @@ internal enum FutureWindowCreateDisposition { Created, Existing, Conflict }
 /// <summary>Transactional persistence for independently scoped one-shot grants.</summary>
 internal sealed class SqliteFutureWindowAuthorizationRepository
 {
+    internal Action<SqliteConnection, SqliteTransaction>? BeforeStartCommitForTests { get; set; }
+    internal Action? AfterStartCommitForTests { get; set; }
     private readonly SqliteOperationalStore _store;
 
     internal SqliteFutureWindowAuthorizationRepository(SqliteOperationalStore store) =>
@@ -115,6 +117,29 @@ internal sealed class SqliteFutureWindowAuthorizationRepository
     {
         using var connection = _store.OpenConnection();
         return ReadById(connection, null, authorizationId, userSid, sessionBinding);
+    }
+
+    // Ownership-only reads are for diagnostics and revocation, never a start receipt.
+    internal FutureWindowAuthorizationRow? GetOwned(string authorizationId, string userSid)
+    {
+        using var connection = _store.OpenReadOnlyConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM future_window_authorizations WHERE current_user_sid = $sid AND authorization_id = $id;";
+        Add(command, "$sid", userSid); Add(command, "$id", authorizationId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadRow(reader) : null;
+    }
+
+    internal IReadOnlyList<FutureWindowAuthorizationRow> ListOwned(string userSid)
+    {
+        using var connection = _store.OpenReadOnlyConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM future_window_authorizations WHERE current_user_sid = $sid ORDER BY created_at_utc DESC, authorization_id;";
+        Add(command, "$sid", userSid);
+        using var reader = command.ExecuteReader();
+        var rows = new List<FutureWindowAuthorizationRow>();
+        while (reader.Read()) rows.Add(ReadRow(reader));
+        return rows;
     }
 
     internal IReadOnlyList<FutureWindowAuthorizationRow> List(string userSid, string sessionBinding)
@@ -242,7 +267,25 @@ internal sealed class SqliteFutureWindowAuthorizationRepository
         if (update.ExecuteNonQuery() != 1)
         { transaction.Rollback(); reasonCode = "future_window_start_race_lost"; return null; }
         var after = ReadById(connection, transaction, authorizationId, userSid, sessionBinding);
-        transaction.Commit();
+        try
+        {
+            BeforeStartCommitForTests?.Invoke(connection, transaction);
+            transaction.Commit();
+            AfterStartCommitForTests?.Invoke();
+        }
+        catch
+        {
+            try { transaction.Dispose(); } catch { }
+            reasonCode = "future_window_start_commit_outcome_unknown";
+            try
+            {
+                var observed = GetOwned(authorizationId, userSid);
+                if (observed?.RunId is not null)
+                    reasonCode = "future_window_start_committed_delivery_failed";
+            }
+            catch { }
+            return null;
+        }
         if (after is null) { reasonCode = "future_window_commit_readback_failed"; return null; }
         reasonCode = string.Empty;
         return new FutureWindowStartCommitReceipt(after.ToScope(), process, runId, proofId, nonce, nowUtc);

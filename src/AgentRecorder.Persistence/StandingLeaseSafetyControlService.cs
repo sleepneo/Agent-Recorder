@@ -148,7 +148,7 @@ internal sealed class StandingLeaseSafetyControlService
         string? currentSessionBinding)
     {
         if (!IsCanonicalUserSid(currentUserSid) ||
-            currentSessionBinding is not null && !IsCanonicalUserSid(currentSessionBinding))
+            !string.IsNullOrEmpty(currentSessionBinding) && !IsCanonicalUserSid(currentSessionBinding))
         {
             return StandingLeaseControlCenterQueryResult.Rejected("safety_user_identity_invalid");
         }

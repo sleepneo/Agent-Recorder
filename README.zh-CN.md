@@ -1,6 +1,6 @@
 # Agent Recorder 中文说明
 
-> 本文适用于 v0.1.23。新录制仅交付视频；使用旧包时以实际运行实例的 capabilities 为准。
+> 本文适用于 v0.1.24。新录制仅交付视频；使用旧包时以实际运行实例的 capabilities 为准。
 
 Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人类用户用自然语言说明要录制什么，本地 AI agent 调用 localhost API，Agent Recorder 负责本地选区、确认、录制、输出和审计。
 
@@ -24,11 +24,13 @@ Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人�
 
 ## 人类用户如何使用
 
-v0.1.23 是 Windows x64 自包含便携正式版。1–30 秒普通录制可由包内 CLI 一次完成启动、提交 quick 请求和等待成片；选区及录制批准仍由用户在本地操作。长录制和高级场景继续使用现有 HTTP API。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
+v0.1.24 是 Windows x64 自包含便携正式版。1–30 秒普通录制可由包内 CLI 一次完成启动、提交 quick 请求和等待成片；选区及录制批准仍由用户在本地操作。长录制和高级场景继续使用现有 HTTP API。常用指令见[快速开始](QUICKSTART.zh-CN.md)。
 
 所有新视频仅交付视频，普通 raw/quick 请求省略 artifacts 即可，空对象或 bundle=false 兼容，显式 true 在录制准备前拒绝。声音选项与截图序列不变。已有 Bundle 的历史读取、五附件核验和删除保护继续兼容，不改写旧数据。成功视频仍需主文件锚点与真实资源退休；未知保持保护。运行能力以 /capabilities 为准。
 
 升级时请先备份数据目录。本版继续使用 SQLite V51；从更早的数据库版本迁移后，不要用不支持 V51 的程序打开。
+
+v0.1.24 加固 HTTP 请求资源边界与授权持久化，并修复 Lease 授权窗及计划历史查询。旧格式或无法验证登录身份的自动授权需要重新本地批准，历史和媒体不删除；恢复限制与验收范围见[安全说明](docs/safety.md)。
 
 1. 解压 Windows 便携 ZIP，将解压目录作为本地 AI agent 的工作目录，或把完整路径交给它。
 2. 直接说要录什么，例如：

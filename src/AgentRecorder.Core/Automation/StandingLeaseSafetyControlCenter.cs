@@ -43,6 +43,7 @@ internal sealed record StandingLeaseControlCenterRecurringLeaseSummary(
     TimeSpan RemainingDuration,
     bool ActiveRunPresent)
 {
+    internal string? BlockedReason { get; init; }
     internal bool CanRevoke => LeaseStatus is ConsentLeaseStatus.Pending or ConsentLeaseStatus.Active ||
         LeaseStatus == ConsentLeaseStatus.Exhausted && ActiveRunPresent;
 }

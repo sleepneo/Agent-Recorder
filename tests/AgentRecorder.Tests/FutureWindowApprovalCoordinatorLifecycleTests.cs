@@ -18,6 +18,36 @@ namespace AgentRecorder.Tests;
 public sealed class FutureWindowApprovalCoordinatorLifecycleTests
 {
     [Theory]
+    [InlineData("unavailable")]
+    [InlineData("boot")]
+    [InlineData("login")]
+    [InlineData("legacy")]
+    public void OldAuthorizationRemainsVisibleAndRevocableButCannotStart(string change)
+    {
+        var ui = new ControllableApprovalUi(FutureWindowApprovalOutcome.Approved);
+        using var context = new CoordinatorContext(ui, TimeSpan.FromSeconds(5));
+        var scope = context.CreatePending();
+        var parts = scope.SessionBinding.Split('|');
+        var binding = change switch
+        {
+            "boot" => DurableAuthorizationIdentity.Format(parts[1], uint.Parse(parts[2], System.Globalization.NumberStyles.HexNumber) + 1,
+                ulong.Parse(parts[3], System.Globalization.NumberStyles.HexNumber), uint.Parse(parts[4], System.Globalization.NumberStyles.HexNumber)),
+            "login" => DurableAuthorizationIdentity.Format(parts[1], uint.Parse(parts[2], System.Globalization.NumberStyles.HexNumber),
+                ulong.Parse(parts[3], System.Globalization.NumberStyles.HexNumber) + 1, uint.Parse(parts[4], System.Globalization.NumberStyles.HexNumber)),
+            "legacy" => "old-domain-user-session",
+            _ => null,
+        };
+        using var identity = CaptureAuthorizationSessionBinding.UseIdentityForTests(new(() => new(binding, "authorization_identity_unavailable")));
+        var expectedReason = change is "boot" or "login" ? "authorization_session_mismatch" : change == "legacy"
+            ? "authorization_identity_fields_invalid" : "authorization_identity_unavailable";
+        Assert.Equal(expectedReason, context.Coordinator.Get(scope.AuthorizationId)!.ReasonCode);
+        Assert.Equal(expectedReason, Assert.Single(context.Coordinator.ListForSafetyCenter()).ReasonCode);
+        Assert.Equal(expectedReason, context.Coordinator.Start(scope.AuthorizationId, "invalid-window").ReasonCode);
+        Assert.Equal("revoked", context.Coordinator.Revoke(scope.AuthorizationId)!.Status);
+        Assert.Equal(scope.SessionBinding, context.Get(scope.AuthorizationId).SessionBinding);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task GlobalSafetyRevocationCancelsPendingApprovalWithoutWaitingForUiDeadline(bool stopAll)
@@ -122,7 +152,7 @@ public sealed class FutureWindowApprovalCoordinatorLifecycleTests
     }
 
     [Fact]
-    public async Task GlobalSafetyRevocationDoesNotCancelApprovalOutsideGatewaySession()
+    public async Task GlobalSafetyRevocationCancelsOwnedApprovalAcrossGatewaySessions()
     {
         var ui = new ControllableApprovalUi(FutureWindowApprovalOutcome.Approved);
         using var context = new CoordinatorContext(ui, TimeSpan.FromSeconds(20), copyExecutable: true);
@@ -138,15 +168,14 @@ public sealed class FutureWindowApprovalCoordinatorLifecycleTests
         var result = gateway.Disable("acceptance-unrelated-session-" + Guid.NewGuid().ToString("N"));
 
         Assert.True(result.DurableOperationCommitted);
-        Assert.False(pending.CancellationObserved);
-        Assert.Equal("pending", context.Get(scope.AuthorizationId).StatusCode);
-        Assert.Throws<IOException>(() =>
-        {
-            using var stillLocked = new FileStream(scope.ExecutableIdentity.CanonicalPath,
-                FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-        });
-        pending.Complete(FutureWindowApprovalOutcome.Rejected);
+        Assert.True(pending.CancellationObserved);
+        Assert.Equal("revoked", context.Get(scope.AuthorizationId).StatusCode);
         await flight.WaitAsync(TimeSpan.FromSeconds(5));
+        using (var released = new FileStream(scope.ExecutableIdentity.CanonicalPath,
+                FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+        {
+            Assert.True(released.CanWrite);
+        }
     }
 
     [Fact]
@@ -341,7 +370,7 @@ public sealed class FutureWindowApprovalCoordinatorLifecycleTests
 
             _sid = WindowsIdentity.GetCurrent().User?.Value
                 ?? throw new InvalidOperationException("The interactive user SID is unavailable.");
-            _session = CaptureAuthorizationSessionBinding.Current;
+            _session = CaptureAuthorizationSessionBinding.Persistent;
             var processPath = Environment.ProcessPath
                 ?? throw new InvalidOperationException("The current executable path is unavailable.");
             if (copyExecutable)

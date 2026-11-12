@@ -12,7 +12,7 @@ namespace AgentRecorder.Tests;
 public sealed class StandingLeaseApprovalFormTests
 {
     [Fact]
-    public void PreviewUsesAbsolutePhysicalRegionAndIsReleasedWithTheForm()
+    public void ConstructorFreezesAbsoluteRegionAndDoesNotCaptureBeforeShowing()
     {
         var provider = new FakePreviewProvider();
         using var form = new StandingLeaseApprovalForm(
@@ -20,17 +20,17 @@ public sealed class StandingLeaseApprovalFormTests
             provider,
             new UiTextProvider(UiLanguage.ZhCn));
 
-        Assert.Equal(new Rectangle(110, 220, 320, 180), provider.LastBounds);
+        Assert.Equal(Rectangle.Empty, provider.LastBounds);
         Assert.Equal(new Rectangle(110, 220, 320, 180), form.AbsolutePreviewBoundsForTests);
-        Assert.True(form.HasPreviewImageForTests);
-        Assert.Empty(form.PreviewFallbackTextForTests);
+        Assert.False(form.HasPreviewImageForTests);
+        Assert.False(string.IsNullOrWhiteSpace(form.PreviewFallbackTextForTests));
 
         form.Dispose();
         Assert.True(form.PreviewBitmapDisposedForTests);
     }
 
     [Fact]
-    public void ProviderFailureShowsLocalizedFallbackAndFrozenCoordinates()
+    public void ConstructorShowsLocalizedFallbackAndFrozenCoordinatesWithoutPreviewWork()
     {
         using var form = new StandingLeaseApprovalForm(
             Details(outputDirectory: new string('C', 280)),

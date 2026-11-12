@@ -21,6 +21,27 @@ public sealed class UnattendedSafetyControlCenterTests
 
     public UnattendedSafetyControlCenterTests(ITestOutputHelper testOutput) => _testOutput = testOutput;
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("new-boot-login-binding")]
+    public void OldStandingGrantHasExplicitReasonAndOwnerCanRevokeWithoutIdentity(string binding)
+    {
+        using var database = new TestDatabase();
+        CreateIntent(database, "old", prepare: true, activate: true);
+        var service = new StandingLeaseSafetyControlService(database.Store, () => At(15), auditForTest: (_, _) => { });
+        var gateway = new StandingLeaseSafetyControlGateway(service, () => UserSid, () => binding);
+        var item = Assert.Single(gateway.Query().State!.Items);
+        Assert.Equal(binding.Length == 0 ? "authorization_identity_unavailable" : "authorization_session_mismatch", item.BlockedReason);
+        var status = new PlanExecutionStatusQueryService(database.Store);
+        Assert.Equal("session-control-center", status.GetOwnedSessionBinding("plan-old", UserSid));
+        Assert.Null(status.GetOwnedSessionBinding("plan-old", "other-user"));
+        Assert.True(gateway.RevokeLease(item.IntentId, "task428-old-revoke").DurableOperationCommitted);
+        var reopened = new StandingLeaseSafetyControlService(new(database.Store.DatabasePath), () => At(16), auditForTest: (_, _) => { });
+        var revoked = Assert.Single(reopened.QueryControlCenter(UserSid, binding).State!.Items);
+        Assert.Equal(ConsentLeaseStatus.Revoked, revoked.LeaseStatus);
+        Assert.Equal(StandingLeaseSafetyReasonCodes.LeaseRevoked, revoked.BlockedReason);
+    }
+
     [Fact]
     public void QueryControlCenterReadsEmptyPendingActiveExpiredAndPersistentRevokedStates()
     {
@@ -105,7 +126,7 @@ public sealed class UnattendedSafetyControlCenterTests
     }
 
     [Fact]
-    public void QueryControlCenterBindsRecurringLeasesToSidAndSessionAndShowsTerminalHistory()
+    public void QueryControlCenterBindsRecurringLeasesToOwnerAndExplainsSessionMismatch()
     {
         using var fixture = new RecurringPlanSetupTestFixture();
         fixture.Create("active-a", prepared: true);
@@ -121,7 +142,11 @@ public sealed class UnattendedSafetyControlCenterTests
         var service = new StandingLeaseSafetyControlService(fixture.Store, () => RecurringPlanSetupTestFixture.At(10));
         var initial = service.QueryControlCenter(RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session);
         Assert.Equal(StandingLeaseControlCenterQueryStatus.Available, initial.Status);
-        Assert.Equal(2, initial.State!.RecurringItems.Count);
+        Assert.Equal(3, initial.State!.RecurringItems.Count);
+        Assert.Single(initial.State.RecurringItems, item => item.BlockedReason == "authorization_session_mismatch");
+        var unavailable = service.QueryControlCenter(RecurringPlanSetupTestFixture.Sid, "");
+        Assert.Equal(3, unavailable.State!.RecurringItems.Count);
+        Assert.All(unavailable.State.RecurringItems, item => Assert.Equal("authorization_identity_unavailable", item.BlockedReason));
         Assert.All(initial.State.RecurringItems, item => Assert.Equal(ConsentLeaseStatus.Active, item.LeaseStatus));
         Assert.All(initial.State.RecurringItems, item => Assert.Equal(new DateOnly(2026, 1, 1), item.NextOccurrenceLocalDate));
         Assert.All(initial.State.RecurringItems, item => Assert.Equal(new TimeOnly(9, 30), item.NextOccurrenceLocalTime));
@@ -136,9 +161,9 @@ public sealed class UnattendedSafetyControlCenterTests
         Assert.Equal(StandingLeaseSafetyControlResultStatus.AlreadyApplied, replay.Status);
 
         var after = service.QueryControlCenter(RecurringPlanSetupTestFixture.Sid, RecurringPlanSetupTestFixture.Session);
-        Assert.Equal(new[] { ConsentLeaseStatus.Active, ConsentLeaseStatus.Revoked }, after.State!.RecurringItems.Select(item => item.LeaseStatus));
+        Assert.Equal(new[] { ConsentLeaseStatus.Active, ConsentLeaseStatus.Active, ConsentLeaseStatus.Revoked }, after.State!.RecurringItems.Select(item => item.LeaseStatus));
         Assert.False(after.State.RecurringItems.Single(item => item.LeaseId == selected.LeaseId).CanRevoke);
-        Assert.True(after.State.RecurringItems.Single(item => item.LeaseId != selected.LeaseId).CanRevoke);
+        Assert.All(after.State.RecurringItems.Where(item => item.LeaseId != selected.LeaseId), item => Assert.True(item.CanRevoke));
         Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM standing_lease_safety_operations WHERE operation_id = 'task289-exact-revoke';"));
     }
 

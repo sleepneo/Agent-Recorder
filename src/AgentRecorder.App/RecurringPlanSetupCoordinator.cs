@@ -113,8 +113,8 @@ internal sealed class RecurringPlanSetupCoordinator : IRecurringPlanSetupGateway
     {
         get
         {
-            var principal = ReadPrincipal();
-            return principal is not null && IsUnattendedEnabledFor(principal.Sid);
+            try { return _principal() is { } principal && IsUnattendedEnabledFor(principal.Sid); }
+            catch { return false; }
         }
     }
 
@@ -130,6 +130,8 @@ internal sealed class RecurringPlanSetupCoordinator : IRecurringPlanSetupGateway
         lock (_commitGate)
         {
             if (_shutdown) return new(RecurringPlanSetupCreateStatus.Rejected, null, "host_shutdown");
+            if (ReadPrincipal() is null)
+                return new(RecurringPlanSetupCreateStatus.Rejected, null, "authorization_identity_unavailable");
             if (!IsExecutionSupported)
                 return new(RecurringPlanSetupCreateStatus.Rejected, null, "recurring_execution_unavailable");
             var principal = ReadPrincipal();
@@ -431,7 +433,7 @@ internal sealed class RecurringPlanSetupCoordinator : IRecurringPlanSetupGateway
     private static RecurringSetupPrincipal? CurrentPrincipal()
     {
         using var identity = WindowsIdentity.GetCurrent();
-        return identity.User?.Value is { } sid ? new(sid, CaptureAuthorizationSessionBinding.Current) : null;
+        return identity.User?.Value is { } sid ? new(sid, CaptureAuthorizationSessionBinding.Persistent) : null;
     }
 
     private static bool IsPending(RecurringPlanSetupRecord record) =>

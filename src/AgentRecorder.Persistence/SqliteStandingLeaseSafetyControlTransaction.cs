@@ -120,12 +120,14 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                         "The control-center setup intent chain is invalid: " + failure);
                 }
 
-                items.Add(BuildControlCenterItem(intent, chain, globalState));
+                var item = BuildControlCenterItem(intent, chain, globalState);
+                items.Add(currentSessionBinding is null || item.BlockedReason is not (null or "region_selection_pending" or "lease_approval_pending")
+                    ? item : item with { BlockedReason = currentSessionBinding.Length == 0
+                        ? "authorization_identity_unavailable" : intent.SessionBinding != currentSessionBinding
+                        ? "authorization_session_mismatch" : item.BlockedReason });
             }
 
-            var recurringItems = string.IsNullOrWhiteSpace(currentSessionBinding)
-                ? Array.Empty<StandingLeaseControlCenterRecurringLeaseSummary>()
-                : ReadRecurringControlCenterItems(
+            var recurringItems = ReadRecurringControlCenterItems(
                     connection,
                     transaction,
                     currentUserSid,
@@ -153,7 +155,7 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
         SqliteConnection connection,
         SqliteTransaction transaction,
         string currentUserSid,
-        string currentSessionBinding)
+        string? currentSessionBinding)
     {
         var leaseIds = new List<string>();
         using (var command = connection.CreateCommand())
@@ -162,11 +164,10 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             command.CommandText = """
                 SELECT lease_id
                 FROM recurring_lease_local_approvals
-                WHERE current_user_sid = $sid AND session_binding = $session
+                WHERE current_user_sid = $sid
                 ORDER BY approved_at_utc DESC, lease_id COLLATE BINARY ASC;
                 """;
             Add(command, "$sid", currentUserSid);
-            Add(command, "$session", currentSessionBinding);
             using var reader = command.ExecuteReader();
             while (reader.Read())
                 leaseIds.Add(ReadRequiredText(reader, 0));
@@ -183,8 +184,7 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             var approval = SqliteRecurringLeaseLocalApprovalEvidenceReader.ReadWithinTransaction(
                     connection, transaction, leaseId)
                 ?? throw new PersistedSnapshotException("A recurring control-center approval disappeared during the snapshot read.");
-            if (!string.Equals(approval.CurrentUserSid, currentUserSid, StringComparison.Ordinal) ||
-                !string.Equals(approval.SessionBinding, currentSessionBinding, StringComparison.Ordinal))
+            if (!string.Equals(approval.CurrentUserSid, currentUserSid, StringComparison.Ordinal))
                 throw new PersistedSnapshotException("A recurring control-center approval is not owned by the current user session.");
 
             using (var count = connection.CreateCommand())
@@ -206,7 +206,7 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                     connection, transaction, preparation.IntentId)
                 ?? throw new PersistedSnapshotException("A recurring control-center preparation points to a missing setup intent.");
             if (!string.Equals(persistedIntent.CurrentUserSid, currentUserSid, StringComparison.Ordinal) ||
-                !string.Equals(persistedIntent.SessionBinding, currentSessionBinding, StringComparison.Ordinal))
+                !string.Equals(persistedIntent.SessionBinding, approval.SessionBinding, StringComparison.Ordinal))
                 throw new PersistedSnapshotException("A recurring control-center setup intent is owned by another user session.");
 
             var readback = SqliteRecurringSetupIntentCreateOrGetTransaction.ValidatePersistedAndRehydrate(
@@ -286,7 +286,9 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                 chain.Lease.ValidUntilUtc,
                 quota.RemainingUses,
                 quota.RemainingDuration,
-                activeRunPresent));
+                activeRunPresent) { BlockedReason = string.IsNullOrEmpty(currentSessionBinding)
+                    ? "authorization_identity_unavailable" : approval.SessionBinding != currentSessionBinding
+                    ? "authorization_session_mismatch" : null });
         }
 
         return result
@@ -1504,13 +1506,12 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             SELECT EXISTS(
                 SELECT 1 FROM recording_runs
                 WHERE status_code NOT IN ('settled', 'started_unknown', 'session_interrupted', 'failed'))
-            OR ($sid IS NOT NULL AND $session IS NOT NULL AND EXISTS(
+            OR ($sid IS NOT NULL AND EXISTS(
                 SELECT 1 FROM future_window_authorizations
-                WHERE current_user_sid = $sid AND session_binding = $session
+                WHERE current_user_sid = $sid
                   AND run_status IN ('start_committed', 'started_unknown', 'recording', 'finalizing')));
             """;
         Add(command, "$sid", futureWindowUserSid);
-        Add(command, "$session", futureWindowSessionBinding);
         return Convert.ToInt64(command.ExecuteScalar()) == 1;
     }
 
@@ -1522,14 +1523,14 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
         DateTimeOffset nowUtc,
         string reasonCode)
     {
-        if (string.IsNullOrWhiteSpace(currentUserSid) || string.IsNullOrWhiteSpace(currentSessionBinding))
+        if (string.IsNullOrWhiteSpace(currentUserSid))
         {
             using var unscoped = connection.CreateCommand();
             unscoped.Transaction = transaction;
             unscoped.CommandText = "SELECT EXISTS(SELECT 1 FROM future_window_authorizations WHERE status_code IN ('pending', 'active', 'used'));";
             if (Convert.ToInt64(unscoped.ExecuteScalar()) == 1)
                 throw new Phase3PersistenceException(
-                    "future_window_scope_unavailable", "Global safety cannot claim success without the current future-window user/session scope.");
+                    "future_window_scope_unavailable", "Global safety cannot claim success without the current future-window owner.");
             return (0, false);
         }
 
@@ -1541,11 +1542,10 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
                                      THEN 1 ELSE 0 END), 0),
                    COALESCE(MAX(CASE WHEN version = 9223372036854775807 THEN 1 ELSE 0 END), 0)
             FROM future_window_authorizations
-            WHERE current_user_sid = $sid AND session_binding = $session
+            WHERE current_user_sid = $sid
               AND status_code IN ('pending', 'active', 'used');
             """;
         Add(count, "$sid", currentUserSid);
-        Add(count, "$session", currentSessionBinding);
         int countToRevoke;
         bool requiresStop;
         bool versionExhausted;
@@ -1570,14 +1570,13 @@ internal sealed class SqliteStandingLeaseSafetyControlTransaction : SqliteReposi
             UPDATE future_window_authorizations
             SET status_code = 'revoked', reason_code = $reason,
                 updated_at_utc = MAX(updated_at_utc, $now), version = version + 1
-            WHERE current_user_sid = $sid AND session_binding = $session
+            WHERE current_user_sid = $sid
               AND status_code IN ('pending', 'active', 'used')
               AND version < 9223372036854775807;
             """;
         Add(revoke, "$reason", reasonCode);
         Add(revoke, "$now", nowUtc.ToUniversalTime().ToUnixTimeMilliseconds());
         Add(revoke, "$sid", currentUserSid);
-        Add(revoke, "$session", currentSessionBinding);
         var changed = revoke.ExecuteNonQuery();
         if (changed != countToRevoke)
             throw new Phase3PersistenceException(

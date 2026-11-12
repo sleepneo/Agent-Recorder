@@ -386,7 +386,7 @@ internal static class Program
             new PlanExecutionStatusQueryService(operationalStore));
         var unifiedHistoryQuery = new UnifiedHistoryQueryService(operationalStore, ordinaryRecordingHistory);
         Func<(string Sid, string Session)> historyIdentity = () => (System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? string.Empty,
-            CaptureAuthorizationSessionBinding.Current);
+            CaptureAuthorizationSessionBinding.History);
         var unifiedHistoryGateway = new SqliteUnifiedHistoryGateway(unifiedHistoryQuery, historyIdentity);
         var retentionPreviewGateway = CreateRetentionPreviewGateway(unifiedHistoryQuery, dataDir, engine, historyIdentity);
         using var deletionStopping=new CancellationTokenSource();

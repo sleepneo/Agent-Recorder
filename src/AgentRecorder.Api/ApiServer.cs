@@ -349,20 +349,33 @@ public sealed partial class ApiServer
             TcpClient client;
             try { client = await _listener.AcceptTcpClientAsync(ct); }
             catch { break; }
-            var task = Task.Run(() => HandleClient(client));
             lock (_clientTaskGate)
             {
-                _activeClients.Add(client);
-                _clientTasks.Add(task);
-            }
-            _ = task.ContinueWith(_ =>
-            {
-                lock (_clientTaskGate)
+                if (ct.IsCancellationRequested || _activeClients.Count >= MaximumAdmittedClients)
                 {
-                    _activeClients.Remove(client);
-                    _clientTasks.Remove(task);
+                    client.Dispose();
+                    continue;
                 }
-            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                // Register the completion before scheduling work. Stop observes either
+                // this exact lifetime or its completed release, never a registration gap.
+                var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _activeClients.Add(client);
+                _clientTasks.Add(completion.Task);
+                _ = Task.Run(async () =>
+                {
+                    try { await HandleClient(client); }
+                    catch { } // Observe failures even if a socket was closed before GetStream.
+                    finally
+                    {
+                        lock (_clientTaskGate)
+                        {
+                            _activeClients.Remove(client);
+                            completion.SetResult();
+                            _clientTasks.Remove(completion.Task);
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -371,18 +384,12 @@ public sealed partial class ApiServer
         var reqId = "req_" + Guid.NewGuid().ToString("N")[..12];
         try
         {
-            var stream = client.GetStream();
-            stream.ReadTimeout = 5000;
-            stream.WriteTimeout = 5000;
-
+            using var stream = ClientStreamForTests?.Invoke(client.GetStream()) ?? client.GetStream();
+            bool parsed = false;
             try
             {
                 var request = await ReadRequest(stream);
-                if (request == null)
-                {
-                    await WriteJson(stream, 400, ApiResponse.Err("BAD_REQUEST", "Malformed HTTP request", null, reqId));
-                    return;
-                }
+                parsed = true;
 
                 var body = request.Body;
                 var method = request.Method;
@@ -449,21 +456,27 @@ public sealed partial class ApiServer
                 }
                 finally { requestCancellation.Cancel(); await disconnect; }
                 if (shutdown && status == 202) BeforeHostShutdownResponseWriteForTests?.Invoke();
-                await WriteJson(stream, status, responseBody, responseHeaders, strictFlush: shutdown);
+                if (!await TryWriteJson(stream, status, responseBody, responseHeaders)) return;
                 if (shutdown && status == 202 && Interlocked.Exchange(ref _hostExitPosted, 1) == 0)
                 {
                     // The transport has finished writing. Never run/drain the host on this client task.
-                    _ = Task.Run(() => _postHostShutdown!());
+                    _ = Task.Run(() => { try { _postHostShutdown!(); } catch { } });
                 }
             }
             catch (ApiException ex)
             {
-                await WriteJson(stream, ex.Status, ApiResponse.Err(ex.Code, ex.Message, ex.Details, reqId));
-                if(ex is EvaluationRequestException or BatchDeletionRequestException or RetentionStorageRequestException or RetentionStagingRequestException or RetentionUsageRequestException or RetentionReconciliationRequestException)await FinishRejectedEvaluation(client,stream);
+                if (await TryWriteJson(stream, ex.Status, ApiResponse.Err(ex.Code, ex.Message, ex.Details, reqId)) &&
+                    (!parsed || ex is EvaluationRequestException or BatchDeletionRequestException or RetentionStorageRequestException or RetentionStagingRequestException or RetentionUsageRequestException or RetentionReconciliationRequestException))
+                    await FinishRejectedEvaluation(client, stream, _cts.Token);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is OperationCanceledException ||
+                _cts.IsCancellationRequested && ex is IOException or SocketException or ObjectDisposedException)
             {
-                await WriteJson(stream, 500, ApiResponse.Err("INTERNAL_ERROR", ex.Message, null, reqId));
+                // Stop or a disconnected transport can close without an error response.
+            }
+            catch
+            {
+                await TryWriteJson(stream, 500, ApiResponse.Err("INTERNAL_ERROR", "HTTP request could not be processed.", null, reqId));
             }
         }
         finally
@@ -501,165 +514,6 @@ public sealed partial class ApiServer
         {try {cancellation.Cancel();}catch(ObjectDisposedException){ }}
         catch(ObjectDisposedException) { } // API Stop has its own linked cancellation.
         catch { } // An observation failure alone does not prove the peer cannot receive.
-    }
-
-    private static async Task WriteJson(Stream stream, int status, string body, IReadOnlyDictionary<string, string>? responseHeaders = null, bool strictFlush = false)
-    {
-        var buf = Encoding.UTF8.GetBytes(body);
-        var extraHeaders = responseHeaders is null
-            ? string.Empty
-            : string.Concat(responseHeaders.Select(header => $"{header.Key}: {header.Value}\r\n"));
-        var headers = $"HTTP/1.1 {status} {StatusText(status)}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {buf.Length}\r\nConnection: close\r\n{extraHeaders}\r\n";
-        var responseBytes = Encoding.UTF8.GetBytes(headers);
-        await stream.WriteAsync(responseBytes);
-        await stream.WriteAsync(buf);
-        if (strictFlush) await stream.FlushAsync();
-        else { try { stream.Flush(); } catch { } }
-    }
-
-    private static string StatusText(int status) => status switch
-    {
-        200 => "OK",
-        201 => "Created",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        409 => "Conflict",
-        412 => "Precondition Failed",
-        428 => "Precondition Required",
-        202 => "Accepted",
-        500 => "Internal Server Error",
-        _ => "Unknown"
-    };
-
-    private static async Task<HttpRequest?> ReadRequest(Stream stream)
-    {
-        using var ms = new MemoryStream();
-        var buffer = new byte[8192];
-        int headerEnd = -1;
-
-        while (true)
-        {
-            int read;
-            try { read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length)); }
-            catch { return null; }
-            if (read == 0) return null;
-
-            ms.Write(buffer, 0, read);
-            var bytes = ms.ToArray();
-            headerEnd = FindHeaderEnd(bytes);
-            if (headerEnd >= 0) break;
-            if (bytes.Length > 65536) return null; // too large
-        }
-
-        var headerBytes = ms.ToArray();
-        var headerText = Encoding.UTF8.GetString(headerBytes, 0, headerEnd);
-        var lines = headerText.Split("\r\n");
-        if (lines.Length < 1) return null;
-
-        var requestLine = lines[0].Split(' ');
-        if (requestLine.Length < 2) return null;
-        var method = requestLine[0].ToUpperInvariant();
-        var rawPath = requestLine[1];
-        var evaluation=IsRetentionEvaluationPath(rawPath);
-        var deletion=IsDeletionPath(rawPath);
-        var batch=IsBatchDeletionPath(rawPath);
-        var staging = IsRetentionStagingPath(rawPath);
-        var usage = IsRetentionUsagePath(rawPath);
-        var reconciliation = IsRetentionReconciliationPath(rawPath);
-        var noBody = reconciliation || usage || staging || IsRetentionStoragePath(rawPath);
-        ApiException InvalidNoBodyRequest() => reconciliation ? new RetentionReconciliationRequestException() :
-            usage ? new RetentionUsageRequestException() :
-            staging ? new RetentionStagingRequestException() : new RetentionStorageRequestException();
-        if (noBody)
-        {
-            try { _ = new UTF8Encoding(false, true).GetString(headerBytes, 0, headerEnd); }
-            catch (DecoderFallbackException) { throw InvalidNoBodyRequest(); }
-        }
-        if(deletion||evaluation||batch)
-        {try{_=new UTF8Encoding(false,true).GetString(headerBytes,0,headerEnd);}catch(DecoderFallbackException){throw batch?InvalidBatchDeletion():evaluation?InvalidEvaluation():InvalidDeletion();}}
-
-        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var duplicateHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (int i = 1; i < lines.Length; i++)
-        {
-            var line = lines[i];
-            var idx = line.IndexOf(':');
-            if (idx <= 0) continue;
-            var name = line[..idx].Trim();
-            var value = line[(idx + 1)..].Trim();
-            if (!headers.TryAdd(name, value))
-            {
-                if (name.Equals("If-Match", StringComparison.OrdinalIgnoreCase) ||
-                    name.Equals("Idempotency-Key", StringComparison.OrdinalIgnoreCase)||name.Equals("Content-Length",StringComparison.OrdinalIgnoreCase))
-                    duplicateHeaders.Add(name);
-                headers[name] = value;
-            }
-        }
-
-        int contentLength = 0;
-        if (headers.TryGetValue("Content-Length", out var clValue) && int.TryParse(clValue, out var parsed))
-            contentLength = parsed;
-        if(deletion&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
-            contentLength is <0 or >2048||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidDeletion();
-
-        if(evaluation&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
-            contentLength is <0 or >EvaluationBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidEvaluation();
-        if(batch&&(headers.ContainsKey("Transfer-Encoding")||duplicateHeaders.Contains("Content-Length")||
-            contentLength is <0 or >BatchDeletionBodyLimit||headers.ContainsKey("Content-Length")&&!int.TryParse(clValue,out _)))throw InvalidBatchDeletion();
-        if (noBody && (headers.ContainsKey("Transfer-Encoding") || duplicateHeaders.Contains("Content-Length") ||
-            headerBytes.Length != headerEnd || clValue is not null &&
-            (clValue.Length == 0 || clValue.Any(c => !char.IsAsciiDigit(c)) || !int.TryParse(clValue, out var length) || length != 0)))
-            throw InvalidNoBodyRequest();
-        using var evaluationReadDeadline=(evaluation||batch)?new CancellationTokenSource(TimeSpan.FromSeconds(3)):null;
-        byte[] bodyBytes = Array.Empty<byte>();
-        var bodyStart = headerEnd;
-        var alreadyRead = headerBytes.Length - bodyStart;
-        if((deletion||evaluation||batch)&&alreadyRead>contentLength)throw batch?InvalidBatchDeletion():evaluation?InvalidEvaluation():InvalidDeletion();
-        var remaining = contentLength - alreadyRead;
-        if (remaining < 0) remaining = 0;
-
-        if (contentLength > 0)
-        {
-            bodyBytes = new byte[contentLength];
-            Array.Copy(headerBytes, bodyStart, bodyBytes, 0, alreadyRead);
-            var offset = alreadyRead;
-            while (remaining > 0)
-            {
-                int r;
-                try { r = (evaluation||batch)?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining),evaluationReadDeadline!.Token):deletion?await stream.ReadAsync(bodyBytes.AsMemory(offset,remaining)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)):await stream.ReadAsync(bodyBytes.AsMemory(offset, remaining)); }
-                catch { break; }
-                if (r == 0) break;
-                offset += r;
-                remaining -= r;
-            }
-        }
-
-        if((evaluation||batch)&&remaining!=0)throw batch?InvalidBatchDeletion():InvalidEvaluation();
-        string body;
-        if(evaluation||batch){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw batch?InvalidBatchDeletion():InvalidEvaluation();}}
-        else if(deletion){try{body=new UTF8Encoding(false,true).GetString(bodyBytes);}catch(DecoderFallbackException){throw InvalidDeletion();}}
-        else body=StripBom(Encoding.UTF8.GetString(bodyBytes));
-        return new HttpRequest(method, rawPath, headers, body, duplicateHeaders);
-    }
-
-    private static string StripBom(string s)
-    {
-        if (s.Length > 0 && s[0] == '\uFEFF')
-            return s[1..];
-        return s;
-    }
-
-    private static int FindHeaderEnd(byte[] bytes)
-    {
-        for (int i = 0; i < bytes.Length - 3; i++)
-        {
-            if (bytes[i] == '\r' && bytes[i + 1] == '\n' && bytes[i + 2] == '\r' && bytes[i + 3] == '\n')
-                return i + 4;
-        }
-        return -1;
     }
 
     private static bool RequiresAuth(string method, string path)

@@ -576,7 +576,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
     [Fact]
     public async Task RevokeBeforeFinalBackendGateBlocksStartAndLeavesRunNonRetryable()
     {
-        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Current);
+        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Persistent);
         using var attempt = BeginBlockedStandingStart(database);
         await attempt.EnvironmentEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -599,7 +599,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
     [Fact]
     public async Task StopAllBeforeFinalBackendGateBlocksStartAndPersistsGlobalStop()
     {
-        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Current);
+        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Persistent);
         using var attempt = BeginBlockedStandingStart(database);
         await attempt.EnvironmentEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -622,7 +622,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
     [Fact]
     public async Task DisableBeforeFinalBackendGateBlocksStartAndPersistsDisabledMode()
     {
-        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Current);
+        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Persistent);
         using var attempt = BeginBlockedStandingStart(database);
         await attempt.EnvironmentEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -733,7 +733,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
     [Fact]
     public async Task BackendStartWinsSafetyRevokeThenStopsExactlyOnceAfterTheInterlock()
     {
-        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Current);
+        using var database = CreateActivatedDatabase(CaptureAuthorizationSessionBinding.Persistent);
         using var attempt = BeginStartHeldAtBackendBoundary(database);
         var entered = await Task.WhenAny(attempt.Backend.StartEntered.Task, attempt.StartTask);
         Assert.True(
@@ -769,7 +769,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         for (var round = 0; round < 20; round++)
         {
             using var database = CreateActivatedDatabase(
-                CaptureAuthorizationSessionBinding.Current,
+                CaptureAuthorizationSessionBinding.Persistent,
                 System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value);
             using var race = CreateProductionRace(database, safetyWins: round % 2 == 0);
 
@@ -810,7 +810,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         Assert.False(string.IsNullOrWhiteSpace(currentUserSid));
 
         using var database = CreateActivatedDatabase(
-            CaptureAuthorizationSessionBinding.Current,
+            CaptureAuthorizationSessionBinding.Persistent,
             currentUserSid!);
         var scope = new SqliteAuthorizedCaptureScopeRepository(database.Store).GetById("scope-1");
         var interlock = new StandingLeaseStartSafetyInterlock();
@@ -875,7 +875,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
             database.Store,
             preparedDispatcher,
             () => currentUserSid,
-            () => CaptureAuthorizationSessionBinding.Current,
+            () => CaptureAuthorizationSessionBinding.Persistent,
             utcNow: () => At(15),
             pollInterval: TimeSpan.FromSeconds(1),
             audit: (_, _) => { });
@@ -1747,7 +1747,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
         Assert.NotEqual(RecState.completed, recording.State);
 
         var execution = new StandingPlanSetupQueryService(database.Store)
-            .GetExecution("intent-1", "S-1-5-21-test", CaptureAuthorizationSessionBinding.Current);
+            .GetExecution("intent-1", "S-1-5-21-test", CaptureAuthorizationSessionBinding.Persistent);
         Assert.NotNull(execution);
         Assert.Equal("run-1", execution!.RunId);
         Assert.Equal("blocked", execution.OccurrenceStatusCode);
@@ -2053,7 +2053,7 @@ public sealed class StandingLeasePreparedIntentNaturalWakeTests
             database.Store,
             dispatcher,
             () => currentUserSid,
-            () => CaptureAuthorizationSessionBinding.Current,
+            () => CaptureAuthorizationSessionBinding.Persistent,
             utcNow: () => At(15),
             waitForTest: (_, cancellationToken) => Task.CompletedTask,
             pollInterval: TimeSpan.FromSeconds(1),

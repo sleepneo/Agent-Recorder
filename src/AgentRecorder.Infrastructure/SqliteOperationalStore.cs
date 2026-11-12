@@ -30,6 +30,7 @@ public sealed class SqliteOperationalStore
     }
 
     public string DatabasePath { get; }
+    internal Action<SqliteConnection>? BeforeWritePolicyValidationForTests { get; set; }
 
     // Unopened: the guard owns cleanup even when Open fails. No creation,
     // migration, recovery, global policy change or pooling on this connection.
@@ -43,7 +44,9 @@ public sealed class SqliteOperationalStore
     internal static void ConfigureRetentionGuardConnection(SqliteConnection connection)
     {
         SqliteOutputPathCollation.Register(connection);
-        ExecuteNonQuery(connection, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;");
+        ApplyConnectionPolicy(connection, 1000);
+        if (!string.Equals(ExecuteScalarString(connection, "PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase))
+            throw new SqliteOperationalStoreException("sqlite_journal_mode_mismatch", "The retention guard requires an existing WAL store.");
     }
 
     internal static void ValidateRetentionGuardStore(SqliteConnection connection, SqliteTransaction transaction)
@@ -85,7 +88,7 @@ public sealed class SqliteOperationalStore
         try
         {
             connection = CreateConnection(SqliteOpenMode.ReadOnly);
-            ConfigureBusinessConnection(connection);
+            ConfigureReadOnlyConnection(connection);
             return connection;
         }
         catch (Exception exception)
@@ -288,9 +291,9 @@ public sealed class SqliteOperationalStore
         catch { connection.Dispose(); throw; }
     }
 
-    private static void ConfigureInitializationConnection(SqliteConnection connection)
+    private void ConfigureInitializationConnection(SqliteConnection connection)
     {
-        ApplyConnectionPolicy(connection);
+        ApplyConnectionPolicy(connection, BusyTimeoutMilliseconds, BeforeWritePolicyValidationForTests);
 
         var integrity = ExecuteScalarString(connection, "PRAGMA integrity_check;");
         if (!string.Equals(integrity, "ok", StringComparison.OrdinalIgnoreCase))
@@ -308,11 +311,9 @@ public sealed class SqliteOperationalStore
                 "SQLite did not accept WAL journal mode.");
         }
 
-        ExecuteNonQuery(connection, "PRAGMA synchronous = NORMAL;");
-
         if (ExecuteScalarInt64(connection, "PRAGMA foreign_keys;") != 1 ||
             ExecuteScalarInt64(connection, "PRAGMA busy_timeout;") != BusyTimeoutMilliseconds ||
-            ExecuteScalarInt64(connection, "PRAGMA synchronous;") != 1 ||
+            ExecuteScalarInt64(connection, "PRAGMA synchronous;") != 2 ||
             !string.Equals(ExecuteScalarString(connection, "PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase))
         {
             throw new SqliteOperationalStoreException(
@@ -321,9 +322,9 @@ public sealed class SqliteOperationalStore
         }
     }
 
-    private static void ConfigureBusinessConnection(SqliteConnection connection)
+    private void ConfigureBusinessConnection(SqliteConnection connection)
     {
-        ApplyConnectionPolicy(connection);
+        ApplyConnectionPolicy(connection, BusyTimeoutMilliseconds, BeforeWritePolicyValidationForTests);
         EnsureInitializedForBusinessConnection(connection);
 
         if (!string.Equals(ExecuteScalarString(connection, "PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase))
@@ -334,15 +335,26 @@ public sealed class SqliteOperationalStore
         }
     }
 
-    private static void ApplyConnectionPolicy(SqliteConnection connection)
+    private static void ConfigureReadOnlyConnection(SqliteConnection connection)
+    {
+        ExecuteNonQuery(connection, "PRAGMA query_only = ON;");
+        ExecuteNonQuery(connection, $"PRAGMA busy_timeout = {BusyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
+        EnsureInitializedForBusinessConnection(connection);
+        if (!string.Equals(ExecuteScalarString(connection, "PRAGMA journal_mode;"), "wal", StringComparison.OrdinalIgnoreCase))
+            throw new SqliteOperationalStoreException("sqlite_journal_mode_mismatch", "The existing operational store is not in WAL mode.");
+    }
+
+    private static void ApplyConnectionPolicy(SqliteConnection connection, int busyTimeout,
+        Action<SqliteConnection>? beforeValidation = null)
     {
         ExecuteNonQuery(connection, "PRAGMA foreign_keys = ON;");
-        ExecuteNonQuery(connection, $"PRAGMA busy_timeout = {BusyTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};");
-        ExecuteNonQuery(connection, "PRAGMA synchronous = NORMAL;");
+        ExecuteNonQuery(connection, $"PRAGMA busy_timeout = {busyTimeout.ToString(CultureInfo.InvariantCulture)};");
+        ExecuteNonQuery(connection, "PRAGMA synchronous = FULL;");
+        beforeValidation?.Invoke(connection);
 
         if (ExecuteScalarInt64(connection, "PRAGMA foreign_keys;") != 1 ||
-            ExecuteScalarInt64(connection, "PRAGMA busy_timeout;") != BusyTimeoutMilliseconds ||
-            ExecuteScalarInt64(connection, "PRAGMA synchronous;") != 1)
+            ExecuteScalarInt64(connection, "PRAGMA busy_timeout;") != busyTimeout ||
+            ExecuteScalarInt64(connection, "PRAGMA synchronous;") != 2)
         {
             throw new SqliteOperationalStoreException(
                 "sqlite_pragma_policy_failed",

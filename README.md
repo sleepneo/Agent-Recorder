@@ -1,6 +1,6 @@
 # Agent Recorder
 
-> This guide describes v0.1.23. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
+> This guide describes v0.1.24. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
 
 Agent Recorder is an **AI agent-native local screen recording capability layer**
 for Windows. A human describes what to record, a local AI agent calls the
@@ -28,7 +28,7 @@ When neither `output.filename` nor `output.filename_template` is specified, a ne
 
 ## Release And Scope
 
-The v0.1.23 release is a Windows x64 self-contained portable package.
+The v0.1.24 release is a Windows x64 self-contained portable package.
 For ordinary 1–30 second recordings, the package CLI can start Recorder,
 submit one quick API request, and wait for a verified MP4 in a single call.
 The user still selects the region when needed and approves recording locally.
@@ -56,6 +56,12 @@ actual scope and use [the API reference](docs/api.md) for contracts.
 When upgrading an existing installation, back up its data directory first.
 The database remains at SQLite schema V51. If upgrading from a pre-V51 build,
 keep migrated data with V51-compatible binaries.
+
+v0.1.24 adds bounded HTTP request handling, stronger authorization durability,
+and fixes for lease approval and plan-history queries. Existing automatic
+grants with legacy or unverifiable login bindings require fresh local approval;
+their history and media are retained. See [Safety](docs/safety.md) for recovery
+limits and validation scope.
 
 ## Recording Audio
 

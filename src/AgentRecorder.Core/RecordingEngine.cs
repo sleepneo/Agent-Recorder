@@ -328,7 +328,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     internal Func<(string CurrentUserSid, string SessionBinding)> RequiredOnceIdentityProviderForTests { get; set; } = () =>
     {
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Current);
+        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Persistent);
     };
 
     internal Func<IReadOnlyList<StandingLeaseDisplayMetadata>> RequiredOnceDisplaysForTests { get; set; } =
@@ -344,7 +344,7 @@ public sealed partial class RecordingEngine : IDisposable, IOrdinaryRuntimeOutpu
     internal Func<(string CurrentUserSid, string SessionBinding, int SessionId)> FutureWindowIdentityForTests { get; set; } = () =>
     {
         using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Current,
+        return (identity.User?.Value ?? string.Empty, CaptureAuthorizationSessionBinding.Persistent,
             FutureWindowProcessIdentity.GetCurrentSessionId() ?? -1);
     };
 

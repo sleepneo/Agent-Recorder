@@ -13,7 +13,7 @@ namespace AgentRecorder.Tests;
 public sealed class RecurringOccurrenceNaturalWakeTests
 {
     private const string Sid = "S-1-5-21-natural-wake";
-    private static readonly string Session = CaptureAuthorizationSessionBinding.Current;
+    private static readonly string Session = CaptureAuthorizationSessionBinding.Persistent;
 
     [Fact]
     public void CandidateQueryDiscoversScheduledDueAuthorizedAndRunCreatedFromExactDurableParents()

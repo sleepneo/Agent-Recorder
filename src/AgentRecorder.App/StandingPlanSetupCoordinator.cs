@@ -34,6 +34,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     private readonly StandingPlanSetupTerminalService _terminal;
     private readonly Func<IReadOnlyList<StandingLeaseDisplayMetadata>> _currentDisplays;
     private readonly ConcurrentDictionary<string, Lazy<Task>> _flights = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _interactionCancellation = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly object _approvalCommitGate = new();
     private readonly Func<Task>? _beforeApprovalCommitForTest;
@@ -111,7 +112,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
         ArgumentNullException.ThrowIfNull(request);
 
         var currentUserSid = CurrentUserSid();
-        var sessionBinding = CaptureAuthorizationSessionBinding.Current;
+        var sessionBinding = CaptureAuthorizationSessionBinding.Persistent;
         if (string.IsNullOrWhiteSpace(currentUserSid) || string.IsNullOrWhiteSpace(sessionBinding))
         {
             return new StandingPlanSetupCreateResult(
@@ -122,7 +123,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
                 null,
                 null,
                 null,
-                "interactive_desktop_required");
+                "authorization_identity_unavailable");
         }
 
         if (!_safety.IsUnattendedEnabled(currentUserSid))
@@ -195,7 +196,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
         var currentUserSid = CurrentUserSid();
-        var sessionBinding = CaptureAuthorizationSessionBinding.Current;
+        var sessionBinding = CaptureAuthorizationSessionBinding.Persistent;
         var record = _query.Get(setupIntentId, currentUserSid, sessionBinding);
         if (record is null)
             return null;
@@ -204,6 +205,8 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
             DateTimeOffset.UtcNow >= record.ExpiresAtUtc)
         {
             _terminal.TrySetTerminal(record.IntentId, "setup_intent_expired", expired: true);
+            if (_interactionCancellation.TryGetValue(record.IntentId, out var interaction))
+                try { interaction.Cancel(); } catch (ObjectDisposedException) { }
             record = _query.Get(setupIntentId, currentUserSid, sessionBinding);
             if (record is null)
                 return null;
@@ -273,6 +276,8 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
                 reason_code = "setup_shutdown_incomplete",
                 pending_flights = flights.Count(flight => !flight.IsCompleted),
             });
+            _ = Task.WhenAll(flights).ContinueWith(_ => _lifetimeCts.Dispose(), CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
 
@@ -287,7 +292,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     private void RecoverPendingSetups()
     {
         var currentUserSid = CurrentUserSid();
-        var sessionBinding = CaptureAuthorizationSessionBinding.Current;
+        var sessionBinding = CaptureAuthorizationSessionBinding.Persistent;
         if (string.IsNullOrWhiteSpace(currentUserSid) || string.IsNullOrWhiteSpace(sessionBinding))
             return;
 
@@ -309,16 +314,23 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     private async Task RunFlightAsync(string intentId)
     {
         LocalSetupUiSerializationGate.Lease? uiLease = null;
+        using var interaction = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        using var monitorStop = new CancellationTokenSource();
+        Task monitor = Task.CompletedTask;
+        _interactionCancellation[intentId] = interaction;
         try
         {
+            var intent = _query.Get(intentId, CurrentUserSid(), CaptureAuthorizationSessionBinding.Persistent);
+            if (intent is null) return;
+            monitor = MonitorExpiryAsync(intentId, intent.ExpiresAtUtc, interaction, monitorStop.Token);
             uiLease = await LocalSetupUiSerializationGate.Instance
-                .WaitAsync(_lifetimeCts.Token).ConfigureAwait(false);
-            await RunFlightUnderUiGateAsync(intentId).ConfigureAwait(false);
+                .WaitAsync(interaction.Token).ConfigureAwait(false);
+            await RunFlightUnderUiGateAsync(intentId, interaction.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
+        catch (OperationCanceledException) when (interaction.IsCancellationRequested)
         {
-            // Host shutdown leaves an uncompleted intent pending and
-            // recoverable; it is not a setup conflict.
+            // Queued/selection cancellation preserves the existing recovery
+            // contract. Approval cancellation is settled inside its owner scope.
         }
         catch (ObjectDisposedException) when (_lifetimeCts.IsCancellationRequested)
         {
@@ -335,21 +347,54 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
         }
         finally
         {
-            uiLease?.Dispose();
-            _flights.TryRemove(intentId, out _);
+            try { monitorStop.Cancel(); await monitor.ConfigureAwait(false); }
+            catch { SafeLifecycleAudit("expiry_monitor_failed", intentId, "setup_persistence_failed"); }
+            finally
+            {
+                _interactionCancellation.TryRemove(intentId, out _);
+                uiLease?.Dispose();
+                _flights.TryRemove(intentId, out _);
+            }
         }
     }
 
-    private async Task RunFlightUnderUiGateAsync(string intentId)
+    private async Task MonitorExpiryAsync(string intentId, DateTimeOffset expires, CancellationTokenSource interaction, CancellationToken stop)
+    {
+        try
+        {
+            var remaining = expires - DateTimeOffset.UtcNow;
+            if (remaining > TimeSpan.Zero) await Task.Delay(remaining, stop).ConfigureAwait(false);
+            bool terminal;
+            lock (_approvalCommitGate) terminal = _terminal.TrySetTerminal(intentId, "setup_intent_expired", expired: true);
+            if (!terminal) return;
+            SafeLifecycleAudit("expired", intentId, "setup_intent_expired");
+            interaction.Cancel();
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        catch
+        {
+            // Persistence uncertainty cannot leave a late UI approval usable.
+            interaction.Cancel();
+            SafeLifecycleAudit("expiry_failed", intentId, "setup_persistence_failed");
+        }
+    }
+
+    private void SafeLifecycleAudit(string stage, string intentId, string reason)
+    {
+        try { _audit.Log("standing_setup.lease_approval." + stage, new { setup_id = intentId, reason_code = reason }); }
+        catch { }
+    }
+
+    private async Task RunFlightUnderUiGateAsync(string intentId, CancellationToken interactionToken)
     {
         var state = Get(intentId);
         if (state is null || state.StatusCode is "scheduled" or "rejected" or "expired")
             return;
 
-        _lifetimeCts.Token.ThrowIfCancellationRequested();
+        interactionToken.ThrowIfCancellationRequested();
 
         var currentUserSid = CurrentUserSid();
-        var sessionBinding = CaptureAuthorizationSessionBinding.Current;
+        var sessionBinding = CaptureAuthorizationSessionBinding.Persistent;
         if (!_safety.IsUnattendedEnabled(currentUserSid))
         {
             _terminal.TrySetTerminal(intentId, "unattended_disabled");
@@ -380,7 +425,9 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
 
         if (state.StatusCode == "setup_pending")
         {
-            var selection = await _setupUi.SelectFreshRegionAsync(_lifetimeCts.Token).ConfigureAwait(false);
+            interactionToken.ThrowIfCancellationRequested();
+            var selection = await _setupUi.SelectFreshRegionAsync(interactionToken).ConfigureAwait(false);
+            interactionToken.ThrowIfCancellationRequested();
             if (selection.Status == "host_shutdown")
                 return;
             if (selection.Status != "selected")
@@ -431,89 +478,104 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
             preparedRecord.OutputDirectory,
             preparedRecord.FrozenFileName);
 
-        var approved = await _setupUi.ShowApprovalAsync(approvalDetails, _lifetimeCts.Token).ConfigureAwait(false);
-        if (_lifetimeCts.IsCancellationRequested)
-            return;
-        if (!approved)
+        interactionToken.ThrowIfCancellationRequested();
+        var approval = _setupUi.BeginApproval(intentId, approvalDetails, _audit.Log, interactionToken);
+        try
         {
-            _terminal.TrySetTerminal(intentId, "lease_rejected_by_user");
-            return;
-        }
-
-        var approvalUserSid = CurrentUserSid();
-        var approvalSession = CaptureAuthorizationSessionBinding.Current;
-        if (_lifetimeCts.IsCancellationRequested)
-            return;
-        if (!string.Equals(approvalUserSid, preparedRecord.CurrentUserSid, StringComparison.Ordinal) ||
-            !string.Equals(approvalSession, preparedRecord.SessionBinding, StringComparison.Ordinal) ||
-            !_safety.IsUnattendedEnabled(approvalUserSid))
-        {
-            _terminal.TrySetTerminal(intentId, "setup_conflict");
-            return;
-        }
-
-        if (_beforeApprovalCommitForTest is not null)
-            await _beforeApprovalCommitForTest().ConfigureAwait(false);
-
-        // Re-read the exact prepared target after the approval callback and
-        // immediately before activation. The pending chain is terminalized on
-        // failure, so no active Lease or executable Occurrence is left behind.
-        if (!TryCheckOutputReadiness(
-                preparedRecord.OutputDirectory,
-                preparedRecord.FrozenFileName,
-                intent.MaximumDuration,
-                out var approvalOutputFailure))
-        {
-            await RejectForOutputReadinessAsync(intentId, approvalOutputFailure).ConfigureAwait(false);
-            return;
-        }
-
-        StandingLeaseAuthorizationActivationResult activated;
-        lock (_approvalCommitGate)
-        {
-            if (Volatile.Read(ref _disposeRequested) != 0 ||
-                Volatile.Read(ref _shutdownLinearized) != 0)
+            var result = await approval.Decision.ConfigureAwait(false);
+            if (interactionToken.IsCancellationRequested)
             {
+                _terminal.TrySetTerminal(intentId, _lifetimeCts.IsCancellationRequested ? "lease_approval_host_shutdown" : "setup_intent_expired",
+                    expired: !_lifetimeCts.IsCancellationRequested);
+                return;
+            }
+            if (result.Outcome != StandingLeaseApprovalOutcome.Approved)
+            {
+                _terminal.TrySetTerminal(intentId, result.Reason);
                 return;
             }
 
-            _approvalCommitLinearizedForTest?.Invoke();
-
-            StandingLeaseLocalApprovalReceipt receipt;
-            try
-            {
-                receipt = StandingLeaseLocalApprovalReceipt.CreateForTrustedLocalApprovalAdapter(
-                    "standing-approval-" + Guid.NewGuid().ToString("N"),
-                    preparedRecord.PlanId,
-                    preparedRecord.OccurrenceId,
-                    preparedRecord.LeaseId,
-                    preparedRecord.ScopeId,
-                    preparedRecord.ScopeDigest,
-                    approvalUserSid,
-                    approvalSession,
-                    DateTimeOffset.UtcNow);
-            }
-            catch (Phase3DomainException)
+            var approvalUserSid = CurrentUserSid();
+            var approvalSession = CaptureAuthorizationSessionBinding.Persistent;
+            if (_lifetimeCts.IsCancellationRequested)
+                return;
+            if (!string.Equals(approvalUserSid, preparedRecord.CurrentUserSid, StringComparison.Ordinal) ||
+                !string.Equals(approvalSession, preparedRecord.SessionBinding, StringComparison.Ordinal) ||
+                !_safety.IsUnattendedEnabled(approvalUserSid))
             {
                 _terminal.TrySetTerminal(intentId, "setup_conflict");
                 return;
             }
 
-            activated = _activation.Activate(intentId, receipt);
-        }
+            if (_beforeApprovalCommitForTest is not null)
+                await _beforeApprovalCommitForTest().ConfigureAwait(false);
 
-        if (activated.Status is StandingLeaseAuthorizationActivationStatus.Activated or StandingLeaseAuthorizationActivationStatus.AlreadyActive)
-        {
-            _audit.Log("consent_lease.approved", new
+            // Re-read the exact prepared target after the approval callback and
+            // immediately before activation. The pending chain is terminalized on
+            // failure, so no active Lease or executable Occurrence is left behind.
+            if (!TryCheckOutputReadiness(
+                    preparedRecord.OutputDirectory,
+                    preparedRecord.FrozenFileName,
+                    intent.MaximumDuration,
+                    out var approvalOutputFailure))
             {
-                intent_id = intentId,
-                status = "scheduled",
-                reason_code = "scheduled",
-            });
+                await RejectForOutputReadinessAsync(intentId, approvalOutputFailure).ConfigureAwait(false);
+                return;
+            }
+
+            StandingLeaseAuthorizationActivationResult activated;
+            lock (_approvalCommitGate)
+            {
+                if (Volatile.Read(ref _disposeRequested) != 0 ||
+                    Volatile.Read(ref _shutdownLinearized) != 0 || interactionToken.IsCancellationRequested || DateTimeOffset.UtcNow >= intent.ExpiresAtUtc)
+                {
+                    return;
+                }
+
+                _approvalCommitLinearizedForTest?.Invoke();
+
+                StandingLeaseLocalApprovalReceipt receipt;
+                try
+                {
+                    receipt = StandingLeaseLocalApprovalReceipt.CreateForTrustedLocalApprovalAdapter(
+                        "standing-approval-" + Guid.NewGuid().ToString("N"),
+                        preparedRecord.PlanId,
+                        preparedRecord.OccurrenceId,
+                        preparedRecord.LeaseId,
+                        preparedRecord.ScopeId,
+                        preparedRecord.ScopeDigest,
+                        approvalUserSid,
+                        approvalSession,
+                        DateTimeOffset.UtcNow);
+                }
+                catch (Phase3DomainException)
+                {
+                    _terminal.TrySetTerminal(intentId, "setup_conflict");
+                    return;
+                }
+
+                activated = _activation.Activate(intentId, receipt);
+            }
+
+            if (activated.Status is StandingLeaseAuthorizationActivationStatus.Activated or StandingLeaseAuthorizationActivationStatus.AlreadyActive)
+            {
+                _audit.Log("consent_lease.approved", new
+                {
+                    intent_id = intentId,
+                    status = "scheduled",
+                    reason_code = "scheduled",
+                });
+            }
+            else
+            {
+                _terminal.TrySetTerminal(intentId, ActivationReason(activated.Reason));
+            }
         }
-        else
+        finally
         {
-            _terminal.TrySetTerminal(intentId, ActivationReason(activated.Reason));
+            // The public decision may already be terminal while a preview or
+            // STA initialization still owns work. Keep the flight and UI gate.
+            await approval.Retired.ConfigureAwait(false);
         }
     }
 
@@ -677,7 +739,7 @@ internal sealed class StandingPlanSetupCoordinator : IStandingPlanSetupGateway, 
     private StandingPlanSetupState? ReadState(string intentId)
     {
         var currentUserSid = CurrentUserSid();
-        var sessionBinding = CaptureAuthorizationSessionBinding.Current;
+        var sessionBinding = CaptureAuthorizationSessionBinding.Persistent;
         var record = _query.Get(intentId, currentUserSid, sessionBinding);
         return record is null
             ? null
@@ -820,25 +882,44 @@ internal interface IStandingPlanSetupUi
     Task<StandingPlanSetupSelection> SelectFreshRegionAsync(CancellationToken cancellationToken);
     Task<bool> ShowApprovalAsync(StandingLeaseApprovalDetails details, CancellationToken cancellationToken);
 
+    StandingLeaseApprovalOperation BeginApproval(string setupId, StandingLeaseApprovalDetails details,
+        Action<string, object> audit, CancellationToken cancellationToken)
+    {
+        async Task<StandingLeaseApprovalResult> Decide()
+        {
+            var approved = await ShowApprovalAsync(details, cancellationToken).ConfigureAwait(false);
+            return new(approved ? StandingLeaseApprovalOutcome.Approved : StandingLeaseApprovalOutcome.Rejected,
+                approved ? "user_approved" : "lease_rejected_by_user");
+        }
+        var task = Decide();
+        return new(task, task);
+    }
+
     Task ShowFailureAsync(string reasonCode, CancellationToken cancellationToken) =>
         Task.CompletedTask;
 }
 
 internal sealed class TrayStandingPlanSetupUi : IStandingPlanSetupUi
 {
-    private readonly TrayContext _tray;
+    private readonly TrayContext? _tray;
+    private readonly Func<IUiTextProvider> _text;
+    private readonly StandingLeaseApprovalOptions? _approvalOptions;
 
     internal TrayStandingPlanSetupUi(TrayContext tray)
     {
         _tray = tray ?? throw new ArgumentNullException(nameof(tray));
+        _text = () => tray.CurrentUiTextProvider;
     }
 
-    public bool IsInteractiveDesktopAvailable => _tray.SupportsRegionSelectionUi;
+    internal TrayStandingPlanSetupUi(Func<IUiTextProvider> textForTests, StandingLeaseApprovalOptions optionsForTests)
+    { _text = textForTests; _approvalOptions = optionsForTests; }
+
+    public bool IsInteractiveDesktopAvailable => _tray?.SupportsRegionSelectionUi == true;
 
     public Task<StandingPlanSetupSelection> SelectFreshRegionAsync(CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<StandingPlanSetupSelection>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _tray.RequestStandingRegionSelection(
+        _tray!.RequestStandingRegionSelection(
             300,
             (status, x, y, width, height, displayId, coordinateSpace) =>
                 completion.TrySetResult(new StandingPlanSetupSelection(status, x, y, width, height, displayId, coordinateSpace)),
@@ -846,27 +927,16 @@ internal sealed class TrayStandingPlanSetupUi : IStandingPlanSetupUi
         return completion.Task;
     }
 
-    public Task<bool> ShowApprovalAsync(StandingLeaseApprovalDetails details, CancellationToken cancellationToken)
+    public StandingLeaseApprovalOperation BeginApproval(string setupId, StandingLeaseApprovalDetails details,
+        Action<string, object> audit, CancellationToken cancellationToken) =>
+        StandingLeaseApprovalPresentation.Start(setupId, details, _text(), audit, cancellationToken, _approvalOptions);
+
+    public async Task<bool> ShowApprovalAsync(StandingLeaseApprovalDetails details, CancellationToken cancellationToken)
     {
-        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                completion.TrySetResult(StandingLeaseApprovalForm.ShowModal(
-                    details,
-                    textProvider: _tray.CurrentUiTextProvider,
-                    cancellationToken: cancellationToken));
-            }
-            catch
-            {
-                completion.TrySetResult(false);
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Start();
-        return completion.Task;
+        var operation = BeginApproval("standing_local", details, (_, _) => { }, cancellationToken);
+        var result = await operation.Decision.ConfigureAwait(false);
+        await operation.Retired.ConfigureAwait(false);
+        return result.Outcome == StandingLeaseApprovalOutcome.Approved;
     }
 
     public Task ShowFailureAsync(string reasonCode, CancellationToken cancellationToken)
@@ -883,7 +953,7 @@ internal sealed class TrayStandingPlanSetupUi : IStandingPlanSetupUi
             "execution_output_file_exists" => "StandingLeaseSetup_OutputFileExists",
             _ => "StandingLeaseSetup_OutputReadinessGeneric",
         };
-        var text = _tray.CurrentUiTextProvider.Format(
+        var text = _tray!.CurrentUiTextProvider.Format(
             "StandingLeaseSetup_OutputReadinessFailure",
             _tray.CurrentUiTextProvider.Get(reasonKey),
             reasonCode);

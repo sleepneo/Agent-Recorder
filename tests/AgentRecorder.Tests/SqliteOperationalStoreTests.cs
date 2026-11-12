@@ -957,7 +957,48 @@ public sealed class SqliteOperationalStoreTests
         Assert.Equal(1, ScalarInt64(connection, "PRAGMA foreign_keys;"));
         Assert.Equal("wal", ScalarString(connection, "PRAGMA journal_mode;"), ignoreCase: true);
         Assert.Equal(SqliteOperationalStore.BusyTimeoutMilliseconds, ScalarInt64(connection, "PRAGMA busy_timeout;"));
-        Assert.Equal(1, ScalarInt64(connection, "PRAGMA synchronous;"));
+        Assert.Equal(2, ScalarInt64(connection, "PRAGMA synchronous;"));
+    }
+
+    [Fact]
+    public void InitializeReopenMultipleConnectionsAndRetentionGuardUseFullBeforeBegin()
+    {
+        using var database = new TemporaryDatabase();
+        var initializationChecks = 0;
+        database.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            Assert.Equal(2L, ScalarInt64(connection, "PRAGMA synchronous;"));
+            Execute(connection, "PRAGMA synchronous=FULL;"); // prohibited within an active transaction
+            initializationChecks++;
+        };
+        database.Store.Initialize();
+        Assert.True(initializationChecks > 0);
+        var reopened = new SqliteOperationalStore(database.Store.DatabasePath);
+        using var first = reopened.OpenConnection();
+        using var second = reopened.OpenConnection();
+        Assert.Equal(2L, ScalarInt64(first, "PRAGMA synchronous;"));
+        Assert.Equal(2L, ScalarInt64(second, "PRAGMA synchronous;"));
+        Assert.Equal("wal", ScalarString(second, "PRAGMA journal_mode;"));
+        using var guard = reopened.CreateRetentionGuardConnection();
+        guard.Open(); SqliteOperationalStore.ConfigureRetentionGuardConnection(guard);
+        Assert.Equal(2L, ScalarInt64(guard, "PRAGMA synchronous;"));
+        using var transaction = guard.BeginTransaction(deferred: false);
+        using var actual = guard.CreateCommand(); actual.Transaction = transaction;
+        actual.CommandText = "PRAGMA synchronous;"; Assert.Equal(2L, actual.ExecuteScalar());
+    }
+
+    [Fact]
+    public void FailedFullValidationCannotInitializeOrOpenBusinessWhileReadOnlyCannotWrite()
+    {
+        using var database = new TemporaryDatabase();
+        database.Store.Initialize();
+        database.Store.BeforeWritePolicyValidationForTests = connection => Execute(connection, "PRAGMA synchronous=NORMAL;");
+        Assert.Throws<SqliteOperationalStoreException>(() => database.Store.OpenConnection());
+        Assert.Throws<SqliteOperationalStoreException>(() => database.Store.Initialize());
+        using var read = database.Store.OpenReadOnlyConnection();
+        Assert.Equal(1L, ScalarInt64(read, "PRAGMA query_only;"));
+        Assert.Throws<SqliteException>(() => Execute(read, "CREATE TABLE task428_must_not_exist(id INTEGER);"));
+        Assert.Equal(0L, ScalarInt64(read, "SELECT COUNT(*) FROM sqlite_master WHERE name='task428_must_not_exist';"));
     }
 
     [Fact]

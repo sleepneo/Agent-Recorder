@@ -17,12 +17,13 @@ public sealed partial class ApiServer
     private static ApiException InvalidEvaluation()=>new EvaluationRequestException();
     // Send FIN after the error, then discard only a bounded amount of unread
     // transport data. Closing with unread bytes can reset away the JSON reply.
-    private static async Task FinishRejectedEvaluation(TcpClient client,Stream stream)
+    private static async Task FinishRejectedEvaluation(TcpClient client,Stream stream,CancellationToken cancellation)
     {
         try
         {
             client.Client.Shutdown(System.Net.Sockets.SocketShutdown.Send);
-            using var deadline=new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            deadline.CancelAfter(TimeSpan.FromMilliseconds(100));
             var buffer=new byte[4096];var remaining=EvaluationBodyLimit;
             while(remaining>0)
             {

@@ -81,6 +81,7 @@ internal static class ConfirmationPreviewBuilder
     public static Bitmap? TryBuildPreview(ConfirmationCaptureBounds? bounds, IScreenPreviewProvider provider, Size maxSize, out string fallbackMessage)
     {
         fallbackMessage = string.Empty;
+        Bitmap? bitmap = null;
 
         try
         {
@@ -103,12 +104,13 @@ internal static class ConfirmationPreviewBuilder
                 return null;
             }
 
-            var bitmap = provider.Capture(clampedBounds, maxSize);
+            bitmap = provider.Capture(clampedBounds, maxSize);
             DrawHighlightBorder(bitmap);
             return bitmap;
         }
         catch
         {
+            bitmap?.Dispose();
             fallbackMessage = FallbackMessage;
             return null;
         }

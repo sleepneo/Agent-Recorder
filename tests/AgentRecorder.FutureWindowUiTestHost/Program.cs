@@ -9,6 +9,20 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[1].StartsWith("standing-", StringComparison.Ordinal))
+        {
+            ApplicationConfiguration.Initialize();
+            return args[1] == "standing-shutdown" ? StandingApprovalShutdownHost.Run(args[0])
+                : StandingApprovalTestHost.Run(args[0], args[1]);
+        }
+        if (args is ["durable-identity-readonly"])
+        {
+            var observation = DurableAuthorizationIdentity.Windows.Read();
+            if (observation.Binding is null) { Console.WriteLine(observation.Reason); return 5; }
+            Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(observation.Binding))));
+            return 0;
+        }
         if (args.Length == 0 && Path.GetFileName(Environment.ProcessPath) == "AgentRecorder.Headless.exe")
             return PrivateShutdownHost.Run(Environment.GetEnvironmentVariable("AGENT_RECORDER_DATA_DIR")!);
         if (args.Length == 2 && args[1] == "shutdown-host") return PrivateShutdownHost.Run(args[0]);

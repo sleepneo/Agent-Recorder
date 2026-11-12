@@ -368,7 +368,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     public async Task ProductionPathUsesPersistedCandidateThroughRuntimeAndSettlesOnceOnSharedLifecycleSignal()
     {
         const string sid = "S-1-5-21-task279r";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         using var context = RecurringOccurrenceReservationTests.ReservationContext.Create(
             countdownSeconds: 0,
             approvalUserSid: sid,
@@ -465,7 +465,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     {
         using var setup = new RecurringPlanSetupTestFixture();
         const string intentId = "task286-no-preseeded-occurrence";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         setup.Create(intentId, prepared: true,
             sid: RecurringPlanSetupTestFixture.Sid, session: session);
         setup.Activate(intentId, RecurringPlanSetupTestFixture.Sid, session);
@@ -587,7 +587,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     public async Task ApprovalAfterRuntimeStartIsDiscoveredWithoutAnExplicitSignal()
     {
         using var setup = new RecurringPlanSetupTestFixture();
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         var now = RecurringPlanSetupTestFixture.At(5_399);
         var interlock = new StandingLeaseStartSafetyInterlock();
         var audit = new AuditLogger(Path.Combine(setup.Root, "task286-late-approval-audit.jsonl"));
@@ -642,7 +642,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     {
         using var setup = new RecurringPlanSetupTestFixture();
         const string intentId = "task286-late-no-preseeded-occurrence";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         setup.Create(intentId, prepared: true,
             sid: RecurringPlanSetupTestFixture.Sid, session: session);
         setup.Activate(intentId, RecurringPlanSetupTestFixture.Sid, session);
@@ -705,7 +705,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     {
         using var setup = new RecurringPlanSetupTestFixture();
         const string intentId = "task286-candidate-eligibility";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         setup.Create(intentId, prepared: true,
             sid: RecurringPlanSetupTestFixture.Sid, session: session);
         setup.Activate(intentId, RecurringPlanSetupTestFixture.Sid, session);
@@ -750,7 +750,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     {
         using var setup = new RecurringPlanSetupTestFixture();
         const string intentId = "task286-concurrent-advancement";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         setup.Create(intentId, prepared: true,
             sid: RecurringPlanSetupTestFixture.Sid, session: session);
         setup.Activate(intentId, RecurringPlanSetupTestFixture.Sid, session);
@@ -773,7 +773,7 @@ public sealed class RecurringNaturalWakeRuntimeTests
     {
         using var setup = new RecurringPlanSetupTestFixture();
         const string intentId = "task286-corrupt-activated-chain";
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         setup.Create(intentId, prepared: true,
             sid: RecurringPlanSetupTestFixture.Sid, session: session);
         setup.Activate(intentId, RecurringPlanSetupTestFixture.Sid, session);

@@ -145,7 +145,7 @@ public sealed partial class FutureWindowPublicationAnchorTests(ITestOutputHelper
         internal readonly Tray Tray = new();
         internal SqliteFutureWindowAuthorizationRepository Future = null!; internal UnifiedHistoryQueryService Query = null!;
         internal FutureWindowOneShotAuthorizationCoordinator Coordinator = null!; private AuditLogger? audit;
-        internal readonly string Sid = WindowsIdentity.GetCurrent().User!.Value; internal readonly string Session = CaptureAuthorizationSessionBinding.Current;
+        internal readonly string Sid = WindowsIdentity.GetCurrent().User!.Value; internal readonly string Session = CaptureAuthorizationSessionBinding.Persistent;
         internal readonly ApprovalUi Approval = new();
         internal SqliteOperationalStore Store = null!; internal SqliteOrdinaryRecordingHistoryStore Writer = null!;
         internal RecordingEngine Engine = null!; internal ApiServer? Api;

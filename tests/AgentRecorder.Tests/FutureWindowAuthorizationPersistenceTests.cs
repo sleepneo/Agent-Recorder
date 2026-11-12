@@ -11,6 +11,112 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-AgentRecorderDataDir")]
 public sealed class FutureWindowAuthorizationPersistenceTests
 {
+    [Theory]
+    [InlineData("receipt_loss")]
+    [InlineData("rollback")]
+    [InlineData("policy")]
+    public void FullStartCommitFailureAndReceiptLossNeverDeliverUsableReceipt(string failure)
+    {
+        using var database = new TemporaryDatabase();
+        var repository = new SqliteFutureWindowAuthorizationRepository(database.Store);
+        var now = DateTimeOffset.UtcNow;
+        var scope = CreateScope("fwa_" + Guid.NewGuid().ToString("N"), new string('c', 64), now.AddSeconds(-2));
+        repository.CreateOrGet(scope);
+        repository.Approve(scope.AuthorizationId, Sid, Session, "approval", now.AddSeconds(-1));
+        var checks = 0;
+        database.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA synchronous=FULL; PRAGMA synchronous;";
+            Assert.Equal(2L, command.ExecuteScalar()); checks++;
+            if (failure == "policy") { command.CommandText = "PRAGMA synchronous=NORMAL;"; command.ExecuteNonQuery(); }
+        };
+        repository.BeforeStartCommitForTests = (connection, transaction) =>
+        {
+            using var command = connection.CreateCommand(); command.Transaction = transaction;
+            command.CommandText = "PRAGMA synchronous;"; Assert.Equal(2L, command.ExecuteScalar());
+            Assert.Equal("active", new SqliteFutureWindowAuthorizationRepository(new(database.Store.DatabasePath))
+                .GetOwned(scope.AuthorizationId, Sid)!.StatusCode);
+            if (failure == "rollback") transaction.Rollback();
+        };
+        if (failure == "receipt_loss") repository.AfterStartCommitForTests = () => throw new IOException("receipt lost");
+        if (failure == "policy")
+            Assert.ThrowsAny<Exception>(() => repository.TryCommitStart(scope.AuthorizationId, Sid, Session,
+                ProcessFor(scope, now), now, out _));
+        else
+        {
+            Assert.Null(repository.TryCommitStart(scope.AuthorizationId, Sid, Session, ProcessFor(scope, now), now, out var reason));
+            Assert.Equal(failure == "receipt_loss" ? "future_window_start_committed_delivery_failed"
+                : "future_window_start_commit_outcome_unknown", reason);
+        }
+        Assert.Equal(1, checks);
+        var reopened = new SqliteFutureWindowAuthorizationRepository(new(database.Store.DatabasePath));
+        var row = reopened.GetOwned(scope.AuthorizationId, Sid)!;
+        Assert.Equal(failure == "receipt_loss" ? "used" : "active", row.StatusCode);
+        if (failure == "receipt_loss")
+        {
+            Assert.Null(reopened.TryCommitStart(scope.AuthorizationId, Sid, Session, ProcessFor(scope, now), now, out _));
+            reopened.RecoverUncertainStarts(now.AddSeconds(1));
+            var recovered = reopened.GetOwned(scope.AuthorizationId, Sid)!;
+            reopened.RecoverUncertainStarts(now.AddSeconds(2));
+            Assert.Equal("started_unknown", recovered.RunStatus);
+            Assert.Equal(recovered, reopened.GetOwned(scope.AuthorizationId, Sid));
+        }
+    }
+
+    [Fact]
+    public void OwnerCanInspectAndRevokeOldBootGrantWithoutRestoringItsBinding()
+    {
+        using var database = new TemporaryDatabase();
+        var repository = new SqliteFutureWindowAuthorizationRepository(database.Store);
+        var now = DateTimeOffset.UtcNow;
+        var scope = CreateScope("fwa_" + Guid.NewGuid().ToString("N"), new string('d', 64), now.AddSeconds(-2)) with
+        { SessionBinding = DurableAuthorizationIdentity.Format(Sid, 99, 12345, 1)! };
+        repository.CreateOrGet(scope);
+        repository.Approve(scope.AuthorizationId, Sid, scope.SessionBinding, "approval", now.AddSeconds(-1));
+        var reopened = new SqliteFutureWindowAuthorizationRepository(new(database.Store.DatabasePath));
+        foreach (var identity in new[] { DurableAuthorizationIdentity.Format(Sid, 100, 12345, 1)!,
+                     DurableAuthorizationIdentity.Format(Sid, 99, 12346, 1)!, "" })
+            Assert.Null(reopened.TryCommitStart(scope.AuthorizationId, Sid, identity, ProcessFor(scope, now), now, out _));
+        Assert.Single(reopened.ListOwned(Sid));
+        Assert.Null(reopened.GetOwned(scope.AuthorizationId, "other-user"));
+        var verifiedBeforeBegin = false;
+        database.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            using var command = connection.CreateCommand(); command.CommandText = "PRAGMA synchronous=FULL; PRAGMA synchronous;";
+            Assert.Equal(2L, command.ExecuteScalar()); verifiedBeforeBegin = true;
+        };
+        Assert.Equal("revoked", repository.Revoke(scope.AuthorizationId, Sid, scope.SessionBinding, now)!.StatusCode);
+        Assert.True(verifiedBeforeBegin);
+        Assert.Null(reopened.TryCommitStart(scope.AuthorizationId, Sid, scope.SessionBinding, ProcessFor(scope, now), now, out _));
+        Assert.Equal(scope.SessionBinding, reopened.GetOwned(scope.AuthorizationId, Sid)!.SessionBinding);
+    }
+
+    [Fact]
+    public void StopAllRevokesEveryOwnedLoginAndFailedRevocationDoesNotClaimSuccess()
+    {
+        using var database = new TemporaryDatabase();
+        var repository = new SqliteFutureWindowAuthorizationRepository(database.Store);
+        var now = DateTimeOffset.UtcNow;
+        var scopes = new[] { Session, "older-login" }.Select(session =>
+            CreateScope("fwa_" + Guid.NewGuid().ToString("N"), new string('e', 64), now.AddSeconds(-2)) with { SessionBinding = session }).ToArray();
+        foreach (var scope in scopes)
+        {
+            repository.CreateOrGet(scope); repository.Approve(scope.AuthorizationId, Sid, scope.SessionBinding, "approval-" + scope.AuthorizationId, now.AddSeconds(-1));
+        }
+        var failing = new StandingLeaseSafetyControlService(database.Store,
+            utcNowForTest: () => now, auditForTest: (_, _) => { }, beforeCommitForTest: (_, _) => throw new IOException("commit failed"));
+        var rejected = failing.StopAllAndRevokeAll("failed-stop", "user_requested", Sid, "");
+        Assert.False(rejected.DurableOperationCommitted);
+        Assert.All(repository.ListOwned(Sid), row => Assert.Equal("active", row.StatusCode));
+        var service = new StandingLeaseSafetyControlService(database.Store, utcNowForTest: () => now, auditForTest: (_, _) => { });
+        Assert.True(service.StopAllAndRevokeAll("durable-stop", "user_requested", Sid, "").DurableOperationCommitted);
+        var reopened = new SqliteFutureWindowAuthorizationRepository(new(database.Store.DatabasePath));
+        Assert.All(reopened.ListOwned(Sid), row => Assert.Equal("revoked", row.StatusCode));
+        foreach (var scope in scopes)
+            Assert.Null(reopened.TryCommitStart(scope.AuthorizationId, Sid, scope.SessionBinding, ProcessFor(scope, now), now, out _));
+    }
+
     private const string Sid = "S-1-5-21-100-200-300-1001";
     private const string Session = "session-future-window-test";
 
@@ -185,7 +291,7 @@ public sealed class FutureWindowAuthorizationPersistenceTests
     }
 
     [Fact]
-    public void StopAllRevokesPendingAndApprovedFutureGrantsOnlyForCurrentSidAndSession()
+    public void StopAllRevokesPendingAndApprovedFutureGrantsAcrossOwnedSessions()
     {
         using var database = new TemporaryDatabase();
         database.Store.Initialize();
@@ -209,7 +315,7 @@ public sealed class FutureWindowAuthorizationPersistenceTests
         Assert.True(result.DurableOperationCommitted);
         Assert.Equal("revoked", repository.Get(pending.AuthorizationId, Sid, Session)!.StatusCode);
         Assert.Equal("revoked", repository.Get(active.AuthorizationId, Sid, Session)!.StatusCode);
-        Assert.Equal("active", repository.Get(otherSession.AuthorizationId, Sid, "other-session")!.StatusCode);
+        Assert.Equal("revoked", repository.Get(otherSession.AuthorizationId, Sid, "other-session")!.StatusCode);
     }
 
     [Fact]

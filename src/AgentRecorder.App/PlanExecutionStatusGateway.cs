@@ -24,7 +24,7 @@ internal sealed class PlanExecutionStatusGateway : IPlanExecutionStatusGateway, 
             sid = null;
         }
 
-        var snapshot = _query.Get(planId, sid, CaptureAuthorizationSessionBinding.Current);
+        var snapshot = _query.Get(planId, sid, _query.GetOwnedSessionBinding(planId, sid));
         return snapshot is null
             ? null
             : new PlanExecutionStatusState(
@@ -44,7 +44,7 @@ internal sealed class PlanExecutionStatusGateway : IPlanExecutionStatusGateway, 
         catch { sid = null; }
 
         PlanExecutionHistoryPageSnapshot? snapshot;
-        try { snapshot = _query.GetHistory(planId, sid, CaptureAuthorizationSessionBinding.Current, limit, cursor); }
+        try { snapshot = _query.GetHistory(planId, sid, _query.GetOwnedSessionBinding(planId, sid), limit, cursor); }
         catch (PlanExecutionHistoryCursorException exception) { throw new ArgumentException("The history cursor is invalid.", exception); }
         return snapshot is null
             ? null

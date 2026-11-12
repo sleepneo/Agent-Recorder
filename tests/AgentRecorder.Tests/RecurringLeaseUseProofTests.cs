@@ -13,6 +13,100 @@ namespace AgentRecorder.Tests;
 [Collection("NonParallel-AgentRecorderDataDir")]
 public sealed class RecurringLeaseUseProofTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PolicyFailureAndCommitReceiptLossCloseRecurringStartWithDurableReadback(bool receiptLost)
+    {
+        using var context = RecurringOccurrenceReservationTests.ReservationContext.Create();
+        var reservation = Reserve(context, "task428-uncertain-run", "task428-uncertain-use");
+        if (!receiptLost) context.Fixture.Store.BeforeWritePolicyValidationForTests = connection =>
+        {
+            using var command = connection.CreateCommand(); command.CommandText = "PRAGMA synchronous=NORMAL;"; command.ExecuteNonQuery();
+        };
+        var issuerCalls = 0;
+        var service = new RecurringOccurrenceStartCommitService(context.Fixture.Store, () => context.Fixture.CreatedAt,
+            new RecurringOccurrenceReservationTests.MatchingReservationEnvironmentProvider(),
+            failureHookForTest: point =>
+            { if (point == RecurringOccurrenceStartCommitFailurePoint.AfterCommit) throw new IOException("receipt lost"); },
+            recurringProofIssuerForTest: _ => { issuerCalls++; throw new Exception(); });
+        if (!receiptLost) Assert.Throws<Phase3PersistenceException>(() => service.Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity));
+        else
+        {
+            var result = service.Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
+            Assert.Equal(RecurringOccurrenceStartCommitStatus.AlreadyCommitted, result.Status);
+            Assert.False(result.CanStartCapture); Assert.Null(result.FirstCommitProof);
+        }
+        Assert.Equal(0, issuerCalls);
+        var reopened = new SqliteOperationalStore(context.Fixture.Store.DatabasePath);
+        Assert.Equal(receiptLost ? RecordingRunStatus.StartCommitted : RecordingRunStatus.Created,
+            new SqliteRecordingRunRepository(reopened).Get(reservation.RunId!).Status);
+        if (receiptLost)
+        {
+            var retry = new RecurringOccurrenceStartCommitService(reopened, () => context.Fixture.CreatedAt,
+                new RecurringOccurrenceReservationTests.MatchingReservationEnvironmentProvider())
+                .Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
+            Assert.Equal(RecurringOccurrenceStartCommitStatus.AlreadyCommitted, retry.Status);
+            Assert.False(retry.CanStartCapture);
+        }
+    }
+
+    [Fact]
+    public void ActualFullTransactionCommitsBeforeIssuerAndLostDeliveryCannotReplayAfterReopen()
+    {
+        using var context = RecurringOccurrenceReservationTests.ReservationContext.Create();
+        var reservation = Reserve(context, "task428-run", "task428-use");
+        var beforeCommit = false;
+        var issuerCalled = false;
+        var service = new RecurringOccurrenceStartCommitService(context.Fixture.Store,
+            () => context.Fixture.CreatedAt,
+            new RecurringOccurrenceReservationTests.MatchingReservationEnvironmentProvider(),
+            beforeCommitHookForTest: (connection, transaction) =>
+            {
+                using var command = connection.CreateCommand(); command.Transaction = transaction;
+                command.CommandText = "PRAGMA synchronous;"; Assert.Equal(2L, command.ExecuteScalar());
+                var reopened = new SqliteOperationalStore(context.Fixture.Store.DatabasePath);
+                Assert.Equal(RecordingRunStatus.Created, new SqliteRecordingRunRepository(reopened).Get(reservation.RunId!).Status);
+                beforeCommit = true;
+            },
+            recurringProofIssuerForTest: receipt =>
+            {
+                Assert.True(beforeCommit);
+                var reopened = new SqliteOperationalStore(context.Fixture.Store.DatabasePath);
+                Assert.Equal(RecordingRunStatus.StartCommitted, new SqliteRecordingRunRepository(reopened).Get(receipt.Run.Id).Status);
+                issuerCalled = true;
+                throw new IOException("delivery failed after durable commit");
+            });
+        var result = service.Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
+        Assert.True(issuerCalled);
+        Assert.Equal(RecurringOccurrenceStartCommitStatus.CommittedWithoutProof, result.Status);
+        Assert.Null(result.FirstCommitProof);
+        var replay = new RecurringOccurrenceStartCommitService(new(context.Fixture.Store.DatabasePath),
+            () => context.Fixture.CreatedAt,
+            new RecurringOccurrenceReservationTests.MatchingReservationEnvironmentProvider())
+            .Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
+        Assert.Equal(RecurringOccurrenceStartCommitStatus.AlreadyCommitted, replay.Status);
+        Assert.False(replay.CanStartCapture);
+        Assert.Null(replay.FirstCommitProof);
+    }
+
+    [Fact]
+    public void CommitExceptionFromRolledBackTransactionCannotIssueRecurringProof()
+    {
+        using var context = RecurringOccurrenceReservationTests.ReservationContext.Create();
+        var reservation = Reserve(context, "task428-rollback-run", "task428-rollback-use");
+        var issuerCalls = 0;
+        var result = new RecurringOccurrenceStartCommitService(context.Fixture.Store,
+            () => context.Fixture.CreatedAt,
+            new RecurringOccurrenceReservationTests.MatchingReservationEnvironmentProvider(),
+            beforeCommitHookForTest: (_, transaction) => transaction.Rollback(),
+            recurringProofIssuerForTest: _ => { issuerCalls++; throw new Exception(); })
+            .Commit(context.Lease.LeaseId, context.Slot.OccurrenceIdentity);
+        Assert.Null(result.FirstCommitProof); Assert.False(result.CanStartCapture); Assert.Equal(0, issuerCalls);
+        var reopened = new SqliteOperationalStore(context.Fixture.Store.DatabasePath);
+        Assert.Equal(RecordingRunStatus.Created, new SqliteRecordingRunRepository(reopened).Get(reservation.RunId!).Status);
+    }
+
     [Fact]
     public void FirstCommittedRecurringUseIssuesOneBoundProofWithExactFields()
     {

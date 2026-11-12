@@ -602,36 +602,28 @@ public sealed class FutureWindowOneShotProof : CaptureAuthorizationProof
     }
 }
 
-/// <summary>
-/// The minimum process-local user/session identity used to bind a proof.
-/// </summary>
+/// <summary>Separate process-local interactive and durable Windows login identities.</summary>
 internal static class CaptureAuthorizationSessionBinding
 {
-    internal static string Current
-    {
-        get
-        {
-            string user = string.IsNullOrWhiteSpace(Environment.UserName)
-                ? "unknown-user"
-                : Environment.UserName;
-            string domain = string.IsNullOrWhiteSpace(Environment.UserDomainName)
-                ? "unknown-domain"
-                : Environment.UserDomainName;
-            int sessionId;
-            try
-            {
-                sessionId = Process.GetCurrentProcess().SessionId;
-            }
-            catch
-            {
-                sessionId = -1;
-            }
+    private static readonly string InteractiveBinding = "interactive-process-v1|" + Guid.NewGuid().ToString("N");
+    private static readonly System.Threading.AsyncLocal<AgentRecorder.Infrastructure.DurableAuthorizationIdentity?> TestAuthority = new();
+    internal static string Current => InteractiveBinding;
+    internal static string Persistent => ObservePersistent().Binding ?? string.Empty;
+    // Read-only history and local safety actions require ownership, not permission
+    // to resume capture. This namespace is never accepted by an automatic gate.
+    internal static string History => ObservePersistent().Binding ?? "history-owner-v1";
+    internal static AgentRecorder.Infrastructure.DurableIdentityObservation ObservePersistent() =>
+        (TestAuthority.Value ?? AgentRecorder.Infrastructure.DurableAuthorizationIdentity.Windows).Read();
 
-            var rawBinding = $"{domain}\\{user}|session:{sessionId}";
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(rawBinding))
-                .TrimEnd('=')
-                .Replace('+', '-')
-                .Replace('/', '_');
-        }
+    internal static IDisposable UseIdentityForTests(AgentRecorder.Infrastructure.DurableAuthorizationIdentity authority)
+    {
+        var prior = TestAuthority.Value;
+        TestAuthority.Value = authority;
+        return new IdentityScope(() => TestAuthority.Value = prior);
+    }
+    private sealed class IdentityScope(Action restore) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose() { if (Interlocked.Exchange(ref _disposed, 1) == 0) restore(); }
     }
 }

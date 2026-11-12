@@ -75,7 +75,7 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
     public bool IsInteractiveDesktopAvailable =>
         Volatile.Read(ref _disposed) == 0 && _tray.SupportsRegionSelectionUi &&
         FutureWindowProcessIdentity.IsInteractiveDesktopAvailable() &&
-        !string.IsNullOrWhiteSpace(CurrentUserSid()) && !string.IsNullOrWhiteSpace(CaptureAuthorizationSessionBinding.Current);
+        !string.IsNullOrWhiteSpace(CurrentUserSid());
 
     public bool IsSetupSupported => OperatingSystem.IsWindows() && IsInteractiveDesktopAvailable;
 
@@ -94,12 +94,16 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(request);
         ValidateRequest(request);
+        var observation = CaptureAuthorizationSessionBinding.ObservePersistent();
+        if (observation.Binding is null)
+            throw new ApiException(409, "AUTHORIZATION_IDENTITY_UNAVAILABLE", "The Windows login identity could not be verified.",
+                new { reason_code = observation.Reason });
         if (!IsInteractiveDesktopAvailable)
             throw new ApiException(409, "INTERACTIVE_DESKTOP_REQUIRED", "A local interactive desktop is required for approval.",
                 new { reason_code = "interactive_desktop_required" });
 
         var sid = CurrentUserSid();
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = observation.Binding;
         if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session))
             throw new ApiException(409, "INTERACTIVE_DESKTOP_REQUIRED", "The current Windows user/session could not be bound.",
                 new { reason_code = "future_window_user_session_unavailable" });
@@ -188,8 +192,11 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
     public FutureWindowAuthorizationState? Get(string authorizationId)
     {
         if (!IsValidAuthorizationId(authorizationId)) return null;
-        var row = _repository.Get(authorizationId, CurrentUserSid() ?? "", CaptureAuthorizationSessionBinding.Current);
+        var row = _repository.GetOwned(authorizationId, CurrentUserSid() ?? "");
         if (row is null) return null;
+        var observation = CaptureAuthorizationSessionBinding.ObservePersistent();
+        if (observation.Binding != row.SessionBinding)
+            return ToState(row with { ReasonCode = observation.Reason ?? "authorization_session_mismatch" });
         if (row.StatusCode == "active" && row.ExpiresAtUtc is { } expires && DateTimeOffset.UtcNow >= expires)
         {
             _repository.SetTerminalWithoutRun(row.AuthorizationId, row.CurrentUserSid, row.SessionBinding,
@@ -203,16 +210,22 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
     public FutureWindowAuthorizationStartResult Start(string authorizationId, string windowId)
     {
         if (!IsValidAuthorizationId(authorizationId)) return new(false, null, "future_window_not_found");
+        var observation = CaptureAuthorizationSessionBinding.ObservePersistent();
+        if (observation.Binding is null) return new(false, null, observation.Reason);
+        var owned = _repository.GetOwned(authorizationId, CurrentUserSid() ?? "");
+        if (owned is null) return new(false, null, "future_window_not_found");
+        if (owned.SessionBinding != observation.Binding) return new(false, null, "authorization_session_mismatch");
         if (!IsExecutionSupported) return new(false, null, "future_window_execution_unavailable");
         _startGate.Wait();
         try
         {
             var sid = CurrentUserSid();
-            var session = CaptureAuthorizationSessionBinding.Current;
+            var session = CaptureAuthorizationSessionBinding.Persistent;
             if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session))
                 return new(false, null, "future_window_user_session_unavailable");
-            var row = _repository.Get(authorizationId, sid, session);
+            var row = _repository.GetOwned(authorizationId, sid);
             if (row is null) return new(false, null, "future_window_not_found");
+            if (row.SessionBinding != session) return new(false, null, "authorization_session_mismatch");
             if (row.StatusCode != "active") return new(false, null, row.StatusCode == "expired" ? "future_window_expired" : "future_window_not_active");
             var now = DateTimeOffset.UtcNow;
             if (row.ExpiresAtUtc is null || now >= row.ExpiresAtUtc.Value)
@@ -321,8 +334,10 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
     {
         if (!IsValidAuthorizationId(authorizationId)) return null;
         var sid = CurrentUserSid();
-        var session = CaptureAuthorizationSessionBinding.Current;
-        if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session)) return null;
+        if (string.IsNullOrWhiteSpace(sid)) return null;
+        var owned = _repository.GetOwned(authorizationId, sid);
+        if (owned is null) return null;
+        var session = owned.SessionBinding;
         FutureWindowAuthorizationRow? row = null;
         _startInterlock.Execute("future_window_revoke", () =>
             row = _repository.Revoke(authorizationId, sid, session, DateTimeOffset.UtcNow));
@@ -357,17 +372,18 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
     public IReadOnlyList<FutureWindowAuthorizationState> ListForSafetyCenter()
     {
         var sid = CurrentUserSid();
-        var session = CaptureAuthorizationSessionBinding.Current;
-        if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session)) return Array.Empty<FutureWindowAuthorizationState>();
-        return _repository.List(sid, session).Select(ToState).ToArray();
+        if (string.IsNullOrWhiteSpace(sid)) return Array.Empty<FutureWindowAuthorizationState>();
+        var observation = CaptureAuthorizationSessionBinding.ObservePersistent();
+        return _repository.ListOwned(sid).Select(row => ToState(
+            row.SessionBinding == observation.Binding ? row : row with
+            { ReasonCode = observation.Reason ?? "authorization_session_mismatch" })).ToArray();
     }
 
     public void CancelGloballyRevokedPendingApprovals(string userSid, string sessionBinding)
     {
         if (Volatile.Read(ref _disposed) != 0 ||
-            string.IsNullOrWhiteSpace(userSid) || string.IsNullOrWhiteSpace(sessionBinding) ||
-            !string.Equals(userSid, CurrentUserSid(), StringComparison.Ordinal) ||
-            !string.Equals(sessionBinding, CaptureAuthorizationSessionBinding.Current, StringComparison.Ordinal))
+            string.IsNullOrWhiteSpace(userSid) ||
+            !string.Equals(userSid, CurrentUserSid(), StringComparison.Ordinal))
             return;
 
         string[] flightIds;
@@ -379,7 +395,7 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
         {
             try
             {
-                var row = _repository.Get(authorizationId, userSid, sessionBinding);
+                var row = _repository.GetOwned(authorizationId, userSid);
                 if (row is { StatusCode: "revoked", ApprovedAtUtc: null, RunId: null })
                 {
                     ReleasePinIfTerminal(row);
@@ -424,7 +440,7 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
         var now = DateTimeOffset.UtcNow;
         _repository.RecoverUncertainStarts(now);
         var sid = CurrentUserSid();
-        var session = CaptureAuthorizationSessionBinding.Current;
+        var session = CaptureAuthorizationSessionBinding.Persistent;
         if (string.IsNullOrWhiteSpace(sid) || string.IsNullOrWhiteSpace(session)) return;
         foreach (var row in _repository.List(sid, session))
         {
@@ -473,7 +489,7 @@ internal sealed class FutureWindowOneShotAuthorizationCoordinator :
             // A gate timeout must still be able to publish a queryable terminal
             // failure instead of leaving the authorization pending indefinitely.
             sid = CurrentUserSid();
-            session = CaptureAuthorizationSessionBinding.Current;
+            session = CaptureAuthorizationSessionBinding.Persistent;
             AuditApprovalUi(authorizationId, "gate_waiting", new
             {
                 process_id = Environment.ProcessId,

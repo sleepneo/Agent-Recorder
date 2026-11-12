@@ -1,6 +1,6 @@
 # Agent Recorder API
 
-This reference describes v0.1.23 (SQLite V51). Inspect `/capabilities` on the running host before using these contracts with an older package.
+This reference describes v0.1.24 (SQLite V51), including bounded HTTP ingress and authorization-recovery hardening. Inspect `/capabilities` before using an older package. Recovery boundaries and validation scope are documented in [the safety model](safety.md#authorization-durability-and-recovery-boundaries).
 
 All new video recordings deliver video only. Ordinary raw `POST /api/v1/recordings` and quick `POST /api/v1/recordings/quick` requests may omit `artifacts`, use `{}`, or send `{"artifacts":{"bundle":false}}`. Explicit true returns `400 UNSUPPORTED_FEATURE`, with `details.field=artifacts.bundle` and `details.reason=bundle_generation_disabled`, before device/source/selection/confirmation or file work. No additional natural-language instruction is needed to obtain this default. The effective false value appears in `summary.artifacts.bundle` and video `config.artifacts.bundle`, including after a locally approved output-directory change.
 
@@ -34,6 +34,27 @@ mean the available evidence cannot confirm the result. Keep any `recording_id`
 for later lookup and avoid automatically submitting again.
 
 ## Response Envelope
+
+The loopback HTTP ingress accepts at most 32 concurrent clients through response
+completion. Excess connections are closed promptly. Each connection handles one
+request and returns `Connection: close`. Headers, including the terminating blank
+line, are limited to 64 KiB. Ordinary request bodies are limited to 1 MiB.
+Deletion requests retain their 2 KiB limit, evaluations 16 KiB, batch deletion
+requests 4 KiB, and body-free retention endpoints accept zero body bytes.
+
+Headers and body share a five-second read deadline. Existing three-second strict
+body budgets also apply. Business selection, approval and long polling have their
+own existing budgets. Response writes and flush share a separate five-second
+deadline. `Content-Length` must be a single nonnegative decimal byte count.
+`Transfer-Encoding`, incomplete bodies, invalid UTF-8 and already buffered surplus
+request bytes are rejected. Valid fragmented requests and send-only TCP half-close
+remain supported. Complete requests are processed without waiting for EOF.
+
+Ordinary malformed requests return `400 BAD_REQUEST`, shared byte-limit violations
+return `413 PAYLOAD_TOO_LARGE`, and reads exceeding the deadline return
+`408 REQUEST_TIMEOUT`. Strict retention endpoints retain their structured
+`400 INVALID_ARGUMENT` contracts once their request path is identified. A failed
+send, disconnected peer or stopping service may close the connection directly.
 
 Success:
 
@@ -760,7 +781,7 @@ For independent window recording, submit two separate ordinary raw
 `POST /api/v1/recordings` requests with different fixed `window_id` values and no
 `nested`, parent or session fields. Each must be silent strict window video,
 1–1800 seconds, with its own local confirmation, Proof, countdown, first frame,
-output and Bundle. Neither run depends on the other's state. Pending confirmation,
+MP4 output and durable result. Neither run depends on the other's state. Pending confirmation,
 preparing, countdown, recording, stopping and finalizing each occupy a slot;
 the default budget is two (startup configuration allows 1–10). Same HWND, over-budget requests, audio and mixed contracts
 fail before an additional confirmation or worker. Quick, Profile, display/region,
@@ -2372,10 +2393,9 @@ proof, or authorization records.
 
 ## Unified read-only task history
 
-This contract is implemented in the current source tree; it is not a released
-package announcement. Inspect `capabilities.unified_history` before using it.
+Inspect `capabilities.unified_history` before using this contract.
 
-The current source persists successful future-window MP4 completion and the original private publisher identity with the exact authorization/run and frozen output in the same SQLite transaction (append-only v40). Native identity unavailable at publication remains explicitly unknown; pre-v40 rows remain legacy unknown without scanning or backfilling media. Unified history validates selected private facts in one bounded indexed batch within its existing SQLite snapshot. Missing modern markers or inconsistent bindings return the existing unavailable response. No public fields, endpoints, capabilities, Bundle delivery, content verification, or authorization scope are added. This records historical publication identity; it does not verify current media bytes or announce a released portable package.
+Successful future-window MP4 completion and the original private publisher identity are stored with the exact authorization/run and frozen output in the same SQLite transaction (introduced in v40). Native identity unavailable at publication remains explicitly unknown; pre-v40 rows remain legacy unknown without scanning or backfilling media. Unified history validates selected private facts in one bounded indexed batch within its existing SQLite snapshot. Missing modern markers or inconsistent bindings return the existing unavailable response. This records historical publication identity; it does not verify current media bytes or expand authorization scope.
 
 App supports `ordinary`, `plan`, and `future_window`. Headless advertises only
 `["ordinary"]` and does not start Plan or future-window runtimes. `source=all`

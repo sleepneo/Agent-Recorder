@@ -442,7 +442,7 @@ internal static class CaptureAuthorizationGate
             return false;
         }
 
-        if (!string.Equals(standing.SessionBinding, CaptureAuthorizationSessionBinding.Current, StringComparison.Ordinal))
+        if (!string.Equals(standing.SessionBinding, CaptureAuthorizationSessionBinding.Persistent, StringComparison.Ordinal))
         {
             failureReason = "standing_proof_session_binding_invalid";
             return false;

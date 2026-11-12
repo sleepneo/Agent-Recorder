@@ -20,6 +20,25 @@ namespace AgentRecorder.Tests;
 public sealed class CaptureAuthorizationProofTests
 {
     [Fact]
+    public void MissingDurableIdentityStillAllowsExactOnceInteractiveFakeCapture()
+    {
+        using var identity = CaptureAuthorizationSessionBinding.UseIdentityForTests(new(() =>
+            DurableIdentityObservation.Unavailable("authorization_identity_unavailable")));
+        Assert.Empty(CaptureAuthorizationSessionBinding.Persistent);
+        var now = DateTimeOffset.UtcNow;
+        var recording = CreateRecording();
+        var confirmation = new Confirmation { RecordingId = recording.Id, CreatedAtUtc = now.UtcDateTime, TimeoutSeconds = 30 };
+        Assert.True(confirmation.TryDecide("approved")); recording.ConfirmationId = confirmation.Id;
+        var plan = CreatePlan(recording.Config);
+        var proof = CaptureAuthorizationProofIssuer.IssueInteractiveConfirmation(recording, confirmation, plan, now);
+        Assert.True(CaptureAuthorizationGate.TryConsumeInteractive(proof, recording, plan, confirmation, false, now, out var reason), reason);
+        ICaptureBackend backend = new CountingBackend();
+        backend.Start(recording.Config, proof);
+        Assert.Equal(1, ((CountingBackend)backend).StartCalls);
+        Assert.False(CaptureAuthorizationGate.TryConsumeInteractive(proof, recording, plan, confirmation, false, now, out _));
+    }
+
+    [Fact]
     public void Proof_IsBoundedAndCanBeConsumedOnlyOnceEvenConcurrently()
     {
         var issued = DateTimeOffset.UtcNow;

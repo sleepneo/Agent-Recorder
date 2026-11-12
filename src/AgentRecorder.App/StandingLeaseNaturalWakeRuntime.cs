@@ -73,7 +73,7 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
             _store,
             preparedDispatcher,
             CurrentUserSid,
-            () => CaptureAuthorizationSessionBinding.Current,
+            () => CaptureAuthorizationSessionBinding.Persistent,
             utcNow: () => DateTimeOffset.UtcNow,
             audit: _audit.Log);
         _scheduler.HostAdmission = _engine.HostAdmission;
@@ -92,7 +92,15 @@ internal sealed class StandingLeaseNaturalWakeRuntime : IDisposable
         if (Interlocked.Exchange(ref _started, 1) != 0)
             return ExecutionSupported;
 
-        if (!_recovery.RecoverAll(CurrentUserSid(), CaptureAuthorizationSessionBinding.Current))
+        var identity = CaptureAuthorizationSessionBinding.ObservePersistent();
+        if (identity.Binding is null)
+        {
+            SafeAudit("standing_lease.runtime_blocked", new { reason_code = identity.Reason });
+            Volatile.Write(ref _started, 0);
+            return false;
+        }
+
+        if (!_recovery.RecoverAll(CurrentUserSid(), identity.Binding))
         {
             SafeAudit("standing_lease.runtime_blocked", new { reason_code = "startup_recovery_failed" });
             Volatile.Write(ref _started, 0);
