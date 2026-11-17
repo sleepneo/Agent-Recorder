@@ -7,7 +7,7 @@ Use the six available Recorder MCP tools for connection and short region clips. 
 plugin requires a separately obtained Windows x64 self-contained Agent Recorder
 portable package, exactly version 0.1.25. The plugin does not contain Recorder.
 
-Plugin 0.3.2 preserves the same six tools and saved schema-1 evidence. A retired
+Plugin 0.3.3 preserves the same six tools and saved schema-1 evidence. A retired
 worker triggers at most one same-operation evidence recheck before reporting an
 unresolved submission. This is observation only and never authorizes another
 recording or stop. Unknown results still require querying the same operation ID.

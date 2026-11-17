@@ -8,6 +8,11 @@ Recorder asks for local selection/confirmation, then writes an MP4.
 
 ## How To Use
 
+For Codex, the optional [plugin preview](docs/integrations/codex.md) binds the
+portable package once and works from other project chats. Its scope is silent
+1-30 second selected-region clips, query and exact-ID stop. Use the CLI/API below
+for audio, windows, longer clips and plans; the two entry points do not conflict.
+
 1. Extract the v0.1.25 Windows x64 portable ZIP. Before reusing data from an earlier version, back up the data directory. This package uses SQLite schema V51.
 2. Open the extracted folder as your local AI agent's working directory, or give the agent its full path. Say:
 

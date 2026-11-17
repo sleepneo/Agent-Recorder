@@ -7,17 +7,22 @@ param([string]$OutputDirectory = '', [switch]$VerifyOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PluginStdioValidation.ps1')
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$allowedRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/task430'))
+$allowedRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/plugin-builds'))
+$testRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/task430'))
 $recordingCandidate = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/task431/development-recording'))
 $nativeContractCandidate = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/task431/development-native-contract'))
 $stopCandidate = [IO.Path]::GetFullPath((Join-Path $projectRoot '.local-data/task432/development-stop'))
-if (-not $OutputDirectory) { $OutputDirectory = $stopCandidate }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $allowedRoot ('build-' + [Guid]::NewGuid().ToString('N')) }
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
+$testRelative = [IO.Path]::GetRelativePath($testRoot, $outputRoot).Replace('\', '/')
+$privateTestOutput = $testRelative -match '^tests-[0-9a-f]{32}/.+'
+$retainedCandidate = $VerifyOnly -and $testRelative -match '^task434-[0-9a-f]{32}$'
 if (-not $outputRoot.StartsWith($allowedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and
-    -not [string]::Equals($outputRoot, $recordingCandidate, [StringComparison]::OrdinalIgnoreCase) -and
-    -not [string]::Equals($outputRoot, $nativeContractCandidate, [StringComparison]::OrdinalIgnoreCase) -and
-    -not [string]::Equals($outputRoot, $stopCandidate, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'OutputDirectory must be below the existing private task430 scope or exactly a permitted task431/task432 candidate directory.'
+    -not $privateTestOutput -and -not $retainedCandidate -and
+    -not ($VerifyOnly -and ([string]::Equals($outputRoot, $recordingCandidate, [StringComparison]::OrdinalIgnoreCase) -or
+    [string]::Equals($outputRoot, $nativeContractCandidate, [StringComparison]::OrdinalIgnoreCase) -or
+    [string]::Equals($outputRoot, $stopCandidate, [StringComparison]::OrdinalIgnoreCase)))) {
+    throw 'OutputDirectory must be below .local-data/plugin-builds or an isolated test directory; legacy candidates are verify-only.'
 }
 if ((Test-Path -LiteralPath $outputRoot) -and -not $VerifyOnly) { throw 'OutputDirectory already exists; choose a new directory. Nothing was removed.' }
 if ($VerifyOnly -and -not (Test-Path -LiteralPath $outputRoot)) { throw 'VerifyOnly requires an existing development directory.' }
@@ -40,13 +45,14 @@ foreach ($name in @('plugin', 'mcp')) {
 $manifestPath = if ($VerifyOnly) { Join-Path $pluginRoot 'plugin.json' } else { Join-Path $sourceRoot 'plugin/plugin.json' }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.name -cne 'agent-recorder-bootstrap') { throw 'Unexpected plugin identity.' }
-if ($manifest.version -cne '0.3.2') {
+if ($manifest.version -cne '0.3.3') {
     # Verify retained historical artifacts only by their explicit immutable
     # contracts. Building always requires the current patch identity.
     $historical = @{
         '0.2.1' = @('0E88E8CFFA4CFFA1619C0A4452538F68AC148DD2DF58675EABE4DEBBE6F324C8', 'E5A2CE2855D9C89DFFA93EE59B9F096F89555E792E27AE1532FD635CCE72E6DA')
         '0.3.0' = @('EDB2B5FC29014D9E8CE4D2938B7DD92E2431CFAB6AA32784BD04FCC1D5AB0A09', '5DFBF982C22E4A0A01ADE9F5954EF4611E1FB0B21F19AA92ED38864B50958939')
         '0.3.1' = @('177994F104574C4365DD9307AFB21C2D0EF6AF4CAE27EE568F854695C4D4D868', '8FCE5C5BBC71205A620E12F8F747D254DB650B963785502D47CEB5EA5808445C')
+        '0.3.2' = @('E65700A4F59C402A4F6F996FD73B971E8553B4705C410BF59E02999DC016962F', 'FC5E841B1DBBCE635694237F48E21D8107DF9321A9776D00ECCFAC9AA4369110')
     }
     if (-not $VerifyOnly -or -not $historical.ContainsKey($manifest.version)) { throw 'Unexpected plugin version.' }
     $expected = $historical[$manifest.version]

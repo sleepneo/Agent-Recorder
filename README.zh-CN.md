@@ -2,6 +2,8 @@
 
 > 本文适用于 v0.1.25。新录制仅交付视频；使用旧包时以实际运行实例的 capabilities 为准。
 
+**Codex 接入：**独立的 [Codex 插件预览版](docs/integrations/codex.md)绑定本版便携包，无需更改每个对话的工作目录。插件 0.3.3 仅提供 1–30 秒无声选区、结果查询和指定停止；声音、窗口及计划仍使用核心 CLI/API。这不是插件商店上架版本。
+
 Agent Recorder 是一款面向 AI agent 的本地 Windows 录屏能力层。人类用户用自然语言说明要录制什么，本地 AI agent 调用 localhost API，Agent Recorder 负责本地选区、确认、录制、输出和审计。
 
 核心流程：

@@ -44,7 +44,7 @@ try
     };
     var options = new McpServerOptions
     {
-        ServerInfo = new() { Name = "agent-recorder-bootstrap", Version = "0.3.2" },
+        ServerInfo = new() { Name = "agent-recorder-bootstrap", Version = "0.3.3" },
         Capabilities = new() { Tools = new() },
         Handlers = new()
         {

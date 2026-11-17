@@ -16,7 +16,7 @@ public sealed class UpgradeCompatibilityTests(Fixture fixture, ITestOutputHelper
     public async Task FrozenSchemaUpgradeAcrossPluginAndCwdPreservesTargetsAndNeverReplays(string state)
     {
         var source = Environment.GetEnvironmentVariable("AGENT_RECORDER_MCP_TEST_PLUGIN_ROOT") ?? fixture.Plugin;
-        var facts = await UpgradeCompatibilityScenarios.RunAsync(fixture, source, source, "0.3.2", "0.3.2", state, freezeSchema: true);
+        var facts = await UpgradeCompatibilityScenarios.RunAsync(fixture, source, source, "0.3.3", "0.3.3", state, freezeSchema: true);
         output.WriteLine(JsonSerializer.Serialize(facts));
     }
 

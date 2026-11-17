@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-recorder-bootstrap",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Connect an external Recorder 0.1.25 portable package and request a silent 1-30 second selected-region MP4 with local selection and approval. Query the original operation without resubmitting unknown outcomes.",
   "author": { "name": "Agent Recorder" },
   "extensions": {

@@ -328,9 +328,9 @@ public sealed class ProtocolTests(Fixture fixture, ITestOutputHelper output) : I
     {
         var plugin = Environment.GetEnvironmentVariable("AGENT_RECORDER_MCP_TEST_PLUGIN_ROOT") ?? fixture.Plugin;
         Assert.True(Path.GetFullPath(plugin).StartsWith(Path.Combine(Fixture.Repo, ".local-data", "task430") + "\\", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(Path.GetFullPath(plugin), Path.Combine(Fixture.Repo, ".local-data", "task432", "development-stop", "agent-recorder-bootstrap"), StringComparison.OrdinalIgnoreCase));
+            Path.GetFullPath(plugin).StartsWith(Path.Combine(Fixture.Repo, ".local-data", "plugin-builds") + "\\", StringComparison.OrdinalIgnoreCase));
         using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(plugin, "plugin.json")));
-        Assert.Equal("0.3.2", manifest.RootElement.GetProperty("version").GetString());
+        Assert.Equal("0.3.3", manifest.RootElement.GetProperty("version").GetString());
         using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(plugin, "mcp.json")));
         var servers = config.RootElement.GetProperty("mcpServers"); Assert.Single(servers.EnumerateObject());
         var server = servers.GetProperty("agent-recorder-bootstrap");
@@ -343,7 +343,7 @@ public sealed class ProtocolTests(Fixture fixture, ITestOutputHelper output) : I
         var binding = fixture.NewPath("plugin-binding/binding.json");
         var data = fixture.NewPath("plugin-existing"); Fixture.ExistingData(data); fixture.Mode("reuse");
         await using var session = await fixture.Connect(binding, launch.Command, launch.WorkingDirectory);
-        Assert.Equal("0.3.2", session.Client.ServerInfo!.Version);
+        Assert.Equal("0.3.3", session.Client.ServerInfo!.Version);
         Assert.Equal(6, (await session.Client.ListToolsAsync()).Count);
         Assert.Equal("binding_saved", Reason(await session.Call("recorder_binding_set", Bind(data))));
         Assert.Equal("binding_valid", Reason(await session.Call("recorder_binding_get")));

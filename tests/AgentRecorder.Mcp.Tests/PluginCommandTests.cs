@@ -9,10 +9,30 @@ namespace AgentRecorder.Mcp.Tests;
 public sealed class PluginCommandTests(Fixture fixture, ITestOutputHelper output) : IClassFixture<Fixture>
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BuilderRejectsNonBuildOutputRootBeforeWriting(bool buildParent)
+    {
+        var target = buildParent ? Path.Combine(Fixture.Repo, ".local-data", "plugin-builds") : Fixture.Repo;
+        var existed = Directory.Exists(target);
+        using var process = Process.Start(new ProcessStartInfo("pwsh")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "-NoProfile", "-File", Path.Combine(Fixture.Repo, "scripts", "build-codex-plugin.ps1"), "-OutputDirectory", target }
+        })!;
+        var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Contains("OutputDirectory must be below", await stdout + await stderr);
+        Assert.Equal(existed, Directory.Exists(target));
+    }
+
+    [Theory]
     [InlineData("0.2.1")]
     [InlineData("0.3.0")]
     [InlineData("0.3.1")]
-    [InlineData("0.3.3")]
+    [InlineData("0.3.2")]
+    [InlineData("0.3.4")]
     public async Task VerifyOnlyRejectsRelabelledOrUnsupportedVersions(string version)
     {
         var path = Path.Combine(fixture.Plugin, "plugin.json"); var original = File.ReadAllBytes(path);
@@ -20,7 +40,7 @@ public sealed class PluginCommandTests(Fixture fixture, ITestOutputHelper output
         {
             var node = JsonNode.Parse(original)!; node["version"] = version; File.WriteAllText(path, node.ToJsonString());
             var result = await Verify(fixture.Plugin); Assert.NotEqual(0, result.Exit);
-            Assert.Contains(version == "0.3.3" ? "Unexpected plugin version" : "Historical plugin identity mismatch", result.Text);
+            Assert.Contains(version == "0.3.4" ? "Unexpected plugin version" : "Historical plugin identity mismatch", result.Text);
         }
         finally { File.WriteAllBytes(path, original); }
     }
@@ -118,7 +138,7 @@ public sealed class PluginCommandTests(Fixture fixture, ITestOutputHelper output
     public async Task CopiedThenMovedPluginWithSpacesLaunchesFromManifestInUnrelatedCwd()
     {
         var source = Environment.GetEnvironmentVariable("AGENT_RECORDER_MCP_TEST_PLUGIN_ROOT") ?? fixture.Plugin;
-        var copied = fixture.NewPath("copied plugin with spaces 0.3.2");
+        var copied = fixture.NewPath("copied plugin with spaces 0.3.3");
         foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
         {
             var destination = Path.Combine(copied, Path.GetRelativePath(source, file));
@@ -131,7 +151,7 @@ public sealed class PluginCommandTests(Fixture fixture, ITestOutputHelper output
         {
             Directory.SetCurrentDirectory(unrelated);
             await Exercise(copied);
-            var moved = fixture.NewPath("moved plugin with spaces 0.3.2"); Directory.CreateDirectory(Path.GetDirectoryName(moved)!);
+            var moved = fixture.NewPath("moved plugin with spaces 0.3.3"); Directory.CreateDirectory(Path.GetDirectoryName(moved)!);
             Directory.Move(copied, moved);
             await Exercise(moved);
             Assert.Empty(Directory.GetFileSystemEntries(unrelated));
@@ -145,7 +165,7 @@ public sealed class PluginCommandTests(Fixture fixture, ITestOutputHelper output
             var launch = PluginStdioLaunch.Read(plugin);
             Assert.Equal(plugin, launch.WorkingDirectory);
             await using var session = await fixture.Connect(binding, launch.Command, launch.WorkingDirectory);
-            Assert.Equal("0.3.2", session.Client.ServerInfo!.Version);
+            Assert.Equal("0.3.3", session.Client.ServerInfo!.Version);
             Assert.Equal(6, (await session.Client.ListToolsAsync()).Count);
             Assert.True((await session.Call("recorder_binding_set", new()
             { ["package_root"] = fixture.Package, ["data_dir"] = data })).GetProperty("ok").GetBoolean());

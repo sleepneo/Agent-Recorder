@@ -2,6 +2,11 @@
 
 > This guide describes v0.1.25. New recordings deliver video only. Inspect the running host's capabilities when using an older package.
 
+**Codex integration:** the separate [Codex plugin preview](docs/integrations/codex.md)
+binds this Recorder 0.1.25 package. Plugin 0.3.3 supports silent 1-30 second
+selected-region clips, result queries and exact-ID stop, not the full audio,
+window or scheduling API. It is not a plugin-store listing.
+
 Agent Recorder is an **AI agent-native local screen recording capability layer**
 for Windows. A human describes what to record, a local AI agent calls the
 localhost API, and Agent Recorder provides local selection, confirmation,
