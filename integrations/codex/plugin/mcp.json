@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "agent-recorder-bootstrap": {
+      "type": "stdio",
+      "command": "./server/AgentRecorder.Mcp.exe",
+      "args": [],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

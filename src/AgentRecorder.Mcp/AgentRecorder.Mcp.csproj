@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>0.3.2</Version>
+    <AssemblyVersion>0.3.2.0</AssemblyVersion>
+    <FileVersion>0.3.2.0</FileVersion>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.Core" Version="[2.4.0]" />
+    <InternalsVisibleTo Include="AgentRecorder.Mcp.Tests" />
+    <Compile Include="../AgentRecorder.Infrastructure/InteractiveDesktopRuntime.cs" Link="Identity/InteractiveDesktopRuntime.cs" />
+  </ItemGroup>
+</Project>
